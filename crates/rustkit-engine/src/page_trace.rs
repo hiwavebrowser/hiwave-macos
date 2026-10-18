@@ -174,6 +174,7 @@ struct FetchedNote {
     waiting_on: Option<String>,
 }
 
+#[derive(Clone)]
 struct ModuleEdge {
     parent: String,
     child: String,
@@ -218,8 +219,6 @@ struct Active {
     /// `parent` imports `child`. Filled when the specifier is requested, so
     /// a note closed at the end of the trace can still name what it waits on.
     imports: Vec<ModuleEdge>,
-    /// Last outstanding import list, used when a note has no edges of its own.
-    last_waiting: Option<String>,
 }
 
 impl Active {
@@ -399,7 +398,6 @@ pub(crate) fn begin(url: &str) -> Option<Session> {
             scope_ended: false,
             last_activity: 0,
             imports: Vec::new(),
-            last_waiting: None,
         });
     });
     flush_file();
@@ -538,6 +536,39 @@ pub(crate) fn note_blocked(url: &str) {
 /// one (a module that failed to parse). A later execute clears it.
 pub(crate) fn note_script_reason(url: &str, reason: &'static str) {
     remember(url, true, None, false, false, Some(reason));
+}
+
+/// The module dependencies of `root` either ran with that graph
+/// (`executed`) or failed for `reason`. `root` is the module that was
+/// polled. Only that module and its static imports are updated. A dynamic
+/// `import()` fetched for a different script stays untouched: one inline
+/// module's pending `data:` URL is not every later concat's wait.
+pub(crate) fn resolve_module_graph(root: &str, executed: bool, reason: Option<&'static str>) {
+    if !enabled() {
+        return;
+    }
+    let root = clamp(root);
+    with_active(|active| {
+        let edges = active.imports.clone();
+        for note in &mut active.fetched {
+            if !note.dependency || note.executed || note.reason.is_some() {
+                continue;
+            }
+            if note.url != root && !static_descendant(&edges, &root, &note.url) {
+                continue;
+            }
+            if executed {
+                note.executed = true;
+                note.reason = None;
+                note.waiting_on = None;
+            } else if let Some(reason) = reason {
+                note.reason = Some(reason);
+            }
+        }
+        if reason == Some("waiting on a dependency") {
+            assign_waiting(active);
+        }
+    });
 }
 
 /// The module dependencies fetched since the previous resolution either ran
@@ -700,17 +731,29 @@ fn remember(
     });
 }
 
+const WAITING_ON_CHARS: usize = 120;
+
+fn short_waiting(text: &str) -> String {
+    if text.chars().count() <= WAITING_ON_CHARS {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(WAITING_ON_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
 fn waiting_label(edges: &[ModuleEdge], url: &str) -> Option<String> {
     let mut names = Vec::new();
     for edge in edges {
         if edge.parent != url {
             continue;
         }
-        let label = if edge.dynamic {
+        let raw = if edge.dynamic {
             format!("dynamic {}", edge.child)
         } else {
             edge.child.clone()
         };
+        let label = short_waiting(&raw);
         if !names.contains(&label) {
             names.push(label);
             if names.len() == 8 {
@@ -725,14 +768,33 @@ fn waiting_label(edges: &[ModuleEdge], url: &str) -> Option<String> {
     }
 }
 
+fn static_descendant(edges: &[ModuleEdge], root: &str, url: &str) -> bool {
+    let mut stack = vec![root.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = stack.pop() {
+        if !seen.insert(parent.clone()) {
+            continue;
+        }
+        for edge in edges {
+            if edge.parent != parent || edge.dynamic {
+                continue;
+            }
+            if edge.child == url {
+                return true;
+            }
+            stack.push(edge.child.clone());
+        }
+    }
+    false
+}
+
 fn assign_waiting(active: &mut Active) {
-    let fallback = active.last_waiting.clone();
-    let edges = &active.imports;
+    let edges = active.imports.clone();
     for note in &mut active.fetched {
         if note.reason != Some("waiting on a dependency") || note.waiting_on.is_some() {
             continue;
         }
-        note.waiting_on = waiting_label(edges, &note.url).or_else(|| fallback.clone());
+        note.waiting_on = waiting_label(&edges, &note.url);
     }
 }
 
@@ -1042,22 +1104,54 @@ pub(crate) fn note_module_import(parent: &str, child: &str, dynamic: bool) {
     });
 }
 
-/// Name the imports still outstanding for every note waiting on a dependency.
-/// The list is kept either way: notes that gain the reason when the trace
-/// closes still receive it.
-pub(crate) fn note_module_waiting_on(urls: &[String]) {
-    if !enabled() || urls.is_empty() {
+/// Name `owner`'s outstanding imports. Other fetched modules are left alone:
+/// the pending list of an inline `data:` module is not copied onto every
+/// concat that has not run yet. Each URL is cut to 120 characters.
+pub(crate) fn note_module_waiting_on(owner: &str, urls: &[String]) {
+    if !enabled() || owner.is_empty() || urls.is_empty() {
         return;
     }
-    let joined = urls
-        .iter()
-        .take(8)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
+    let owner = clamp(owner);
+    let joined = short_waiting(
+        &urls.iter().take(8).map(|url| short_waiting(url)).collect::<Vec<_>>().join(", "),
+    );
     with_active(|active| {
-        active.last_waiting = Some(joined);
-        assign_waiting(active);
+        if let Some(note) = active.fetched.iter_mut().find(|note| note.url == owner) {
+            if note.waiting_on.is_none() {
+                note.waiting_on = Some(joined);
+            }
+        }
+    });
+}
+
+/// `url` was supplied and its jobs ran. A module that still has a static
+/// import outstanding stays unexecuted. A dynamic `import()` does not.
+pub(crate) fn note_module_ran(url: &str) {
+    if !enabled() || url.is_empty() {
+        return;
+    }
+    let url = clamp(url);
+    with_active(|active| {
+        let waiting_static = active.imports.iter().any(|edge| {
+            edge.parent == url && !edge.dynamic && {
+                active
+                    .fetched
+                    .iter()
+                    .find(|note| note.url == edge.child)
+                    .map(|note| !note.executed)
+                    .unwrap_or(true)
+            }
+        });
+        if waiting_static {
+            return;
+        }
+        if let Some(note) = active.fetched.iter_mut().find(|note| note.url == url) {
+            note.executed = true;
+            if note.reason == Some("waiting on a dependency") {
+                note.reason = None;
+            }
+            note.waiting_on = None;
+        }
     });
 }
 
@@ -1635,7 +1729,10 @@ mod tests {
         ));
         note_module_dependency("https://example.test/child.js", Some(200));
         resolve_module_dependencies(false, Some("waiting on a dependency"));
-        note_module_waiting_on(&["https://example.test/missing.js".into()]);
+        note_module_waiting_on(
+            "https://example.test/child.js",
+            &["https://example.test/missing.js".into()],
+        );
         note_module_dependency("https://example.test/bnu.js", Some(200));
         note_module_import(
             "https://example.test/bnu.js",
@@ -1647,6 +1744,10 @@ mod tests {
             "https://example.test/later.js",
             true,
         );
+        let data_url = format!("data:text/javascript,{}", "a".repeat(18_000));
+        note_module_dependency("https://example.test/inline.js", Some(200));
+        note_module_waiting_on("https://example.test/inline.js", &[format!("dynamic {data_url}")]);
+        note_module_dependency("https://example.test/concat.js", Some(200));
         note_module_fetch("https://example.test/child.js", "body");
         note_module_held("https://example.test/child.js", 40);
         drop(_session);
@@ -1684,6 +1785,11 @@ mod tests {
             reason("https://example.test/bnu.js")["waiting_on"],
             "https://example.test/need.js, dynamic https://example.test/later.js"
         );
+        let inline_wait = reason("https://example.test/inline.js")["waiting_on"].as_str().unwrap();
+        assert!(inline_wait.starts_with("dynamic data:text/javascript,"), "{inline_wait}");
+        assert!(inline_wait.ends_with('…'), "{inline_wait}");
+        assert!(inline_wait.chars().count() <= 120, "{}", inline_wait.chars().count());
+        assert!(reason("https://example.test/concat.js").get("waiting_on").is_none());
         let timeline = value["module_timeline"].as_array().unwrap();
         let child = timeline
             .iter()

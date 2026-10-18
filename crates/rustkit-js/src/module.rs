@@ -16,6 +16,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -58,19 +59,26 @@ pub(crate) struct HostModuleLoader {
 impl HostModuleLoader {
     fn resolve(&self, specifier: &str, referrer: Option<&str>) -> Result<Url, String> {
         let document = self.base.borrow().clone();
-        let referrer_url = referrer.and_then(|r| Url::parse(r).ok()).or_else(|| document.clone());
+        let referrer_url = referrer
+            .and_then(|r| Url::parse(r).ok())
+            .or_else(|| document.clone());
         let Some(referrer_url) = referrer_url else {
             // No base at all: only an absolute URL can be resolved.
-            return Url::parse(specifier)
-                .map_err(|_| format!("Failed to resolve module specifier '{specifier}': no base URL"));
+            return Url::parse(specifier).map_err(|_| {
+                format!("Failed to resolve module specifier '{specifier}': no base URL")
+            });
         };
         // A relative specifier resolves against the importing module; the
         // import map (if any) decides everything else.
-        self.import_map.borrow().resolve(specifier, &referrer_url, &referrer_url)
+        self.import_map
+            .borrow()
+            .resolve(specifier, &referrer_url, &referrer_url)
     }
 
     pub fn register_module(&self, specifier: &str, module: Module) {
-        self.modules.borrow_mut().insert(specifier.to_string(), module);
+        self.modules
+            .borrow_mut()
+            .insert(specifier.to_string(), module);
     }
 
     pub fn get_module(&self, specifier: &str) -> Option<Module> {
@@ -126,7 +134,11 @@ impl ModuleLoader for HostModuleLoader {
             Ok(res) => res,
             Err(_) => {
                 if dynamic {
-                    boa_engine::module::record_dynamic_import_failure(&specifier, &url, "Module fetch cancelled");
+                    boa_engine::module::record_dynamic_import_failure(
+                        &specifier,
+                        &url,
+                        "Module fetch cancelled",
+                    );
                 }
                 Err(JsNativeError::typ()
                     .with_message("Module fetch cancelled")
@@ -135,7 +147,12 @@ impl ModuleLoader for HostModuleLoader {
         }
     }
 
-    fn init_import_meta(self: Rc<Self>, import_meta: &JsObject, module: &Module, context: &mut Context) {
+    fn init_import_meta(
+        self: Rc<Self>,
+        import_meta: &JsObject,
+        module: &Module,
+        context: &mut Context,
+    ) {
         if let Some(url) = path_string(module.path()) {
             let _ = import_meta.set(js_string!("url"), js_string!(url.as_str()), false, context);
         }
@@ -265,8 +282,7 @@ impl JsRuntime {
             None => {
                 self.diag.know_path(url);
                 self.sources.remember(url, source);
-                let path = Path::new(url);
-                let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
+                let parsed = parse_module_source(url, source, &mut self.context);
                 match parsed {
                     Ok(module) => module,
                     Err(e) => {
@@ -372,10 +388,9 @@ impl JsRuntime {
                             self.sources.remember(requested, &fetched.source);
                         }
                         self.prefetch_source_imports(&fetched.final_url, &fetched.source);
-                        let path = Path::new(fetched.final_url.as_str());
-                        match Module::parse(
-                            Source::from_bytes(fetched.source.as_str()).with_path(path),
-                            None,
+                        match parse_module_source(
+                            fetched.final_url.as_str(),
+                            fetched.source.as_str(),
                             &mut self.context,
                         ) {
                             Ok(module) => {
@@ -393,15 +408,22 @@ impl JsRuntime {
         };
         if let Ok(module) = &module {
             // Both the asked-for URL and (above) the final one name it.
-            loader.modules.borrow_mut().insert(requested.to_string(), module.clone());
+            loader
+                .modules
+                .borrow_mut()
+                .insert(requested.to_string(), module.clone());
         }
         // Wake everything waiting for it, in the order they asked. A module
         // reached by a redirect also answers imports of its final URL.
         let waiters: Vec<Waiter> = {
             let mut waiting = loader.waiting.borrow_mut();
-            let (ready, rest): (Vec<Waiter>, Vec<Waiter>) = std::mem::take(&mut *waiting)
-                .into_iter()
-                .partition(|w| w.url == requested || module.as_ref().is_ok_and(|m| loader.modules.borrow().get(&w.url).is_some_and(|k| k == m)));
+            let (ready, rest): (Vec<Waiter>, Vec<Waiter>) =
+                std::mem::take(&mut *waiting).into_iter().partition(|w| {
+                    w.url == requested
+                        || module.as_ref().is_ok_and(|m| {
+                            loader.modules.borrow().get(&w.url).is_some_and(|k| k == m)
+                        })
+                });
             *waiting = rest;
             ready
         };
@@ -412,10 +434,16 @@ impl JsRuntime {
                 }
                 Err(message) => {
                     if waiter.dynamic {
-                        boa_engine::module::record_dynamic_import_failure(&waiter.specifier, &waiter.url, message);
+                        boa_engine::module::record_dynamic_import_failure(
+                            &waiter.specifier,
+                            &waiter.url,
+                            message,
+                        );
                     }
                     let _ = waiter.sender.send(Err(JsNativeError::typ()
-                        .with_message(format!("Failed to fetch dynamically imported module: {message}"))
+                        .with_message(format!(
+                            "Failed to fetch dynamically imported module: {message}"
+                        ))
                         .into()));
                 }
             }
@@ -478,7 +506,12 @@ impl JsRuntime {
                 entry.evaluation = Some(evaluation);
             }
         }
-        let evaluation = match self.modules.entries.get(&handle.0).and_then(|e| e.evaluation.clone()) {
+        let evaluation = match self
+            .modules
+            .entries
+            .get(&handle.0)
+            .and_then(|e| e.evaluation.clone())
+        {
             Some(p) => p,
             None => return ModuleState::Loading,
         };
@@ -525,7 +558,9 @@ impl JsRuntime {
     fn thrown_text(&mut self, reason: &JsValue) -> String {
         let mut message = describe_value(reason, &mut self.context);
         let getter = self.diag.stack_getter.borrow().clone();
-        if let (_, Some(stack)) = crate::describe::error_report(reason, getter.as_ref(), &mut self.context) {
+        if let (_, Some(stack)) =
+            crate::describe::error_report(reason, getter.as_ref(), &mut self.context)
+        {
             message.push('\n');
             message.push_str(stack.trim_end());
         }
@@ -724,7 +759,11 @@ fn prefetch_specifier_kind(referrer: &str, specifier: &str, critical: bool) {
     let Some(loader) = loader else {
         return;
     };
-    let referrer = if referrer.is_empty() { None } else { Some(referrer) };
+    let referrer = if referrer.is_empty() {
+        None
+    } else {
+        Some(referrer)
+    };
     let Ok(url) = loader.resolve(specifier, referrer) else {
         return;
     };
@@ -746,76 +785,135 @@ pub fn install_import_specifier_hook() {
 /// fetch starts when the call runs.
 #[allow(dead_code)]
 pub fn static_import_specifiers(source: &str) -> Vec<String> {
-    import_specifiers(source).into_iter().map(|(specifier, _)| specifier).collect()
+    import_specifiers(source)
+        .into_iter()
+        .map(|(specifier, _)| specifier)
+        .collect()
+}
+
+/// How often a scan or a parse looks up module bodies that have already
+/// arrived. Boa's parser reads the source as it goes, so the same interval
+/// covers `Module::parse`, not only the import scan.
+const YIELD_EVERY_BYTES: usize = 64 * 1024;
+
+/// A reader that asks the host to notice ready module bodies every
+/// [`YIELD_EVERY_BYTES`]. `Module::parse` otherwise holds the main thread
+/// until the whole source is compiled, and a body that arrived during that
+/// compile is not scanned until it returns.
+struct YieldingSource<'a> {
+    data: &'a [u8],
+    pos: usize,
+    since: usize,
+}
+
+impl<'a> YieldingSource<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            since: 0,
+        }
+    }
+}
+
+impl Read for YieldingSource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.data.len() || buf.is_empty() {
+            return Ok(0);
+        }
+        if self.since >= YIELD_EVERY_BYTES {
+            self.since = 0;
+            note_scan_yield();
+        }
+        let n = buf.len().min(self.data.len() - self.pos);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        self.since += n;
+        Ok(n)
+    }
+}
+
+fn parse_module_source(url: &str, source: &str, context: &mut Context) -> JsResult<Module> {
+    let path = Path::new(url);
+    let reader = YieldingSource::new(source.as_bytes());
+    Module::parse(Source::from_reader(reader, Some(path)), None, context)
 }
 
 /// `(specifier, dynamic)`. `dynamic` is a string-literal `import()`.
 fn import_specifiers(source: &str) -> Vec<(String, bool)> {
-    let chars: Vec<char> = source.chars().collect();
+    let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
-    while i < chars.len() {
-        // A multi-megabyte bundle spends seconds in this walk. Bodies that
-        // arrived for specifiers already queued are observed here, not after
-        // `Module::parse` returns.
-        if i.is_multiple_of(50_000) {
+    let mut next_yield = YIELD_EVERY_BYTES;
+    while i < bytes.len() {
+        if i >= next_yield {
+            next_yield = i.saturating_add(YIELD_EVERY_BYTES);
             note_scan_yield();
         }
-        if chars[i].is_whitespace() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
             i += 1;
             continue;
         }
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
             i += 2;
-            while i < chars.len() && chars[i] != '\n' {
+            while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
             i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 i += 1;
             }
-            i = (i + 2).min(chars.len());
+            i = (i + 2).min(bytes.len());
             continue;
         }
-        if matches!(chars[i], '\'' | '"' | '`') {
-            i = skip_string(&chars, i);
+        if matches!(b, b'\'' | b'"' | b'`') {
+            i = skip_string(bytes, i);
             continue;
         }
-        if is_ident_start(chars[i]) {
+        if is_ident_start(b) {
             let start = i;
             i += 1;
-            while i < chars.len() && is_ident_continue(chars[i]) {
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
                 i += 1;
             }
-            let word: String = chars[start..i].iter().collect();
-            if word == "import" {
-                let mut j = skip_ws(&chars, i);
-                if chars.get(j) == Some(&'(') {
-                    j = skip_ws(&chars, j + 1);
-                    if let Some((specifier, next)) = read_string_literal(&chars, j) {
+            if bytes[start..i] == b"import"[..] {
+                let j = skip_ws(bytes, i);
+                // `import.meta` is not a module specifier. Treating it as
+                // one walked every identifier up to the next `;`.
+                if bytes.get(j) == Some(&b'.') {
+                    continue;
+                }
+                if bytes.get(j) == Some(&b'(') {
+                    let j = skip_ws(bytes, j + 1);
+                    if let Some((specifier, next)) = read_string_literal(bytes, j) {
                         out.push((specifier, true));
                         i = next;
                     }
                     continue;
                 }
-                if let Some((specifier, next)) = read_string_literal(&chars, j) {
+                if let Some((specifier, next)) = read_string_literal(bytes, j) {
                     out.push((specifier, false));
                     i = next;
                     continue;
                 }
-                if let Some(specifier) = from_specifier(&chars, i) {
+                if let Some(specifier) = from_specifier(bytes, i) {
                     out.push((specifier, false));
                 }
                 continue;
             }
-            if word == "export" {
-                if let Some(specifier) = from_specifier(&chars, i) {
+            if bytes[start..i] == b"export"[..] {
+                if let Some(specifier) = from_specifier(bytes, i) {
                     out.push((specifier, false));
                 }
             }
+            continue;
+        }
+        if b >= 0x80 {
+            i = skip_utf8(bytes, i);
             continue;
         }
         i += 1;
@@ -823,51 +921,65 @@ fn import_specifiers(source: &str) -> Vec<(String, bool)> {
     out
 }
 
-fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+fn is_ident_start(b: u8) -> bool {
+    b == b'_' || b == b'$' || b.is_ascii_alphabetic()
 }
 
-fn is_ident_continue(ch: char) -> bool {
-    is_ident_start(ch) || ch.is_ascii_digit()
+fn is_ident_continue(b: u8) -> bool {
+    is_ident_start(b) || b.is_ascii_digit()
 }
 
-fn skip_ws(chars: &[char], mut i: usize) -> usize {
-    while i < chars.len() && chars[i].is_whitespace() {
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
         i += 1;
     }
     i
 }
 
-fn skip_string(chars: &[char], start: usize) -> usize {
-    let quote = chars[start];
+fn skip_utf8(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    let width = if b & 0xE0 == 0xC0 {
+        2
+    } else if b & 0xF0 == 0xE0 {
+        3
+    } else if b & 0xF8 == 0xF0 {
+        4
+    } else {
+        1
+    };
+    (i + width).min(bytes.len())
+}
+
+fn skip_string(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
     let mut i = start + 1;
-    while i < chars.len() {
-        if chars[i] == '\\' {
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
             i += 2;
             continue;
         }
-        if chars[i] == quote {
+        if bytes[i] == quote {
             return i + 1;
         }
-        if quote == '`' && chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+        if quote == b'`' && bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
             i += 2;
-            let mut depth = 1;
-            while i < chars.len() && depth > 0 {
-                if chars[i] == '{' {
+            let mut depth = 1i32;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'{' {
                     depth += 1;
                     i += 1;
                     continue;
                 }
-                if chars[i] == '}' {
+                if bytes[i] == b'}' {
                     depth -= 1;
                     i += 1;
                     continue;
                 }
-                if matches!(chars[i], '\'' | '"' | '`') {
-                    i = skip_string(chars, i);
+                if matches!(bytes[i], b'\'' | b'"' | b'`') {
+                    i = skip_string(bytes, i);
                     continue;
                 }
-                if chars[i] == '\\' {
+                if bytes[i] == b'\\' {
                     i += 2;
                     continue;
                 }
@@ -877,68 +989,71 @@ fn skip_string(chars: &[char], start: usize) -> usize {
         }
         i += 1;
     }
-    chars.len()
+    bytes.len()
 }
 
-fn read_string_literal(chars: &[char], start: usize) -> Option<(String, usize)> {
-    let quote = *chars.get(start)?;
-    if quote != '\'' && quote != '"' {
+fn read_string_literal(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    let quote = *bytes.get(start)?;
+    if quote != b'\'' && quote != b'"' {
         return None;
     }
-    let mut out = String::new();
+    let mut raw = Vec::new();
     let mut i = start + 1;
-    while i < chars.len() {
-        if chars[i] == '\\' {
-            if let Some(next) = chars.get(i + 1).copied() {
-                out.push(next);
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if let Some(next) = bytes.get(i + 1).copied() {
+                raw.push(next);
                 i += 2;
                 continue;
             }
         }
-        if chars[i] == quote {
-            return Some((out, i + 1));
+        if bytes[i] == quote {
+            return Some((String::from_utf8_lossy(&raw).into_owned(), i + 1));
         }
-        if chars[i] == '\n' {
+        if bytes[i] == b'\n' {
             return None;
         }
-        out.push(chars[i]);
+        raw.push(bytes[i]);
         i += 1;
     }
     None
 }
 
 /// The string after the first top-level `from` before the next `;`.
-fn from_specifier(chars: &[char], mut i: usize) -> Option<String> {
+fn from_specifier(bytes: &[u8], mut i: usize) -> Option<String> {
     let mut depth = 0i32;
-    while i < chars.len() {
-        if chars[i] == ';' && depth == 0 {
+    while i < bytes.len() {
+        if bytes[i] == b';' && depth == 0 {
             return None;
         }
-        if chars[i] == '{' {
+        if bytes[i] == b'{' {
             depth += 1;
             i += 1;
             continue;
         }
-        if chars[i] == '}' {
+        if bytes[i] == b'}' {
             depth -= 1;
             i += 1;
             continue;
         }
-        if matches!(chars[i], '\'' | '"' | '`') {
-            i = skip_string(chars, i);
+        if matches!(bytes[i], b'\'' | b'"' | b'`') {
+            i = skip_string(bytes, i);
             continue;
         }
-        if depth == 0 && is_ident_start(chars[i]) {
+        if depth == 0 && is_ident_start(bytes[i]) {
             let start = i;
             i += 1;
-            while i < chars.len() && is_ident_continue(chars[i]) {
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
                 i += 1;
             }
-            let word: String = chars[start..i].iter().collect();
-            if word == "from" {
-                let j = skip_ws(chars, i);
-                return read_string_literal(chars, j).map(|(specifier, _)| specifier);
+            if bytes[start..i] == b"from"[..] {
+                let j = skip_ws(bytes, i);
+                return read_string_literal(bytes, j).map(|(specifier, _)| specifier);
             }
+            continue;
+        }
+        if bytes[i] >= 0x80 {
+            i = skip_utf8(bytes, i);
             continue;
         }
         i += 1;
@@ -972,6 +1087,19 @@ mod specifier_tests {
             ]
         );
     }
+
+    #[test]
+    fn import_meta_is_not_a_module_specifier() {
+        let source = r#"
+            SML.di(`./chunk.js`, import.meta.url, `chunk`);
+            import "./real.js";
+            const note = "import.meta.url";
+        "#;
+        assert_eq!(
+            static_import_specifiers(source),
+            vec!["./real.js".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -991,7 +1119,9 @@ mod host_tests {
             .expect("parse");
         let pending = rt.pending_module_imports();
         assert!(
-            pending.iter().any(|item| item.url.ends_with("/a.js") && !item.dynamic),
+            pending
+                .iter()
+                .any(|item| item.url.ends_with("/a.js") && !item.dynamic),
             "{pending:?}"
         );
         assert!(
@@ -1020,5 +1150,36 @@ mod host_tests {
         if !cfg!(debug_assertions) {
             assert!(ms < 8_000, "release parse of 358KB took {ms} ms");
         }
+    }
+
+    #[test]
+    fn a_large_module_parse_yields_while_it_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                super::set_module_yield_hook(None);
+            }
+        }
+        let _clear = Clear;
+        HITS.store(0, Ordering::Relaxed);
+        super::set_module_yield_hook(Some(|| {
+            HITS.fetch_add(1, Ordering::Relaxed);
+        }));
+        let mut body = String::from("export const value = 1;");
+        while body.len() < 200 * 1024 {
+            body.push_str("void 0;");
+        }
+        let mut rt = JsRuntime::new().expect("runtime");
+        rt.set_module_base("https://example.test/");
+        rt.begin_module("https://example.test/big.js", &body)
+            .expect("parse");
+        let hits = HITS.load(Ordering::Relaxed);
+        assert!(
+            hits >= 2,
+            "parse of {} bytes yielded {hits} times",
+            body.len()
+        );
     }
 }
