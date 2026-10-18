@@ -11,6 +11,7 @@ license = "MIT"
 rustkit-dom = { path = "../rustkit-dom" }
 rustkit-js = { path = "../rustkit-js" }
 rustkit-core = { path = "../rustkit-core" }
+rustkit-css = { path = "../rustkit-css" }
 
 # Error handling
 thiserror = "1.0"

@@ -1,24 +1,34 @@
 //! Media query evaluation (Media Queries 4) against a static viewport.
 //!
 //! The environment is the one the real-site board pins Chrome to: a screen
-//! of the given size, device pixel ratio 1, light colour scheme, a fine
-//! hover-capable pointer, no reduced-motion preference. Anything this
-//! evaluator does not understand does not match, which is what Chrome does
-//! with an unknown media feature.
+//! of the given size, light colour scheme, a fine hover-capable pointer, no
+//! reduced-motion preference. Resolution features use the device pixel ratio
+//! passed in ([`media_query_list_matches`] uses 1, the board's scale).
+//! Anything this evaluator does not understand does not match, which is what
+//! Chrome does with an unknown media feature.
 
 /// Does a media query list (the prelude of `@media`) match a viewport of
-/// `width` x `height` CSS px? Comma-separated queries match if any does.
+/// `width` x `height` CSS px at device pixel ratio 1? Comma-separated
+/// queries match if any does.
 pub fn media_query_list_matches(list: &str, width: f32, height: f32) -> bool {
+    media_query_list_matches_with(list, width, height, 1.0)
+}
+
+/// [`media_query_list_matches`] at device pixel ratio `dpr`. A ratio that is
+/// not a positive finite number is 1. `matchMedia` and the cascade both
+/// call this, so a resolution query agrees with `window.devicePixelRatio`.
+pub fn media_query_list_matches_with(list: &str, width: f32, height: f32, dpr: f32) -> bool {
     let list = list.trim();
     if list.is_empty() {
         return true;
     }
+    let dpr = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
     split_top_level(list, ',')
         .iter()
-        .any(|q| query_matches(q.trim(), width, height))
+        .any(|q| query_matches(q.trim(), width, height, dpr))
 }
 
-fn query_matches(query: &str, width: f32, height: f32) -> bool {
+fn query_matches(query: &str, width: f32, height: f32, dpr: f32) -> bool {
     let lower = query.to_ascii_lowercase();
     let mut q = lower.trim();
     let mut negate = false;
@@ -33,14 +43,14 @@ fn query_matches(query: &str, width: f32, height: f32) -> bool {
         q = rest;
     }
     let matched = if q.starts_with('(') || q.starts_with("not") {
-        condition_matches(q, width, height)
+        condition_matches(q, width, height, dpr)
     } else {
         // A media type, optionally `and` a condition.
         let type_end = q.find(char::is_whitespace).unwrap_or(q.len());
         let (media_type, rest) = (&q[..type_end], q[type_end..].trim());
         let type_ok = matches!(media_type, "all" | "screen");
         let cond_ok = match strip_word(rest, "and") {
-            Some(cond) => condition_matches(cond, width, height),
+            Some(cond) => condition_matches(cond, width, height, dpr),
             None => rest.is_empty(),
         };
         type_ok && cond_ok
@@ -50,36 +60,36 @@ fn query_matches(query: &str, width: f32, height: f32) -> bool {
 
 /// `<media-condition>`: `not X`, `X and Y ...`, `X or Y ...`, where each X
 /// is a parenthesized feature or nested condition.
-fn condition_matches(cond: &str, width: f32, height: f32) -> bool {
+fn condition_matches(cond: &str, width: f32, height: f32, dpr: f32) -> bool {
     let cond = cond.trim();
     if let Some(rest) = strip_word(cond, "not") {
-        return !condition_matches(rest, width, height);
+        return !condition_matches(rest, width, height, dpr);
     }
     let ands = split_top_level_word(cond, "and");
     if ands.len() > 1 {
-        return ands.iter().all(|c| condition_matches(c, width, height));
+        return ands.iter().all(|c| condition_matches(c, width, height, dpr));
     }
     let ors = split_top_level_word(cond, "or");
     if ors.len() > 1 {
-        return ors.iter().any(|c| condition_matches(c, width, height));
+        return ors.iter().any(|c| condition_matches(c, width, height, dpr));
     }
     match cond.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
         Some(inner) => {
             let inner = inner.trim();
             if inner.starts_with('(') || inner.starts_with("not ") {
-                condition_matches(inner, width, height)
+                condition_matches(inner, width, height, dpr)
             } else {
-                feature_matches(inner, width, height)
+                feature_matches(inner, width, height, dpr)
             }
         }
         None => false,
     }
 }
 
-fn feature_matches(feature: &str, width: f32, height: f32) -> bool {
+fn feature_matches(feature: &str, width: f32, height: f32, dpr: f32) -> bool {
     // Range syntax: `width >= 600px`, `400px <= width < 700px`.
-    if feature.contains(['<', '>']) || (feature.contains('=') && !feature.contains(':')) {
-        return range_matches(feature, width, height);
+        if feature.contains(['<', '>']) || (feature.contains('=') && !feature.contains(':')) {
+        return range_matches(feature, width, height, dpr);
     }
     let (name, value) = match feature.split_once(':') {
         Some((n, v)) => (n.trim(), Some(v.trim())),
@@ -107,7 +117,7 @@ fn feature_matches(feature: &str, width: f32, height: f32) -> bool {
         | "-moz-device-pixel-ratio", None) => prefix.is_none(),
         ("width" | "height" | "aspect-ratio" | "resolution" | "-webkit-device-pixel-ratio"
         | "-moz-device-pixel-ratio", Some(v)) => {
-            let Some(actual) = actual_value(base, width, height) else {
+            let Some(actual) = actual_value(base, width, height, dpr) else {
                 return false;
             };
             let Some(wanted) = parse_value(base, v, width, height) else {
@@ -143,12 +153,12 @@ fn feature_matches(feature: &str, width: f32, height: f32) -> bool {
     }
 }
 
-fn actual_value(base: &str, width: f32, height: f32) -> Option<f32> {
+fn actual_value(base: &str, width: f32, height: f32, dpr: f32) -> Option<f32> {
     match base {
         "width" => Some(width),
         "height" => Some(height),
         "aspect-ratio" if height > 0.0 => Some(width / height),
-        "resolution" | "-webkit-device-pixel-ratio" | "-moz-device-pixel-ratio" => Some(1.0),
+        "resolution" | "-webkit-device-pixel-ratio" | "-moz-device-pixel-ratio" => Some(dpr),
         _ => None,
     }
 }
@@ -224,7 +234,7 @@ fn compare(actual: f32, wanted: f32, min: Option<bool>) -> bool {
     }
 }
 
-fn range_matches(feature: &str, width: f32, height: f32) -> bool {
+fn range_matches(feature: &str, width: f32, height: f32, dpr: f32) -> bool {
     // Tokenize into operands and operators: a op b [op c].
     let mut parts: Vec<String> = Vec::new();
     let mut ops: Vec<String> = Vec::new();
@@ -252,7 +262,7 @@ fn range_matches(feature: &str, width: f32, height: f32) -> bool {
     let Some(name) = parts.iter().find(|p| names.contains(&p.as_str())).cloned() else {
         return false;
     };
-    let Some(actual) = actual_value(&name, width, height) else {
+    let Some(actual) = actual_value(&name, width, height, dpr) else {
         return false;
     };
     let value_of = |p: &str| -> Option<f32> {
@@ -430,5 +440,19 @@ mod tests {
         assert!(m("(min--moz-device-pixel-ratio: 1)", w, h));
         assert!(!m("(frobnicate: yes)", w, h));
         assert!(m("", w, h));
+    }
+
+    /// Resolution features follow the device pixel ratio. 192dpi is 2dppx.
+    #[test]
+    fn resolution_follows_the_device_pixel_ratio() {
+        let (w, h) = (1280.0, 800.0);
+        let m2 = |q| super::media_query_list_matches_with(q, w, h, 2.0);
+        assert!(m2("(min-resolution: 2dppx)"));
+        assert!(m2("(min-resolution: 192dpi)"));
+        assert!(m2("(-webkit-min-device-pixel-ratio: 2)"));
+        assert!(!m2("(max-resolution: 1.5dppx)"));
+        assert!(m2("(resolution: 2dppx)"));
+        assert!(!m("(min-resolution: 2dppx)", w, h));
+        assert!(!super::media_query_list_matches_with("(min-resolution: 2dppx)", w, h, 0.0));
     }
 }
