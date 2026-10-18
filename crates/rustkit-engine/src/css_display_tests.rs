@@ -1606,6 +1606,59 @@ fn the_pinned_appearance_dropdown_has_no_box_over_donate() {
     );
 }
 
+/// Microsoft's unstyled header menu is a text-only `<button>` whose
+/// label is pretty-printed across lines ("PCs & Devices"). `white-space`
+/// is `normal`, so the indentation collapses and the button stays the
+/// width of the words. Measuring the raw text made a ~3100px inline-block
+/// and `documentElement.scrollWidth` was 3199 at a 1280 viewport.
+#[test]
+fn an_indented_menu_button_collapses_to_its_label() {
+    let (mut engine, view) = loaded(
+        "<!doctype html><header><nav id=\"uhf-c-nav\"><ul><li><div><ul><li>\
+<button id=\"pcs\" type=\"button\">PCs\n                                                                            &amp;\n                                                                            Devices\n                </button>\
+<a id=\"link\" href=\"https://www.microsoft.com/edge\">Microsoft\n                                                                            Edge</a>\
+</li></ul></div></li></ul></nav></header>",
+    );
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+        )
+        .expect("desktop");
+    let pcs = rect(&mut engine, view, "pcs");
+    let link = rect(&mut engine, view, "link");
+    assert!(
+        pcs.2 > 40.0 && pcs.2 < 220.0,
+        "menu button kept its source indentation: {pcs:?}"
+    );
+    assert!(
+        link.2 < 220.0 && link.0 + link.2 < 1280.0,
+        "nav link ran off the viewport: {link:?}"
+    );
+    let scroll: f64 = eval(&mut engine, view, "document.documentElement.scrollWidth")
+        .parse()
+        .unwrap_or(f64::MAX);
+    assert!(
+        scroll <= 1280.0,
+        "unstyled header still overflows: scrollWidth {scroll} button {pcs:?}"
+    );
+
+    let spaces = " ".repeat(200);
+    let (mut engine, view) = loaded(&format!(
+        "<!doctype html><button id=\"pre\" style=\"white-space:pre\">PCs{spaces}Devices</button>"
+    ));
+    let pre = rect(&mut engine, view, "pre");
+    assert!(
+        pre.2 > 400.0,
+        "white-space:pre collapsed the button label: {pre:?}"
+    );
+}
+
 /// Below Vector's 1120px breakpoint the appearance menu is unpinned into
 /// the header. The control is an `inline-flex` icon button with
 /// `min-width: 44px` inside `.vector-dropdown`. The dropdown's intrinsic
