@@ -158,13 +158,6 @@ core--abspos--grid--w-200px--h-50pct       grid-auto-rows-not-stretched-to-non-p
 grid-span--grid--auto-rows-auto            grid-auto-rows-not-stretched-to-non-px-height
 gap--grid--grid                            grid-auto-rows-not-stretched-to-non-px-height
 
-# column-flex-item-stretches-to-outer-width: 5
-core--flex-row--flex-col--w-auto--h-auto         column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-min-content--h-auto  column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-50pct        column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-max-content--h-50pct column-flex-item-stretches-to-outer-width
-core--flex-row--flex-col--w-auto--h-120px        column-flex-item-stretches-to-outer-width
-
 # fit-content-grid-item-stretches: 5
 core--grid--block--w-fit-content--h-120px        fit-content-grid-item-stretches
 core--grid--flex-row--w-fit-content--h-120px     fit-content-grid-item-stretches
