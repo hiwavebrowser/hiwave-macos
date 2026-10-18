@@ -29,6 +29,9 @@ use crate::JsRuntime;
 
 struct Waiter {
     url: String,
+    specifier: String,
+    /// This wait came from a dynamic `import()`, not a static dependency.
+    dynamic: bool,
     sender: tokio::sync::oneshot::Sender<JsResult<Module>>,
 }
 
@@ -87,9 +90,13 @@ impl ModuleLoader for HostModuleLoader {
     ) -> JsResult<Module> {
         let specifier = request.specifier().to_std_string_escaped();
         let referrer_url = path_string(referrer.path());
+        let dynamic = boa_engine::module::in_dynamic_import();
         let url = match self.resolve(&specifier, referrer_url.as_deref()) {
             Ok(url) => url.to_string(),
             Err(message) => {
+                if dynamic {
+                    boa_engine::module::record_dynamic_import_failure(&specifier, "", &message);
+                }
                 return Err(JsNativeError::typ().with_message(message).into());
             }
         };
@@ -101,16 +108,23 @@ impl ModuleLoader for HostModuleLoader {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting.borrow_mut().push(Waiter {
             url: url.clone(),
+            specifier: specifier.clone(),
+            dynamic,
             sender: tx,
         });
         if self.asked.borrow_mut().insert(url.clone()) {
-            self.requested.borrow_mut().push(url);
+            self.requested.borrow_mut().push(url.clone());
         }
         match rx.await {
             Ok(res) => res,
-            Err(_) => Err(JsNativeError::typ()
-                .with_message("Module fetch cancelled")
-                .into()),
+            Err(_) => {
+                if dynamic {
+                    boa_engine::module::record_dynamic_import_failure(&specifier, &url, "Module fetch cancelled");
+                }
+                Err(JsNativeError::typ()
+                    .with_message("Module fetch cancelled")
+                    .into())
+            }
         }
     }
 
@@ -119,6 +133,15 @@ impl ModuleLoader for HostModuleLoader {
             let _ = import_meta.set(js_string!("url"), js_string!(url.as_str()), false, context);
         }
     }
+}
+
+/// A dynamic `import()` that rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicImportFailure {
+    pub specifier: String,
+    /// Resolved URL. Empty when the specifier itself could not be resolved.
+    pub url: String,
+    pub reason: String,
 }
 
 /// A module the embedder started (`JsRuntime::begin_module`).
@@ -221,6 +244,7 @@ impl JsRuntime {
             Some(module) => module,
             None => {
                 self.diag.know_path(url);
+                self.sources.remember(url, source);
                 let path = Path::new(url);
                 let parsed = Module::parse(Source::from_bytes(source).with_path(path), None, &mut self.context);
                 match parsed {
@@ -257,6 +281,19 @@ impl JsRuntime {
         Ok(ModuleHandle(url.to_string()))
     }
 
+    /// Dynamic `import()` calls that rejected since the last call: the
+    /// specifier, the resolved URL (empty when it did not resolve), and why.
+    pub fn take_dynamic_import_failures(&mut self) -> Vec<DynamicImportFailure> {
+        boa_engine::module::take_dynamic_import_failures()
+            .into_iter()
+            .map(|failure| DynamicImportFailure {
+                specifier: failure.specifier,
+                url: failure.url,
+                reason: failure.reason,
+            })
+            .collect()
+    }
+
     /// The URLs the graph has asked for since the last call, each at most
     /// once, in the order Boa asked.
     pub fn take_module_requests(&mut self) -> Vec<String> {
@@ -275,6 +312,10 @@ impl JsRuntime {
                     Some(module) => Ok(module),
                     None => {
                         self.diag.know_path(&fetched.final_url);
+                        self.sources.remember(&fetched.final_url, &fetched.source);
+                        if fetched.final_url != requested {
+                            self.sources.remember(requested, &fetched.source);
+                        }
                         let path = Path::new(fetched.final_url.as_str());
                         match Module::parse(
                             Source::from_bytes(fetched.source.as_str()).with_path(path),
@@ -314,6 +355,9 @@ impl JsRuntime {
                     let _ = waiter.sender.send(Ok(module.clone()));
                 }
                 Err(message) => {
+                    if waiter.dynamic {
+                        boa_engine::module::record_dynamic_import_failure(&waiter.specifier, &waiter.url, message);
+                    }
                     let _ = waiter.sender.send(Err(JsNativeError::typ()
                         .with_message(format!("Failed to fetch dynamically imported module: {message}"))
                         .into()));
@@ -356,6 +400,7 @@ impl JsRuntime {
                 }
                 return ModuleState::Failed(message);
             }
+            self.context.reset_recursion_max();
             let evaluation = match module.evaluate(&mut self.context) {
                 Ok(p) => {
                     self.rejections.forget(&JsObject::from(p.clone()));

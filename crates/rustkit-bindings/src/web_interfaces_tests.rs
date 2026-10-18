@@ -92,6 +92,44 @@ fn a_canvas_has_no_context_and_a_media_element_plays_nothing_without_throwing() 
     assert_eq!(ev(&b, "Object.prototype.toString.call(p) + ' ' + played"), "[object Promise] NotSupportedError:true");
 }
 
+/// `MediaError` is the interface a media element's `error` would be. Pages
+/// read the code constants; there is no playback, so nothing constructs one
+/// and `error` stays null.
+#[test]
+fn media_error_exists_with_its_code_constants() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "[typeof MediaError, MediaError.MEDIA_ERR_ABORTED, MediaError.MEDIA_ERR_NETWORK, MediaError.MEDIA_ERR_DECODE, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, MediaError.prototype.MEDIA_ERR_ABORTED].join()"),
+        "function,1,2,3,4,1"
+    );
+    assert_eq!(
+        ev(&b, "var t; try { new MediaError(); t = 'no throw'; } catch (e) { t = e.name + ':' + e.message; } t"),
+        "TypeError:Illegal constructor"
+    );
+    assert_eq!(ev(&b, "String(document.getElementById('vi').error)"), "null");
+    assert_eq!(ev(&b, "String(document.createElement('audio').error)"), "null");
+}
+
+/// A timestamp with more than three fractional digits, or an offset written
+/// `+HHMM`, used to be Invalid Date. `toISOString` then throws RangeError
+/// Invalid time value.
+#[test]
+fn iso_dates_with_a_long_fraction_or_a_basic_offset_parse() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, "new Date('2024-10-16T18:22:11.123000+0000').toISOString()"),
+        "2024-10-16T18:22:11.123Z"
+    );
+    assert_eq!(ev(&b, "String(new Date('2024-10-16T18:22:11.1Z').getUTCMilliseconds())"), "100");
+    assert_eq!(ev(&b, "new Date('2024-10-16T18:22:11.1234Z').toISOString()"), "2024-10-16T18:22:11.123Z");
+    assert_eq!(ev(&b, "new Date('2024-10-16 18:22:11Z').toISOString()"), "2024-10-16T18:22:11.000Z");
+    assert_eq!(ev(&b, "String(isNaN(Date.parse('not-a-date')))"), "true");
+    assert_eq!(
+        ev(&b, "new Date('2020-06-08T09:16:15.779-07:30').toISOString()"),
+        "2020-06-08T16:46:15.779Z"
+    );
+}
+
 #[test]
 fn event_subclasses_extend_event_with_their_init_members() {
     let b = bound();

@@ -424,7 +424,10 @@ impl PageEndpoint {
             }
         };
         rt.block_on(async {
-            if let Err(e) = self.engine.load_url(self.view, url).await {
+            // Yield after DOMContentLoaded while inserted scripts are still
+            // arriving. A page with none finishes inside this call, as
+            // `load_url` did. Later live turns run the tail.
+            if let Err(e) = self.engine.load_url_yielding(self.view, url).await {
                 tracing::error!(error = %e, "Failed to load URL");
             }
         });

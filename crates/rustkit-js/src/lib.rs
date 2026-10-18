@@ -14,8 +14,8 @@ mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
-pub use module::{FetchedModule, ModuleHandle, ModuleState};
-pub use control::{ThreadStamp, ViewControl, Watchdog};
+pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
+pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
@@ -24,17 +24,193 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+mod source_context;
 #[cfg(feature = "boa")]
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info, trace};
+
+thread_local! {
+    static DIAG_TURN: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_JOB: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_NAV: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The kind of turn whose script is running: `load`, `live`, `navigation-teardown`.
+/// Empty when no turn has been marked. Restored when the guard drops.
+pub fn set_diag_turn(turn: &'static str) {
+    DIAG_TURN.with(|cell| cell.set(turn));
+}
+
+pub fn diag_turn() -> &'static str {
+    DIAG_TURN.with(Cell::get)
+}
+
+/// The job inside the turn: `timer`, `microtask`, or empty.
+pub fn set_diag_job(job: &'static str) {
+    DIAG_JOB.with(|cell| cell.set(job));
+}
+
+pub fn diag_job() -> &'static str {
+    DIAG_JOB.with(Cell::get)
+}
+
+/// Navigation id of the document the window thread is loading or showing.
+pub fn set_diag_nav(nav: u64) {
+    DIAG_NAV.with(|cell| cell.set(nav));
+}
+
+pub fn diag_nav() -> u64 {
+    DIAG_NAV.with(Cell::get)
+}
+
+thread_local! {
+    static DIAG_CONTROL: std::cell::RefCell<Option<Arc<control::ViewControl>>> =
+        const { std::cell::RefCell::new(None) };
+    static DIAG_STAMP: std::cell::RefCell<Option<Arc<control::ThreadStamp>>> =
+        const { std::cell::RefCell::new(None) };
+    static DEADLINE_TRIP_US: Cell<u64> = const { Cell::new(0) };
+}
+
+fn note_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(control::mono_us()));
+}
+
+fn clear_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(0));
+}
+
+/// `word=… turn_id=… setter=… setter_target=… setter_age_us=… wall_us=… turn_budget_us=… deadline_age_us=… depth=… host_depth=… recursion_limit=… host_limit=… max_depth=…`
+/// for an interrupt log. Empty clocks read as `-` or zero when nothing is armed.
+/// `depth` is the JavaScript frame count at the last recursion check, and
+/// `recursion_limit` is the frame cap that check used.
+pub fn interrupt_attribution() -> String {
+    let (word, setter, setter_at, setter_target) = DIAG_CONTROL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|control| control.word_writer())
+            .unwrap_or((0, "-", 0, 0))
+    });
+    let (turn, wall, turn_budget) = DIAG_STAMP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|stamp| stamp.timing())
+            .unwrap_or((0, 0, 0))
+    });
+    let now = control::mono_us();
+    let setter_age = if setter_at == 0 {
+        0
+    } else {
+        now.saturating_sub(setter_at)
+    };
+    let deadline_age = DEADLINE_TRIP_US.with(|at| {
+        let tripped = at.get();
+        if tripped == 0 {
+            None
+        } else {
+            Some(now.saturating_sub(tripped))
+        }
+    });
+    let target = if setter_target == control::ALL {
+        "all".to_string()
+    } else {
+        setter_target.to_string()
+    };
+    let deadline = deadline_age
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    #[cfg(feature = "boa")]
+    let depth = recursion_depth_log();
+    #[cfg(not(feature = "boa"))]
+    let depth = "depth=- host_depth=- recursion_limit=- host_limit=- max_depth=-".to_string();
+    format!(
+        "word={word} turn_id={turn} setter={setter} setter_target={target} setter_age_us={setter_age} wall_us={wall} turn_budget_us={turn_budget} deadline_age_us={deadline} {depth}"
+    )
+}
+
+/// Sets [`diag_turn`] and puts the previous kind back on drop.
+pub struct DiagTurn {
+    prev: &'static str,
+}
+
+impl DiagTurn {
+    pub fn enter(turn: &'static str) -> Self {
+        let prev = diag_turn();
+        set_diag_turn(turn);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagTurn {
+    fn drop(&mut self) {
+        set_diag_turn(self.prev);
+    }
+}
+
+/// Sets [`diag_job`] and puts the previous job back on drop.
+pub struct DiagJob {
+    prev: &'static str,
+}
+
+impl DiagJob {
+    pub fn enter(job: &'static str) -> Self {
+        let prev = diag_job();
+        set_diag_job(job);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagJob {
+    fn drop(&mut self) {
+        set_diag_job(self.prev);
+    }
+}
+
+/// Install the function Boa calls when an interrupt path fires. A null hook
+/// leaves those paths silent. The hook itself decides whether to write.
+#[cfg(feature = "boa")]
+pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag>) {
+    boa_engine::interrupt_diag::set_interrupt_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str, &'static str)>) {}
+
+/// Install the function Boa calls the first time a host-reentry climb crosses
+/// 256, 512, or 1000. A null hook leaves the climb silent.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_diag(hook: Option<boa_engine::host_stack::HostStackDiag>) {
+    boa_engine::host_stack::set_host_stack_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_diag(_hook: Option<fn(usize, &str, &str)>) {}
+
+/// Record host-reentry names only while this is set.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_armed(on: bool) {
+    boa_engine::host_stack::set_host_stack_armed(on);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_armed(_on: bool) {}
+
+/// Move the first host-stack log mark. `None` restores 256.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_first_mark(mark: Option<usize>) {
+    boa_engine::host_stack::set_host_stack_first_mark(mark);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_first_mark(_mark: Option<usize>) {}
 
 /// Errors that can occur in JS operations.
 #[derive(Error, Debug)]
@@ -251,6 +427,9 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// Page script text, only while an embedder has asked to quote it in
+    /// an error log. See [`JsRuntime::set_capture_script_sources`].
+    sources: source_context::ScriptSources,
 }
 
 impl JsRuntime {
@@ -305,6 +484,7 @@ impl JsRuntime {
             diag,
             #[cfg(feature = "boa")]
             host,
+            sources: source_context::ScriptSources::default(),
         };
 
         // Set up built-in APIs
@@ -341,6 +521,7 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
+            let _job = DiagJob::enter("microtask");
             let result = self.context.run_jobs();
             self.consume_interrupt();
             result.map_err(|e| JsError::ExecutionError(e.to_string()))
@@ -384,6 +565,18 @@ impl JsRuntime {
         }
         #[cfg(not(feature = "boa"))]
         let _ = (on, keep_text);
+    }
+
+    /// Keep the source of each named script and module so a later error can
+    /// quote the text around its position. Off by default, and turning it
+    /// off drops whatever was kept. The page cannot see this.
+    pub fn set_capture_script_sources(&mut self, on: bool) {
+        self.sources.set_enabled(on);
+    }
+
+    /// The source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.sources.get(path)
     }
 
     /// The page errors since the last call (with reports on), oldest first:
@@ -539,9 +732,14 @@ impl JsRuntime {
         {
             use boa_engine::Source;
 
+            // Max frame depth is per script, including the microtask drain
+            // below. The live counters are not touched: a stop already
+            // unwinds them.
+            self.context.reset_recursion_max();
             let result = match path {
                 Some(path) => {
                     self.diag.know_path(path);
+                    self.sources.remember(path, source);
                     self.context
                         .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
                 }
@@ -618,6 +816,7 @@ impl JsRuntime {
         self.deadline.at.set(at);
         self.deadline.hit.set(false);
         self.deadline.late.set(None);
+        clear_deadline_trip();
     }
 
     /// Whether the deadline has stopped a host call since it was last set
@@ -635,6 +834,7 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         self.context
             .set_interrupt_word(control.as_ref().map(|c| c.word().clone()));
+        DIAG_CONTROL.with(|slot| *slot.borrow_mut() = control.clone());
         *self.deadline.control.borrow_mut() = control;
     }
 
@@ -648,6 +848,7 @@ impl JsRuntime {
         };
         let turn = stamp.begin_turn(&control, budget);
         *self.deadline.stamp.borrow_mut() = Some(stamp.clone());
+        DIAG_STAMP.with(|slot| *slot.borrow_mut() = Some(stamp.clone()));
         self.deadline.graced.set(false);
         self.set_turn(turn);
         turn
@@ -662,6 +863,7 @@ impl JsRuntime {
         let open = stamp.current_turn();
         if open == 0 {
             *self.deadline.stamp.borrow_mut() = None;
+            DIAG_STAMP.with(|slot| *slot.borrow_mut() = None);
         }
         self.set_turn(open);
     }
@@ -699,6 +901,15 @@ impl JsRuntime {
         }
         self.deadline.hit.set(true);
         self.deadline.graced.set(true);
+        // The grace turn is a new id, so the interrupt word still names the
+        // stopped turn and the opcode check stays quiet. The host deadline
+        // is a separate clock and is already in the past: a reaction's first
+        // host call then throws uncatchable `LoopIteration`, which the await
+        // path reports as "async function was interrupted". Move the deadline
+        // with the grace turn.
+        self.deadline
+            .at
+            .set(Some(std::time::Instant::now() + control::STOP_GRACE));
         let control = self.deadline.control.borrow().clone();
         let stamp = self.deadline.stamp.borrow().clone();
         if let (Some(control), Some(stamp)) = (control, stamp) {
@@ -796,6 +1007,7 @@ impl JsRuntime {
                         // takes long to unwind, the log still says when.
                         if !deadline.hit.replace(true) {
                             deadline.late.set(Some(late));
+                            note_deadline_trip();
                             tracing::warn!(
                                 late_ms = late.as_millis() as u64,
                                 "Script budget spent: host calls are refused until the script has unwound"
@@ -997,6 +1209,21 @@ impl Default for JsRuntime {
     fn default() -> Self {
         Self::new().expect("Failed to create default JsRuntime")
     }
+}
+
+/// `depth=`, the host depth, both configured limits, and the deepest frame
+/// count since this script started.
+///
+/// The interrupt log appends this. The check records it on the thread
+/// because the interrupt hook has no context.
+#[cfg(feature = "boa")]
+#[must_use]
+pub fn recursion_depth_log() -> String {
+    let sample = boa_engine::vm::recursion_sample();
+    format!(
+        "depth={} host_depth={} recursion_limit={} host_limit={} max_depth={}",
+        sample.frames, sample.host, sample.recursion_limit, sample.host_limit, sample.max_frames
+    )
 }
 
 #[cfg(test)]
@@ -1308,6 +1535,20 @@ mod tests {
         assert!(err.to_string().contains("(inline#2:2:"), "{err}");
     }
 
+    #[test]
+    fn script_source_is_kept_only_while_capture_is_on() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#1").ok();
+        assert!(runtime.script_source("inline#1").is_none());
+        runtime.set_capture_script_sources(true);
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#2").ok();
+        let kept = runtime.script_source("inline#2").expect("captured");
+        assert!(kept.contains("box.missing(1)"), "{kept}");
+        assert!(runtime.script_source("inline#1").is_none(), "scripts from before capture stay unstored");
+        runtime.set_capture_script_sources(false);
+        assert!(runtime.script_source("inline#2").is_none());
+    }
+
     /// A thrown value that is not an error is described (`[object Object]`,
     /// the string itself), never pretty-printed with its properties, and
     /// keeps its frames; an error-like object (a prototype of
@@ -1615,5 +1856,200 @@ mod tests {
             let report = runtime.diag.describe_error(&error, &mut runtime.context);
             assert_eq!((report.frames, report.located), (Vec::new(), false), "{message}");
         }
+    }
+
+    /// Thirty recursion stops, twenty setter stops and thirty interrupt
+    /// stops in one runtime, then a recursion that only fits if every stop
+    /// gave the frames and the host depth back.
+    #[test]
+    fn uncatchable_stops_do_not_leak_recursion_depth() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.context.runtime_limits_mut().set_recursion_limit(40);
+        for _ in 0..30 {
+            assert!(
+                runtime
+                    .evaluate_script("function blow(n) { blow(n - 1); } blow(0);")
+                    .is_err()
+            );
+        }
+        runtime.context.runtime_limits_mut().set_recursion_limit(80);
+        let shallow = runtime
+            .evaluate_script("function f(n) { return n <= 0 ? 7 : f(n - 1); } f(50)")
+            .unwrap();
+        assert!(matches!(shallow, JsValue::Number(n) if n == 7.0));
+
+        runtime.context.runtime_limits_mut().set_recursion_limit(8192);
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(12);
+        for _ in 0..20 {
+            assert!(
+                runtime
+                    .evaluate_script("var obj = { set x(v) { this.x = v; } }; obj.x = 1;")
+                    .is_err()
+            );
+        }
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(15);
+        let setters = runtime
+            .evaluate_script(
+                "var n = 0; var obj = { set x(v) { n++; if (n < 8) this.x = v; } }; obj.x = 1; n",
+            )
+            .unwrap();
+        assert!(matches!(setters, JsValue::Number(n) if n == 8.0));
+
+        // A climb through 256 records the setter once, with the name on the
+        // stack, and does not log that threshold again before it returns.
+        {
+            use std::sync::{Mutex, OnceLock};
+            fn lines() -> &'static Mutex<Vec<String>> {
+                static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+                LINES.get_or_init(|| Mutex::new(Vec::new()))
+            }
+            fn hook(depth: usize, histogram: &str, frames: &str) {
+                lines()
+                    .lock()
+                    .unwrap()
+                    .push(format!("depth={depth} histogram={histogram} frames={frames}"));
+            }
+            struct Disarm;
+            impl Drop for Disarm {
+                fn drop(&mut self) {
+                    set_host_stack_armed(false);
+                    set_host_stack_diag(None);
+                    set_host_stack_first_mark(None);
+                }
+            }
+            let _disarm = Disarm;
+            lines().lock().unwrap().clear();
+            // A debug native stack overflows before a climb of 256. The
+            // marks in a live run stay 256/512/1000; this only moves the first.
+            set_host_stack_first_mark(Some(4));
+            runtime
+                .context
+                .runtime_limits_mut()
+                .set_host_recursion_limit(1024);
+            set_host_stack_diag(Some(hook));
+            set_host_stack_armed(true);
+            let climbed = runtime
+                .evaluate_script(
+                    "var n = 0; var obj = { set x(v) { n++; if (n < 6) this.x = v; } }; obj.x = 1; n",
+                )
+                .unwrap();
+            assert!(matches!(climbed, JsValue::Number(n) if n == 6.0));
+            let logged = lines().lock().unwrap().clone();
+            assert_eq!(logged.len(), 1, "{logged:?}");
+            assert!(logged[0].starts_with("depth=4 "), "{}", logged[0]);
+            assert!(logged[0].contains("histogram=set x=4"), "{}", logged[0]);
+            assert!(logged[0].contains("set x > set x"), "{}", logged[0]);
+        }
+
+        let word = Arc::new(AtomicU64::new(0));
+        runtime.context.set_interrupt_word(Some(word.clone()));
+        runtime.context.set_interrupt_turn(7);
+        let flag = word.clone();
+        runtime
+            .register_host_function(
+                "arm",
+                0,
+                Box::new(move |_| {
+                    flag.store(7, Ordering::Relaxed);
+                    JsValue::Undefined
+                }),
+            )
+            .unwrap();
+        runtime.context.runtime_limits_mut().set_recursion_limit(80);
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(1024);
+        let dive = "function dive(n) { if (n === 15) arm(); if (n > 0) dive(n - 1); } dive(30);";
+        for _ in 0..30 {
+            word.store(0, Ordering::Relaxed);
+            assert!(runtime.evaluate_script(dive).is_err());
+        }
+        word.store(0, Ordering::Relaxed);
+        let after = runtime
+            .evaluate_script("function g(n) { return n <= 0 ? 7 : g(n - 1); } g(50)")
+            .unwrap();
+        assert!(matches!(after, JsValue::Number(n) if n == 7.0));
+    }
+
+    /// A promise job calls the host, and the host queues another job and
+    /// asks for a checkpoint. That checkpoint is already running, so the
+    /// inner job waits until the host has returned.
+    #[test]
+    fn a_nested_microtask_checkpoint_does_not_reenter() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let saw = std::rc::Rc::new(std::cell::Cell::new(false));
+        let saw_in_host = saw.clone();
+        // SAFETY: the closure captures an `Rc<Cell<bool>>`, which holds no
+        // GC-managed data.
+        let native = unsafe {
+            boa_engine::NativeFunction::from_closure(move |_this, _args, context| {
+                context.eval(boa_engine::Source::from_bytes(
+                    "Promise.resolve().then(function () { globalThis.__inner = true; });",
+                ))?;
+                context.run_jobs()?;
+                let inner = context.eval(boa_engine::Source::from_bytes("globalThis.__inner === true"))?;
+                saw_in_host.set(inner.as_boolean() == Some(true));
+                Ok(boa_engine::JsValue::undefined())
+            })
+        };
+        runtime
+            .context
+            .register_global_callable(boa_engine::js_string!("hostNest"), 0, native)
+            .unwrap();
+        runtime
+            .evaluate_script(
+                "globalThis.__inner = false; Promise.resolve().then(function () { hostNest(); });",
+            )
+            .unwrap();
+        assert!(!saw.get(), "the nested checkpoint ran the inner job");
+        let inner = runtime.evaluate_script("globalThis.__inner").unwrap();
+        assert!(matches!(inner, JsValue::Boolean(true)));
+    }
+
+    /// The default limits fit a setter chain and a pure call that Boa's 512,
+    /// counted twice for each host callback, rejected. The setter chain
+    /// re-enters the VM on the native stack: the default test thread is 2MB
+    /// and overflows near 270 of those, so this runs on an 8MB thread, the
+    /// size of the main thread page script uses.
+    #[test]
+    fn a_deep_setter_chain_and_call_fit_the_default_recursion_limit() {
+        std::thread::Builder::new()
+            .name("setter-depth".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut runtime = JsRuntime::new().unwrap();
+                let setters = runtime
+                    .evaluate_script(
+                        "var n = 0; var obj = { set x(v) { n++; if (n < 400) this.x = v; } }; obj.x = 1; n",
+                    )
+                    .unwrap();
+                assert!(matches!(setters, JsValue::Number(n) if n == 400.0), "{setters:?}");
+                let calls = runtime
+                    .evaluate_script("function f(n) { return n <= 0 ? 0 : f(n - 1); } f(1000)")
+                    .unwrap();
+                assert!(matches!(calls, JsValue::Number(n) if n == 0.0), "{calls:?}");
+            })
+            .expect("spawn")
+            .join()
+            .expect("setter depth");
+    }
+
+    #[test]
+    fn the_recursion_log_names_the_depth_and_the_configured_limit() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .evaluate_script("function f(n) { return n <= 0 ? 0 : f(n - 1); } f(20)")
+            .unwrap();
+        let line = recursion_depth_log();
+        assert!(line.contains("depth="), "{line}");
+        assert!(line.contains("recursion_limit=8192"), "{line}");
+        assert!(line.contains("host_limit=1024"), "{line}");
+        let max = line
+            .split("max_depth=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
+        assert!(max >= 20, "{line}");
+        let attribution = interrupt_attribution();
+        assert!(attribution.contains(&line), "{attribution}");
     }
 }

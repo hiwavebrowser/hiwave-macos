@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -222,6 +222,9 @@ enum UserEvent {
     DecayTick,
     // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
     WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -341,6 +344,37 @@ fn apply_layout(
     let _ = content.set_bounds(content_rect);
     let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
+}
+
+/// The content view's top-left frame, in the same coordinates as
+/// [`apply_layout`]. Used while a load has the engine borrowed.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn content_host_bounds(
+    window: &tao::window::Window,
+    chrome_height: f64,
+    shelf_height: f64,
+    inspector_height: f64,
+    sidebar_width: f64,
+    right_sidebar_open: bool,
+) -> rustkit_viewhost::Bounds {
+    let scale = window.scale_factor();
+    let window_size = window.inner_size();
+    let width = window_size.width as f64 / scale;
+    let height = window_size.height as f64 / scale;
+    let sidebar_width = sidebar_width.min(width).max(0.0);
+    let right_sidebar_width = if right_sidebar_open {
+        SIDEBAR_WIDTH.min(width - sidebar_width)
+    } else {
+        0.0
+    };
+    let content_width = (width - sidebar_width - right_sidebar_width).max(0.0);
+    let content_height = (height - chrome_height - shelf_height - inspector_height).max(0.0);
+    rustkit_viewhost::Bounds {
+        x: sidebar_width as i32,
+        y: chrome_height as i32,
+        width: content_width as u32,
+        height: content_height as u32,
+    }
 }
 
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
@@ -586,11 +620,39 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
@@ -685,7 +747,14 @@ fn main() {
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
-    // Sidebar width: 0.0 = closed, >0 = open with that width
+    // Sidebar width: 0.0 = closed, >0 = open with that width.
+    // The content view starts at the full window. A page with no inserted
+    // scripts reads that width, then hears one `resize` when chrome opens
+    // the sidebar. Creating it already inset made that first read the
+    // narrowed width, and chrome's initial width of 0 then dispatched a
+    // stale full-window resize. While a load has the engine borrowed, the
+    // NSView can still move (`place_host_frame`); the resize event follows
+    // the viewport the view has when the load returns.
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
@@ -1209,6 +1278,15 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
         rustkit_view.load_html_internal(ABOUT_HTML)
             .expect("Failed to load initial HTML");
         
@@ -2026,6 +2104,47 @@ fn main() {
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
+        // A content load is pumping the run loop so the chrome WebView can
+        // paint. The engine is borrowed for that load; handling the nested
+        // event here would borrow it again (a resize, a navigate, the live
+        // turn). Put user events back and let WebKit's own sources, which
+        // already ran, do the paint.
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if webview_rustkit::chrome_pump_active() {
+            if let Event::UserEvent(user_event) = &event {
+                // The engine is borrowed for the load, so `apply_layout`
+                // cannot run. Move the NSView now; the requeued event
+                // resizes the surface and relayouts once the load returns.
+                let sidebar = match user_event {
+                    UserEvent::SetSidebarOpen(open) => {
+                        Some((if *open { SIDEBAR_WIDTH } else { 0.0 }, None))
+                    }
+                    UserEvent::SetSidebarWidth(width) => Some((*width, None)),
+                    UserEvent::SetRightPanelOpen(open) => Some((
+                        *sidebar_width_for_events.lock().unwrap(),
+                        Some(*open),
+                    )),
+                    _ => None,
+                };
+                if let Some((width, right)) = sidebar {
+                    *sidebar_width_for_events.lock().unwrap() = width;
+                    if let Some(open) = right {
+                        *right_sidebar_open_for_events.lock().unwrap() = open;
+                    }
+                    let bounds = content_host_bounds(
+                        &window,
+                        *chrome_height_for_events.lock().unwrap(),
+                        *shelf_height_for_events.lock().unwrap(),
+                        *inspector_height_for_events.lock().unwrap(),
+                        *sidebar_width_for_events.lock().unwrap(),
+                        *right_sidebar_open_for_events.lock().unwrap(),
+                    );
+                    content_for_events.place_host_frame(bounds);
+                }
+                let _ = click_proxy.send_event(user_event.clone());
+            }
+            return;
+        }
         *control_flow = match live_wake.get() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -4153,6 +4272,9 @@ fn main() {
                         if let Some((answered, clock)) = stall_log.as_ref() {
                             answered.now(clock);
                         }
+                    }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
                     }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs

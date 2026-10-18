@@ -281,6 +281,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod console_log;
 mod relayout_cause;
 mod presenter;
 pub use presenter::FrameCommit;
@@ -347,6 +348,8 @@ mod script_net_engine_tests;
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
+#[cfg(all(test, feature = "headless"))]
+mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
 #[cfg(test)]
@@ -372,6 +375,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_budget_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
@@ -382,8 +387,7 @@ mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
-mod hover_restyle_tests;
-#[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -893,6 +897,10 @@ struct ViewState {
     /// Bounds the view was given since its last layout (`set_view_bounds`):
     /// the next live turn lays out once, at these, and fires `resize`.
     pending_resize: Option<Bounds>,
+    /// The viewport last published to the page (`window.innerWidth` /
+    /// `innerHeight`). A later resize at this size is not an event, and a
+    /// queued size the view has already left is not dispatched.
+    announced_viewport: Option<(u32, u32)>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -912,6 +920,18 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// External classic scripts the page inserted whose fetches are still
+    /// out, or finished and not yet run. The fetch is not tied to a turn
+    /// deadline. A live turn runs one whose fetch has finished (an
+    /// `async = false` script waits for the in-order scripts before it) and
+    /// fires `load` or `error`. A new document retires the queue.
+    live_inserted: script_net::InsertedScripts,
+    /// Navigation whose `window` `load` is waiting on [`Self::live_inserted`].
+    /// Set only by [`Engine::load_url_yielding`], after `DOMContentLoaded`,
+    /// when an inserted script is still queued. `None` for [`Engine::load_url`]
+    /// and for a page that inserted nothing: those fire `load` before they
+    /// return. A newer document clears it without firing `load`.
+    load_tail: Option<u64>,
     /// Causes noted since the last relayout (see `relayout_cause`).
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
@@ -979,6 +999,13 @@ impl ViewState {
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_images.clear();
+        // The previous document's inserted scripts must not run here. A
+        // fetch still out is discarded when its result arrives. A load tail
+        // parked on that document must not fire `load` on this one.
+        if let Some(nav_id) = self.load_tail.take() {
+            self.control.end_load(nav_id);
+        }
+        self.live_inserted.retire(self.nav_id);
         // The last document's sheets, before the first layout of this one.
         // `load_subresources` assigns the new document's when they have
         // been fetched, which is after a document that links none has been
@@ -1003,12 +1030,18 @@ pub struct EngineConfig {
     /// Disable animations and transitions for deterministic parity captures.
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
-    /// Wall-clock budget for a page's scripts on the load path, fetching
-    /// and running together. Once spent, unfetched and unstarted scripts
-    /// are recorded as over budget (a script already running is bounded by
-    /// the loop-iteration limit, and by this only with
-    /// `interrupt_scripts_at_budget`). Scripts run after every
-    /// subresource today, so this comes out of the page's load time.
+    /// How long the page's scripts may execute on the load path. Only
+    /// JavaScript counts: a fetch, a module load, or any other network
+    /// wait does not. Once the executions so far have used it, a script
+    /// not yet started is recorded as over budget. A script already
+    /// running is bounded by the loop-iteration limit, and by this only
+    /// with `interrupt_scripts_at_budget` (the watchdog is armed for that
+    /// one execution: the script, a callback, or a microtask drain).
+    /// An external script the page inserted while the document was still
+    /// loading does not spend this budget on its fetch, and it does not
+    /// delay `DOMContentLoaded`. It does delay `window` `load` and
+    /// `readyState` `complete` until that script has run and fired `load`
+    /// or `error`.
     pub script_budget_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -1042,12 +1075,13 @@ pub struct EngineConfig {
     /// the budget is a different frame. The live app turns it on, where a
     /// script that does not end is a window that does not answer.
     pub interrupt_scripts_at_budget: bool,
-    /// Wall-clock budget for the script one turn of the live loop runs
-    /// after the load (`pump_live`: timer callbacks and response handlers),
-    /// and for the listeners of one input event (a mouse event, a key, the
-    /// `input` of a typed key, a `resize`). Read only with
-    /// `interrupt_scripts_at_budget`; script still running when it is spent
-    /// is stopped at its next call into the host.
+    /// How long the script of one live-loop turn may execute
+    /// (`pump_live`: timer callbacks and response handlers), and how long
+    /// the listeners of one input event may (a mouse event, a key, the
+    /// `input` of a typed key, a `resize`). Network waits inside the turn
+    /// do not count. Read only with `interrupt_scripts_at_budget`; the
+    /// watchdog is armed once per execution, and script still running when
+    /// its allowance is spent is stopped.
     pub live_turn_budget_ms: u64,
     /// The embedder loads the URL a page's script asks for
     /// ([`Engine::take_script_navigation`]), as the live app does. A load
@@ -1110,6 +1144,25 @@ const LIVE_NETWORK_SLICE: std::time::Duration = std::time::Duration::from_millis
 /// How long a request started by the live loop may take before the page gets
 /// a network error for it.
 const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long one script fetch may wait: a parser script, an inserted script,
+/// a module, or an XHR/`fetch` during the load. The same 30 s as
+/// [`LIVE_REQUEST_TIMEOUT`]. It is not the script budget. When it runs out
+/// that request fails; it never arms the watchdog and never refuses a host
+/// call, and a script whose body did arrive still runs.
+///
+/// These waits already ran on the window thread before the budget counted
+/// JavaScript time only: `load_url` is `block_on` there. They were not
+/// moved onto that thread. They are no longer cut off by the script
+/// budget, so a slow page can hold the thread for the waits plus the
+/// JavaScript. [`await_with_chrome_ui`] gives the chrome UI a turn during
+/// a wait, so that hold does not skip the toolbar and sidebar paint.
+const SCRIPT_NETWORK_CAP: std::time::Duration = LIVE_REQUEST_TIMEOUT;
+
+/// How often a network wait lets the chrome UI run. Short enough that a
+/// toolbar paints during a slow document, long enough that a fast response
+/// is not sliced.
+const CHROME_UI_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Most records the live loop adds to a view's script log. A timer that
 /// throws on every tick would otherwise grow it for as long as the page is
@@ -1267,6 +1320,16 @@ pub struct ClickOutcome {
     pub navigate: Option<String>,
 }
 
+/// Wake the window thread when an inserted script's fetch finishes.
+///
+/// `wake` only posts an event the loop already turns into a live pump. The
+/// script runs on that turn, never inside `wake`. One slot for the process:
+/// the app has one content loop. Tests leave it unset and call
+/// [`Engine::pump_live`](Engine::pump_live) themselves.
+pub fn set_live_wake(wake: Arc<dyn Fn() + Send + Sync>) {
+    script_net::set_live_wake(wake);
+}
+
 /// What one turn of the live loop did for a view (see [`Engine::pump_live`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LivePump {
@@ -1274,9 +1337,10 @@ pub struct LivePump {
     pub timers_ran: u32,
     /// Script network requests and module fetches that were answered.
     pub requests: usize,
-    /// Script network requests and script-added images that are out and
-    /// have not arrived yet. While there are any, the loop has to keep
-    /// turning: nothing else wakes it when one comes.
+    /// Script network requests and script-added images that are out. While
+    /// there are any, the loop has to keep turning: nothing else wakes it
+    /// when one comes. An inserted script's fetch is not counted here. Its
+    /// completion wakes the loop, and the next turn runs the script.
     pub in_flight: usize,
     /// The page was laid out again: a callback wrote to the DOM, or an image
     /// it added arrived.
@@ -1284,6 +1348,16 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+}
+
+/// How far [`Engine::load_url_yielding`] got before it returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadYield {
+    /// `window` `load` has fired and `PageLoaded` was sent.
+    Complete,
+    /// `DOMContentLoaded` has fired. `readyState` is `interactive`.
+    /// Inserted scripts are still arriving; live turns finish the load.
+    Yielded,
 }
 
 /// The one line that says a script was stopped by the execution deadline
@@ -1356,20 +1430,369 @@ fn end_live_turn(
         return None;
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    Some(record_stopped_script(
+        config, bindings, source, elapsed_ms, late,
+    ))
+}
+
+/// The log line and the page's console note for a script the budget
+/// stopped, and the record of it.
+fn record_stopped_script(
+    config: &EngineConfig,
+    bindings: &DomBindings,
+    source: &str,
+    elapsed_ms: u64,
+    late: Option<std::time::Duration>,
+) -> ScriptRecord {
     log_script_stopped(source, elapsed_ms, late);
     // `console.warn` may be the page's own function by now, so it gets a
-    // limit as well.
-    let note = format!("Script stopped: it ran past {} ms ({source})", config.live_turn_budget_ms);
-    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    // limit as well. The note is its own execution: the budget it reports
+    // is the one the stopped script ran past.
+    let limit_ms = if source.starts_with("event:") || source == "timers" || source == "network" {
+        config.live_turn_budget_ms
+    } else {
+        config.script_budget_ms
+    };
+    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
     begin_script_turn(bindings, STOP_NOTE_BUDGET);
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
     end_script_turn(bindings);
     bindings.set_execution_deadline(None);
-    Some(ScriptRecord {
+    ScriptRecord {
         source: source.to_string(),
         bytes: 0,
         elapsed_ms,
         outcome: ScriptOutcome::OverBudget,
+    }
+}
+
+/// JavaScript execution charged against the script budget of one load, or
+/// of one live turn. Network waits are not charged, and they are not run
+/// with a turn armed: the watchdog is armed once per execution (a script,
+/// a callback, a microtask drain) and disarmed before the next await.
+struct ScriptJs {
+    limit_us: std::cell::Cell<u64>,
+    spent_us: std::cell::Cell<u64>,
+    interrupt: std::cell::Cell<bool>,
+    /// Non-zero while an execution is on the stack. A nested one joins it.
+    depth: std::cell::Cell<u32>,
+    stopped: std::cell::Cell<bool>,
+    /// How long the execution that was stopped had run.
+    stopped_us: std::cell::Cell<u64>,
+    /// How far that execution ran past its allowance.
+    overrun: std::cell::RefCell<Option<std::time::Duration>>,
+    /// Monotonic start of the open execution; 0 when none is open.
+    exec_started_us: std::cell::Cell<u64>,
+}
+
+thread_local! {
+    static SCRIPT_JS: ScriptJs = const { ScriptJs {
+        limit_us: std::cell::Cell::new(0),
+        spent_us: std::cell::Cell::new(0),
+        interrupt: std::cell::Cell::new(false),
+        depth: std::cell::Cell::new(0),
+        stopped: std::cell::Cell::new(false),
+        stopped_us: std::cell::Cell::new(0),
+        overrun: std::cell::RefCell::new(None),
+        exec_started_us: std::cell::Cell::new(0),
+    }};
+}
+
+/// Charges JavaScript against `limit` until dropped. One load or one live
+/// turn installs one; executions inside it share what is left.
+struct ScriptJsInstall;
+
+fn install_script_js(limit: std::time::Duration, interrupt: bool) -> ScriptJsInstall {
+    SCRIPT_JS.with(|js| {
+        js.limit_us
+            .set(limit.as_micros().min(u64::MAX as u128) as u64);
+        js.spent_us.set(0);
+        js.interrupt.set(interrupt);
+        js.depth.set(0);
+        js.stopped.set(false);
+        js.stopped_us.set(0);
+        *js.overrun.borrow_mut() = None;
+    });
+    script_net::clear_parked_deliveries();
+    ScriptJsInstall
+}
+
+impl Drop for ScriptJsInstall {
+    fn drop(&mut self) {
+        SCRIPT_JS.with(|js| js.limit_us.set(0));
+    }
+}
+
+/// The installed budget is used up, so another execution must not start.
+fn script_js_exhausted() -> bool {
+    SCRIPT_JS.with(|js| {
+        let limit = js.limit_us.get();
+        limit > 0 && js.spent_us.get() >= limit
+    })
+}
+
+/// Whether an execution since install was stopped by the budget.
+fn script_js_stopped() -> bool {
+    SCRIPT_JS.with(|js| js.stopped.get())
+}
+
+/// How long the stopped execution had run, and how far past its allowance.
+fn take_script_js_overrun() -> Option<std::time::Duration> {
+    SCRIPT_JS.with(|js| js.overrun.borrow_mut().take())
+}
+
+/// Milliseconds the stopped execution had run.
+fn script_js_stopped_ms() -> u64 {
+    SCRIPT_JS.with(|js| js.stopped_us.get() / 1000)
+}
+
+/// Run `body` as one script execution. With no budget installed, `body`
+/// just runs. The watchdog, when interruption is on, is armed for this
+/// call and disarmed before it returns, including when `body` panics.
+fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bool) {
+    let (active, nested) = SCRIPT_JS.with(|js| (js.limit_us.get() > 0, js.depth.get() > 0));
+    if !active || nested {
+        return (body(), false);
+    }
+    let interrupt = SCRIPT_JS.with(|js| js.interrupt.get());
+    let allowance = SCRIPT_JS.with(|js| {
+        std::time::Duration::from_micros(js.limit_us.get().saturating_sub(js.spent_us.get()))
+    });
+    SCRIPT_JS.with(|js| {
+        js.depth.set(1);
+        js.exec_started_us.set(rustkit_js::mono_us());
+    });
+    let started = std::time::Instant::now();
+    // A zero allowance used to arm a deadline of now and a watchdog turn of
+    // no time. The next `evaluate` (a lifecycle step) then resumed a pending
+    // async function under that stop, and Boa reported it as
+    // "async function was interrupted". The step still runs. It is not a
+    // turn: there is no time left to arm.
+    let arm = interrupt && !allowance.is_zero();
+    if arm {
+        bindings.set_execution_deadline(Some(std::time::Instant::now() + allowance));
+        begin_script_turn(bindings, allowance);
+    }
+    let mut armed = ArmedExecution {
+        bindings,
+        interrupt: arm,
+        open: true,
+    };
+    let result = body();
+    let stopped = armed.finish();
+    let elapsed_us = started.elapsed().as_micros() as u64;
+    SCRIPT_JS.with(|js| {
+        if stopped {
+            js.stopped.set(true);
+            js.spent_us.set(js.limit_us.get());
+            js.stopped_us.set(elapsed_us);
+        } else {
+            let spent = js.spent_us.get().saturating_add(elapsed_us);
+            js.spent_us.set(spent.min(js.limit_us.get()));
+        }
+    });
+    (result, stopped)
+}
+
+/// Closes the turn [`with_script_js`] opened, on the normal path and on a
+/// panic (a panic must not leave the watchdog believing the turn is still
+/// running).
+struct ArmedExecution<'a> {
+    bindings: &'a DomBindings,
+    interrupt: bool,
+    open: bool,
+}
+
+impl ArmedExecution<'_> {
+    /// Ends the turn. Whether this execution was stopped.
+    fn finish(&mut self) -> bool {
+        self.open = false;
+        if !self.interrupt {
+            SCRIPT_JS.with(|js| {
+                js.depth.set(0);
+                js.exec_started_us.set(0);
+            });
+            return false;
+        }
+        let hit = self.bindings.take_deadline_hit();
+        // Read before the deadline is lifted: clearing it forgets the overrun.
+        let late = self.bindings.take_deadline_overrun();
+        self.bindings.set_execution_deadline(None);
+        end_script_turn(self.bindings);
+        SCRIPT_JS.with(|js| {
+            js.depth.set(0);
+            js.exec_started_us.set(0);
+            if hit {
+                *js.overrun.borrow_mut() = late;
+            }
+        });
+        hit
+    }
+}
+
+impl Drop for ArmedExecution<'_> {
+    fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
+        if self.interrupt {
+            self.bindings.set_execution_deadline(None);
+            end_script_turn(self.bindings);
+        }
+        SCRIPT_JS.with(|js| {
+            js.depth.set(0);
+            js.exec_started_us.set(0);
+        });
+    }
+}
+
+/// `exec_us` is JavaScript time charged to the open load, including the
+/// execution in progress. `budget_us` is that load's allowance. Both are
+/// zero when no budget is installed.
+pub(crate) fn script_budget_attribution() -> String {
+    SCRIPT_JS.with(|js| {
+        let spent = js.spent_us.get();
+        let started = js.exec_started_us.get();
+        let current = if started == 0 {
+            0
+        } else {
+            rustkit_js::mono_us().saturating_sub(started)
+        };
+        format!(
+            "exec_us={} budget_us={}",
+            spent.saturating_add(current),
+            js.limit_us.get()
+        )
+    })
+}
+
+/// The budget is installed and too little of it is left to resume an async
+/// function. A turn that short is stopped by the watchdog before the
+/// function's body runs, which rejects it with "async function was
+/// interrupted". The answer waits for a later turn.
+fn script_js_resume_would_be_stopped() -> bool {
+    SCRIPT_JS.with(|js| {
+        let limit = js.limit_us.get();
+        if limit == 0 || !js.interrupt.get() {
+            return false;
+        }
+        let remaining = limit.saturating_sub(js.spent_us.get());
+        remaining < rustkit_js::control::STOP_GRACE.as_micros() as u64
+    })
+}
+
+#[cfg(test)]
+fn test_leave_script_budget(remaining: std::time::Duration) {
+    SCRIPT_JS.with(|js| {
+        let limit = js.limit_us.get();
+        let remain = remaining.as_micros().min(u128::from(limit)) as u64;
+        js.spent_us.set(limit.saturating_sub(remain));
+        js.stopped.set(false);
+    });
+}
+
+thread_local! {
+    /// The app's chrome (toolbar, sidebar) runs on this same thread. A
+    /// content load's network wait used to hold the thread straight through,
+    /// so the chrome got no turn and a screenshot caught it blank. The app
+    /// registers a hook; it is called only while the content turn is
+    /// disarmed and the content budget is suspended.
+    static CHROME_UI_TURN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Set for the hook: this yield suspended an installed content budget.
+    static CHROME_UI_SUSPENDED_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Register the chrome UI turn, or clear it. One per thread: a thread runs
+/// one page at a time. The hook runs during a content load's network waits
+/// and must not re-enter the load.
+pub fn set_chrome_ui_turn(hook: Option<Box<dyn FnMut()>>) {
+    CHROME_UI_TURN.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn chrome_ui_turn_is_set() -> bool {
+    CHROME_UI_TURN.with(|slot| slot.borrow().is_some())
+}
+
+/// The hook is running with the content budget suspended and no script
+/// turn open, so a chrome script is not charged to the content page and
+/// the content watchdog does not stop it.
+#[cfg(test)]
+fn chrome_ui_turn_is_clear() -> bool {
+    let js_clear = SCRIPT_JS.with(|js| js.limit_us.get() == 0 && js.depth.get() == 0);
+    let turn_clear = SCRIPT_STAMP.with(|stamp| stamp.current_turn() == 0);
+    js_clear && turn_clear
+}
+
+/// This yield took the content budget off the thread for the hook.
+#[cfg(test)]
+fn chrome_ui_turn_suspended_content_budget() -> bool {
+    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.get())
+}
+
+/// Run the chrome hook once, with the content budget not installed, and
+/// put that budget back afterwards. A hook that panics still restores both.
+fn yield_chrome_ui_turn() {
+    let hook = CHROME_UI_TURN.with(|slot| slot.borrow_mut().take());
+    let Some(hook) = hook else { return };
+    struct Restore {
+        limit: u64,
+        depth: u32,
+        hook: Option<Box<dyn FnMut()>>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCRIPT_JS.with(|js| {
+                if js.limit_us.get() == 0 {
+                    js.limit_us.set(self.limit);
+                }
+                if js.depth.get() == 0 {
+                    js.depth.set(self.depth);
+                }
+            });
+            let hook = self.hook.take();
+            CHROME_UI_TURN.with(|slot| {
+                if slot.borrow().is_none() {
+                    *slot.borrow_mut() = hook;
+                }
+            });
+        }
+    }
+    let (limit, depth) = SCRIPT_JS.with(|js| (js.limit_us.replace(0), js.depth.replace(0)));
+    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.set(limit > 0));
+    let mut restore = Restore {
+        limit,
+        depth,
+        hook: Some(hook),
+    };
+    if let Some(hook) = restore.hook.as_mut() {
+        hook();
+    }
+}
+
+/// Await `fut`, and while it is pending let the chrome UI run. With no
+/// hook registered this is just `fut`: fast tests do not slice their waits.
+///
+/// Boxed so the select does not enlarge `load_url`'s future. That future
+/// is already built on the stack before it is moved to the heap, and the
+/// debug stack does not have room for another state machine in it.
+pub(crate) fn await_with_chrome_ui<'a, F: std::future::Future + 'a>(
+    fut: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = F::Output> + 'a>> {
+    Box::pin(async move {
+        if !chrome_ui_turn_is_set() {
+            return fut.await;
+        }
+        tokio::pin!(fut);
+        loop {
+            let slice = tokio::time::sleep(CHROME_UI_SLICE);
+            tokio::pin!(slice);
+            tokio::select! {
+                biased;
+                result = &mut fut => return result,
+                _ = &mut slice => yield_chrome_ui_turn(),
+            }
+        }
     })
 }
 
@@ -1887,6 +2310,25 @@ pub struct StyleRecord {
     pub computed: Vec<(String, String)>,
 }
 
+/// The viewport a `resize` event is dispatched against.
+///
+/// `pending` is the size queued by [`Engine::set_view_bounds`]. `stored` is
+/// the viewport the engine last applied. `frame` is the host view's frame
+/// when that frame already moved (a sidebar inset while the engine was
+/// borrowed). The event follows the frame, otherwise the stored viewport.
+/// A queued size the view has left is not what the page hears.
+fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, u32)>) -> Bounds {
+    match frame {
+        Some((width, height)) if width > 0 && height > 0 => Bounds {
+            x: stored.x,
+            y: stored.y,
+            width,
+            height,
+        },
+        _ => stored,
+    }
+}
+
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -1921,6 +2363,7 @@ impl Engine {
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        console_log::install_console_diag();
         Ok(Self {
             config,
             presenter,
@@ -2028,12 +2471,15 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2115,12 +2561,15 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2201,12 +2650,15 @@ impl Engine {
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
+            announced_viewport: None,
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
+            live_inserted: script_net::InsertedScripts::new(),
+            load_tail: None,
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
@@ -2244,7 +2696,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = None;
         }
-        self.layout_after_resize(id, bounds)
+        self.layout_after_resize(id, bounds).map(|_| ())
     }
 
     /// Give a view its new bounds now (the NSView frame and the GPU surface
@@ -2258,6 +2710,15 @@ impl Engine {
     /// H9). The events of one loop turn now cost one layout, at the last
     /// size, and the page hears one `resize`, as in a browser (at most one
     /// per frame).
+    /// Platform view pointer for `id` (an `NSView` on macOS). 0 when the
+    /// view has none. Reading it does not borrow the page.
+    pub fn host_view_raw(&self, id: EngineViewId) -> isize {
+        self.views
+            .get(&id)
+            .map(|view| self.presenter.raw_view(view.viewhost_id))
+            .unwrap_or(0)
+    }
+
     pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
@@ -2267,15 +2728,18 @@ impl Engine {
     }
 
     /// Lay out a view whose bounds changed since its last layout, and tell
-    /// the page. Returns whether there was anything to do.
+    /// the page. Returns whether the page was told.
+    ///
+    /// The event is the viewport the view has now, not a size queued earlier
+    /// and since left. A repeat of the size the page already reads is not
+    /// a `resize`.
     pub fn flush_pending_resize(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         let _hold = wgate::hold("resize");
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let Some(bounds) = view.pending_resize.take() else {
+        let Some(pending) = view.pending_resize.take() else {
             return Ok(false);
         };
-        self.layout_after_resize(id, bounds)?;
-        Ok(true)
+        self.layout_after_resize(id, pending)
     }
 
     /// The surface half of a resize: the viewhost's bounds and the GPU
@@ -2304,7 +2768,28 @@ impl Engine {
     /// let the page's scripts see it and hear `resize` at `window`, as a
     /// browser window resize does. Listener exceptions go to the script log
     /// like the lifecycle events' do.
-    fn layout_after_resize(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+    ///
+    /// Returns whether the page heard `resize`. `false` when `requested`
+    /// is a size the view has already left, or the size the page already
+    /// reads: neither is dispatched.
+    fn layout_after_resize(
+        &mut self,
+        id: EngineViewId,
+        requested: Bounds,
+    ) -> Result<bool, EngineError> {
+        let stored = self.stored_viewport_bounds(id).unwrap_or(requested);
+        let bounds = resize_dispatch_bounds(requested, stored, self.live_frame_size(id));
+        if bounds.width != stored.width || bounds.height != stored.height {
+            // The host frame already moved (a sidebar inset while this
+            // engine was borrowed). The surface follows that frame; the
+            // queued size does not.
+            self.apply_view_bounds(id, bounds)?;
+        }
+        if self.views.get(&id).and_then(|view| view.announced_viewport)
+            == Some((bounds.width, bounds.height))
+        {
+            return Ok(false);
+        }
         // Re-layout if we have content
         if self
             .views
@@ -2319,6 +2804,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
+                let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
                 let fired = sized.and_then(|()| {
                     bindings.fire_lifecycle_event(
@@ -2350,8 +2836,36 @@ impl Engine {
             width: bounds.width,
             height: bounds.height,
         });
+        if let Some(view) = self.views.get_mut(&id) {
+            view.announced_viewport = Some((bounds.width, bounds.height));
+        }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// The viewport `set_view_bounds` last stored. A headless view keeps
+    /// its own; a windowed view reads the host.
+    fn stored_viewport_bounds(&self, id: EngineViewId) -> Option<Bounds> {
+        let view = self.views.get(&id)?;
+        if let Some(bounds) = view.headless_bounds {
+            return Some(bounds);
+        }
+        self.presenter.host_bounds(view.viewhost_id).ok()
+    }
+
+    /// The host view's frame, when a load moved it without borrowing the
+    /// engine (`place_host_frame`). `None` for a headless view and on
+    /// platforms without that frame.
+    fn live_frame_size(&self, id: EngineViewId) -> Option<(u32, u32)> {
+        #[cfg(target_os = "macos")]
+        {
+            return rustkit_viewhost::raw_view_content_size(self.host_view_raw(id));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = id;
+            None
+        }
     }
 
     /// Scroll a view by the given delta (the user's wheel, keys or scrollbar).
@@ -3348,6 +3862,7 @@ impl Engine {
             return true;
         };
         let source = format!("event:{event_type}");
+        let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
         let fired = bindings.fire_mouse_event(target, event_type, data);
         let stopped = end_live_turn(&self.config, armed, bindings, &source);
@@ -3384,6 +3899,471 @@ impl Engine {
     /// [`LivePump::next_timer_ms`] says the next timer is due. Requests go
     /// through the document's own `FetchPolicy`, as they did during the
     /// load; a page with none (`load_html`) has no network.
+    /// `true` when an inserted script is queued or its fetch is still out.
+    /// Enqueues anything the page prepared since the last take. Does not
+    /// run a script and does not wait.
+    fn inserted_chain_pending(
+        &self,
+        id: EngineViewId,
+        bindings: &DomBindings,
+        loader: &Arc<ResourceLoader>,
+        referrer: &SubresourceReferrer,
+        inspector: &Arc<Inspector>,
+    ) -> bool {
+        let Some(inserted) = self.views.get(&id).map(|view| view.live_inserted.clone()) else {
+            return false;
+        };
+        if !script_net::enqueue_inserted_scripts(bindings, loader, referrer, inspector, &inserted) {
+            return false;
+        }
+        inserted.pending()
+    }
+
+    fn abandon_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.load_tail != Some(nav_id) {
+            return;
+        }
+        view.load_tail = None;
+        // A newer document owns the queue. Retire already dropped the old
+        // jobs; abandoning here would cancel the new document's.
+        if view.nav_id == nav_id {
+            view.live_inserted.abandon();
+        }
+        view.control.end_load(nav_id);
+    }
+
+    fn tail_watch(&self, id: EngineViewId, nav_id: u64) -> Option<NavWatch> {
+        let view = self.views.get(&id)?;
+        Some(NavWatch {
+            canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
+            nav_id,
+        })
+    }
+
+    fn note_tail_pump(&mut self, id: EngineViewId, found: script_net::Pump) -> bool {
+        let Some(view) = self.views.get_mut(&id) else {
+            return found.poisoned;
+        };
+        let inspector = view.inspector.clone();
+        let inserted = view.live_inserted.clone();
+        Self::absorb_inserted_pump(&mut view.script_log, &inspector, found, &inserted)
+    }
+
+    /// One live turn of a parked load: at most one arrived inserted script.
+    /// When nothing is left queued, fire `load` and finish the document.
+    async fn advance_load_tail(&mut self, id: EngineViewId) {
+        let Some(nav_id) = self.views.get(&id).and_then(|view| view.load_tail) else {
+            return;
+        };
+        if self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let ready = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.bindings.is_some());
+        if !ready {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return;
+        };
+        let inserted = view.live_inserted.clone();
+        let inspector = view.inspector.clone();
+        let found = script_net::drive_at_most_one(
+            bindings,
+            &loader,
+            &referrer,
+            &inspector,
+            &inserted,
+            !script_js_exhausted(),
+        );
+        let poisoned = self.note_tail_pump(id, found);
+        if poisoned || self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let idle = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail == Some(nav_id) && !view.live_inserted.pending());
+        if idle {
+            self.complete_load_tail(id, nav_id).await;
+        }
+    }
+
+    /// The chain is idle. `readyState` becomes `complete`, `window` `load`
+    /// fires, then the timer horizon and scripts the load handler inserted.
+    /// `PageLoaded` is sent after that, not before.
+    async fn complete_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
+        if self.nav_superseded(id, nav_id) {
+            self.abandon_load_tail(id, nav_id);
+            return;
+        }
+        let horizon = self.config.timer_horizon_ms;
+        let net_rounds = self.config.script_network_rounds;
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.load_tail != Some(nav_id) {
+            return;
+        }
+        view.load_tail = None;
+        let Some(bindings) = view.bindings.take() else {
+            view.control.end_load(nav_id);
+            return;
+        };
+        let mut log = std::mem::take(&mut view.script_log);
+        let inspector = view.inspector.clone();
+        let policy = view.script_policy.clone();
+        let document_url = view.url.clone();
+        let modules_fetched = Cell::new(0usize);
+        let watch = NavWatch {
+            canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
+            nav_id,
+        };
+        let watch = Some(watch);
+
+        let mut pump = |timers: Option<(u64, u32)>| {
+            let policy = policy.clone();
+            let loader = loader.clone();
+            let document = document_url.clone();
+            let modules_fetched = &modules_fetched;
+            let inspector = &inspector;
+            let watch = watch.clone();
+            let bindings = &bindings;
+            async move {
+                let Some(policy) = policy else {
+                    return None;
+                };
+                let mut count = modules_fetched.get();
+                let found = nav_cancel::unless_cancelled(
+                    watch.as_ref(),
+                    script_net::pump_all(
+                        bindings,
+                        &policy,
+                        &loader,
+                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                        net_rounds,
+                        timers,
+                        document.as_ref(),
+                        &mut count,
+                        inspector,
+                    ),
+                )
+                .await;
+                modules_fetched.set(count);
+                found
+            }
+        };
+
+        let mut stopped = nav_cancel::cancelled(watch.as_ref());
+        if !stopped {
+            self.refresh_layout_for_script(id, &bindings);
+            // The same lines the blocking load logs. A yielded tail used to
+            // fire `load` without them, so a live run never showed
+            // `source=event:load`.
+            info!(source = "event:load", "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
+            let (caught, load_stopped) = with_script_js(&bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings
+                        .set_ready_state("complete")
+                        .map_err(Self::strip_binding)?;
+                    bindings
+                        .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
+                        .map_err(Self::strip_binding)
+                }))
+            });
+            if load_stopped {
+                log_script_stopped("event:load", 0, take_script_js_overrun());
+            }
+            match caught {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => log.push(ScriptRecord {
+                    source: "event:load".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                }),
+                Err(_) => {
+                    log.push(ScriptRecord {
+                        source: "event:load".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    stopped = true;
+                }
+            }
+            info!(
+                source = "event:load",
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = 0u32,
+                "Page lifecycle step done"
+            );
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
+        }
+        if !stopped {
+            if let Some(found) = pump(None).await {
+                if Self::absorb_network_pump(&mut log, &inspector, found) {
+                    stopped = true;
+                }
+            } else if nav_cancel::cancelled(watch.as_ref()) {
+                stopped = true;
+            }
+        }
+        if !stopped && !self.nav_superseded(id, nav_id) {
+            self.refresh_layout_for_script(id, &bindings);
+            info!(source = "timers", "Running page lifecycle step");
+            let step_started = std::time::Instant::now();
+            let mut timer_callbacks = 0u32;
+            let (caught, timer_stopped) = with_script_js(&bindings, || {
+                let _job = rustkit_js::DiagJob::enter("timer");
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings
+                        .run_timers(horizon, MAX_TIMER_CALLBACKS)
+                        .map_err(Self::strip_binding)
+                }))
+            });
+            if timer_stopped {
+                log_script_stopped("timers", 0, take_script_js_overrun());
+            }
+            match caught {
+                Ok(Ok(ran)) => timer_callbacks = ran,
+                Ok(Err(message)) => log.push(ScriptRecord {
+                    source: "timers".into(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                }),
+                Err(_) => {
+                    log.push(ScriptRecord {
+                        source: "timers".into(),
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    });
+                    stopped = true;
+                }
+            }
+            info!(
+                source = "timers",
+                elapsed_ms = step_started.elapsed().as_millis() as u64,
+                callbacks = timer_callbacks,
+                "Page lifecycle step done"
+            );
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
+            if !stopped {
+                if let Some(found) = pump(Some((horizon, MAX_TIMER_CALLBACKS))).await {
+                    if Self::absorb_network_pump(&mut log, &inspector, found) {
+                        stopped = true;
+                    }
+                }
+            }
+        }
+        if !stopped {
+            // A script the load handler inserted does not delay `load`,
+            // which has already fired. Run one whose body is already here.
+            stopped = self
+                .settle_inserted_scripts(
+                    id,
+                    &bindings,
+                    &mut log,
+                    &loader,
+                    &referrer,
+                    &inspector,
+                    watch.as_ref(),
+                    tokio::time::Instant::now(),
+                    !script_js_exhausted(),
+                    false,
+                    &mut pump,
+                )
+                .await;
+        }
+        // `pump` only holds references, so it is `Copy`. Using it here ends
+        // that borrow and `bindings` can move back onto the view.
+        #[allow(dropping_copy_types)]
+        drop(pump);
+        if let Some(view) = self.views.get_mut(&id) {
+            log.append(&mut view.script_log);
+            view.script_log = log;
+            view.bindings = Some(bindings);
+        }
+        if stopped || self.nav_superseded(id, nav_id) {
+            if let Some(view) = self.views.get(&id) {
+                if view.nav_id == nav_id {
+                    view.live_inserted.abandon();
+                }
+                if view.control.loading_nav() == nav_id {
+                    view.control.end_load(nav_id);
+                }
+            }
+            return;
+        }
+        if let Err(e) = self.publish_yielded_load(id, nav_id).await {
+            warn!(?id, error = %e, "Yielded load failed while it was finishing");
+        }
+        if let Some(view) = self.views.get(&id) {
+            if view.control.loading_nav() == nav_id {
+                view.control.end_load(nav_id);
+            }
+        }
+    }
+
+    fn strip_binding(error: rustkit_bindings::BindingError) -> String {
+        let message = error.to_string();
+        message
+            .strip_prefix("JS error: Execution error: ")
+            .map(str::to_string)
+            .unwrap_or(message)
+    }
+
+    /// Record a network pump the way the load's lifecycle steps do.
+    /// `true` when the JS engine panicked.
+    fn absorb_network_pump(
+        log: &mut Vec<ScriptRecord>,
+        inspector: &Arc<Inspector>,
+        mut found: script_net::Pump,
+    ) -> bool {
+        for record in found.records.drain(..) {
+            inspector_glue::log_script(log, inspector, record);
+        }
+        for message in found.threw {
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        if found.poisoned {
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+            });
+        }
+        found.poisoned
+    }
+
+    /// Images the yielded load's scripts added, then `PageLoaded`.
+    ///
+    /// Same ending as [`Engine::load_url`]: a cancel or a newer navigation
+    /// sends nothing.
+    async fn publish_yielded_load(
+        &mut self,
+        id: EngineViewId,
+        nav_id: u64,
+    ) -> Result<(), EngineError> {
+        if self.nav_superseded(id, nav_id) {
+            return Ok(());
+        }
+        if let Some(view) = self.views.get(&id) {
+            let settled = load_lost_a_script(&view.script_log)
+                && view
+                    .document
+                    .as_ref()
+                    .is_some_and(|document| document.settle_custom_element_definitions());
+            if let (true, Some(bindings)) = (settled, view.bindings.as_ref()) {
+                bindings.mark_dirty(DomDirty::Style);
+            }
+        }
+        self.flush_script_dom_writes(id, None)?;
+        let Some(watch) = self.tail_watch(id, nav_id) else {
+            return Ok(());
+        };
+        let leaving = self.config.follows_script_navigation
+            && self
+                .views
+                .get(&id)
+                .and_then(|view| view.bindings.as_ref())
+                .is_some_and(|bindings| bindings.navigation_requested());
+        if leaving {
+            info!(
+                ?id,
+                "Page asked to navigate: not waiting for images its scripts added"
+            );
+        }
+        let added = match leaving {
+            true => Ok(0),
+            false => match watch
+                .unless_cancelled(self.load_images_added_by_scripts(id))
+                .await
+            {
+                Some(added) => added,
+                None => return Ok(()),
+            },
+        };
+        match added {
+            Ok(0) => {}
+            Ok(count) => {
+                info!(count, "Loaded images added by page scripts");
+                if !self.nav_superseded(id, nav_id) {
+                    self.relayout_for(id, RelayoutCause::ImageLoaded { count })?;
+                }
+            }
+            Err(e) => warn!(?e, "Failed to load images added by page scripts"),
+        }
+        if self.nav_superseded(id, nav_id) {
+            return Ok(());
+        }
+        let still_loading = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.control.end_load(nav_id));
+        if !still_loading {
+            debug!(?id, nav_id, "Yielded load was cancelled as it finished");
+            return Ok(());
+        }
+        let view = self
+            .views
+            .get_mut(&id)
+            .ok_or(EngineError::ViewNotFound(id))?;
+        view.navigation
+            .finish_navigation()
+            .map_err(|e| EngineError::NavigationError(e.to_string()))?;
+        let url = view
+            .url
+            .clone()
+            .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank parses"));
+        let title = view.title.clone();
+        if let Some(ref title) = title {
+            let _ = self.event_tx.send(EngineEvent::TitleChanged {
+                view_id: id,
+                title: title.clone(),
+            });
+        }
+        view.inspector
+            .emit_with(|inspector| InspectorEvent::LoadFinished {
+                url: Some(inspector.url(&url)),
+                scripts_over_budget: view
+                    .script_log
+                    .iter()
+                    .filter(|record| record.outcome == ScriptOutcome::OverBudget)
+                    .count() as u32,
+            });
+        let _ = self.event_tx.send(EngineEvent::PageLoaded {
+            view_id: id,
+            url,
+            title: view.title.clone(),
+        });
+        Ok(())
+    }
+
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
@@ -3393,11 +4373,27 @@ impl Engine {
             Ok(resized) => out.relaid_out = resized,
             Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
         }
+        // A yielding load parked `window` `load` on this view. One arrived
+        // inserted script, then return, so the event loop can present. The
+        // live timer clock does not run until that `load` has fired.
+        let defer_post_load_timers = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail.is_some());
+        if defer_post_load_timers {
+            let _tail_js = install_script_js(
+                std::time::Duration::from_millis(self.config.script_budget_ms),
+                self.config.interrupt_scripts_at_budget,
+            );
+            self.advance_load_tail(id).await;
+        }
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
+        let _turn = rustkit_js::DiagTurn::enter("live");
+        rustkit_js::set_diag_nav(view.nav_id);
         let Some(bindings) = view.bindings.as_ref() else {
             return out;
         };
@@ -3406,35 +4402,49 @@ impl Engine {
         let inspector = view.inspector.clone();
         let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, ScriptOutcome)> = Vec::new();
-        // One budget for all the script this turn runs. This thread is the
-        // window's: until 2026-10-12 a callback that did not end held it
-        // for as long as it ran.
-        let armed = arm_live_turn(&self.config, bindings);
-        let budget = std::time::Duration::from_millis(self.config.live_turn_budget_ms);
-        // Whether the turn's budget is gone. The deadline stays set to the
-        // end of the turn, so from then on any script the turn starts is
-        // refused at its first host call: none is started.
-        let spent = || armed.is_some_and(|started| started.elapsed() >= budget);
+        // One budget of JavaScript time for the script this turn runs.
+        // Each callback arms the watchdog on its own. The waits between
+        // them do not, and a wait cannot refuse a host call. This thread
+        // is the window's: until 2026-10-12 a callback that did not end
+        // held it for as long as it ran.
+        let _js = install_script_js(
+            std::time::Duration::from_millis(self.config.live_turn_budget_ms),
+            self.config.interrupt_scripts_at_budget,
+        );
         // Where in `threw` the error that unwound a stopped script is. The
         // stop has its own record, and the error reads as the loop limit's.
         let mut unwound = None;
 
         // Timers first: what they ask of the network is answered this turn.
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
-        })) {
-            Ok(Ok(ran)) => out.timers_ran = ran,
-            Ok(Err(e)) => {
-                unwound = spent().then_some(threw.len());
-                threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
+        // Not while a load tail is open, and not on the turn that just
+        // fired `load`: that turn already ran the load's timer horizon, and
+        // `elapsed_ms` includes time from before `load`.
+        let timer_stopped = if defer_post_load_timers {
+            false
+        } else {
+            let (timers, timer_stopped) = with_script_js(bindings, || {
+                let _job = rustkit_js::DiagJob::enter("timer");
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+                }))
+            });
+            match timers {
+                Ok(Ok(ran)) => out.timers_ran = ran,
+                Ok(Err(e)) => {
+                    if timer_stopped {
+                        unwound = Some(threw.len());
+                    }
+                    threw.push(("timers", ScriptOutcome::Threw(e.to_string())));
+                }
+                Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
-            Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
-        }
-        // What the timers threw or left rejected is theirs in the Inspector.
-        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+            // What the timers threw or left rejected is theirs in the Inspector.
+            inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+            timer_stopped
+        };
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
-        let spent_by_timers = spent();
+        let spent_by_timers = timer_stopped;
         if let Some(policy) = policy {
             // Start what the page has asked for since the last turn. No turn
             // waits for an answer: this thread is the window's.
@@ -3455,25 +4465,33 @@ impl Engine {
             // turn, when its time has passed, and a request it makes starts
             // on the next.
             //
-            // An answer is handed over only while the turn has budget left.
-            // The bridge forgets a request before it calls the page's
-            // handler, so an answer handed to a turn that was stopped (by a
-            // timer, or by the handler of the answer before it) was lost:
-            // the handler's first host call was refused and the request
-            // never finished (#666 review). What is not handed over waits,
-            // in order, for the next turn.
-            let mut answers = script_net::settle_live(live_requests, LIVE_NETWORK_SLICE).await.into_iter();
-            while !spent() {
+            // An answer is handed over only while the turn has JavaScript
+            // budget left. The bridge forgets a request before it calls
+            // the page's handler, so an answer handed to a turn that was
+            // stopped (by a timer, or by the handler of the answer before
+            // it) was lost: the handler's first host call was refused and
+            // the request never finished (#666 review). What is not handed
+            // over waits, in order, for the next turn. Callbacks shelved
+            // when the load's script budget ran out are waiting here too.
+            let _ = bindings.unshelve_net_requests();
+            let mut answers = script_net::settle_live(live_requests, LIVE_NETWORK_SLICE)
+                .await
+                .into_iter();
+            while !script_js_exhausted() && !script_js_resume_would_be_stopped() {
                 let Some((request_id, outcome)) = answers.next() else {
                     break;
                 };
                 out.requests += 1;
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    bindings.deliver_net_response(request_id, outcome)
-                })) {
+                script_net::log_live_handoff(&outcome, "delivered");
+                let (delivered, stopped) = with_script_js(bindings, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bindings.deliver_net_response(request_id, outcome)
+                    }))
+                });
+                match delivered {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
-                        if spent() {
+                        if stopped {
                             unwound = Some(threw.len());
                         }
                         threw.push(("network", ScriptOutcome::Threw(e.to_string())));
@@ -3482,13 +4500,14 @@ impl Engine {
                 }
             }
             for (at, answer) in answers.enumerate() {
+                script_net::log_live_handoff(&answer.1, "parked");
                 live_requests.insert(at, Box::pin(std::future::ready(answer)));
             }
             out.in_flight = live_requests.len();
             // The modules a dynamic `import()` asked for are still fetched
             // inside the turn, unless its budget is gone: they are asked
             // for again on the next.
-            if let Some(document) = document.as_ref().filter(|_| !spent()) {
+            if let Some(document) = document.as_ref().filter(|_| !script_js_exhausted()) {
                 let mut modules_fetched = 0;
                 let found = script_net::pump_modules(
                     bindings,
@@ -3506,15 +4525,27 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
-            // So are the scripts the turn's callbacks inserted, and they run
-            // inside it, under its budget.
-            if !spent() {
-                let found = script_net::pump_inserted_scripts(
+            // Scripts the page inserted, including one whose fetch is still
+            // out. A turn does not wait a fetch out and does not drop it.
+            // The fetch runs on its own thread, at most a few at a time; a
+            // finished body is queued, and this turn runs it when its fetch
+            // has finished (in insertion order only when `async` was set
+            // false), then fires `load` or `error`. The arrival woke the
+            // loop. Nothing here polls, and the fetch is not part of
+            // `in_flight`. A turn whose JavaScript budget is already spent
+            //             only enqueues.
+            // The open tail already ran its one script for this turn.
+            if view.load_tail.is_none() {
+                let inserted = view.live_inserted.clone();
+                let execute = !script_js_exhausted();
+                let found = script_net::drive_inserted_scripts(
                     bindings,
-                    &loader,
+                    loader.clone(),
                     &referrer,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
                     &inspector,
+                    &inserted,
+                    tokio::time::Instant::now(),
+                    execute,
                 )
                 .await;
                 out.requests += found.requests;
@@ -3530,10 +4561,20 @@ impl Engine {
             }
         }
         let stopped_in = if spent_by_timers { "timers" } else { "network" };
-        // A turn that ran out of budget held work back (answers, modules,
-        // the timers behind the one that was stopped): the next is due.
-        let held_back = spent();
-        let stopped = end_live_turn(&self.config, armed, bindings, stopped_in);
+        // A turn that ran out of JavaScript budget held work back (answers,
+        // modules, the timers behind the one that was stopped): the next
+        // is due. Network time does not count, and with interruption off
+        // a long callback is not stopped, but it does spend the budget.
+        let held_back = script_js_exhausted();
+        let stopped = script_js_stopped().then(|| {
+            record_stopped_script(
+                &self.config,
+                bindings,
+                stopped_in,
+                script_js_stopped_ms(),
+                take_script_js_overrun(),
+            )
+        });
         if let Some(at) = unwound.filter(|_| stopped.is_some()) {
             threw.remove(at);
         }
@@ -3656,6 +4697,7 @@ impl Engine {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.sync_control_value(focused.raw(), state.value());
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
+                let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
                 if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
                     debug!(?id, error = %e, "input listener threw");
@@ -3815,6 +4857,7 @@ impl Engine {
             shift_key: shift,
             ..Default::default()
         };
+        let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
         let not_cancelled = bindings.fire_key_event(node, event_type, &data).unwrap_or_else(|e| {
             debug!(?id, event_type, error = %e, "key listener threw");
@@ -4152,8 +5195,8 @@ impl Engine {
     /// fetching the external ones. The returned future borrows nothing from
     /// the engine, so `load_url` polls it alongside `load_subresources`:
     /// script bytes arrive while stylesheets, images and fonts do, instead
-    /// of after them. A fetch not finished `script_budget_ms` after this
-    /// call is over budget.
+    /// of after them. A fetch that is still waiting when the network cap
+    /// runs out fails; that cap is not the script budget.
     fn fetch_page_scripts(
         &self,
         id: EngineViewId,
@@ -4192,8 +5235,9 @@ impl Engine {
         // A document with no scripts still has a lifecycle: `load` fires and
         // the timers run (a `<meta http-equiv=refresh>`'s among them).
 
-        let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
-        let deadline = tokio::time::Instant::now() + budget;
+        // Each fetch has its own network cap, from when it starts. The
+        // script budget is not spent here: a slow script still runs once
+        // its body arrives.
 
         // Fetch every external script concurrently, keeping document order.
         use futures::{stream::StreamExt, FutureExt};
@@ -4224,7 +5268,8 @@ impl Engine {
                             ))),
                             Some(policy) => {
                                 let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                let fetch = await_with_chrome_ui(policy.fetch_module(&loader, &url, &base));
+                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
                                 inspector::answer_module(guard, &fetched);
                                 match fetched {
@@ -4238,21 +5283,27 @@ impl Engine {
                                         }
                                         denial => FetchFailure::Transport(format!("{denial}")),
                                     })),
-                                    Err(_) => Err(ScriptOutcome::OverBudget),
+                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "timed out".into(),
+                                    ))),
                                 }
                             }
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
+                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                                 let guard = inspector
                                     .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
-                                    .map(|g| g.over_budget_at(deadline, "script budget spent"));
-                                match loader.fetch(
-                                    referrer.get_for(url, RequestDestination::Script),
-                                ).await {
-                                    Ok(response) if response.ok() => {
+                                    .map(|g| g.timeout_at(deadline, "timed out"));
+                                let fetched = tokio::time::timeout_at(
+                                    deadline,
+                                    await_with_chrome_ui(loader.fetch(referrer.get_for(url, RequestDestination::Script))),
+                                )
+                                .await;
+                                match fetched {
+                                    Ok(Ok(response)) if response.ok() => {
                                         let received = guard.map(|g| g.received(&response));
-                                        match response.text().await {
+                                        match await_with_chrome_ui(response.text()).await {
                                             Ok(text) => {
                                                 if let Some(received) = received {
                                                     received.read(text.len());
@@ -4267,21 +5318,22 @@ impl Engine {
                                             }
                                         }
                                     }
-                                    Ok(response) => {
+                                    Ok(Ok(response)) => {
                                         if let Some(guard) = guard {
                                             guard.received(&response).unread();
                                         }
                                         Err(ScriptOutcome::FetchFailed(FetchFailure::Status(response.status.as_u16())))
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         inspector::fail_net(guard, &e);
                                         Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
                                     }
+                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "timed out".into(),
+                                    ))),
                                 }
                             };
-                            tokio::time::timeout_at(deadline, fetch)
-                                .await
-                                .unwrap_or(Err(ScriptOutcome::OverBudget))
+                            fetch.await
                         }
                     };
                     (label, node_id, result, is_module)
@@ -4293,11 +5345,130 @@ impl Engine {
         )
     }
 
+    /// Fetch and run external scripts the page inserted.
+    ///
+    /// `wait` stays until each script prepared so far has fired `load` or
+    /// `error`, or `deadline` passes. That is what holds `window` `load`.
+    /// `wait` false only enqueues, and runs a body that has already arrived,
+    /// so a script inserted from the load handler does not hold the event.
+    /// `true` means the load must stop (cancelled, or the JS engine panicked).
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_inserted_scripts<P, Fut>(
+        &self,
+        id: EngineViewId,
+        bindings: &DomBindings,
+        log: &mut Vec<ScriptRecord>,
+        loader: &Arc<ResourceLoader>,
+        referrer: &SubresourceReferrer,
+        inspector: &Arc<Inspector>,
+        watch: Option<&NavWatch>,
+        deadline: tokio::time::Instant,
+        execute: bool,
+        wait: bool,
+        pump: &mut P,
+    ) -> bool
+    where
+        P: FnMut(Option<(u64, u32)>) -> Fut,
+        Fut: std::future::Future<Output = Option<script_net::Pump>>,
+    {
+        if nav_cancel::cancelled(watch) {
+            return true;
+        }
+        let Some(inserted) = self.views.get(&id).map(|view| view.live_inserted.clone()) else {
+            return true;
+        };
+        let rounds = if wait { 4 } else { 1 };
+        for _ in 0..rounds {
+            if nav_cancel::cancelled(watch) {
+                inserted.abandon();
+                return true;
+            }
+            let driven = nav_cancel::unless_cancelled(
+                watch,
+                script_net::drive_inserted_scripts(
+                    bindings,
+                    loader.clone(),
+                    referrer,
+                    inspector,
+                    &inserted,
+                    deadline,
+                    execute,
+                ),
+            )
+            .await;
+            let Some(found) = driven else {
+                inserted.abandon();
+                return true;
+            };
+            // One drive stops after a fixed number of scripts. A page that
+            // inserted more than that still has them queued; keep going
+            // while a drive ran something or a response started more.
+            let ran = found.requests;
+            if Self::absorb_inserted_pump(log, inspector, found, &inserted) {
+                return true;
+            }
+            if !wait {
+                break;
+            }
+            let answered = pump(None).await;
+            if let Some(found) = answered {
+                let requests = found.requests;
+                if Self::absorb_inserted_pump(log, inspector, found, &inserted) {
+                    return true;
+                }
+                if requests == 0 && ran == 0 {
+                    break;
+                }
+            } else if nav_cancel::cancelled(watch) {
+                inserted.abandon();
+                return true;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
+    /// Record one inserted-script pump. `true` when the JS engine panicked
+    /// and the queue has been dropped.
+    fn absorb_inserted_pump(
+        log: &mut Vec<ScriptRecord>,
+        inspector: &Arc<Inspector>,
+        found: script_net::Pump,
+        inserted: &script_net::InsertedScripts,
+    ) -> bool {
+        for record in found.records {
+            inspector_glue::log_script(log, inspector, record);
+        }
+        for message in found.threw {
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::Threw(message),
+            });
+        }
+        if found.poisoned {
+            inserted.abandon();
+            log.push(ScriptRecord {
+                source: "network".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
+            });
+        }
+        found.poisoned
+    }
+
     /// Run the fetched `<script>`s: classic scripts in document order,
     /// then `defer`, then `async`; then `DOMContentLoaded`, `load`, and the
-    /// page's timers up to `timer_horizon_ms` of virtual time. Every
-    /// outcome lands in the view's script log. A script not started within
-    /// `budget` is over budget.
+    /// page's timers up to `timer_horizon_ms` of virtual time. External
+    /// scripts inserted while the document was loading do not delay
+    /// `DOMContentLoaded`. They do delay `window` `load` and `readyState`
+    /// `complete`: each runs and fires `load` or `error` first. Every
+    /// outcome lands in the view's script log. A script not started once
+    /// the budget of JavaScript time is spent is over budget. Network
+    /// waits are not part of that budget.
     ///
     /// The document is fully parsed before any script runs, so a script
     /// sees the whole tree rather than the part above it.
@@ -4308,6 +5479,7 @@ impl Engine {
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
+        yield_inserted: bool,
     ) {
         // The page's scripts run on the view's bindings and log, taken out of
         // the view for the run so that the engine can lay the page out again
@@ -4321,20 +5493,32 @@ impl Engine {
             },
             None => return,
         };
-        // The budget is read between scripts; with the switch on it also
-        // ends the script that is running when it is spent.
-        if self.config.interrupt_scripts_at_budget {
-            bindings.set_execution_deadline(Some(std::time::Instant::now() + budget));
-            // The watchdog keeps the same budget for script with no host
-            // call in it.
-            begin_script_turn(&bindings, budget);
+        let _turn = rustkit_js::DiagTurn::enter("load");
+        if let Some(watch) = watch {
+            rustkit_js::set_diag_nav(watch.nav_id);
         }
-        self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
-            .await;
-        if self.config.interrupt_scripts_at_budget {
-            end_script_turn(&bindings);
+        // One budget of JavaScript time for the phase. Each script,
+        // callback and microtask drain arms the watchdog on its own; the
+        // fetches between them do not.
+        let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+        self.run_page_scripts_with(
+            id,
+            fetched,
+            budget,
+            policy,
+            &bindings,
+            &mut log,
+            watch,
+            yield_inserted,
+        )
+        .await;
+        let parked = script_net::take_parked_deliveries();
+        if let Some(view) = self.views.get_mut(&id) {
+            for delivery in parked {
+                view.live_requests
+                    .push(Box::pin(std::future::ready(delivery)));
+            }
         }
-        bindings.set_execution_deadline(None);
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
             view.script_log = log;
@@ -4346,13 +5530,13 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
-        budget: std::time::Duration,
+        _budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         bindings: &DomBindings,
         log: &mut Vec<ScriptRecord>,
         watch: Option<&NavWatch>,
+        yield_inserted: bool,
     ) {
-        let started = std::time::Instant::now();
         let horizon_ms = self.config.timer_horizon_ms;
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
@@ -4396,23 +5580,29 @@ impl Engine {
         let poisoned = Cell::new(false);
         // `f` is given the source's label.
         let run = |source: String, bytes: usize, f: &dyn Fn(&str) -> Result<(), String>| {
+            // Lifecycle steps (`DOMContentLoaded`, `load`, timers) still run
+            // after the budget is spent. Only a script not yet started is
+            // skipped; that check is at the script loop. With interruption
+            // off a step runs to its end, so it is not an over-budget record.
             let started = std::time::Instant::now();
-            let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&source))) {
-                Ok(Ok(())) => ScriptOutcome::Ran,
-                Ok(Err(message)) => ScriptOutcome::Threw(message),
-                Err(_) => {
-                    poisoned.set(true);
-                    ScriptOutcome::EngineFailed(EngineFailure::Panic)
-                }
-            };
-            // Stopped by the execution deadline, whatever it then reported.
+            // One execution: the script or callback, and the microtask drain
+            // `evaluate` runs before it returns. The turn is not armed
+            // across a later network wait.
+            let (caught, stopped) = with_script_js(bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&source)))
+            });
             let elapsed_ms = started.elapsed().as_millis() as u64;
-            let outcome = match bindings.take_deadline_hit() {
-                true => {
-                    log_script_stopped(&source, elapsed_ms, bindings.take_deadline_overrun());
-                    ScriptOutcome::OverBudget
-                }
-                false => outcome,
+            let outcome = if stopped {
+                log_script_stopped(&source, elapsed_ms, take_script_js_overrun());
+                ScriptOutcome::OverBudget
+            } else {
+                match caught {
+                    Ok(Ok(())) => ScriptOutcome::Ran,
+                    Ok(Err(message)) => ScriptOutcome::Threw(message),
+                    Err(_) => {
+                        poisoned.set(true);
+                        ScriptOutcome::EngineFailed(EngineFailure::Panic)
+                    }                }
             };
             ScriptRecord {
                 source,
@@ -4489,7 +5679,7 @@ impl Engine {
                     continue;
                 }
             };
-            if poisoned.get() || started.elapsed() >= budget {
+            if poisoned.get() || script_js_exhausted() {
                 log.push(ScriptRecord {
                     source: label,
                     bytes: text.len(),
@@ -4529,79 +5719,112 @@ impl Engine {
                 }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
-                let begun = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    bindings.begin_module(&module_url, &text)
-                }));
-                let (outcome, event) = match begun {
-                    Err(_) => {
-                        poisoned.set(true);
-                        (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
-                    }
-                    // A syntax error: the module graph was never built.
-                    Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
-                    Ok(Ok(handle)) => {
-                        if let (Some(policy), Some(document)) = (&policy, &document_url) {
-                            let remaining = budget.saturating_sub(started.elapsed());
-                            let mut count = modules_fetched.get();
-                            let found = nav_cancel::unless_cancelled(
-                                watch,
-                                script_net::pump_modules(
-                                    bindings,
-                                    policy,
-                                    &loader,
-                                    tokio::time::Instant::now() + remaining,
-                                    document,
-                                    &mut count,
-                                    &inspector,
-                                ),
-                            )
-                            .await;
-                            let Some(found) = found else { return };
-                            modules_fetched.set(count);
-                            if found.poisoned {
-                                poisoned.set(true);
-                            }
+                let (begun, begin_stopped) = with_script_js(bindings, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bindings.begin_module(&module_url, &text)
+                    }))
+                });
+                let (outcome, event) = if begin_stopped {
+                    log_script_stopped(
+                        &label,
+                        module_started.elapsed().as_millis() as u64,
+                        take_script_js_overrun(),
+                    );
+                    (ScriptOutcome::OverBudget, None)
+                } else {
+                    match begun {
+                        Err(_) => {
+                            poisoned.set(true);
+                            (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
                         }
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            bindings.poll_module(&handle)
-                        })) {
-                            Err(_) => {
-                                poisoned.set(true);
-                                (ScriptOutcome::EngineFailed(EngineFailure::Panic), None)
+                        // A syntax error: the module graph was never built.
+                        Ok(Err(message)) => (ScriptOutcome::Threw(message), Some("error")),
+                        Ok(Ok(handle)) => {
+                            if let (Some(policy), Some(document)) = (&policy, &document_url) {
+                                let mut count = modules_fetched.get();
+                                let found = nav_cancel::unless_cancelled(
+                                    watch,
+                                    script_net::pump_modules(
+                                        bindings,
+                                        policy,
+                                        &loader,
+                                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                                        document,
+                                        &mut count,
+                                        &inspector,
+                                    ),
+                                )
+                                .await;
+                                let Some(found) = found else { return };
+                                modules_fetched.set(count);
+                                if found.poisoned {
+                                    poisoned.set(true);
+                                }
                             }
-                            // Loaded and run (a pending top-level `await` is
-                            // still running): the element hears `load`.
-                            Ok(rustkit_bindings::ModuleState::Done)
-                            | Ok(rustkit_bindings::ModuleState::Evaluating) => {
-                                (ScriptOutcome::Ran, Some("load"))
+                            if script_js_exhausted() {
+                                // A module fetch's JavaScript (not the wait) spent
+                                // the budget. The graph is not evaluated.
+                                if script_js_stopped() {
+                                    log_script_stopped(
+                                        &label,
+                                        script_js_stopped_ms(),
+                                        take_script_js_overrun(),
+                                    );
+                                }
+                                (ScriptOutcome::OverBudget, None)
+                            } else {
+                                let (polled, poll_stopped) = with_script_js(bindings, || {
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        bindings.poll_module(&handle)
+                                    }))
+                                });
+                                if poll_stopped {
+                                    log_script_stopped(
+                                        &label,
+                                        module_started.elapsed().as_millis() as u64,
+                                        take_script_js_overrun(),
+                                    );
+                                    (ScriptOutcome::OverBudget, None)
+                                } else {
+                                    match polled {
+                                        Err(_) => {
+                                            poisoned.set(true);
+                                            (
+                                                ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                                                None,
+                                            )
+                                        }
+                                        // Loaded and run (a pending top-level `await` is
+                                        // still running): the element hears `load`.
+                                        Ok(rustkit_bindings::ModuleState::Done)
+                                        | Ok(rustkit_bindings::ModuleState::Evaluating) => {
+                                            (ScriptOutcome::Ran, Some("load"))
+                                        }
+                                        // The graph loaded and ran, and threw: reported,
+                                        // and the fetch itself succeeded.
+                                        Ok(rustkit_bindings::ModuleState::Threw(message)) => {
+                                            (ScriptOutcome::Threw(message), Some("load"))
+                                        }
+                                        // The graph could not be loaded or linked.
+                                        Ok(rustkit_bindings::ModuleState::Failed(message)) => (
+                                            ScriptOutcome::Threw(format!(
+                                                "module graph failed: {message}"
+                                            )),
+                                            Some("error"),
+                                        ),
+                                        Ok(rustkit_bindings::ModuleState::Loading) => (
+                                            ScriptOutcome::Threw(
+                                                "module imports were not loaded".into(),
+                                            ),
+                                            Some("error"),
+                                        ),
+                                    }
+                                }
                             }
-                            // The graph loaded and ran, and threw: reported,
-                            // and the fetch itself succeeded.
-                            Ok(rustkit_bindings::ModuleState::Threw(message)) => {
-                                (ScriptOutcome::Threw(message), Some("load"))
-                            }
-                            // The graph could not be loaded or linked.
-                            Ok(rustkit_bindings::ModuleState::Failed(message)) => (
-                                ScriptOutcome::Threw(format!("module graph failed: {message}")),
-                                Some("error"),
-                            ),
-                            Ok(rustkit_bindings::ModuleState::Loading) => (
-                                ScriptOutcome::Threw("module imports were not loaded".into()),
-                                Some("error"),
-                            ),
                         }
                     }
                 };
-                // Stopped by the execution deadline: over budget, and its
-                // element hears neither `load` nor `error`.
                 let elapsed_ms = module_started.elapsed().as_millis() as u64;
-                let (outcome, event) = match bindings.take_deadline_hit() {
-                    true => {
-                        log_script_stopped(&label, elapsed_ms, bindings.take_deadline_overrun());
-                        (ScriptOutcome::OverBudget, None)
-                    }
-                    false => (outcome, event),
-                };
                 // What the module logged comes before what it threw: module
                 // evaluation ends in no `evaluate_script`, which would flush.
                 bindings.flush_console();
@@ -4625,13 +5848,18 @@ impl Engine {
             // make it the base of the script's dynamic `import()`s.
             // The same names with the Inspector on or off, so the script
             // log reads the same either way; only a listening Inspector
-            // records which URL each stands for.
+            // records which URL each stands for. The console-log switch, when
+            // set, records the same names so a log line can show the URL.
             let external: Option<String> = if label.starts_with("inline#") {
+                if let Some(url) = document_url.as_ref() {
+                    crate::console_log::alias(&label, url.as_str());
+                }
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
+                crate::console_log::alias(&name, &label);
                 Some(name)
             };
             let record = run(label, text.len(), &|label| {
@@ -4660,33 +5888,36 @@ impl Engine {
         // What the scripts asked of the network, answered before the
         // lifecycle events fire (a handler can start more; see the rounds).
         // Delivery only: the timers run in their own step below.
-        let pump = |timers: Option<(u64, u32)>| {
+        load_phase("network");
+        let mut pump = |timers: Option<(u64, u32)>| {
             let policy = policy.clone();
             let loader = loader.clone();
             let document = document_url.clone();
             let modules_fetched = &modules_fetched;
             let inspector = &inspector;
-            let referrer = &referrer;
             async move {
                 match policy {
                     Some(policy) => {
-                        let remaining = budget.saturating_sub(started.elapsed());
                         let mut count = modules_fetched.get();
                         // Network requests and dynamic imports alternate:
-                        // one can start the other.
+                        // one can start the other. The deadline is the
+                        // network cap, not what is left of the script budget.
+                        // Inserted scripts are not fetched here. The ones
+                        // prepared while the document is still loading are
+                        // settled after DOMContentLoaded and before window
+                        // load.
                         let found = nav_cancel::unless_cancelled(
                             watch,
                             script_net::pump_all(
                                 bindings,
                                 &policy,
                                 &loader,
-                                tokio::time::Instant::now() + remaining,
+                                tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
                                 net_rounds,
                                 timers,
                                 document.as_ref(),
                                 &mut count,
                                 inspector,
-                                Some(referrer),
                             ),
                         )
                         .await;
@@ -4727,6 +5958,7 @@ impl Engine {
         }
 
         let timers_ran = Cell::new(0u32);
+        let mut yielded = false;
         // Lifecycle events and timers. Listener/callback exceptions are
         // caught in JS and drained after each step.
         let steps: [(&str, &dyn Fn() -> Result<(), String>); 3] = [
@@ -4746,13 +5978,14 @@ impl Engine {
                     .map_err(strip)
             }),
             ("timers", &|| {
+                let _job = rustkit_js::DiagJob::enter("timer");
                 bindings
                     .run_timers(horizon_ms, MAX_TIMER_CALLBACKS)
                     .map(|n| timers_ran.set(n))
                     .map_err(strip)
             }),
         ];
-        for (source, step) in steps {
+        for (index, (source, step)) in steps.into_iter().enumerate() {
             if nav_cancel::cancelled(watch) {
                 return;
             }
@@ -4812,12 +6045,105 @@ impl Engine {
                 });
             }
             inspector_glue::drain_reports(bindings, &inspector, log, source);
+            // External scripts prepared while the document is still loading
+            // do not hold DOMContentLoaded. They do hold `window` `load`
+            // and `readyState` `complete`: each runs, and its element hears
+            // `load` or `error`, before those fire. The wait is the network
+            // cap. A script inserted by the load handler itself is after
+            // the event, so it is settled below without waiting.
+            //
+            // A yielding load returns here instead of waiting out the
+            // chain. The document stays `interactive`. Live turns run the
+            // scripts, one arrived body each, and fire `load` when the
+            // chain is idle. A page with nothing queued does not yield:
+            // `load` still fires before this call returns.
+            if index == 0
+                && yield_inserted
+                && self.inserted_chain_pending(id, bindings, &loader, &referrer, &inspector)
+            {
+                if let Some(watch) = watch {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.load_tail = Some(watch.nav_id);
+                        yielded = true;
+                    }
+                }
+                if yielded {
+                    break;
+                }
+            }
+            if index == 0
+                && self
+                    .settle_inserted_scripts(
+                        id,
+                        bindings,
+                        log,
+                        &loader,
+                        &referrer,
+                        &inspector,
+                        watch,
+                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                        true,
+                        true,
+                        &mut pump,
+                    )
+                    .await
+            {
+                return;
+            }
+        }
+        if yielded {
+            return;
+        }
+        // Scripts the load handler or a timer inserted. Enqueue them, and
+        // run one whose body has already arrived. Do not wait: they must
+        // not delay the load event, which has already fired.
+        if self
+            .settle_inserted_scripts(
+                id,
+                bindings,
+                log,
+                &loader,
+                &referrer,
+                &inspector,
+                watch,
+                tokio::time::Instant::now(),
+                !script_js_exhausted(),
+                false,
+                &mut pump,
+            )
+            .await
+        {
+            return;
         }
     }
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false).await
+        self.load_url_with_disposition(id, url, false, false)
+            .await
+            .map(|_| ())
+    }
+
+    /// Load `url` through `DOMContentLoaded`, then return while an inserted
+    /// script is still arriving.
+    ///
+    /// [`LoadYield::Complete`] is [`Engine::load_url`]: `window` `load` has
+    /// fired and `PageLoaded` was sent. A page that inserted no external
+    /// script during the parse or `DOMContentLoaded` always completes here.
+    /// [`LoadYield::Yielded`] means `readyState` is `interactive` and the
+    /// chain is still queued. Each later [`Engine::pump_live`] runs at most
+    /// one arrived script. When the chain is idle that turn fires
+    /// `readystatechange` / `complete` and `window` `load`, runs the timer
+    /// horizon and any script the load handler inserted, then sends
+    /// `PageLoaded`. A newer navigation abandons the chain and does not
+    /// fire `load`.
+    pub async fn load_url_yielding(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+    ) -> Result<LoadYield, EngineError> {
+        let _hold = wgate::hold("load");
+        self.load_url_with_disposition(id, url, false, true).await
     }
 
     /// Load a URL, optionally REPLACING the current history entry instead of
@@ -4835,7 +6161,9 @@ impl Engine {
         id: EngineViewId,
         url: Url,
         replace: bool,
-    ) -> Result<(), EngineError> {
+        yield_inserted: bool,
+    ) -> Result<LoadYield, EngineError> {
+        let _turn = rustkit_js::DiagTurn::enter("load");
         let view = self
             .views
             .get_mut(&id)
@@ -4867,17 +6195,38 @@ impl Engine {
         // load, Stop, or a cancel from another thread makes it stale, and
         // a stale load must not touch view state (M3b).
         let watch = self.begin_nav(id)?;
-        let _in_progress = LoadInProgress {
-            control: watch.canceller.control().clone(),
-            nav_id: watch.nav_id,
-        };
+        rustkit_js::set_diag_nav(watch.nav_id);
+        console_log::doc(
+            "navigation-start",
+            &format!("url={}", console_log::brief_url(url.as_str())),
+        );
+        let mut in_progress =
+            LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);
         // Boxed: the load's state is large, and the debug build's stack
         // is not.
-        let result = Box::pin(self.load_url_for_nav(id, url, &watch)).await;
+        let result = Box::pin(self.load_url_for_nav(id, url, &watch, yield_inserted)).await;
+        if !self.nav_superseded(id, watch.nav_id)
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.load_tail == Some(watch.nav_id))
+        {
+            // The tail fires `load` and sends `PageLoaded` from a later live
+            // turn. Until then a Stop still sees this load in progress.
+            in_progress.handed_off = true;
+            return Ok(LoadYield::Yielded);
+        }
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.load_tail == Some(watch.nav_id))
+        {
+            self.abandon_load_tail(id, watch.nav_id);
+        }
         if self.nav_superseded(id, watch.nav_id) {
             self.load_cancelled(id, watch.nav_id);
         }
-        result
+        result.map(|_| LoadYield::Complete)
     }
 
     /// The rest of [`Engine::load_url_with_disposition`], for navigation
@@ -4887,6 +6236,7 @@ impl Engine {
         id: EngineViewId,
         url: Url,
         watch: &NavWatch,
+        yield_inserted: bool,
     ) -> Result<(), EngineError> {
         let generation = watch.nav_id;
 
@@ -4903,7 +6253,10 @@ impl Engine {
             .inspector
             .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
             .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
-        let Some(fetched) = watch.unless_cancelled(self.loader.fetch(request)).await else {
+        let Some(fetched) = watch
+            .unless_cancelled(await_with_chrome_ui(self.loader.fetch(request)))
+            .await
+        else {
             debug!(?id, %url, "Navigation cancelled during the document fetch");
             return Ok(());
         };
@@ -4953,7 +6306,7 @@ impl Engine {
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
-                Some(response) => match watch.unless_cancelled(response.text()).await {
+                Some(response) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
                     Some(text) => text.unwrap_or_default(),
                     None => return Ok(()),
                 },
@@ -5012,7 +6365,7 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => match watch.unless_cancelled(response.text()).await {
+            (None, Some(response)) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
                 None => {
                     debug!(?id, %url, "Navigation cancelled while its body was read");
                     return Ok(());
@@ -5060,6 +6413,10 @@ impl Engine {
         view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
+        console_log::doc(
+            "document-replace",
+            &format!("url={}", console_log::brief_url(url.as_str())),
+        );
         view.title = title.clone();
         view.header_referrer_policy = header_referrer_policy;
         view.http_status = Some(status.as_u16());
@@ -5068,6 +6425,14 @@ impl Engine {
         // a cancel now stops its script (M3b). Until this, a cancel ends
         // the load at its next await and leaves the shown page's script.
         view.control.commit_nav(generation);
+        console_log::doc(
+            "navigation-commit",
+            &format!(
+                "url={} status={}",
+                console_log::brief_url(url.as_str()),
+                status.as_u16()
+            ),
+        );
         // Not laid out yet. Set to whether the first layout waits for the
         // sheets below; a cancel that comes first lays it out
         // (`load_cancelled`), or the frame keeps the previous page's.
@@ -5119,6 +6484,9 @@ impl Engine {
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.announced_viewport = Some((width as u32, height as u32));
+                }
             }
 
             // One FetchPolicy per URL-loaded document, owning its request
@@ -5207,7 +6575,7 @@ impl Engine {
             }
         };
         // A cancel drops every fetch still out, the page's scripts too.
-        let Some(((subresources, subresources_done), scripts)) = watch
+        let Some(((subresources, _subresources_done), scripts)) = watch
             .unless_cancelled(Box::pin(async { futures::join!(subresources, scripts) }))
             .await
         else {
@@ -5245,24 +6613,31 @@ impl Engine {
         // schedule. Script failures are the page's, not the navigation's:
         // they go to the view's script log.
         //
-        // One budget covers what scripts add to the load: script fetching
-        // that outlasted the subresources spends it before any script runs
-        // (a page with 46 external scripts, instagram, spent most of it on
-        // the network). A fetch that hit the deadline spent all of it.
-        if let Some((fetched, fetch_done)) = scripts {
-            let timed_out = fetched
-                .iter()
-                .any(|(_, _, r, _)| matches!(r, Err(ScriptOutcome::OverBudget)));
-            let budget = if timed_out {
-                std::time::Duration::ZERO
-            } else {
-                std::time::Duration::from_millis(self.config.script_budget_ms)
-                    .saturating_sub(fetch_done.saturating_duration_since(subresources_done))
-            };
-            self.run_page_scripts(id, fetched, budget, script_policy, Some(watch))
-                .await;
+        // The script budget is JavaScript time only. How long the fetches
+        // took, including a fetch that outlasted the subresources, does
+        // not spend it.
+        if let Some((fetched, _fetch_done)) = scripts {
+            let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
+            self.run_page_scripts(
+                id,
+                fetched,
+                budget,
+                script_policy,
+                Some(watch),
+                yield_inserted,
+            )
+            .await;
             if self.nav_superseded(id, generation) {
                 debug!(?id, %url, "Navigation abandoned after page scripts");
+                return Ok(());
+            }
+            if self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.load_tail.is_some())
+            {
+                // `DOMContentLoaded` has fired. `window` `load`, the timer
+                // horizon and `PageLoaded` wait for the inserted-script chain.
                 return Ok(());
             }
             // The load's scripts are over. If it lost one (a script skipped
@@ -5374,11 +6749,11 @@ impl Engine {
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
+        let _turn = rustkit_js::DiagTurn::enter("load");
         let watch = self.begin_nav(id)?;
-        let _in_progress = LoadInProgress {
-            control: watch.canceller.control().clone(),
-            nav_id: watch.nav_id,
-        };
+        rustkit_js::set_diag_nav(watch.nav_id);
+        console_log::doc("navigation-start", "url=about:blank");
+        let _in_progress = LoadInProgress::begin(watch.canceller.control().clone(), watch.nav_id);
         let view = self
             .views
             .get_mut(&id)
@@ -5431,12 +6806,14 @@ impl Engine {
         view.summarize_relayouts_for_navigation();
         view.url = Some(url.clone());
         view.document = Some(document.clone());
+        console_log::doc("document-replace", "url=about:blank");
         view.title = title.clone();
         view.header_referrer_policy = None;
         view.http_status = None;
         view.reset_for_new_document();
         // The commit: the interrupt word is this document's from here (M3b).
         view.control.commit_nav(watch.nav_id);
+        console_log::doc("navigation-commit", "url=about:blank status=-");
         view.inspector.emit(InspectorEvent::NavigationCommit { url: None, status: None });
         let inspector = view.inspector.clone();
 
@@ -5470,6 +6847,9 @@ impl Engine {
                 bindings
                     .set_dimensions(width as f64, height as f64)
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.announced_viewport = Some((width as u32, height as u32));
+                }
             }
 
             let view = self
@@ -11219,6 +12599,8 @@ impl Engine {
     /// "cancelled" if Stop has not already failed it. Nothing for a load
     /// superseded by a newer navigation, which owns the view now.
     fn load_cancelled(&mut self, id: EngineViewId, nav_id: u64) {
+        let _turn = rustkit_js::DiagTurn::enter("navigation-teardown");
+        rustkit_js::set_diag_nav(nav_id);
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
@@ -11228,8 +12610,9 @@ impl Engine {
         // Before the commit the word is the shown page's, whose script
         // keeps running: the cancel is of the load, not of that page.
         let committed = view.control.nav_committed(nav_id);
+        console_log::doc("navigation-teardown", &format!("committed={committed}"));
         if committed {
-            view.control.stop_all();
+            view.control.stop_cancelled();
         }
         // A cancel during a render-blocking sheet (or before the first
         // layout) leaves the committed document never laid out: lay it out
@@ -11303,7 +12686,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -11318,7 +12701,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -11335,7 +12718,7 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true).await?;
+                self.load_url_with_disposition(id, url, true, false).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -18193,6 +19576,14 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
     bottom
 }
 
+/// The document element, the first box in the layout that names a node.
+fn root_element_id(layout: &LayoutBox) -> Option<usize> {
+    if layout.node_id.is_some() {
+        return layout.node_id;
+    }
+    layout.children.first().and_then(root_element_id)
+}
+
 /// Hand script the geometry of `layout` without measuring it: the snapshot
 /// is built on the first read (`DomBindings::set_geometry_source`). The
 /// source holds the layout weakly, so it never keeps an old tree alive or
@@ -18200,6 +19591,19 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
 /// is republished before script runs again.
 fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
     let layout = Rc::downgrade(layout);
+    let hit_layout = layout.clone();
+    bindings.set_hit_tester(Some(std::rc::Rc::new(move |x, y, scroll| {
+        let layout = hit_layout.upgrade()?;
+        let hit = layout.hit_test_scrolled(x, y, scroll);
+        if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
+            return Some(id);
+        }
+        let bounds = layout.dimensions.border_box();
+        if x >= 0.0 && y >= 0.0 && x < bounds.width && y < bounds.height {
+            return root_element_id(&layout);
+        }
+        None
+    })));
     bindings.set_geometry_source(Box::new(move || {
         let Some(layout) = layout.upgrade() else {
             return Default::default();
@@ -18232,7 +19636,13 @@ fn geometry_snapshot(
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
-        let mut extent = Some((bb.x, bb.y, bb.x + bb.width, bb.y + bb.height));
+        let (bx, by, bw, bh) = (
+            finite_f32(bb.x),
+            finite_f32(bb.y),
+            finite_f32(bb.width),
+            finite_f32(bb.height),
+        );
+        let mut extent = Some((bx, by, bx + bw, by + bh));
         for child in &b.children {
             if let Some(c) = walk(child, out, styles) {
                 extent = Some(match extent {
@@ -18243,7 +19653,13 @@ fn geometry_snapshot(
         }
         if let Some(node) = b.node_id {
             let pb = b.dimensions.padding_box();
-            let (right, bottom) = extent.map_or((pb.x + pb.width, pb.y + pb.height), |e| (e.2, e.3));
+            let (px, py, pw, ph) = (
+                finite_f32(pb.x),
+                finite_f32(pb.y),
+                finite_f32(pb.width),
+                finite_f32(pb.height),
+            );
+            let (right, bottom) = extent.map_or((px + pw, py + ph), |e| (e.2, e.3));
             // The computed value, not the layout box's: a relative or sticky
             // box is laid out as static, but it is still positioned (it is
             // an offsetParent).
@@ -18253,16 +19669,16 @@ fn geometry_snapshot(
                 _ => 1,
             };
             let geometry = rustkit_bindings::BoxGeometry {
-                x: bb.x,
-                y: bb.y,
-                width: bb.width,
-                height: bb.height,
-                border_left: b.dimensions.border.left,
-                border_top: b.dimensions.border.top,
-                client_width: pb.width,
-                client_height: pb.height,
-                scroll_width: (right - pb.x).max(pb.width),
-                scroll_height: (bottom - pb.y).max(pb.height),
+                x: finite_f32(bb.x),
+                y: finite_f32(bb.y),
+                width: finite_f32(bb.width),
+                height: finite_f32(bb.height),
+                border_left: finite_f32(b.dimensions.border.left),
+                border_top: finite_f32(b.dimensions.border.top),
+                client_width: pw,
+                client_height: ph,
+                scroll_width: finite_f32((right - px).max(pw)),
+                scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
             };
             styles.entry(node).or_insert_with(|| computed_style_lines(b));
@@ -18316,9 +19732,68 @@ fn css_color(c: rustkit_css::Color) -> String {
     }
 }
 
+fn finite_f32(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
 fn css_px(v: f32) -> String {
+    let v = finite_f32(v);
     let r = (v * 100.0).round() / 100.0;
     if r.fract() == 0.0 { format!("{}px", r as i64) } else { format!("{r}px") }
+}
+
+/// One corner's used radii as `<n>px` strings. A percentage resolves against
+/// the border box: width for the horizontal radius, height for the vertical.
+fn corner_radii_px(
+    c: &rustkit_css::CornerRadius,
+    font_px: f32,
+    width: f32,
+    height: f32,
+) -> (String, String) {
+    let axis = |length: &rustkit_css::Length, size: f32| {
+        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
+    };
+    (axis(&c.horizontal, width), axis(&c.vertical, height))
+}
+
+fn corner_longhand(horizontal: &str, vertical: &str) -> String {
+    if horizontal == vertical {
+        horizontal.to_string()
+    } else {
+        format!("{horizontal} {vertical}")
+    }
+}
+
+/// The `border-radius` shorthand the way Chrome serialises a computed value:
+/// four horizontal radii, then ` / ` and the vertical radii when any corner
+/// is elliptical. Each side drops a value the 1–4 expansion would refill,
+/// so an unset radius is `0px` rather than four zeros.
+fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
+    fn minimize(v: [&str; 4]) -> String {
+        if v[0] == v[1] && v[1] == v[2] && v[2] == v[3] {
+            v[0].to_string()
+        } else if v[0] == v[2] && v[1] == v[3] {
+            format!("{} {}", v[0], v[1])
+        } else if v[1] == v[3] {
+            format!("{} {} {}", v[0], v[1], v[2])
+        } else {
+            format!("{} {} {} {}", v[0], v[1], v[2], v[3])
+        }
+    }
+    let horizontal = minimize([
+        &corners[0].0,
+        &corners[1].0,
+        &corners[2].0,
+        &corners[3].0,
+    ]);
+    if corners.iter().all(|(h, v)| h == v) {
+        horizontal
+    } else {
+        format!(
+            "{horizontal} / {}",
+            minimize([&corners[0].1, &corners[1].1, &corners[2].1, &corners[3].1])
+        )
+    }
 }
 
 /// The computed style of one box as `name\tvalue` lines, for the properties
@@ -18346,6 +19821,13 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
         _ => "normal".to_string(),
     };
+    let box_edges = d.border_box();
+    let radii = [
+        corner_radii_px(&s.border_top_left_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_top_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_right_radius, font_px, box_edges.width, box_edges.height),
+        corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
+    ];
     let rows: Vec<(&str, String)> = vec![
         ("display", css_keyword(&format!("{:?}", s.display))),
         ("position", css_keyword(&format!("{:?}", s.position))),
@@ -18372,6 +19854,11 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("border-right-width", css_px(d.border.right)),
         ("border-bottom-width", css_px(d.border.bottom)),
         ("border-left-width", css_px(d.border.left)),
+        ("border-top-left-radius", corner_longhand(&radii[0].0, &radii[0].1)),
+        ("border-top-right-radius", corner_longhand(&radii[1].0, &radii[1].1)),
+        ("border-bottom-right-radius", corner_longhand(&radii[2].0, &radii[2].1)),
+        ("border-bottom-left-radius", corner_longhand(&radii[3].0, &radii[3].1)),
+        ("border-radius", border_radius_shorthand(&radii)),
         ("top", offset(&s.top, d.content.height)),
         ("right", offset(&s.right, d.content.width)),
         ("bottom", offset(&s.bottom, d.content.height)),
@@ -29311,7 +30798,9 @@ window.addEventListener('load', function () {
     }
 
     #[test]
-    fn the_script_budget_covers_fetching() {
+    fn the_script_budget_does_not_cover_fetching() {
+        // `/slow.js` answers after 3s. That wait is not the 500 ms script
+        // budget: the script runs, and so does the one after it.
         let page = r#"<html><head>
 <script src="/slow.js"></script>
 <script>var ranAfter = true;</script>
@@ -29326,16 +30815,19 @@ window.addEventListener('load', function () {
         };
         let (mut engine, view, took) = load_timed(config, port);
         assert!(
-            took < std::time::Duration::from_millis(2_500),
-            "waited for the slow script: {took:?}"
+            took >= std::time::Duration::from_millis(2_500)
+                && took < std::time::Duration::from_secs(10),
+            "the slow script was cut or the network cap was the script budget: {took:?}"
         );
         let log = engine.script_log(view).unwrap();
-        assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
-        // The budget was spent waiting, so the inline script after it is
-        // not started either.
-        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
-        assert_eq!(engine.execute_script(view, "typeof slow").unwrap(), r#"String("undefined")"#);
-    }
+        assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
+        assert_eq!(log[1].outcome, ScriptOutcome::Ran, "{log:#?}");
+        assert_eq!(
+            engine
+                .execute_script(view, "slow === true && ranAfter === true")
+                .unwrap(),
+            "Boolean(true)"
+        );    }
 
     /// `document.currentScript` is the classic <script> element while it
     /// runs and null otherwise. x.com ends inline scripts with

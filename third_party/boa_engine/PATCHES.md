@@ -328,3 +328,61 @@ cycle root never settles, because `SourceTextModule::evaluate`
 
 **Upgrading Boa.** Re-apply the marked lines to the new version, or drop this
 directory once upstream has an equivalent hook (to be offered upstream).
+
+## Patch, continued: recursion limits a real page can use
+
+**Why.** Boa's default recursion limit is 512, and `check_depth_limits`
+added `host_call_depth` to the frame count. A setter, getter or other host
+re-entry both increments `host_call_depth` (around `Context::run`) and
+pushes a frame, so it counted twice and a Lit-style setter chain died near
+256 calls. Reddit's shreddit bundles (custom elements plus a fetch-wrapping
+canary) tripped `RuntimeLimitError::Recursion` inside the load turn's
+microtask drain, with budget left (`limit=Recursion`, about 6s of a 15s
+load turn).
+
+The frame counter does not leak across an uncatchable stop, an interrupt or
+the grace turn: `call` decrements `host_call_depth` and pops the frame on
+the error path too. `HostJobExecutor::run_jobs` did re-enter. A host call
+during a job that asked for another checkpoint drained the new jobs on top
+of the outer job's frames. HTML says a microtask checkpoint does not nest.
+
+**What.** Marked `HIWAVE PATCH (recursion)`.
+
+| file | change |
+|---|---|
+| `src/vm/runtime_limits.rs` | frame limit 8192, host limit 1024, stack slots `64 * 1024` (the old 10240 would turn a deep call into `StackSize`) |
+| `src/vm/mod.rs` | the two limits are checked separately (`limit <= frames`, `host_limit <= host_call_depth`); every check samples the depth onto the thread, and `max_frame_depth` is the per-script high-water mark |
+| `src/context/mod.rs` | `Context::reset_recursion_max` |
+
+`recursion_sample()` is what the interrupt log reads: the hook has no
+`Context`. The host cap stays lower than the frame cap because each
+re-entry nests `Context::run` on the native stack.
+
+The job executor (`crates/rustkit-js/src/executor.rs`, not this crate)
+returns immediately when `run_jobs` is already running. The outer loop
+takes the jobs the nested call queued, after the current job returns.
+
+**Tests.** `uncatchable_stops_do_not_leak_recursion_depth` (thirty
+recursion stops, twenty setter stops, thirty interrupt stops, then a
+recursion that does not fit if a stop kept a frame or a host count),
+`a_nested_microtask_checkpoint_does_not_reenter`, and
+`a_deep_setter_chain_and_call_fit_the_default_recursion_limit` (400
+setters, a call of 1000). The existing `recursion_runtime_limit` and
+setter tests still fail through the frame check at the limit they set.
+
+## Host-stack names
+
+`host_call_depth` counted re-entries and did not say which function was
+entered. While `set_host_stack_armed` is set, `call` and `construct` push
+that function's name. The first time a climb crosses 256, 512, and 1000,
+`host_stack` calls the installed hook with a histogram and the innermost
+20 names. The console log arms it. A disarmed process does not allocate
+the names.
+
+**What.** Marked `HIWAVE PATCH (host stack)`.
+
+| file | change |
+|---|---|
+| `src/vm/host_stack.rs` | the stack, the thresholds, the hook |
+| `src/vm/mod.rs` | `host_frames`, `host_stack_logged` |
+| `src/object/operations.rs` | `call` and `construct` push and pop around `Context::run` |
