@@ -3781,9 +3781,27 @@ impl LayoutBox {
         // them first, and Wikipedia's empty `#siteNotice` then occupies one
         // 24px row under the 66px header. A formatting root of our own
         // (empty flex/grid) does not collapse through.
+        //
+        // css-sizing-4: an empty block with a usable `aspect-ratio` and a
+        // definite width has a used height. It is not the zero-height box
+        // §8.3.1 collapses through (`aspect-ratio: 2/1` on a 600px block is
+        // 300px tall).
+        let aspect_height = aspect_ratio_content_height(
+            &self.style,
+            self.dimensions.content.width,
+            self.dimensions.padding.left
+                + self.dimensions.padding.right
+                + self.dimensions.border.left
+                + self.dimensions.border.right,
+            self.dimensions.padding.top
+                + self.dimensions.padding.bottom
+                + self.dimensions.border.top
+                + self.dimensions.border.bottom,
+        );
         if self.children.is_empty()
             && in_flow
             && !is_formatting_root
+            && !aspect_height.is_some_and(|height| height > 0.0)
             && is_margin_collapsible_through(
                 &self.style,
                 self.float,

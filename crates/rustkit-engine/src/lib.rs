@@ -1253,10 +1253,33 @@ enum ParkedImages {
 impl ScriptPlan {
     fn attach_images(&mut self, fut: script_net::LiveFuture<FetchedImages>) {
         self.images = Some(fut);
-        // Start the sockets now. Later polls use the load's waker.
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(&waker);
-        self.poll_images(&mut cx);
+    }
+
+    /// Drive the image fetch until it is waiting on response bytes, or done.
+    ///
+    /// One poll with `Waker::noop` starts a connect and drops the wake, so
+    /// the request is never written. A parser script that does not yield
+    /// never polls again. A canceller waiting for those requests never
+    /// fires, and the load spins until the test aborts the process.
+    /// Localhost HTTP/1 needs a wake between connect and the request write.
+    /// A few polls on this task, with a yield between them, send the
+    /// in-flight requests. The bodies are still awaited only before
+    /// `window` `load`.
+    async fn start_image_sockets(&mut self) {
+        for _ in 0..4 {
+            if self.images.is_none() {
+                return;
+            }
+            std::future::poll_fn(|cx| {
+                self.poll_images(cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
+            if self.images.is_none() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     fn poll_images(&mut self, cx: &mut std::task::Context<'_>) {
@@ -7278,6 +7301,7 @@ impl Engine {
         };
         if let (Some(plan), Some(scripts)) = (image_plan, script_plan.as_mut()) {
             scripts.attach_images(Box::pin(Self::fetch_planned_images(plan)));
+            scripts.start_image_sockets().await;
         }
         // Still deferred means load_subresources failed before laying out.
         if !self.nav_superseded(id, generation)

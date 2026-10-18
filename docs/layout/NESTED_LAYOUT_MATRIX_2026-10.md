@@ -108,7 +108,7 @@ second cause, it is named under its first.
 | 7 | `table-cell-percent-height` | 16 | 0 | table.rs `layout_cell` / `stretch_cell` |
 | 8 | `grid-auto-rows-not-stretched-to-non-px-height` | 9 | 0 | grid.rs `layout_grid_container`, `own_definite_height` |
 | 9 | `gap-two-value-shorthand-dropped` | 6 | 0 | rustkit-engine `apply_style_property`, `"gap"` arm |
-| 10 | `column-flex-item-stretches-to-outer-width` | 5 | 0 | flex.rs, not located |
+| 10 | `column-flex-item-stretches-to-outer-width` | 0 | 0 | flex.rs used width of a column item |
 | 11 | `fit-content-grid-item-stretches` | 5 | 0 | grid.rs `apply_justify_self` |
 | 12 | `grid-max-content-width-zero-with-column-span` | 5 | 0 | grid.rs content-width estimate |
 | 13 | `aspect-ratio-width-not-derived-from-height` | 4 | 0 | rustkit-layout `calculate_block_width`; flex.rs for the flex item |
@@ -311,7 +311,10 @@ Where: the `"gap" | "grid-gap"` arm of the style property match in
 `crates/rustkit-engine/src/lib.rs` passes the whole value to `parse_length`,
 which fails on `10px 20px`, and nothing is set.
 
-### 10. `column-flex-item-stretches-to-outer-width` (5)
+### 10. `column-flex-item-stretches-to-outer-width` (0)
+
+Cleared when a column flex item is sized from its used width. The five
+`core--flex-row--flex-col--*` cases match Chromium and are off the list.
 
 **Rule:** the items of a column flex container that is itself a row flex
 item stretch to that container's width; the engine stretches them to the
