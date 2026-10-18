@@ -67,15 +67,30 @@ invokes each factory when its chunk dependencies have finished. Debug,
 not a release build:
 
 - `begin_module` checkpoint: 0 jobs. Nothing was waiting on this module.
-- `poll_module` checkpoint, after the module body ran: 3 promise jobs,
-  61 ms. Two are `bound smlThen` (61 ms together) and one is
-  `bound smlFail` (the `DZDBx0nCO6` rejection). No callback from the
-  chunk URL itself.
-- The factories did register (`BvOWmaNPEJ`, `Dyg3q1gB6W`, `DZDBx0nCO6`).
-  `DZDBx0nCO6` rejected with `ReferenceError: CLIENT_CONFIG is not defined`,
-  which is a page global this harness does not provide.
-- Wall time for parse plus that evaluation was 963 ms on the last
-  debug run (978 ms on the run before it). It is not the Mac's 3.1 s.
+- With `globalThis.CLIENT_CONFIG` stubbed (`STATIC_BASE_URL`,
+  `REDDITSTATIC_CF_MIGRATION`), `poll_module` is 6 promise jobs, 118 ms,
+  and `errors` is empty. All three factories register. Three jobs are
+  `bound smlThen` (117 ms). One callback is still labeled `native` (0 ms):
+  a builtin whose spec name is empty and that is not an `await` resume.
+- Before that stub, `DZDBx0nCO6` rejected with
+  `ReferenceError: CLIENT_CONFIG is not defined` and the checkpoint was
+  3 jobs / 61 ms. Either way this is not the Mac's 271-job / 3,013 ms
+  drain. That drain is the parent continuation already queued when the
+  body is supplied, and this harness has no such parent.
+- Await resumes are named `await {function}` (or `await @{path}`). The
+  Mac's `native` rows (223 of 271, and 7,216 of 12,500) were those
+  resumes, created with an empty name. Host bindings are timed beside
+  that, by IDL member. On this run the top host calls are all under 1 ms:
+  `__rustkit_dom_shadow` ×76, `__rustkit_dom_collect` ×59,
+  `__rustkit_dom_attr:name` ×57, `__rustkit_dom_by_id` ×21. No
+  `setAttribute` shows up, because the parent Lit render is not in this
+  evaluation.
+- A class write used to `retain` the whole id table. 4,000 ids × 200
+  class writes: 14 ms before, 4 ms after (debug). The removed term grows
+  with the document, which is the per-call cost inside those resumes.
+  Style and layout stay deferred until the script returns.
+- Wall time for parse plus that evaluation was 1,030 ms on this debug
+  run (963 ms before the stub). It is not the Mac's 3.1 s.
 
 So the chunk's own factories are not a multi-second microtask drain. The
 3.1 s on the Mac is the checkpoint that resumes whoever was already

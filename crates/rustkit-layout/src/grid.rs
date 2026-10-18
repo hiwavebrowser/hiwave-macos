@@ -3485,6 +3485,18 @@ fn length_min_width_border_box(item: &LayoutBox) -> Option<f32> {
     })
 }
 
+/// A definite `min-width` floors an intrinsic contribution (css-sizing-3 §4).
+/// The content walk alone answers the children's sizes, so an
+/// `inline-flex` button with `min-width: 44px` and a clipped label
+/// contributed ~10px. Its parent then laid out 10 wide and the button
+/// overflowed the next link.
+fn at_least_min_width(item: &LayoutBox, content: f32) -> f32 {
+    match length_min_width_border_box(item) {
+        Some(min_width) => content.max(min_width),
+        None => content,
+    }
+}
+
 /// Size grid tracks using the track sizing algorithm.
 /// Estimate of a box's min-content (border-box) width.
 ///
@@ -3639,7 +3651,10 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
             sum += estimate_min_content_width(child) + horizontal_margins(&child.style);
             item_count += 1;
         }
-        return sum + main_gap * item_count.saturating_sub(1) as f32 + padding_border;
+        return at_least_min_width(
+            layout_box,
+            sum + main_gap * item_count.saturating_sub(1) as f32 + padding_border,
+        );
     }
 
     // Content-derived width. Under white-space that forbids wrapping,
@@ -3698,7 +3713,7 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     }
     max_contribution = max_contribution.max(inline_run);
 
-    max_contribution + padding_border
+    at_least_min_width(layout_box, max_contribution + padding_border)
 }
 
 /// The BORDER-box min-content width of a form control.
@@ -3967,7 +3982,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         } else {
             widest
         };
-        return content + padding_border;
+        return at_least_min_width(layout_box, content + padding_border);
     }
 
     let mut max_contribution = 0.0f32;
@@ -3995,7 +4010,7 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
     }
     max_contribution = max_contribution.max(inline_run);
 
-    max_contribution + padding_border
+    at_least_min_width(layout_box, max_contribution + padding_border)
 }
 
 /// A replaced box's content-width contribution, or `None` for any other box

@@ -7,7 +7,7 @@
 use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
-use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
+use rustkit_engine::{drive_host, Engine, EngineBuilder, EngineEvent, EngineViewId};
 use rustkit_viewhost::Bounds;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::AtomicU64;
@@ -65,9 +65,6 @@ pub struct RustKitView {
     /// The page clock: the instant the live loop has run the page's timers
     /// up to. Reset when a page finishes loading.
     live_clock: Cell<Instant>,
-    /// Runtime the live loop's network turns block on. `None` if it could
-    /// not be built: the page then gets no timers or late fetches, as before.
-    live_runtime: Option<tokio::runtime::Runtime>,
     /// The content `NSView`. Kept outside the engine so a load can move the
     /// frame while `engine` is borrowed.
     host_view: isize,
@@ -243,11 +240,6 @@ impl RustKitView {
             history_index: RefCell::new(0),
             replace_next: Cell::new(false),
             live_clock: Cell::new(Instant::now()),
-            live_runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
-                .ok(),
             host_view,
         })
     }
@@ -271,7 +263,6 @@ impl RustKitView {
     /// showed and a `setTimeout` set by a click never fired (Z lane I0).
     pub fn process_events(&self) -> Option<Duration> {
         let view_id = self.view_id?;
-        let runtime = self.live_runtime.as_ref()?;
         let started = Instant::now();
         // Whole milliseconds only; the remainder stays on the clock for the
         // next turn, so frequent turns do not slow the page's time.
@@ -280,7 +271,9 @@ impl RustKitView {
             .set(self.live_clock.get() + Duration::from_millis(elapsed_ms));
 
         let mut engine = self.engine.borrow_mut();
-        let turn = runtime.block_on(engine.pump_live(view_id, elapsed_ms));
+        // The same runtime the load used. A fresh one here would poll image
+        // timeouts whose driver had already shut down.
+        let turn = drive_host(engine.pump_live(view_id, elapsed_ms));
         if turn.timers_ran > 0 || turn.requests > 0 {
             debug!(?turn, "Live turn");
         }
@@ -642,25 +635,18 @@ impl RustKitView {
             }
         };
 
-        // Create a single-threaded tokio runtime for this operation
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                error!(error = %e, "Failed to create runtime");
-                return;
-            }
-        };
-
         let mut engine = self.engine.borrow_mut();
         if let Some(view_id) = self.view_id {
             // Returns after DOMContentLoaded when an inserted script is
             // still arriving. Live turns (`process_events`) run the chain
             // one script at a time and send PageLoaded at the end. A page
             // with no inserted script still finishes inside this call.
-            rt.block_on(async {
+            //
+            // One process runtime, shared with those live turns. Building
+            // one here and dropping it left image `timeout` sleeps bound
+            // to a driver that then shut down; the next turn panicked in
+            // Tokio's time driver.
+            drive_host(async {
                 if let Err(e) = engine.load_url_yielding(view_id, parsed).await {
                     error!(error = %e, "Failed to load URL");
                 }

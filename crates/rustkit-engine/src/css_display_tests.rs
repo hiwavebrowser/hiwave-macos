@@ -1284,3 +1284,362 @@ customElements.define('faceplate-header', FaceplateHeader);
         "desktop span lost its box inside the narrow host {wide}"
     );
 }
+
+/// Reddit's feed shell, from the public page (1 Oct 2026 snapshot).
+///
+/// `m:` is `@media (min-width: 1200px)`, and that same query holds
+/// `--flex-nav-width` (272px, or 315px with `.flex-nav-upsell`),
+/// `grid-template-columns: var(--flex-nav-width) 1fr`, and
+/// `max-width: calc(100vw - var(--flex-nav-width, 0px))` on
+/// `.subgrid-container`. The container is also `m:w-[1120px]` with 24px
+/// padding. Chrome at 1280 with the upsell: sub 315×965, shell 339×917,
+/// feed 577. Without the clamp the 1120px width's content box is 1072 and
+/// the feed track is 732. At 1060 every `m:` rule drops: the shell is the
+/// full viewport with 16px padding, the feed is 688, the hamburger
+/// (`m:hidden`) is 44px, and the search is the flex remainder, not 560px.
+#[test]
+fn the_reddit_shell_clamps_to_the_viewport_minus_the_nav() {
+    let html = r#"<!doctype html><style>
+html,body{margin:0}
+.grid{display:grid;width:100%}
+@media (min-width:1200px){
+.grid-container:not(.grid-full),.grid-container:not(.grid-full).flex-nav-expanded{--flex-nav-width:272px}
+.grid-container:not(.grid-full).flex-nav-expanded.flex-nav-upsell{--flex-nav-width:315px}
+.grid-container:not(.grid-full){display:grid;width:100%;grid-template-columns:var(--flex-nav-width) 1fr}
+.grid-container:not(.grid-full) .subgrid-container{max-width:calc(100vw - var(--flex-nav-width, 0px))}
+}
+.box-border{box-sizing:border-box}
+.w-full{width:100%}
+.hidden{display:none}
+.flex{display:flex}
+.flex-col{display:flex;flex-direction:column}
+.order-2{order:2}
+.mx-auto{margin-left:auto;margin-right:auto}
+.flex-1{flex:1 1 0%}
+nav{display:flex;align-items:center;height:56px;width:100%}
+#logo{width:120px;height:40px;flex:none}
+#burger{width:44px;height:40px;flex:none}
+#feed,#side{height:40px}
+.main-container{display:grid;width:100%;gap:1.5rem;grid-template-columns:minmax(0,1fr)}
+@media (min-width:768px){
+  .xs\:px-md{padding-left:1rem;padding-right:1rem}
+}
+@media (min-width:960px){
+  .s\:\[\&\.fixed-sidebar\]\:grid-cols-\[minmax\(0\,756px\)_minmax\(0\,316px\)\].fixed-sidebar{
+    grid-template-columns:minmax(0,756px) minmax(0,316px)
+  }
+}
+@media (min-width:1200px){
+  .m\:col-start-2{grid-column-start:2}
+  .m\:w-\[1120px\]{width:1120px}
+  .m\:px-lg{padding-left:1.5rem;padding-right:1.5rem}
+  .m\:hidden{display:none}
+  .m\:block{display:block}
+  .m\:w-\[560px\]{width:560px}
+  .m\:mx-auto{margin-left:auto;margin-right:auto}
+}
+</style>
+<div class="grid-container theme-rpl grid flex-nav-expanded flex-nav-upsell">
+  <div style="position:fixed;width:315px;height:40px"></div>
+  <div id="sub" class="subgrid-container m:col-start-2 box-border flex flex-col order-2 w-full m:w-[1120px] xs:px-md m:px-lg mx-auto">
+    <div id="shell" class="main-container fixed-sidebar s:[&.fixed-sidebar]:grid-cols-[minmax(0,756px)_minmax(0,316px)]">
+      <div id="feed"></div><div id="side"></div>
+    </div>
+  </div>
+</div>
+<header><nav>
+  <button id="burger" class="m:hidden">menu</button>
+  <div id="logo"></div>
+  <div id="search" class="flex-1 flex">
+    <div class="flex w-full">
+      <div id="box" class="flex w-full m:block m:w-[560px] m:mx-auto"><div id="bar" class="w-full" style="height:40px">Search</div></div>
+    </div>
+  </div>
+</nav></header>"#;
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+        })
+        .expect("view");
+    engine.load_html(view, html).expect("load");
+    let measure = |engine: &mut Engine| {
+        eval(
+            engine,
+            view,
+            r#"
+            function r(id){var b=document.getElementById(id).getBoundingClientRect();return [b.x,b.width].join(' ')}
+            [r('sub'),r('shell'),r('feed'),r('side'),r('burger'),r('box'),r('search'),innerWidth].join('|')
+            "#,
+        )
+    };
+    let wide = measure(&mut engine);
+    let near = |got: &str, expect: &[f64]| {
+        let nums = numbers(&got.replace([' ', '|'], ","));
+        nums.len() == expect.len()
+            && nums
+                .iter()
+                .zip(expect)
+                .all(|(g, e)| (*g - *e).abs() < 2.0)
+    };
+    assert!(
+        near(
+            &wide,
+            &[
+                315.0, 965.0, 339.0, 917.0, 339.0, 577.0, 940.0, 316.0, 0.0, 0.0, 420.0, 560.0,
+                120.0, 1160.0, 1280.0,
+            ],
+        ),
+        "1280 shell {wide}"
+    );
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let narrow = measure(&mut engine);
+    assert!(
+        near(
+            &narrow,
+            &[
+                0.0, 1060.0, 16.0, 1028.0, 16.0, 688.0, 728.0, 316.0, 0.0, 44.0, 164.0, 896.0,
+                164.0, 896.0, 1060.0,
+            ],
+        ),
+        "1060 shell {narrow}"
+    );
+}
+
+/// Reddit's button font is `font: var(--button-font)`, and the custom
+/// property chain ends at `normal 600 0.875rem/1.25rem <family>`. The 600 is
+/// the weight. Reading it as the size made every `.button-medium` 600px and
+/// the join button 1528 wide, so the wrapping credit span collapsed to 0 and
+/// stacked to 827. The same text, measured as max-content on the resize
+/// relayout, was the search row's automatic minimum.
+#[test]
+fn a_button_font_variable_is_14px_semibold_not_600px() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>"#,
+        r#":root{--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"#,
+        r#"--font-14-20-semibold:normal 600 0.875rem/1.25rem var(--font-sans);"#,
+        r#"--font-12-16-semibold:normal 600 0.75rem/1rem var(--font-sans);"#,
+        r#"--font-button-md:var(--font-14-20-semibold);"#,
+        r#"--font-button-sm:var(--font-12-16-semibold)}"#,
+        r#".button{font:var(--button-font);display:inline-flex;align-items:center;height:32px;margin:0;padding:0 8px;border:0}"#,
+        r#".button-medium{--button-font:var(--font-button-md)}"#,
+        r#".button-small{--button-font:var(--font-button-sm)}"#,
+        r#"#host{font-size:18px}#bad{--button-font:600}"#,
+        r#"#cyc{--a:var(--b);--b:var(--a)}"#,
+        r#"body{margin:0}header{display:flex;align-items:center;width:100%;height:56px}"#,
+        r#"#search{display:flex;flex:1 1 auto;min-width:auto;height:40px;align-items:center}"#,
+        r#"#row{display:flex;width:545px;align-items:flex-start}"#,
+        r#"#credit{display:flex;flex-wrap:wrap;flex:1 1 auto;align-items:center;min-height:32px}"#,
+        r#"</style><body>"#,
+        r#"<header id="hdr"><a id="skip" class="button button-medium">Skip to main content</a>"#,
+        r#"<div id="search"><button id="find" class="button button-medium">Search</button></div></header>"#,
+        r#"<div id="row"><button id="join" class="button button-small">Join</button>"#,
+        r#"<span id="credit"><span>u/name</span><span>1h</span><span>award</span></span></div>"#,
+        r#"<p id="host"><button id="bad" class="button">Bad</button></p>"#,
+        r#"<button id="miss" class="button">Miss</button>"#,
+        r#"<p id="cyc"><button id="cycle" class="button" style="--button-font:var(--a)">Cycle</button></p>"#,
+        r#"</body>"#,
+    ));
+    let fonts = eval(
+        &mut engine,
+        view,
+        r#"[getComputedStyle(document.getElementById('find')).fontSize, getComputedStyle(document.getElementById('find')).fontWeight, getComputedStyle(document.getElementById('join')).fontSize, getComputedStyle(document.getElementById('join')).fontWeight].join('|')"#,
+    );
+    assert_eq!(
+        fonts, "14px|600|12px|600",
+        "button font shorthand parsed the weight as the size: {fonts}"
+    );
+    let invalid = eval(
+        &mut engine,
+        view,
+        r#"[getComputedStyle(document.getElementById('bad')).fontSize, getComputedStyle(document.getElementById('miss')).fontSize, getComputedStyle(document.getElementById('cycle')).fontSize].join('|')"#,
+    );
+    assert_eq!(
+        invalid, "18px|16px|16px",
+        "a font var() that is not a shorthand must inherit, not keep a partial size: {invalid}"
+    );
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let search = rect(&mut engine, view, "search");
+    let skip = rect(&mut engine, view, "skip");
+    let join = rect(&mut engine, view, "join");
+    let credit = rect(&mut engine, view, "credit");
+    assert!(
+        search.2 < 1060.0 && search.2 > 40.0,
+        "search flex item kept a content minimum from the 600px face: {search:?}"
+    );
+    assert!(
+        skip.2 < 400.0,
+        "skip link is the 600px face: {skip:?}"
+    );
+    assert!(
+        join.2 < 200.0,
+        "join button squeezed the credit span: {join:?}"
+    );
+    assert!(
+        credit.3 < 40.0 && credit.2 > 100.0,
+        "credit span stacked one item per line: {credit:?} join {join:?}"
+    );
+}
+/// Netflix's hero card is a column flex item, `width: 100%`,
+/// `align-self: center`, `max-width: 31.75rem` from 960px. 31.75rem is 508px.
+/// The card must stay that wide; the heading and the email form wrap inside
+/// it rather than at the min-content of one word.
+#[test]
+fn the_netflix_hero_card_stays_508_wide_at_1060() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".hero{display:flex;align-items:flex-end;justify-content:center;width:100%}"#,
+        r#".col{display:flex;flex-direction:column;flex:1}"#,
+        r#".wrap{display:flex;flex-direction:column;width:100%;max-width:120rem;"#,
+        r#"justify-content:center;padding:0 2rem 2rem 2rem}"#,
+        r#".card{display:flex;flex-direction:column;width:100%;margin-left:auto;"#,
+        r#"margin-right:auto;text-align:center;align-self:center;position:relative;"#,
+        r#"max-width:100%}"#,
+        r#"@media all and (min-width:600px){.card{max-width:27rem}}"#,
+        r#"@media all and (min-width:960px){.card{max-width:31.75rem}}"#,
+        r#"@media all and (min-width:1280px){.card{max-width:36.75rem}}"#,
+        r#"h1{font-size:2.5rem;font-weight:700;margin:0}"#,
+        r#"form{width:100%;max-width:36.625rem;margin:1rem auto 0}"#,
+        r#"</style><body><div class="hero"><div class="col"><div class="wrap">"#,
+        r#"<div class="card" id="card"><h1 id="h">Unlimited movies, TV shows, and more</h1>"#,
+        r#"<form id="f"><h3>Ready to watch? Enter your email to create or restart your membership.</h3>"#,
+        r#"<input id="email" type="email"></form></div></div></div></div></body>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1060,
+                height: 800,
+            },
+        )
+        .expect("resize");
+    let card = rect(&mut engine, view, "card");
+    let heading = rect(&mut engine, view, "h");
+    let form = rect(&mut engine, view, "f");
+    assert!(
+        (card.2 - 508.0).abs() < 2.0,
+        "hero card is not the 31.75rem max-width: {card:?} h1 {heading:?} form {form:?}"
+    );
+    assert!(
+        heading.2 > 400.0 && form.2 > 400.0,
+        "hero text wrapped to the min-content width: h1 {heading:?} form {form:?}"
+    );
+}
+/// Vector hides the unpinned appearance control in the header when the
+/// pinned preference is on:
+/// `.vector-feature-appearance-pinned-clientpref-1 .vector-user-links
+/// .vector-appearance-landmark { display: none }` inside `@media screen`.
+/// The dropdown then has no box, so it cannot sit on Donate.
+#[test]
+fn the_pinned_appearance_dropdown_has_no_box_over_donate() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><html class="client-js vector-feature-appearance-pinned-clientpref-1">"#,
+        r#"<head><style>"#,
+        r#"@media screen{"#,
+        r#".vector-feature-appearance-pinned-clientpref-1 .vector-user-links .vector-appearance-landmark,"#,
+        r#".vector-feature-appearance-pinned-clientpref-0 .vector-column-end .vector-appearance-landmark{display:none}"#,
+        r#".client-nojs .vector-appearance-landmark{display:none}}"#,
+        r#".mw-header{display:flex;align-items:center;height:66px;width:1280px;margin:0}"#,
+        r#".vector-user-links{display:flex;margin-left:auto;align-items:center}"#,
+        r#".vector-dropdown{position:relative}"#,
+        r#".vector-dropdown-checkbox{position:absolute;top:0;left:0;z-index:1;opacity:0;width:100%;height:100%;margin:0;padding:0}"#,
+        r#"body{margin:0}a{margin-left:12px}"#,
+        r#"</style></head><body><header class="mw-header" id="hdr">"#,
+        r#"<nav class="vector-user-links"><nav class="vector-appearance-landmark">"#,
+        r#"<div id="vector-appearance-dropdown" class="vector-dropdown">"#,
+        r#"<input class="vector-dropdown-checkbox" type="checkbox" id="cb">"#,
+        r#"<label id="lab">Appearance</label></div></nav>"#,
+        r#"<a id="donate" href="https://donate.wikimedia.org/">Donate</a></nav></header></body></html>"#,
+    ));
+    engine
+        .resize_view(
+            view,
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+        )
+        .expect("desktop");
+    let shown = eval(
+        &mut engine,
+        view,
+        r#"var d=document.getElementById('vector-appearance-dropdown'); var r=d.getBoundingClientRect(); [getComputedStyle(d).display, getComputedStyle(d.parentElement).display, Math.round(r.width), Math.round(r.height), Math.round(r.x)].join('|')"#,
+    );
+    let parts: Vec<&str> = shown.split('|').collect();
+    assert_eq!(
+        parts.first().copied(),
+        Some("none"),
+        "appearance dropdown generated a box: {shown}"
+    );
+    let width: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    assert!(
+        width < 1.0,
+        "appearance dropdown covers the header: {shown}"
+    );
+}
+
+/// Below Vector's 1120px breakpoint the appearance menu is unpinned into
+/// the header. The control is an `inline-flex` icon button with
+/// `min-width: 44px` inside `.vector-dropdown`. The dropdown's intrinsic
+/// width has to include that minimum: a 10px box lets the 44px button
+/// paint over Donate.
+#[test]
+fn an_unpinned_appearance_button_does_not_cover_donate() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#".mw-header{display:flex;align-items:center;height:66px;width:1000px}"#,
+        r#".vector-user-links{display:flex;margin-left:auto;align-items:center}"#,
+        r#".vector-dropdown{position:relative}"#,
+        r#".vector-dropdown-checkbox{position:absolute;top:0;left:0;opacity:0;width:100%;height:100%;margin:0}"#,
+        r#".cdx-button{display:inline-flex;align-items:center;box-sizing:border-box;min-height:32px}"#,
+        r#".cdx-button--icon-only{min-width:44px;min-height:44px}"#,
+        r#".cdx-button--icon-only span+span{position:absolute;width:1px;height:1px;overflow:hidden}"#,
+        r#"a{margin-left:4px}"#,
+        r#"</style><header class="mw-header"><nav class="vector-user-links">"#,
+        r#"<nav class="vector-appearance-landmark"><div id="dd" class="vector-dropdown">"#,
+        r#"<input class="vector-dropdown-checkbox" type="checkbox">"#,
+        r#"<label id="lab" class="cdx-button cdx-button--icon-only"><span class="icon"></span>"#,
+        r#"<span>Appearance</span></label></div></nav>"#,
+        r#"<a id="donate" href="https://donate.wikimedia.org/">Donate</a>"#,
+        r#"</nav></header>"#,
+    ));
+    let dd = rect(&mut engine, view, "dd");
+    let lab = rect(&mut engine, view, "lab");
+    let donate = rect(&mut engine, view, "donate");
+    assert!(
+        dd.2 >= 44.0 - 0.5 && lab.2 >= 44.0 - 0.5,
+        "appearance dropdown ignored the 44px button: dd {dd:?} lab {lab:?}"
+    );
+    assert!(
+        donate.0 + 1.0 >= dd.0 + dd.2,
+        "appearance button covers Donate: dd {dd:?} lab {lab:?} donate {donate:?}"
+    );
+}

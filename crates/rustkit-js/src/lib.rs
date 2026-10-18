@@ -49,7 +49,10 @@ pub fn js_stack_sample() -> usize {
 #[cfg(feature = "boa")]
 mod executor;
 mod job_census;
-pub use job_census::{last_census as last_job_census, summary as job_census_summary, JobCensus};
+pub use job_census::{
+    last_census as last_job_census, reset_host_calls, summary as job_census_summary,
+    top_host_calls, JobCensus, JobSource,
+};
 #[cfg(feature = "boa")]
 mod describe;
 #[cfg(feature = "boa")]
@@ -1073,6 +1076,7 @@ impl JsRuntime {
             // crate's own `JsValue`, which holds no GC-managed data, so the
             // closure captures nothing the collector would need to trace.
             let deadline = self.deadline.clone();
+            let host_name = name.to_string();
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, _context| {
                     // No deadline (the default): the clock is not read.
@@ -1098,7 +1102,11 @@ impl JsRuntime {
                         return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
                     }
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
-                    Ok(to_boa_value(function(&args)))
+                    let label = host_call_label(&host_name, &args);
+                    let started = std::time::Instant::now();
+                    let value = function(&args);
+                    crate::job_census::note_host_call(&label, started.elapsed());
+                    Ok(to_boa_value(value))
                 })
             };
             self.context
@@ -1112,6 +1120,50 @@ impl JsRuntime {
             Err(JsError::NotInitialized)
         }
     }
+}
+
+/// DOM writes carry the op in a fixed argument slot. `write` and `mutate`
+/// put it at `args[1]` (`setAttr`, `insert`). `info` and `attr` put the
+/// member at `args[2]` (the node id is `args[1]`). A `setAttr` also names
+/// the attribute, so `class` and `style` are separate rows.
+#[cfg(feature = "boa")]
+fn host_call_label(name: &str, args: &[JsValue]) -> String {
+    let index = match name {
+        "__rustkit_dom_write" | "__rustkit_dom_mutate" => 1,
+        "__rustkit_dom_info" | "__rustkit_dom_attr" => 2,
+        _ => return name.to_string(),
+    };
+    let Some(JsValue::String(op)) = args.get(index) else {
+        return name.to_string();
+    };
+    let op = clip_host_label(op, 40);
+    if op.is_empty() {
+        return name.to_string();
+    }
+    if name == "__rustkit_dom_write" && (op == "setAttr" || op == "removeAttr") {
+        if let Some(JsValue::String(attr)) = args.get(3) {
+            let attr = clip_host_label(attr, 24);
+            if !attr.is_empty() {
+                return format!("{name}:{op}:{attr}");
+            }
+        }
+    }
+    format!("{name}:{op}")
+}
+
+#[cfg(feature = "boa")]
+fn clip_host_label(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if out.chars().count() >= max {
+            break;
+        }
+        out.push(if ch.is_control() || ch == ',' { ' ' } else { ch });
+    }
+    out
+}
+
+impl JsRuntime {
 
     /// Convert Boa value to JsValue.
     #[cfg(feature = "boa")]

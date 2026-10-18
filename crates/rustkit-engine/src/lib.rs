@@ -319,6 +319,8 @@ pub use inspector::{
     InspectorSnapshot, InspectorSummary, SourceLocation, UnsupportedApiCount, FailureStage, ResourceType,
 };
 pub use rustkit_bindings::MutationKind;
+mod host_runtime;
+pub use host_runtime::drive as drive_host;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
@@ -2119,13 +2121,53 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
             _ => return None,
         })
     };
-    let is_length = |t: &str| {
-        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
-    };
-    let idx = tokens.iter().position(|t| {
-        let (size, _) = t.split_once('/').unwrap_or((t, ""));
+    // `<font-size>` is a keyword or a length/percentage. A unitless number
+    // is `<font-weight>` (css-fonts-4 §2.2), and `parse_length` treats one
+    // as px — so `normal 600 0.875rem/1.25rem sans-serif` (Reddit's
+    // `--font-14-20-semibold`) took 600 as the size. A percentage is
+    // `<font-stretch>` when another size follows it (`50% 16px serif`).
+    let is_definite_size = |size: &str| -> bool {
+        if size == "0" {
+            return true;
+        }
         let lower = size.to_ascii_lowercase();
-        size_keyword(&lower).is_some() || is_length(size)
+        if lower.starts_with("calc(")
+            || lower.starts_with("min(")
+            || lower.starts_with("max(")
+            || lower.starts_with("clamp(")
+        {
+            return parse_length(size).is_some();
+        }
+        let bytes = lower.as_bytes();
+        let mut i = 0;
+        if bytes.first() == Some(&b'+') || bytes.first() == Some(&b'-') {
+            i = 1;
+        }
+        let mut saw_digit = false;
+        let mut saw_dot = false;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || (bytes[i] == b'.' && !saw_dot)) {
+            saw_digit |= bytes[i].is_ascii_digit();
+            saw_dot |= bytes[i] == b'.';
+            i += 1;
+        }
+        saw_digit && i < bytes.len() && bytes[i] != b'%' && parse_length(size).is_some()
+    };
+    let is_percentage = |size: &str| size.ends_with('%') && parse_length(size).is_some();
+    let idx = (0..tokens.len()).find(|&i| {
+        let (size, _) = tokens[i].split_once('/').unwrap_or((tokens[i], ""));
+        let lower = size.to_ascii_lowercase();
+        if size_keyword(&lower).is_some() || is_definite_size(size) {
+            return true;
+        }
+        if is_percentage(size) {
+            let later_size = tokens[i + 1..].iter().any(|u| {
+                let (s, _) = u.split_once('/').unwrap_or((u, ""));
+                let l = s.to_ascii_lowercase();
+                size_keyword(&l).is_some() || is_definite_size(s)
+            });
+            return !later_size;
+        }
+        false
     })?;
     let (size_part, lh_part) = match tokens[idx].split_once('/') {
         Some((s, lh)) => (s, Some(lh)),
@@ -11569,6 +11611,31 @@ impl Engine {
                         // Already applied to `vars` above.
                         continue;
                     }
+                    if decl.property == "font" {
+                        // Pending-substitution: expand var() fully, then parse
+                        // the font shorthand. A failed substitution does not
+                        // leave a partial token stream for the size parser.
+                        self.apply_font_declaration(
+                            &mut style,
+                            parent_style,
+                            &value_str,
+                            css_vars,
+                        );
+                        ch_pending.note(&decl.property, &value_str);
+                        if recording {
+                            records.push(DeclarationRecord {
+                                property: decl.property.clone(),
+                                value: value_str,
+                                selector: rule.selector.clone(),
+                                specificity: *specificity,
+                                origin: "author",
+                                important: decl.important,
+                                order,
+                            });
+                            order += 1;
+                        }
+                        continue;
+                    }
                     let resolved_value = self.resolve_css_variables(&value_str, css_vars);
                     if value_str != resolved_value {
                         trace!(
@@ -11773,6 +11840,11 @@ impl Engine {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
                 if important != important_pass {
+                    continue;
+                }
+                if property == "font" {
+                    self.apply_font_declaration(style, parent_style, value, css_vars);
+                    ch_pending.note(&property, value);
                     continue;
                 }
                 // Resolve CSS variables in the value
@@ -15104,6 +15176,67 @@ impl Engine {
             &mut false,
             &mut false,
         ))
+    }
+
+    /// Substitute `var()` for a declaration that is applied at computed-value
+    /// time. `Err` is invalid at computed-value time: a missing custom
+    /// property with no fallback, or a cycle (CSS Variables §3). The
+    /// substituted tokens are not a partial value the property parser may
+    /// use.
+    fn substitute_declared(&self, value: &str, css_vars: &dyn VarSource) -> Result<String, ()> {
+        if !value.contains("var(") {
+            return Ok(resolve_light_dark(value.to_string()));
+        }
+        let mut stack: Vec<&str> = Vec::new();
+        let mut budget = VAR_EXPANSION_BUDGET;
+        let (mut cycle, mut invalid) = (false, false);
+        let substituted = substitute_css_vars(
+            value,
+            &[css_vars],
+            &mut stack,
+            &mut budget,
+            &mut cycle,
+            &mut invalid,
+        );
+        if cycle || invalid {
+            Err(())
+        } else {
+            Ok(resolve_light_dark(substituted))
+        }
+    }
+
+    /// `font` is a shorthand of inherited longhands. A `var()` that does not
+    /// substitute, or that substitutes to tokens which are not the shorthand
+    /// grammar, makes every longhand invalid at computed-value time (the
+    /// pending-substitution value). That is `unset`: the parent's font, or
+    /// the initial font when there is no parent. A shorthand that never
+    /// contained `var()` and does not parse is invalid at parse time and is
+    /// dropped instead, so an earlier longhand survives.
+    fn apply_font_declaration(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        original: &str,
+        css_vars: &dyn VarSource,
+    ) {
+        let had_var = original.contains("var(");
+        match self.substitute_declared(original, css_vars) {
+            Ok(value) if !had_var || split_font_shorthand(&value).is_some() => {
+                self.apply_cascaded(style, parent_style, "font", &value);
+            }
+            _ => {
+                if let Some(parent) = parent_style {
+                    Self::inherit_property(style, parent, "font");
+                } else {
+                    self.apply_initial_value(style, "font-size");
+                    self.apply_initial_value(style, "font-weight");
+                    self.apply_initial_value(style, "font-style");
+                    self.apply_initial_value(style, "font-family");
+                    self.apply_initial_value(style, "line-height");
+                    style.font_stretch = rustkit_css::FontStretch::Normal;
+                }
+            }
+        }
     }
 
     /// The custom properties in effect on one element: the inherited map
@@ -26769,6 +26902,22 @@ mod web_font_tests {
         );
         assert_eq!(split_font_shorthand("menu"), None, "system fonts are not parsed");
         assert_eq!(split_font_shorthand("20px"), None, "a size with no family is invalid");
+        // Reddit `--font-14-20-semibold`: the 600 is the weight, not the size.
+        let reddit = split_font_shorthand(
+            "normal 600 0.875rem/1.25rem -apple-system, BlinkMacSystemFont, sans-serif",
+        )
+        .expect("reddit button font");
+        assert_eq!(reddit.prefix, vec!["normal".to_string(), "600".to_string()]);
+        assert_eq!(reddit.size, "0.875rem");
+        assert_eq!(reddit.line_height.as_deref(), Some("1.25rem"));
+        let stretch = split_font_shorthand("50% 16px serif").expect("stretch then size");
+        assert_eq!(stretch.prefix, vec!["50%".to_string()]);
+        assert_eq!(stretch.size, "16px");
+        assert_eq!(
+            split_font_shorthand("80% serif").map(|p| p.size),
+            Some("80%".into()),
+            "a lone percentage is the size"
+        );
 
         let Some(engine) = test_engine() else { return };
         let html = r#"<!DOCTYPE html><html><body>
