@@ -1,4 +1,5 @@
 //! `HIWAVE_DUMP_RENDER=<path>` writes a capped picture of `main#main-content`
+//! and of the page header (the search popover lives outside `main`),
 //! after the large feed insertion, and again when the load is quiet.
 //! `HIWAVE_DUMP_RENDER_AT_MS` also writes one snapshot once that many
 //! milliseconds have passed since navigation start. A frozen page does not
@@ -379,6 +380,7 @@ fn build_snapshot(
             "when": when,
             "display_list_items_in_main": commands,
             "main": null,
+            "header": header_snapshot(document, &placed),
             "note": "no main#main-content"
         });
     };
@@ -403,7 +405,152 @@ fn build_snapshot(
         "t_ms": t_ms,
         "when": when,
         "display_list_items_in_main": commands,
-        "main": element_json(&main, &defined, &placed, &included, &keep, &posts, true)
+        "main": element_json(&main, &defined, &placed, &included, &keep, &posts, true),
+        "header": header_snapshot(document, &placed)
+    })
+}
+
+/// The site header, plus up to eight `popover` elements, so a search panel
+/// that paints outside `main#main-content` shows up in the dump. The walk
+/// stops once both are found (or after a few thousand nodes).
+fn header_snapshot(document: &Document, placed: &HashMap<usize, Placed<'_>>) -> Value {
+    let Some(root) = document.document_element() else {
+        return Value::Null;
+    };
+    let mut found = HeaderFound::default();
+    let mut seen = 0usize;
+    walk_header(&root, &mut found, &mut seen);
+    let header = found.header.or(found.loose);
+    json!({
+        "element": header.as_ref().map(|node| header_element_json(node, placed, 4, &mut 40)),
+        "popovers": found
+            .popovers
+            .iter()
+            .map(|node| header_element_json(node, placed, 2, &mut 12))
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Default)]
+struct HeaderFound {
+    header: Option<std::rc::Rc<Node>>,
+    loose: Option<std::rc::Rc<Node>>,
+    popovers: Vec<std::rc::Rc<Node>>,
+}
+
+fn walk_header(node: &std::rc::Rc<Node>, found: &mut HeaderFound, seen: &mut usize) {
+    if *seen > 4000 || (found.header.is_some() && found.popovers.len() >= 8) {
+        return;
+    }
+    *seen += 1;
+    if let Some(tag) = node.tag_name() {
+        if found.header.is_none() && tag.eq_ignore_ascii_case("header") {
+            found.header = Some(node.clone());
+        } else if found.header.is_none()
+            && found.loose.is_none()
+            && tag.to_ascii_lowercase().contains("header")
+        {
+            found.loose = Some(node.clone());
+        }
+    }
+    if found.popovers.len() < 8 && node.get_attribute("popover").is_some() {
+        found.popovers.push(node.clone());
+    }
+    if let Some(root) = node.shadow_root() {
+        for child in root.children() {
+            if child.is_element() {
+                walk_header(&child, found, seen);
+            }
+        }
+    }
+    for child in node.children() {
+        if child.is_element() {
+            walk_header(&child, found, seen);
+        }
+    }
+}
+
+fn header_element_json(
+    node: &std::rc::Rc<Node>,
+    placed: &HashMap<usize, Placed<'_>>,
+    depth: usize,
+    budget: &mut usize,
+) -> Value {
+    if *budget == 0 {
+        return json!({ "truncated": true });
+    }
+    *budget -= 1;
+    let place = placed.get(&node.id.raw());
+    let style = header_style_json(node, place);
+    let mut children = Vec::new();
+    if depth > 0 {
+        let mut push = |child: &std::rc::Rc<Node>| {
+            if child.is_element() && *budget > 0 {
+                children.push(header_element_json(child, placed, depth - 1, budget));
+            }
+        };
+        if let Some(root) = node.shadow_root() {
+            for child in root.children() {
+                push(&child);
+            }
+        }
+        for child in node.children() {
+            push(&child);
+        }
+    }
+    json!({
+        "tag": node.tag_name().unwrap_or(""),
+        "id": node.get_attribute("id").unwrap_or(""),
+        "class": node.get_attribute("class").unwrap_or(""),
+        "popover": node.get_attribute("popover"),
+        "hidden": node.get_attribute("hidden"),
+        "style": style,
+        "box": box_json(place),
+        "children": children,
+    })
+}
+
+fn box_json(place: Option<&Placed<'_>>) -> Value {
+    match place.and_then(|place| place.boxes.first()) {
+        Some(box_) => {
+            let border = box_.dimensions.border_box();
+            json!({
+                "x": round_px(border.x),
+                "y": round_px(border.y),
+                "width": round_px(border.width),
+                "height": round_px(border.height),
+            })
+        }
+        None => json!("no box"),
+    }
+}
+
+fn header_style_json(node: &Node, place: Option<&Placed<'_>>) -> Value {
+    if let Some(box_) = place.and_then(|place| place.boxes.first().copied()) {
+        let font_px = match box_.style.font_size {
+            rustkit_css::Length::Px(px) => px,
+            _ => 16.0,
+        };
+        return json!({
+            "display": css_display(box_.style.display),
+            "position": css_position(box_.style.position),
+            "font-size": format!("{}px", round_px(font_px)),
+            "height": format!("{}px", round_px(box_.dimensions.border_box().height)),
+        });
+    }
+    if let Some(boxless) = crate::boxless_style(node.id.raw()) {
+        return json!({
+            "display": css_display(boxless.display),
+            "position": css_position(boxless.position),
+            "font-size": format!("{}px", round_px(boxless.font_size_px)),
+            "height": "0px",
+        });
+    }
+    json!({
+        "display": Value::Null,
+        "position": Value::Null,
+        "font-size": Value::Null,
+        "height": Value::Null,
     })
 }
 
@@ -616,6 +763,17 @@ fn slot_json(node: &std::rc::Rc<Node>) -> Value {
 fn style_json(node: &Node, place: Option<&Placed<'_>>) -> Value {
     let content_visibility = inline_content_visibility(node);
     let Some(box_) = place.and_then(|place| place.boxes.first().copied()) else {
+        if let Some(boxless) = crate::boxless_style(node.id.raw()) {
+            return json!({
+                "display": css_display(boxless.display),
+                "visibility": css_visibility(boxless.visibility),
+                "opacity": round_px(1.0),
+                "content-visibility": content_visibility,
+                "position": css_position(boxless.position),
+                "height": "0px",
+                "overflow": Value::Null,
+            });
+        }
         return json!({
             "display": Value::Null,
             "visibility": Value::Null,
@@ -645,6 +803,9 @@ fn skip_reason(node: &Node, place: Option<&Placed<'_>>, style: &Value) -> Option
     }
     if style.get("display").and_then(Value::as_str) == Some("none") {
         return Some("display:none");
+    }
+    if style.get("display").and_then(Value::as_str) == Some("contents") {
+        return Some("display:contents");
     }
     if style.get("content-visibility").and_then(Value::as_str) == Some("hidden") {
         return Some("content-visibility");
@@ -821,5 +982,47 @@ mod tests {
             Some(t_ms)
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_dump_includes_the_header_outside_main() {
+        let html = concat!(
+            r#"<!doctype html><style>body{margin:0}.show{display:block;font-size:24px}</style>"#,
+            r#"<body><header id="site"><div id="closed" popover="auto">hidden</div>"#,
+            r#"<div id="panel" class="show" popover="manual">Search</div></header>"#,
+            r#"<main id="main-content"><p>post</p></main></body>"#,
+        );
+        let engine = crate::Engine::new(crate::EngineConfig::default()).expect("engine");
+        let document = Document::parse_html(html).expect("parse");
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        let cb = rustkit_layout::Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        };
+        layout.layout(&cb);
+        let snapshot = build_snapshot(&document, &layout, None, "test", 0);
+        let header = &snapshot["header"]["element"];
+        assert_eq!(header["id"], "site");
+        assert_eq!(header["tag"], "header");
+        assert!(snapshot["main"]["tag"] == "main");
+        let children = header["children"].as_array().expect("header children");
+        let panel = children
+            .iter()
+            .find(|child| child["id"] == "panel")
+            .expect("search panel");
+        assert_eq!(panel["popover"], "manual");
+        assert_eq!(panel["style"]["display"], "block");
+        assert_eq!(panel["style"]["position"], "fixed");
+        assert_eq!(panel["style"]["font-size"], "24px");
+        let width = panel["box"]["width"].as_f64().expect("panel width");
+        assert!(width < 400.0, "search panel covered the page: {width}");
+        let closed = children
+            .iter()
+            .find(|child| child["id"] == "closed")
+            .expect("closed popover");
+        assert_eq!(closed["box"], "no box");
+        assert_eq!(closed["popover"], "auto");
+        let popovers = snapshot["header"]["popovers"].as_array().expect("popovers");
+        assert!(popovers.iter().any(|item| item["id"] == "panel"));
     }
 }
