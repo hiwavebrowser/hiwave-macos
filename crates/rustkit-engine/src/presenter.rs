@@ -771,3 +771,69 @@ impl Presenter {
     }
 }
 
+/// The window thread's surface for a page that lives on the content thread.
+///
+/// The NSView, the GPU surface and the renderer are created here, on the
+/// thread that calls [`WindowSurface::attach`]. The page thread never sees
+/// them. It publishes [`FrameCommit`]s; this draws the newest one, including
+/// a commit whose only change is the scroll offset.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub struct WindowSurface {
+    presenter: Presenter,
+    viewhost_id: ViewId,
+    id: super::EngineViewId,
+    shown: Option<(u64, (f32, f32))>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl WindowSurface {
+    /// A host view and its GPU surface in `parent`. Fails before any page
+    /// state exists.
+    pub fn attach(parent: WindowHandle, bounds: Bounds) -> Result<Self, EngineError> {
+        let mut presenter = Presenter::new(super::EngineConfig::default().background_color)?;
+        let viewhost_id = presenter.create_host_view(parent, bounds)?;
+        presenter.attach_surface(viewhost_id, bounds)?;
+        presenter.clear_to_background(viewhost_id)?;
+        Ok(Self {
+            presenter,
+            viewhost_id,
+            id: super::EngineViewId::new(),
+            shown: None,
+        })
+    }
+
+    pub fn raw_view(&self) -> isize {
+        self.presenter.raw_view(self.viewhost_id)
+    }
+
+    /// The NSView and the GPU surface take `bounds` now. The page lays out
+    /// when it receives the same bounds as a message.
+    pub fn resize(&mut self, bounds: Bounds) -> Result<(), EngineError> {
+        self.presenter.apply_bounds(self.viewhost_id, false, bounds)
+    }
+
+    pub fn grab_keyboard(&self) {
+        self.presenter.grab_keyboard(self.viewhost_id)
+    }
+
+    /// Draw `commit` when its generation or its scroll offset differs from
+    /// the frame on screen. Generation-only dedup would drop a scroll.
+    pub fn present_commit(&mut self, commit: &FrameCommit, images: &ImageManager) -> Result<(), EngineError> {
+        let key = (commit.generation, commit.scroll_offset);
+        if self.shown == Some(key) {
+            return Ok(());
+        }
+        self.presenter.commit(self.id, commit.clone());
+        let drawn = self.presenter.present(self.id, self.viewhost_id, false, images);
+        let noted = match &drawn {
+            Ok(_) => Ok(()),
+            Err(error) => Err(EngineError::RenderError(error.to_string())),
+        };
+        self.presenter.note_render_result(self.id, &noted);
+        if drawn.is_ok() {
+            self.shown = Some(key);
+        }
+        drawn.map(|_| ())
+    }
+}
+

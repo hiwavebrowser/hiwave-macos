@@ -8,7 +8,8 @@ use super::shield_adapter::create_shield_interceptor_with_counter;
 use super::webview::IWebContent;
 use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{
-    connect, EngineBuilder, EngineViewId, PageCmd, PageEndpoint, PageHandle, PageInput,
+    connect, content_thread_enabled, ContentThread, EngineBuilder, EngineViewId, FrameCommit,
+    LoadState, PageCmd, PageEndpoint, PageEvent, PageHandle, PageInput, WindowSurface,
 };
 use rustkit_viewhost::Bounds;
 use std::cell::{Cell, RefCell};
@@ -33,19 +34,34 @@ const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 
 /// A RustKit-based WebView that implements IWebContent.
 ///
-/// The window talks to the page through a [`PageHandle`]: commands go in,
-/// events and frame commits come out. Both ends are drained on this thread,
-/// so a load, an input and a frame do what they did when the view held the
-/// engine directly.
+/// With `HIWAVE_CONTENT_THREAD` unset, the window talks to the page through
+/// a [`PageHandle`] and drains it on this thread. With the variable set,
+/// the page is built on the content thread and this view only sends
+/// commands, presents commits, and never waits for a load or a script.
 ///
 /// # Thread Safety
 ///
 /// This type is NOT Send or Sync. All operations must be performed on the main thread.
 pub struct RustKitView {
     /// Commands in, events out. Applied by [`Self::submit`] on this thread.
-    handle: PageHandle,
-    /// Owns the engine and applies the handle's commands.
-    endpoint: RefCell<PageEndpoint>,
+    /// `None` when the page runs on the content thread.
+    handle: Option<PageHandle>,
+    /// Owns the engine and applies the handle's commands. `None` on the
+    /// content-thread path: that engine is constructed on the other thread.
+    endpoint: Option<RefCell<PageEndpoint>>,
+    /// The page, when `HIWAVE_CONTENT_THREAD` is set. The window does not
+    /// join it.
+    content: Option<ContentThread>,
+    /// NSView, GPU surface and renderer. Created on this thread, and only
+    /// when the page is on the content thread. The flag-off engine still
+    /// owns its own presenter.
+    surface: Option<RefCell<WindowSurface>>,
+    /// Navigation the window has asked for. Older events are dropped.
+    accepted_nav: Cell<u64>,
+    /// A navigation the page decided on, harvested from events.
+    script_nav: RefCell<Option<(String, bool)>>,
+    /// Newest commit whose navigation is still the one on screen.
+    latest_commit: RefCell<Option<FrameCommit>>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
@@ -78,6 +94,8 @@ pub struct RustKitView {
     /// The content `NSView`. Kept outside the engine so a load can move the
     /// frame while `engine` is borrowed.
     host_view: isize,
+    /// Set once Close has been asked. Later commands are dropped.
+    closed: Cell<bool>,
 }
 
 /// Script budget for pages in the live app. The engine default (5 s) is
@@ -209,31 +227,60 @@ impl RustKitView {
             builder = builder.request_interceptor(interceptor);
         }
 
-        let mut engine = builder
-            .build()
-            .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
-
-        // Create view, then hand the engine to the page endpoint. The
-        // endpoint takes the event receiver; the handle is what this view
-        // keeps.
-        let view_id = engine
-            .create_view(raw_handle, bounds)
-            .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
-        let (handle, endpoint) = connect(engine, view_id);
-
-        info!(?view_id, "RustKit view created");
-        let host_view = engine.host_view_raw(view_id);
-        rustkit_viewhost::clip_raw_view(host_view);
-        // The chrome WebView is WebKit on this same thread. A content load
-        // blocks the thread through its network waits (it already did,
-        // before the script budget stopped counting those waits). The hook
-        // gives that WebView a run-loop turn during each wait.
-        install_chrome_ui_turn();
+        let (handle, endpoint, content, surface, host_view, view_id) = if content_thread_enabled() {
+            // The surface is created here, on the window thread. The page
+            // engine is created on the content thread, inside spawn.
+            let surface = WindowSurface::attach(raw_handle, bounds)
+                .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+            let host_view = surface.raw_view();
+            rustkit_viewhost::clip_raw_view(host_view);
+            let thread = ContentThread::spawn(builder, bounds).map_err(|e| {
+                hiwave_core::HiWaveError::WebView(format!("content thread did not start: {e:?}"))
+            })?;
+            info!("RustKit view created on the content thread");
+            (
+                None,
+                None,
+                Some(thread),
+                Some(RefCell::new(surface)),
+                host_view,
+                None,
+            )
+        } else {
+            let mut engine = builder
+                .build()
+                .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+            let view_id = engine
+                .create_view(raw_handle, bounds)
+                .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+            let host_view = engine.host_view_raw(view_id);
+            let (handle, endpoint) = connect(engine, view_id);
+            rustkit_viewhost::clip_raw_view(host_view);
+            // The chrome WebView is WebKit on this same thread. A content load
+            // blocks the thread through its network waits. The hook gives that
+            // WebView a run-loop turn during each wait. The content thread
+            // does not install it: the window thread is not inside the load.
+            install_chrome_ui_turn();
+            info!(?view_id, "RustKit view created");
+            (
+                Some(handle),
+                Some(RefCell::new(endpoint)),
+                None,
+                None,
+                host_view,
+                Some(view_id),
+            )
+        };
 
         Ok(Self {
             handle,
-            endpoint: RefCell::new(endpoint),
-            view_id: Some(view_id),
+            endpoint,
+            content,
+            surface,
+            accepted_nav: Cell::new(0),
+            script_nav: RefCell::new(None),
+            latest_commit: RefCell::new(None),
+            view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
             zoom_level: RefCell::new(1.0),
@@ -250,19 +297,33 @@ impl RustKitView {
                 .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
                 .ok(),
             host_view,
+            closed: Cell::new(false),
         })
+    }
+
+    fn is_open(&self) -> bool {
+        !self.closed.get()
     }
 
     /// Queue `cmd` and apply it on this thread. Events are taken and
     /// dropped: `current_title` and `loading` stay as they were when the
     /// view held the engine and never read its events.
     fn submit(&self, cmd: PageCmd) {
-        if self.view_id.is_none() {
+        if !self.is_open() {
             return;
         }
-        self.handle.send(cmd);
-        self.endpoint.borrow_mut().drain(self.live_runtime.as_ref());
-        let _ = self.handle.drain_events();
+        if let Some(thread) = &self.content {
+            thread.enqueue(cmd);
+            return;
+        }
+        let handle = self.handle.as_ref().expect("inline page handle");
+        handle.send(cmd);
+        self.endpoint
+            .as_ref()
+            .expect("inline page endpoint")
+            .borrow_mut()
+            .drain(self.live_runtime.as_ref());
+        let _ = handle.drain_events();
     }
 
     /// Send a command that answers on a oneshot. The answer is ready when
@@ -291,7 +352,15 @@ impl RustKitView {
     /// ran a page's timers or delivered a fetch, so late content never
     /// showed and a `setTimeout` set by a click never fired (Z lane I0).
     pub fn process_events(&self) -> Option<Duration> {
-        self.view_id?;
+        if !self.is_open() {
+            return None;
+        }
+        if self.content.is_some() {
+            // The content thread pumps itself. This thread only reads what
+            // the page has already published.
+            self.harvest();
+            return None;
+        }
         self.live_runtime.as_ref()?;
         let started = Instant::now();
         // Whole milliseconds only; the remainder stays on the clock for the
@@ -328,6 +397,11 @@ impl RustKitView {
     /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
         rustkit_viewhost::clip_raw_view(self.host_view);
+        if self.content.is_some() {
+            self.harvest();
+            self.present_latest();
+            return;
+        }
         // The live turn lays out a resized view; without a live runtime
         // there is no turn, so the frame does it (`flush_pending_resize`
         // inside [`PageCmd::Render`]).
@@ -392,6 +466,10 @@ impl RustKitView {
 
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
+        if let Some(surface) = &self.surface {
+            surface.borrow().grab_keyboard();
+            return;
+        }
         self.submit(PageCmd::GrabKeyboard);
     }
 
@@ -407,6 +485,20 @@ impl RustKitView {
         shift: bool,
         alt: bool,
     ) -> bool {
+        if self.content.is_some() {
+            // The page scrolls an unhandled key itself. Returning before
+            // the reply arrives tells the window not to scroll as well.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::TextKey {
+                key_code,
+                key: key.to_string(),
+                ctrl,
+                shift,
+                alt,
+                reply,
+            }));
+            return true;
+        }
         self.ask(|reply| {
             PageCmd::Input(PageInput::TextKey {
                 key_code,
@@ -436,6 +528,11 @@ impl RustKitView {
     /// when there is no form, a listener cancelled, or the form is not a
     /// GET.
     pub fn form_submit_url(&self) -> Option<String> {
+        if self.content.is_some() {
+            // Enter is a key. The page submits the focused form and emits
+            // NavigateRequested; this does not wait for that URL.
+            return None;
+        }
         self.ask(|reply| PageCmd::Input(PageInput::FormSubmit { reply }))
             .flatten()
     }
@@ -446,7 +543,14 @@ impl RustKitView {
     /// A reload, `location.replace()` or a meta refresh replaces the
     /// current history entry when it is loaded, as in Chrome.
     pub fn take_script_navigation(&self) -> Option<String> {
-        let (url, replace) = self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
+        if self.content.is_some() {
+            self.harvest();
+            let taken = self.script_nav.borrow_mut().take()?;
+            self.replace_next.set(taken.1);
+            return Some(taken.0);
+        }
+        let (url, replace) =
+            self.ask(|reply| PageCmd::Input(PageInput::TakeNavigation { reply }))??;
         self.replace_next.set(replace);
         Some(url)
     }
@@ -492,6 +596,15 @@ impl RustKitView {
     /// (`mouseup`, `click`), then report the click's default actions: what
     /// it focused and the link to follow unless a listener cancelled it.
     pub fn click_at_point(&self, x: f32, y: f32) -> rustkit_engine::ClickOutcome {
+        if self.content.is_some() {
+            // The link, if the page allows it, arrives as
+            // NavigateRequested and is taken by `take_script_navigation`.
+            // The outcome's navigate is left empty so the caller does not
+            // load the same URL twice.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::Click { x, y, reply }));
+            return rustkit_engine::ClickOutcome::default();
+        }
         self.ask(|reply| PageCmd::Input(PageInput::Click { x, y, reply }))
             .unwrap_or_default()
     }
@@ -520,6 +633,11 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
+        if let Some(thread) = &self.content {
+            let _rx = thread.load_html(html);
+            self.live_clock.set(Instant::now());
+            return Ok(());
+        }
         if self.view_id.is_some() {
             match self.ask(|reply| PageCmd::LoadHtml {
                 html: html.to_string(),
@@ -545,10 +663,20 @@ impl RustKitView {
     /// many sizes a drag delivered since the last one (H9: every size laid
     /// the page out in full before the next was read).
     pub fn set_bounds_internal(&self, bounds: Bounds) -> HiWaveResult<()> {
-        if self.view_id.is_none() {
+        if !self.is_open() {
             return Ok(());
         }
         let scale = *self.zoom_level.borrow();
+        if let Some(thread) = &self.content {
+            if let Some(surface) = &self.surface {
+                surface
+                    .borrow_mut()
+                    .resize(bounds)
+                    .map_err(|e| hiwave_core::HiWaveError::WebView(e.to_string()))?;
+            }
+            thread.resize(bounds, scale);
+            return Ok(());
+        }
         match self.ask(|reply| PageCmd::Resize {
             bounds,
             scale,
@@ -639,20 +767,47 @@ impl RustKitView {
             }
         };
 
+        if let Some(thread) = &self.content {
+            // Signal cancel and the interrupt before the command is queued.
+            let nav_id = thread.navigate(parsed);
+            self.accepted_nav.set(nav_id);
+            *self.loading.borrow_mut() = true;
+            self.live_clock.set(Instant::now());
+            return;
+        }
         // Returns after DOMContentLoaded when an inserted script is still
         // arriving. Live turns (`process_events`) run the chain one script
         // at a time and send PageLoaded at the end. A page with no inserted
-        // script still finishes inside this call. `nav_id` is this handle's
-        // count; the engine still assigns the id its cancel path reads.
-        let nav_id = self.handle.last_sent_nav_id().saturating_add(1);
-        self.submit(PageCmd::Navigate { url: parsed, nav_id });
+        // script still finishes inside this call. `nav_id` 0 lets the engine
+        // allocate the id its cancel path reads.
+        self.submit(PageCmd::Navigate {
+            url: parsed,
+            nav_id: 0,
+        });
         // The new page's clock starts now: the time the load took is not
         // time its timers have waited.
         self.live_clock.set(Instant::now());
     }
 
-    /// Execute JavaScript synchronously.
+    /// Stop the load and any script it is running. On the content thread
+    /// the interrupt is stored before this returns, including while the
+    /// page is not reading commands.
+    pub fn stop(&self) {
+        if let Some(thread) = &self.content {
+            thread.stop();
+            *self.loading.borrow_mut() = false;
+            return;
+        }
+        let _ = self.ask(|reply| PageCmd::Stop { reply });
+    }
+
+    /// Execute JavaScript synchronously on the flag-off path. The content
+    /// thread queues the script and returns `None` without waiting.
     pub fn execute_script_sync(&self, script: &str) -> Option<String> {
+        if self.content.is_some() {
+            let _rx = self.content.as_ref().unwrap().eval(script);
+            return None;
+        }
         match self.ask(|reply| PageCmd::Eval {
             script: script.to_string(),
             reply,
@@ -669,11 +824,94 @@ impl RustKitView {
 
 impl Drop for RustKitView {
     fn drop(&mut self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        if let Some(thread) = &self.content {
+            thread.shutdown();
+            self.view_id = None;
+            return;
+        }
         if self.view_id.is_some() {
-            self.submit(PageCmd::Close);
+            // `submit` refuses a closed view. Close still has to be applied
+            // on this thread, and it must not wait on a content thread.
+            if let Some(handle) = &self.handle {
+                handle.send(PageCmd::Close);
+                if let Some(endpoint) = &self.endpoint {
+                    endpoint.borrow_mut().drain(self.live_runtime.as_ref());
+                }
+            }
             self.view_id = None;
         }
     }
+}
+
+impl RustKitView {
+    fn harvest(&self) {
+        let Some(thread) = &self.content else {
+            return;
+        };
+        let accepted = self.accepted_nav.get();
+        for event in thread.poll() {
+            if stale(accepted, &event) {
+                continue;
+            }
+            match event {
+                PageEvent::Commit(commit) => {
+                    *self.latest_commit.borrow_mut() = Some(commit);
+                }
+                PageEvent::Title { text, .. } => {
+                    *self.current_title.borrow_mut() = Some(text);
+                }
+                PageEvent::Url { url, .. } => {
+                    *self.current_url.borrow_mut() = Some(url.to_string());
+                }
+                PageEvent::LoadState { state, .. } => {
+                    *self.loading.borrow_mut() = matches!(state, LoadState::Started);
+                }
+                PageEvent::NavigateRequested { url, replace, .. } => {
+                    *self.script_nav.borrow_mut() = Some((url, replace));
+                }
+                PageEvent::Focused(_)
+                | PageEvent::Cursor(_)
+                | PageEvent::Unresponsive
+                | PageEvent::Closed => {}
+            }
+        }
+    }
+
+    fn present_latest(&self) {
+        let Some(commit) = self.latest_commit.borrow().clone() else {
+            return;
+        };
+        let Some(thread) = &self.content else {
+            return;
+        };
+        let Some(images) = thread.images() else {
+            return;
+        };
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        if let Err(error) = surface.borrow_mut().present_commit(&commit, &images) {
+            warn!(%error, "content frame was not presented");
+        }
+    }
+}
+
+fn stale(accepted: u64, event: &PageEvent) -> bool {
+    let nav_id = match event {
+        PageEvent::Title { nav_id, .. }
+        | PageEvent::Url { nav_id, .. }
+        | PageEvent::LoadState { nav_id, .. }
+        | PageEvent::NavigateRequested { nav_id, .. } => *nav_id,
+        PageEvent::Commit(commit) => commit.nav_generation,
+        PageEvent::Focused(_)
+        | PageEvent::Cursor(_)
+        | PageEvent::Unresponsive
+        | PageEvent::Closed => 0,
+    };
+    nav_id != 0 && nav_id < accepted
 }
 
 // ============================================================================

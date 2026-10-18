@@ -285,9 +285,15 @@ mod console_log;
 mod relayout_cause;
 mod presenter;
 pub use presenter::FrameCommit;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
     connect, LoadState, PageCmd, PageEndpoint, PageEvent, PageHandle, PageInput,
+};
+mod content_thread;
+pub use content_thread::{
+    content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
 mod wgate;
 pub use wgate::InputMark;
@@ -2152,7 +2158,14 @@ pub struct Engine {
     config: EngineConfig,
     /// The window thread's half: view host, compositor, renderer. The
     /// page side (everything below) hands it frames; see `presenter.rs`.
-    presenter: Presenter,
+    presenter: Option<Presenter>,
+    /// Commits a page engine publishes. A window engine stores them on its presenter.
+    page_commits: HashMap<EngineViewId, FrameCommit>,
+    /// One navigation sequence, shared with the window handle.
+    nav_seq: Arc<AtomicU64>,
+    /// `Some` replaces Boa's host re-entry cap for runtimes this engine creates.
+    /// `None` leaves the default (1024) alone.
+    host_reentry_override: Option<usize>,
     loader: Arc<ResourceLoader>,
     image_manager: Arc<ImageManager>,
     /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
@@ -2340,10 +2353,34 @@ impl Engine {
         config: EngineConfig,
         interceptor: Option<rustkit_net::RequestInterceptor>,
     ) -> Result<Self, EngineError> {
-        info!("Initializing RustKit Engine");
-
-        // The view host, the compositor and the renderer.
         let presenter = Presenter::new(config.background_color)?;
+        Self::assemble(
+            config,
+            interceptor,
+            Some(presenter),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
+    /// A page engine: DOM, script, layout and the network, and no presenter.
+    ///
+    /// Built on the content thread. `nav_seq` is the navigation identity the
+    /// window allocates from. Commits are published for the window to present.
+    pub fn new_page(
+        config: EngineConfig,
+        interceptor: Option<rustkit_net::RequestInterceptor>,
+        nav_seq: Arc<AtomicU64>,
+    ) -> Result<Self, EngineError> {
+        Self::assemble(config, interceptor, None, nav_seq)
+    }
+
+    fn assemble(
+        config: EngineConfig,
+        interceptor: Option<rustkit_net::RequestInterceptor>,
+        presenter: Option<Presenter>,
+        nav_seq: Arc<AtomicU64>,
+    ) -> Result<Self, EngineError> {
+        info!("Initializing RustKit Engine");
 
         // Initialize ResourceLoader
         let loader_config = LoaderConfig {
@@ -2367,6 +2404,9 @@ impl Engine {
         Ok(Self {
             config,
             presenter,
+            page_commits: HashMap::new(),
+            nav_seq,
+            host_reentry_override: None,
             loader,
             image_manager,
             views: HashMap::new(),
@@ -2417,10 +2457,17 @@ impl Engine {
         debug!(?id, ?bounds, "Creating view");
 
         // Create viewhost view (using trait method)
-        let viewhost_id = self.presenter.create_host_view(parent, bounds)?;
+        let viewhost_id = self
+            .presenter
+            .as_mut()
+            .unwrap()
+            .create_host_view(parent, bounds)?;
 
         // Create compositor surface
-        self.presenter.attach_surface(viewhost_id, bounds)?;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .attach_surface(viewhost_id, bounds)?;
 
         // Create navigation state machine
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -2488,7 +2535,10 @@ impl Engine {
         self.views.insert(id, view_state);
 
         // Render initial background
-        self.presenter.clear_to_background(viewhost_id)?;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .clear_to_background(viewhost_id)?;
 
         info!(?id, "View created");
         Ok(id)
@@ -2511,7 +2561,11 @@ impl Engine {
     ) -> Result<EngineViewId, EngineError> {
         // TODO: Implement macOS view creation in Phase 3
         // For now, use trait method which will call the stub implementation
-        let viewhost_id = self.presenter.create_host_view(parent, bounds)?;
+        let viewhost_id = self
+            .presenter
+            .as_mut()
+            .unwrap()
+            .create_host_view(parent, bounds)?;
 
         // Create view state (without compositor surface for now)
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -2579,13 +2633,25 @@ impl Engine {
         self.views.insert(id, view_state);
 
         // Create compositor surface
-        self.presenter.attach_surface(viewhost_id, bounds)?;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .attach_surface(viewhost_id, bounds)?;
 
         // Render initial background
-        self.presenter.clear_to_background(viewhost_id)?;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .clear_to_background(viewhost_id)?;
 
         info!(?id, "View created (macOS)");
         Ok(id)
+    }
+
+    /// A view with no NSView and no GPU surface. The content thread builds
+    /// display lists here; the window thread's presenter draws the commits.
+    pub fn create_page_view(&mut self, bounds: Bounds) -> Result<EngineViewId, EngineError> {
+        self.insert_offscreen_view(bounds)
     }
 
     /// Create a headless view for offscreen rendering (testing/CI mode).
@@ -2594,13 +2660,26 @@ impl Engine {
     /// and CI environments. Available to unit tests and with the "headless" feature.
     #[cfg(any(test, feature = "headless"))]
     pub fn create_headless_view(&mut self, bounds: Bounds) -> Result<EngineViewId, EngineError> {
+        let id = self.insert_offscreen_view(bounds)?;
+        let viewhost_id = self.views[&id].viewhost_id;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .create_headless_texture(viewhost_id, bounds)?;
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .clear_to_background(viewhost_id)?;
+        info!(?id, "Headless view created");
+        Ok(id)
+    }
+
+    /// The page state of an offscreen view. No texture and no host view.
+    fn insert_offscreen_view(&mut self, bounds: Bounds) -> Result<EngineViewId, EngineError> {
         let id = EngineViewId::new();
         let viewhost_id = ViewId::new();
 
-        debug!(?id, ?bounds, "Creating headless view");
-
-        // Create headless texture instead of surface
-        self.presenter.create_headless_texture(viewhost_id, bounds)?;
+        debug!(?id, ?bounds, "Creating offscreen view");
 
         // Create navigation state machine
         let (nav_tx, nav_rx) = mpsc::unbounded_channel();
@@ -2665,11 +2744,6 @@ impl Engine {
         };
 
         self.views.insert(id, view_state);
-
-        // Render initial background to headless texture
-        self.presenter.clear_to_background(viewhost_id)?;
-
-        info!(?id, "Headless view created");
         Ok(id)
     }
 
@@ -2680,9 +2754,11 @@ impl Engine {
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         self.image_manager.forget_view(id.0);
+        self.page_commits.remove(&id);
 
-        // Destroy compositor surface and viewhost view
-        self.presenter.destroy_view(id, view.viewhost_id);
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.destroy_view(id, view.viewhost_id);
+        }
 
         info!(?id, "View destroyed");
         Ok(())
@@ -2713,9 +2789,12 @@ impl Engine {
     /// Platform view pointer for `id` (an `NSView` on macOS). 0 when the
     /// view has none. Reading it does not borrow the page.
     pub fn host_view_raw(&self, id: EngineViewId) -> isize {
+        let Some(presenter) = self.presenter.as_ref() else {
+            return 0;
+        };
         self.views
             .get(&id)
-            .map(|view| self.presenter.raw_view(view.viewhost_id))
+            .map(|view| presenter.raw_view(view.viewhost_id))
             .unwrap_or(0)
     }
 
@@ -2751,7 +2830,9 @@ impl Engine {
 
         debug!(?id, ?bounds, is_headless, "Resizing view");
 
-        self.presenter.apply_bounds(viewhost_id, is_headless, bounds)?;
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.apply_bounds(viewhost_id, is_headless, bounds)?;
+        }
 
         if is_headless {
             // Update headless_bounds in view state
@@ -2850,7 +2931,9 @@ impl Engine {
         if let Some(bounds) = view.headless_bounds {
             return Some(bounds);
         }
-        self.presenter.host_bounds(view.viewhost_id).ok()
+        self.presenter
+            .as_ref()
+            .and_then(|presenter| presenter.host_bounds(view.viewhost_id).ok())
     }
 
     /// The host view's frame, when a load moved it without borrowing the
@@ -5012,7 +5095,11 @@ impl Engine {
         let view = self.views.get(&id)?;
         let bounds = match view.headless_bounds {
             Some(b) => b,
-            None => self.presenter.host_bounds(view.viewhost_id).ok()?,
+            None => self
+                .presenter
+                .as_ref()?
+                .host_bounds(view.viewhost_id)
+                .ok()?,
         };
         Some((bounds.width as f32, bounds.height as f32))
     }
@@ -5104,8 +5191,11 @@ impl Engine {
     /// which element gets the keys; this decides whether the keys arrive at
     /// all. Two systems, both required.
     pub fn grab_keyboard(&self, id: EngineViewId) {
+        let Some(presenter) = self.presenter.as_ref() else {
+            return;
+        };
         if let Some(view) = self.views.get(&id) {
-            self.presenter.grab_keyboard(view.viewhost_id);
+            presenter.grab_keyboard(view.viewhost_id);
         }
     }
 
@@ -5147,7 +5237,7 @@ impl Engine {
 
         debug!(?id, "Focusing view");
 
-        self.presenter.focus(view.viewhost_id)?;
+        self.presenter.as_ref().unwrap().focus(view.viewhost_id)?;
 
         Ok(())
     }
@@ -5158,7 +5248,10 @@ impl Engine {
 
         debug!(?id, visible, "Setting view visibility");
 
-        self.presenter.set_visible(view.viewhost_id, visible)?;
+        self.presenter
+            .as_ref()
+            .unwrap()
+            .set_visible(view.viewhost_id, visible)?;
 
         Ok(())
     }
@@ -6119,7 +6212,7 @@ impl Engine {
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false, false)
+        self.load_url_with_disposition(id, url, false, false, None)
             .await
             .map(|_| ())
     }
@@ -6143,7 +6236,22 @@ impl Engine {
         url: Url,
     ) -> Result<LoadYield, EngineError> {
         let _hold = wgate::hold("load");
-        self.load_url_with_disposition(id, url, false, true).await
+        self.load_url_with_disposition(id, url, false, true, None)
+            .await
+    }
+
+    /// [`Engine::load_url_yielding`] for a navigation id the window already
+    /// allocated. A stale id (a newer one exists, or this one was cancelled)
+    /// loads nothing.
+    pub async fn load_url_yielding_as(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        nav_id: u64,
+    ) -> Result<LoadYield, EngineError> {
+        let _hold = wgate::hold("load");
+        self.load_url_with_disposition(id, url, false, true, Some(nav_id))
+            .await
     }
 
     /// Load a URL, optionally REPLACING the current history entry instead of
@@ -6162,8 +6270,21 @@ impl Engine {
         url: Url,
         replace: bool,
         yield_inserted: bool,
+        preset_nav: Option<u64>,
     ) -> Result<LoadYield, EngineError> {
         let _turn = rustkit_js::DiagTurn::enter("load");
+        if let Some(nav_id) = preset_nav {
+            let newest = self.nav_seq.load(Ordering::Acquire);
+            let current = self.views.get(&id).map(|view| view.nav_id).unwrap_or(0);
+            let cancelled = self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.control.nav_cancelled(nav_id));
+            if nav_id == 0 || newest > nav_id || nav_id < current || cancelled {
+                debug!(?id, nav_id, "Navigation rejected before it started");
+                return Ok(LoadYield::Complete);
+            }
+        }
         let view = self
             .views
             .get_mut(&id)
@@ -6193,8 +6314,16 @@ impl Engine {
 
         // This load's navigation, taken BEFORE the first await. A newer
         // load, Stop, or a cancel from another thread makes it stale, and
-        // a stale load must not touch view state (M3b).
-        let watch = self.begin_nav(id)?;
+        // a stale load must not touch view state (M3b). A preset id the
+        // window has already replaced loads nothing.
+        let watch = match preset_nav {
+            Some(nav_id) => self.begin_nav_as(id, nav_id)?,
+            None => self.begin_nav(id)?,
+        };
+        if preset_nav.is_some() && self.nav_superseded(id, watch.nav_id) {
+            debug!(?id, nav_id = watch.nav_id, "Navigation rejected: stale");
+            return Ok(LoadYield::Complete);
+        }
         rustkit_js::set_diag_nav(watch.nav_id);
         console_log::doc(
             "navigation-start",
@@ -6446,12 +6575,13 @@ impl Engine {
         // Initialize JavaScript if enabled
         let mut script_policy: Option<Arc<FetchPolicy>> = None;
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+            let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
                 max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            self.apply_host_reentry_limit(&mut js_runtime);
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -6819,12 +6949,13 @@ impl Engine {
 
         // Initialize JavaScript if enabled
         if self.config.javascript_enabled {
-            let js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
+            let mut js_runtime = JsRuntime::with_config(rustkit_js::JsRuntimeConfig {
                 max_job_iterations: self.config.script_loop_iteration_limit.min(100_000),
                 timeout: Some(std::time::Duration::from_millis(self.config.script_budget_ms)),
                 ..Default::default()
             })
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            self.apply_host_reentry_limit(&mut js_runtime);
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
@@ -7014,7 +7145,10 @@ impl Engine {
         let bounds = if let Some(headless_bounds) = view.headless_bounds {
             headless_bounds
         } else {
-            self.presenter.host_bounds(view.viewhost_id)?
+            self.presenter
+                .as_mut()
+                .unwrap()
+                .host_bounds(view.viewhost_id)?
         };
 
         debug!(
@@ -12577,13 +12711,30 @@ impl Engine {
     /// load of an earlier one still marked in progress (its future was
     /// dropped), and a new decode epoch.
     fn begin_nav(&mut self, id: EngineViewId) -> Result<NavWatch, EngineError> {
+        let nav_id = self.nav_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        self.begin_nav_as(id, nav_id)
+    }
+
+    /// Install navigation `nav_id` when it is still the newest one on
+    /// [`Engine::nav_seq`]. A stale id does not cancel the navigation that
+    /// replaced it and does not become the view's id.
+    fn begin_nav_as(&mut self, id: EngineViewId, nav_id: u64) -> Result<NavWatch, EngineError> {
         let view = self
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
         let canceller = NavCanceller::new(view.control.clone(), view.nav_signal.clone());
+        let newest = self.nav_seq.load(Ordering::Acquire);
+        // `newest > nav_id` means a later navigation was already allocated.
+        // A preset id that is still the newest, or ahead of the counter,
+        // becomes the view's id and pulls the counter forward.
+        let stale = nav_id == 0 || nav_id < view.nav_id || newest > nav_id;
+        if stale {
+            return Ok(NavWatch { canceller, nav_id });
+        }
+        self.nav_seq.fetch_max(nav_id, Ordering::AcqRel);
         canceller.cancel_nav(view.control.loading_nav());
-        view.nav_id = view.nav_id.wrapping_add(1);
+        view.nav_id = nav_id;
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
         self.image_manager.begin_navigation(id.0, view.decode_epoch);
@@ -12686,7 +12837,8 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false).await?;
+                self.load_url_with_disposition(id, url, true, false, None)
+                    .await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -12701,7 +12853,8 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false).await?;
+                self.load_url_with_disposition(id, url, true, false, None)
+                    .await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -12718,7 +12871,8 @@ impl Engine {
         };
         match target {
             Some(url) => {
-                self.load_url_with_disposition(id, url, true, false).await?;
+                self.load_url_with_disposition(id, url, true, false, None)
+                    .await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -15878,7 +16032,11 @@ impl Engine {
     /// The presenter's newest commit for view `id` (tests and the shell's
     /// diagnostics): its generation and the display list it holds alive.
     pub fn latest_commit(&self, id: EngineViewId) -> Option<&FrameCommit> {
-        self.presenter.latest(id)
+        if let Some(presenter) = self.presenter.as_ref() {
+            presenter.latest(id)
+        } else {
+            self.page_commits.get(&id)
+        }
     }
 
     /// Whether the frame `id` last presented is still the frame a render
@@ -15891,8 +16049,15 @@ impl Engine {
         frame.generation == view.frame_generation
             && frame.scroll_offset == view.scroll_offset
             && view.pending_resize.is_none()
-            && self.presenter.surface_size(view.viewhost_id).ok() == Some(frame.surface)
-            && !frame.missing_images.iter().any(|url| self.image_manager.is_cached(url))
+            && self
+                .presenter
+                .as_ref()
+                .and_then(|presenter| presenter.surface_size(view.viewhost_id).ok())
+                == Some(frame.surface)
+            && !frame
+                .missing_images
+                .iter()
+                .any(|url| self.image_manager.is_cached(url))
             && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
     }
 
@@ -15911,7 +16076,10 @@ impl Engine {
             }
             drawn += 1;
             let result = self.render(id);
-            self.presenter.note_render_result(id, &result);
+            self.presenter
+                .as_mut()
+                .unwrap()
+                .note_render_result(id, &result);
         }
         drawn
     }
@@ -15928,7 +16096,10 @@ impl Engine {
 
         info!(?id, path, "Capturing frame");
 
-        self.presenter.capture_frame(viewhost_id, display_list.as_deref(), path)
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .capture_frame(viewhost_id, display_list.as_deref(), path)
     }
 
     /// Export the layout tree for a view as JSON.
@@ -15956,10 +16127,13 @@ impl Engine {
         let layout_json = layout_box_to_json_under(layout, None, &svg_shapes);
 
         // Get viewport size from compositor
-        let (width, height) = self
-            .presenter
-            .surface_size(view.viewhost_id)
-            .unwrap_or((0, 0));
+        let (width, height) = if let Some(presenter) = self.presenter.as_ref() {
+            presenter.surface_size(view.viewhost_id).unwrap_or((0, 0))
+        } else if let Some(bounds) = view.headless_bounds {
+            (bounds.width, bounds.height)
+        } else {
+            (0, 0)
+        };
 
         let wrapper = layout_export_wrapper(layout_json, width, height);
 
@@ -16326,7 +16500,10 @@ impl Engine {
             })
             .collect();
 
-        let (width, height) = self.presenter.surface_size(view.viewhost_id)
+        let (width, height) = self
+            .presenter
+            .as_ref()
+            .and_then(|presenter| presenter.surface_size(view.viewhost_id).ok())
             .unwrap_or((0, 0));
 
         let wrapper = serde_json::json!({
@@ -16533,14 +16710,17 @@ impl Engine {
     /// Batch sizes and stack depths of the last frame (shell diagnostics /
     /// screenshot harness).
     pub fn get_render_stats(&self) -> RenderStats {
-        self.presenter.render_stats()
+        self.presenter
+            .as_ref()
+            .expect("render stats")
+            .render_stats()
     }
 
     /// The renderer, for tests that read its caches (glyph atlas resets,
     /// uploaded images).
     #[cfg(test)]
     pub(crate) fn renderer_mut(&mut self) -> Option<&mut rustkit_renderer::Renderer> {
-        self.presenter.renderer_mut()
+        self.presenter.as_mut().unwrap().renderer_mut()
     }
 
     /// Render a view's current display list to `output_path` as PNG (plus a
@@ -16558,17 +16738,23 @@ impl Engine {
         let bounds = if let Some(headless_bounds) = view.headless_bounds {
             headless_bounds
         } else {
-            self.presenter.host_bounds(viewhost_id)?
+            self.presenter.as_mut().unwrap().host_bounds(viewhost_id)?
         };
 
-        self.presenter.capture_screenshot(bounds, display_list, output_path)
+        self.presenter
+            .as_mut()
+            .unwrap()
+            .capture_screenshot(bounds, display_list, output_path)
     }
 
     /// Get the native window handle (HWND) for a view.
     #[cfg(windows)]
     pub fn get_view_hwnd(&self, id: EngineViewId) -> Result<HWND, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        self.presenter.hwnd(view.viewhost_id)
+        self.presenter
+            .as_ref()
+            .expect("hwnd")
+            .hwnd(view.viewhost_id)
     }
 
     /// Render a view (internal).
@@ -16586,13 +16772,11 @@ impl Engine {
         // offset). A draw for any other reason (a new surface size, an
         // image that arrived, the one-second refresh) presents the commit
         // the presenter already holds.
-        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let viewhost_id = view.viewhost_id;
-        let is_headless = view.headless_bounds.is_some();
-        let moved = self.presenter.latest(id).map_or(true, |c| {
-            c.generation != view.frame_generation || c.scroll_offset != view.scroll_offset
-        });
-        if moved {
+        let (viewhost_id, is_headless, commit) = {
+            let view = self
+                .views
+                .get_mut(&id)
+                .ok_or(EngineError::ViewNotFound(id))?;
             let commit = FrameCommit {
                 generation: view.frame_generation,
                 nav_generation: view.nav_id,
@@ -16602,13 +16786,41 @@ impl Engine {
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
                 input: view.input_pending.take(),
             };
-            self.presenter.commit(id, commit);
+            (view.viewhost_id, view.headless_bounds.is_some(), commit)
+        };
+        let previous = if self.presenter.is_some() {
+            self.presenter
+                .as_ref()
+                .and_then(|presenter| presenter.latest(id))
+                .map(|previous| (previous.generation, previous.scroll_offset))
+        } else {
+            self.page_commits
+                .get(&id)
+                .map(|previous| (previous.generation, previous.scroll_offset))
+        };
+        let moved = previous.map_or(true, |(generation, scroll)| {
+            generation != commit.generation || scroll != commit.scroll_offset
+        });
+        if !moved {
+            // A draw for any other reason presents the commit already held.
+        } else if self.presenter.is_none() {
+            // The window thread presents. This thread only publishes.
+            self.page_commits.insert(id, commit);
+            return Ok(());
+        } else {
+            self.presenter.as_mut().unwrap().commit(id, commit);
+        }
+        if self.presenter.is_none() {
+            return Ok(());
         }
 
         // The presenter's: upload, execute, present.
-        let presented = self
-            .presenter
-            .present(id, viewhost_id, is_headless, &self.image_manager)?;
+        let presented = self.presenter.as_mut().unwrap().present(
+            id,
+            viewhost_id,
+            is_headless,
+            &self.image_manager,
+        )?;
 
         if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
             view.presented = Some(presented);
@@ -16829,7 +17041,10 @@ impl Engine {
 
     /// Get GPU info.
     pub fn gpu_info(&self) -> String {
-        self.presenter.gpu_info()
+        match self.presenter.as_ref() {
+            Some(presenter) => presenter.gpu_info(),
+            None => "page".to_string(),
+        }
     }
 
     /// Handle a view event from the viewhost.
@@ -17260,6 +17475,35 @@ impl Engine {
         self.image_manager.clone()
     }
 
+    /// The navigation counter this engine allocates from.
+    pub fn nav_sequence(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.nav_seq)
+    }
+
+    /// Replace the host re-entry cap for JavaScript runtimes created after
+    /// this call. The frame limit and the operand-stack limit stay as they
+    /// are. Production leaves this unset.
+    pub fn set_host_reentry_limit(&mut self, limit: usize) {
+        self.host_reentry_override = Some(limit);
+    }
+
+    /// Install `__rk_reenter` on the view's runtime. Tests only call this.
+    pub fn install_reentry_probe(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let bindings = view
+            .bindings
+            .as_ref()
+            .ok_or_else(|| EngineError::JsError("JavaScript not initialized".into()))?;
+        bindings.install_reentry_probe();
+        Ok(())
+    }
+
+    fn apply_host_reentry_limit(&self, runtime: &mut rustkit_js::JsRuntime) {
+        if let Some(limit) = self.host_reentry_override {
+            runtime.set_host_reentry_limit(limit);
+        }
+    }
+
     /// Clear the image cache.
     pub fn clear_image_cache(&self) {
         self.image_manager.clear_cache();
@@ -17396,6 +17640,12 @@ impl EngineBuilder {
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
         Engine::with_interceptor(self.config, self.interceptor)
+    }
+
+    /// Build a page engine on the caller. The content thread calls this on
+    /// itself; the window does not.
+    pub fn build_page(self, nav_seq: Arc<AtomicU64>) -> Result<Engine, EngineError> {
+        Engine::new_page(self.config, self.interceptor, nav_seq)
     }
 }
 
@@ -20559,7 +20809,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21301,7 +21554,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21372,7 +21628,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21460,7 +21719,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -21644,7 +21906,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21738,7 +22003,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21852,7 +22120,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -21930,7 +22201,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -22002,7 +22276,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22089,7 +22366,10 @@ mod tests {
             font_loader: Arc::new(FontLoader::new()),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22190,7 +22470,10 @@ mod tests {
                 config: EngineConfig::default(),
                 views: HashMap::new(),
                 font_loader: Arc::new(FontLoader::new()),
-                presenter: Presenter::layout_only(compositor),
+                presenter: Some(Presenter::layout_only(compositor)),
+                page_commits: HashMap::new(),
+                nav_seq: Arc::new(AtomicU64::new(0)),
+                host_reentry_override: None,
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
                 image_manager: Arc::new(ImageManager::new()),
                 event_tx,
@@ -22293,7 +22576,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22374,7 +22660,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22457,7 +22746,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22540,7 +22832,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22617,7 +22912,10 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -22696,7 +22994,10 @@ mod tests {
             views: HashMap::new(),
             
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
@@ -25234,7 +25535,10 @@ mod web_font_tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            presenter: Presenter::layout_only(compositor),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             image_manager: Arc::new(ImageManager::new()),
             event_tx,

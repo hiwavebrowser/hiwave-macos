@@ -337,6 +337,33 @@ pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
 /// function can capture Rust state freely but can never hold a JS object.
 pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
 
+fn stack_addr() -> usize {
+    let slot = 0u8;
+    &slot as *const u8 as usize
+}
+
+thread_local! {
+    static REENTRY_ORIGIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+static REENTRY_USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn reentry_reset() {
+    REENTRY_ORIGIN.with(|origin| origin.set(stack_addr()));
+    REENTRY_USED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn reentry_note(_depth: usize) {
+    let used = REENTRY_ORIGIN.with(|origin| origin.get().saturating_sub(stack_addr()));
+    REENTRY_USED.fetch_max(used, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Native-stack bytes the re-entry probe has climbed on this process.
+/// Zero until a test installs the probe and runs it.
+pub fn reentry_stack_used() -> usize {
+    REENTRY_USED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Pending timer.
 #[allow(dead_code)]
 struct PendingTimer {
@@ -977,6 +1004,59 @@ impl JsRuntime {
         {
             let _ = handler;
         }
+    }
+
+    /// Set only the host re-entry cap. The frame cap and the operand-stack
+    /// cap are left as they are.
+    pub fn set_host_reentry_limit(&mut self, limit: usize) {
+        #[cfg(feature = "boa")]
+        {
+            self.context
+                .runtime_limits_mut()
+                .set_host_recursion_limit(limit);
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = limit;
+        }
+    }
+
+    /// A native `__rk_reenter(n)` that calls the page function `__rk_step(n)`.
+    /// Tests use it to climb the native stack. A page does not get this
+    /// function unless a test installs it.
+    #[cfg(feature = "boa")]
+    pub fn install_reentry_probe(&mut self) {
+        use boa_engine::{
+            js_string, Context, JsNativeError, JsObject, JsResult, JsValue as BoaValue,
+            NativeFunction,
+        };
+        reentry_reset();
+        let native = NativeFunction::from_copy_closure(
+            |_this, args, context: &mut Context| -> JsResult<BoaValue> {
+                let n = args
+                    .first()
+                    .and_then(|value| value.as_number())
+                    .unwrap_or(0.0);
+                reentry_note(n as usize);
+                let step = context
+                    .global_object()
+                    .get(js_string!("__rk_step"), context)?;
+                let function = step.as_object().ok_or_else(|| {
+                    boa_engine::JsError::from_native(
+                        JsNativeError::typ().with_message("no __rk_step"),
+                    )
+                })?;
+                JsObject::call(
+                    &function,
+                    &BoaValue::undefined(),
+                    &[BoaValue::from(n)],
+                    context,
+                )
+            },
+        );
+        self.context
+            .register_global_callable(js_string!("__rk_reenter"), 1, native)
+            .expect("reentry probe");
     }
 
     /// Define a global function `name` that calls `function`.

@@ -312,7 +312,7 @@ Until the step that adds this (M9b, section 6), wheel input goes to the page thr
 
 **Cost.**
 
-- **Memory.** One OS thread per live tab. Boa needs deep native stacks: `docs/BOA_UPGRADE_PARKED_2026-10-03.md:30-32` records the 16 MB Windows main-thread stack against the recursion limit. So each page thread is spawned with an explicit 16–32 MB stack, which is virtual reservation, not committed memory.
+- **Memory.** One OS thread per live tab at M6. Boa needs deep native stacks: `docs/BOA_UPGRADE_PARKED_2026-10-03.md:30-32` records the 16 MB Windows main-thread stack against the recursion limit. M4's one shared content thread requests 64 MiB (`HIWAVE_CONTENT_STACK_MB`, clamped to 8..=512). A 4,000-frame host re-entry on that stack used 25.9 MiB in a debug build and 4.4 MiB in release. The host cap stays 1,024, separate from the frame cap (8,192) and the operand-stack cap (65,536 slots): 1,024 debug frames are already about 6.6 MiB, and the same cap binds the flag-off page on the window thread. The reservation is virtual, not committed memory.
 - **Retained tabs.** Keeping each tab's DOM alive instead of reloading on switch is the real memory cost: tens to hundreds of MB per heavy page. It is bounded by discarding background tabs (Tab Decay) — open question 3.
 - **GPU.** One wgpu device in total, instead of one per `Engine` as today.
 - **Latency.** Input costs one channel hop plus one wake (sub-millisecond). A frame is drawn on the next window-thread turn after the commit, at most one turn later than today.

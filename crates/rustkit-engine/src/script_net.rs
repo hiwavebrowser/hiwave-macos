@@ -568,7 +568,7 @@ pub(crate) fn set_live_wake(wake: Arc<dyn Fn() + Send + Sync>) {
     *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
 }
 
-fn poke_live_turn() {
+pub(crate) fn poke_live_turn() {
     let Some(slot) = LIVE_WAKE.get() else {
         return;
     };

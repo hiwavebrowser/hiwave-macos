@@ -85,6 +85,15 @@ pub enum PageCmd {
     },
     GrabKeyboard,
     Relayout,
+    /// Test hook: the next JavaScript runtime uses this host re-entry cap.
+    /// The frame cap and the operand-stack cap are not changed.
+    SetHostReentry {
+        limit: usize,
+    },
+    /// Test hook: install `__rk_reenter` on the current runtime.
+    InstallReentryProbe {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Input and the synchronous questions the window still asks.
@@ -143,13 +152,30 @@ pub enum PageInput {
 }
 
 /// What the page tells the window.
+///
+/// `nav_id` is the navigation the page was on when it emitted the event.
+/// The window drops one whose id is older than the navigation it has since
+/// asked for.
 #[derive(Debug, Clone)]
 pub enum PageEvent {
     Commit(FrameCommit),
-    Title(String),
-    Url(Url),
-    LoadState(LoadState),
-    NavigateRequested { url: String, replace: bool },
+    Title {
+        text: String,
+        nav_id: u64,
+    },
+    Url {
+        url: Url,
+        nav_id: u64,
+    },
+    LoadState {
+        state: LoadState,
+        nav_id: u64,
+    },
+    NavigateRequested {
+        url: String,
+        replace: bool,
+        nav_id: u64,
+    },
     Focused(bool),
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
@@ -180,15 +206,41 @@ pub struct PageEndpoint {
     engine: Engine,
     engine_events: Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
     view: EngineViewId,
-    /// Generation of the last [`PageEvent::Commit`] sent. `None` until the
-    /// first one, so a frame whose generation is still 0 is not dropped.
-    last_commit: Option<u64>,
+    /// Generation and scroll of the last [`PageEvent::Commit`] sent.
+    /// Scroll-only updates keep the generation and must still be delivered.
+    last_commit: Option<(u64, (f32, f32))>,
     /// `SetVisible`, recorded for the content thread. Nothing reads it yet.
     #[allow(dead_code)]
     visible: bool,
+    /// The content thread settles an unhandled key as a scroll, because the
+    /// window does not wait to find out whether the page consumed it.
+    settle_keys: bool,
+    /// Post the window's live wake when an event is published. The
+    /// same-thread drain does not: it is already on the window thread.
+    wake_window: bool,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
+pub(crate) fn adopt(
+    mut engine: Engine,
+    view: EngineViewId,
+    rx: Receiver<PageCmd>,
+    events: Sender<PageEvent>,
+) -> PageEndpoint {
+    let engine_events = engine.take_event_receiver();
+    PageEndpoint {
+        rx,
+        events,
+        engine,
+        engine_events,
+        view,
+        last_commit: None,
+        visible: true,
+        settle_keys: false,
+        wake_window: false,
+    }
+}
+
 pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpoint) {
     let engine_events = engine.take_event_receiver();
     let control = engine
@@ -213,6 +265,8 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         view,
         last_commit: None,
         visible: true,
+        settle_keys: false,
+        wake_window: false,
     };
     (handle, endpoint)
 }
@@ -272,8 +326,8 @@ impl PageEndpoint {
 
     fn apply(&mut self, cmd: PageCmd, live: Option<&tokio::runtime::Runtime>) {
         match cmd {
-            PageCmd::Navigate { url, .. } => {
-                self.load_url(url);
+            PageCmd::Navigate { url, nav_id } => {
+                self.load_url(url, nav_id);
             }
             PageCmd::LoadHtml { html, reply } => {
                 let result = self
@@ -285,12 +339,20 @@ impl PageEndpoint {
             }
             PageCmd::Stop { reply } => {
                 let stopped = self.engine.stop(self.view);
+                // `stop_all` left ALL in the word so the script that was
+                // running could unwind. That script has returned by the time
+                // this command runs. Lift ALL so the next script on this
+                // document can run; a turn id left in the word names a turn
+                // that has already ended.
+                if let Some(control) = self.engine.view_control(self.view) {
+                    control.clear_all();
+                }
                 let _ = reply.send(stopped);
             }
             PageCmd::Reload { reply, .. } => {
                 let result = match self.engine.get_url(self.view) {
                     Some(url) => {
-                        self.load_url(url);
+                        self.load_url(url, 0);
                         Ok(())
                     }
                     None => Err("No URL to reload".to_string()),
@@ -353,15 +415,55 @@ impl PageEndpoint {
                 }
                 self.publish_commit();
             }
+            PageCmd::SetHostReentry { limit } => {
+                self.engine.set_host_reentry_limit(limit);
+            }
+            PageCmd::InstallReentryProbe { reply } => {
+                let result = self
+                    .engine
+                    .install_reentry_probe(self.view)
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
         }
     }
 
     fn apply_input(&mut self, input: PageInput) {
         let view = self.view;
         match input {
-            PageInput::TextKey { key_code, key, ctrl, shift, alt, reply } => {
-                let consumed = self.engine.handle_text_key(view, key_code, &key, ctrl, shift, alt);
-                let _ = reply.send(consumed);
+            PageInput::TextKey {
+                key_code,
+                key,
+                ctrl,
+                shift,
+                alt,
+                reply,
+            } => {
+                let submitted = if key_code == 0x0D {
+                    self.engine.submit_focused_form(view)
+                } else {
+                    None
+                };
+                if let Some(url) = submitted {
+                    let nav_id = self.engine.nav_id(view).unwrap_or(0);
+                    self.emit(PageEvent::NavigateRequested {
+                        url,
+                        replace: false,
+                        nav_id,
+                    });
+                    let _ = reply.send(true);
+                } else {
+                    let focused_before = self.engine.focused_node(view);
+                    let consumed = self
+                        .engine
+                        .handle_text_key(view, key_code, &key, ctrl, shift, alt);
+                    if self.settle_keys && !consumed && focused_before.is_none() {
+                        if let Some(dy) = scroll_dy_for_unhandled_key(key_code, &key) {
+                            let _ = self.engine.scroll_view(view, 0.0, dy);
+                        }
+                    }
+                    let _ = reply.send(consumed || self.settle_keys);
+                }
             }
             PageInput::KeyUp { key_code, key, ctrl, shift, alt } => {
                 self.engine.handle_key_up(view, key_code, &key, ctrl, shift, alt);
@@ -373,6 +475,14 @@ impl PageEndpoint {
             PageInput::MouseLeave => self.engine.mouse_leave(view),
             PageInput::Click { x, y, reply } => {
                 let outcome = self.engine.click_at_point(view, x, y);
+                if let Some(url) = outcome.navigate.clone() {
+                    let nav_id = self.engine.nav_id(view).unwrap_or(0);
+                    self.emit(PageEvent::NavigateRequested {
+                        url,
+                        replace: false,
+                        nav_id,
+                    });
+                }
                 let _ = reply.send(outcome);
             }
             PageInput::FocusAt { x, y, reply } => {
@@ -397,12 +507,25 @@ impl PageEndpoint {
             }
             PageInput::FormSubmit { reply } => {
                 let url = self.engine.submit_focused_form(view);
+                if let Some(url) = url.clone() {
+                    let nav_id = self.engine.nav_id(view).unwrap_or(0);
+                    self.emit(PageEvent::NavigateRequested {
+                        url,
+                        replace: false,
+                        nav_id,
+                    });
+                }
                 let _ = reply.send(url);
             }
             PageInput::TakeNavigation { reply } => {
                 let taken = self.engine.take_script_navigation_with_replace(view);
                 if let Some((url, replace)) = taken.clone() {
-                    self.emit(PageEvent::NavigateRequested { url, replace });
+                    let nav_id = self.engine.nav_id(view).unwrap_or(0);
+                    self.emit(PageEvent::NavigateRequested {
+                        url,
+                        replace,
+                        nav_id,
+                    });
                 }
                 let _ = reply.send(taken);
             }
@@ -415,23 +538,62 @@ impl PageEndpoint {
         self.publish_commit();
     }
 
-    fn load_url(&mut self, url: Url) {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    fn load_url(&mut self, url: Url, nav_id: u64) {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to create runtime");
                 return;
             }
         };
-        rt.block_on(async {
-            // Yield after DOMContentLoaded while inserted scripts are still
-            // arriving. A page with none finishes inside this call, as
-            // `load_url` did. Later live turns run the tail.
-            if let Err(e) = self.engine.load_url_yielding(self.view, url).await {
-                tracing::error!(error = %e, "Failed to load URL");
+        rt.block_on(self.load_yielding(url, nav_id));
+        self.after_page_change();
+    }
+
+    /// Yield after DOMContentLoaded while inserted scripts are still
+    /// arriving. A page with none finishes inside this call. `nav_id` 0
+    /// lets the engine allocate; any other id is the window's.
+    ///
+    /// Events the load emits while a fetch is outstanding are forwarded
+    /// every couple of milliseconds. The load future borrows only the
+    /// engine, so the event channel can be read while it is pending.
+    async fn load_yielding(&mut self, url: Url, nav_id: u64) {
+        let view = self.view;
+        let engine = &mut self.engine;
+        let engine_events = &mut self.engine_events;
+        let tx = &self.events;
+        let wake = self.wake_window;
+        let mut load = Box::pin(async move {
+            if nav_id == 0 {
+                engine.load_url_yielding(view, url).await
+            } else {
+                engine.load_url_yielding_as(view, url, nav_id).await
             }
         });
-        self.after_page_change();
+        loop {
+            // Polled on the runtime's waker via the sleep below: a fetch
+            // that completes during the sleep is observed on the next poll.
+            let polled = std::future::Future::poll(
+                load.as_mut(),
+                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
+            );
+            match polled {
+                std::task::Poll::Ready(result) => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "Failed to load URL");
+                    }
+                    forward_events(engine_events, tx, nav_id, wake);
+                    return;
+                }
+                std::task::Poll::Pending => {
+                    forward_events(engine_events, tx, nav_id, wake);
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }
+        }
     }
 
     fn after_page_change(&mut self) {
@@ -440,70 +602,242 @@ impl PageEndpoint {
     }
 
     fn translate_engine_events(&mut self) {
-        let raw = {
-            let Some(rx) = self.engine_events.as_mut() else {
-                return;
-            };
-            let mut raw = Vec::new();
-            while let Ok(event) = rx.try_recv() {
-                raw.push(event);
-            }
-            raw
-        };
-        let mut pending = Vec::new();
-        for event in raw {
-            let mapped = match event {
-                EngineEvent::NavigationStarted { url, .. } => {
-                    Some(PageEvent::LoadState(LoadState::Started))
-                        .into_iter()
-                        .chain(Some(PageEvent::Url(url)))
-                        .collect::<Vec<_>>()
-                }
-                EngineEvent::NavigationCommitted { url, .. } => vec![PageEvent::Url(url)],
-                EngineEvent::PageLoaded { url, title, .. } => {
-                    let mut out = Vec::new();
-                    if let Some(title) = title {
-                        out.push(PageEvent::Title(title));
-                    }
-                    out.push(PageEvent::Url(url));
-                    out.push(PageEvent::LoadState(LoadState::Complete));
-                    out
-                }
-                EngineEvent::NavigationFailed { url, error, .. } => {
-                    vec![
-                        PageEvent::Url(url),
-                        PageEvent::LoadState(LoadState::Failed { error }),
-                    ]
-                }
-                EngineEvent::TitleChanged { title, .. } => vec![PageEvent::Title(title)],
-                EngineEvent::ViewFocused { .. } => vec![PageEvent::Focused(true)],
-                EngineEvent::ConsoleMessage { .. }
-                | EngineEvent::ViewResized { .. }
-                | EngineEvent::DownloadStarted { .. }
-                | EngineEvent::ImageLoaded { .. }
-                | EngineEvent::ImageError { .. }
-                | EngineEvent::FaviconDetected { .. } => Vec::new(),
-            };
-            pending.extend(mapped);
-        }
-        for event in pending {
-            self.emit(event);
-        }
+        let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        forward_events(
+            &mut self.engine_events,
+            &self.events,
+            nav_id,
+            self.wake_window,
+        );
     }
 
     fn publish_commit(&mut self) {
         let Some(commit) = self.engine.latest_commit(self.view).cloned() else {
             return;
         };
-        if self.last_commit == Some(commit.generation) {
+        if self.last_commit.is_some_and(|(generation, scroll)| {
+            generation == commit.generation && scroll == commit.scroll_offset
+        }) {
             return;
         }
-        self.last_commit = Some(commit.generation);
+        self.last_commit = Some((commit.generation, commit.scroll_offset));
         self.emit(PageEvent::Commit(commit));
     }
 
     fn emit(&self, event: PageEvent) {
         let _ = self.events.send(event);
+        if self.wake_window {
+            crate::script_net::poke_live_turn();
+        }
+    }
+
+    pub(crate) fn set_settle_keys(&mut self, settle: bool) {
+        self.settle_keys = settle;
+    }
+
+    pub(crate) fn set_wake_window(&mut self, wake: bool) {
+        self.wake_window = wake;
+    }
+
+    /// Commands waiting on the channel, with adjacent resizes, renders and
+    /// live turns collapsed. Clicks and keys keep their order.
+    pub(crate) fn drain_coalesced(&self) -> Vec<PageCmd> {
+        let mut batch = Vec::new();
+        for _ in 0..64 {
+            match self.rx.try_recv() {
+                Ok(cmd) => batch.push(cmd),
+                Err(_) => break,
+            }
+        }
+        coalesce(batch)
+    }
+
+    /// The content thread's loop. One current-thread runtime, already
+    /// entered by the caller: timers and fetches progress on every idle wait.
+    pub(crate) async fn run(mut self) {
+        let mut clock = tokio::time::Instant::now();
+        loop {
+            let cmds = self.drain_coalesced();
+            if cmds.is_empty() {
+                let elapsed = clock.elapsed().as_millis() as u64;
+                clock = tokio::time::Instant::now();
+                let turn = self.engine.pump_live(self.view, elapsed).await;
+                self.after_page_change();
+                let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            for cmd in cmds {
+                let close = matches!(cmd, PageCmd::Close);
+                self.apply_async(cmd).await;
+                if close {
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn apply_async(&mut self, cmd: PageCmd) {
+        match cmd {
+            PageCmd::Navigate { url, nav_id } => {
+                self.load_yielding(url, nav_id).await;
+                self.after_page_change();
+            }
+            PageCmd::Reload { reply, nav_id } => {
+                let result = match self.engine.get_url(self.view) {
+                    Some(url) => {
+                        self.load_yielding(url, nav_id).await;
+                        Ok(())
+                    }
+                    None => Err("No URL to reload".to_string()),
+                };
+                let _ = reply.send(result);
+                self.after_page_change();
+            }
+            PageCmd::PumpLive { elapsed_ms, reply } => {
+                let turn = self.engine.pump_live(self.view, elapsed_ms).await;
+                let _ = reply.send(turn);
+                self.after_page_change();
+            }
+            PageCmd::LoadHtml { html, reply } => {
+                let result = self
+                    .engine
+                    .load_html(self.view, &html)
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+                self.after_page_change();
+            }
+            other => self.apply(other, None),
+        }
+    }
+}
+
+fn forward_events(
+    engine_events: &mut Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
+    tx: &Sender<PageEvent>,
+    nav_id: u64,
+    wake: bool,
+) {
+    let Some(rx) = engine_events.as_mut() else {
+        return;
+    };
+    let mut pending = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        let mapped = match event {
+            EngineEvent::NavigationStarted { url, .. } => vec![
+                PageEvent::LoadState {
+                    state: LoadState::Started,
+                    nav_id,
+                },
+                PageEvent::Url { url, nav_id },
+            ],
+            EngineEvent::NavigationCommitted { url, .. } => {
+                vec![PageEvent::Url { url, nav_id }]
+            }
+            EngineEvent::PageLoaded { url, title, .. } => {
+                let mut out = Vec::new();
+                if let Some(text) = title {
+                    out.push(PageEvent::Title { text, nav_id });
+                }
+                out.push(PageEvent::Url { url, nav_id });
+                out.push(PageEvent::LoadState {
+                    state: LoadState::Complete,
+                    nav_id,
+                });
+                out
+            }
+            EngineEvent::NavigationFailed { url, error, .. } => vec![
+                PageEvent::Url { url, nav_id },
+                PageEvent::LoadState {
+                    state: LoadState::Failed { error },
+                    nav_id,
+                },
+            ],
+            EngineEvent::TitleChanged { title, .. } => {
+                vec![PageEvent::Title {
+                    text: title,
+                    nav_id,
+                }]
+            }
+            EngineEvent::ViewFocused { .. } => vec![PageEvent::Focused(true)],
+            EngineEvent::ConsoleMessage { .. }
+            | EngineEvent::ViewResized { .. }
+            | EngineEvent::DownloadStarted { .. }
+            | EngineEvent::ImageLoaded { .. }
+            | EngineEvent::ImageError { .. }
+            | EngineEvent::FaviconDetected { .. } => Vec::new(),
+        };
+        pending.extend(mapped);
+    }
+    if pending.is_empty() {
+        return;
+    }
+    for event in pending {
+        let _ = tx.send(event);
+    }
+    if wake {
+        crate::script_net::poke_live_turn();
+    }
+}
+
+/// Collapse adjacent resizes, renders and live turns. Anything else,
+/// including clicks and keys, stays where it was.
+pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
+    let mut out = Vec::new();
+    for cmd in batch {
+        match cmd {
+            PageCmd::Resize {
+                bounds,
+                scale,
+                reply,
+            } => {
+                if matches!(out.last(), Some(PageCmd::Resize { .. })) {
+                    if let Some(PageCmd::Resize {
+                        reply: previous, ..
+                    }) = out.pop()
+                    {
+                        let _ = previous.send(Ok(()));
+                    }
+                }
+                out.push(PageCmd::Resize {
+                    bounds,
+                    scale,
+                    reply,
+                });
+            }
+            PageCmd::Render { every } => {
+                if let Some(PageCmd::Render { every: previous }) = out.last_mut() {
+                    *previous = *previous || every;
+                } else {
+                    out.push(PageCmd::Render { every });
+                }
+            }
+            PageCmd::PumpLive { elapsed_ms, reply } => {
+                if matches!(out.last(), Some(PageCmd::PumpLive { .. })) {
+                    if let Some(PageCmd::PumpLive {
+                        reply: previous, ..
+                    }) = out.pop()
+                    {
+                        let _ = previous.send(crate::LivePump::default());
+                    }
+                }
+                out.push(PageCmd::PumpLive { elapsed_ms, reply });
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {
+    match (key_code, key) {
+        (0x28, _) => Some(-40.0),
+        (0x26, _) => Some(40.0),
+        (0x22, _) | (0, " ") => Some(-600.0),
+        (0x21, _) => Some(600.0),
+        (0x23, _) => Some(-f32::MAX),
+        (0x24, _) => Some(f32::MAX),
+        _ => None,
     }
 }
 

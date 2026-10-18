@@ -2742,12 +2742,15 @@ fn main() {
                     }
                     UserEvent::Stop => {
                         info!("Stopping load");
-                        #[cfg(target_os = "macos")]
-                        {
-                            // TODO: Implement stop in RustKit
+                        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                        if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
+                            // Signals the interrupt before the page drains
+                            // the command, including while a script is running.
+                            view.stop();
+                        } else {
                             let _ = content_for_events.evaluate_script("window.stop();");
                         }
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
                         {
                             let _ = content_for_events.evaluate_script("window.stop();");
                         }
