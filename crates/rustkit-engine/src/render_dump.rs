@@ -1,7 +1,9 @@
 //! `HIWAVE_DUMP_RENDER=<path>` writes a capped picture of `main#main-content`
 //! after the large feed insertion, and again when the load is quiet.
-//! `HIWAVE_DUMP_RENDER_AT_MS` also writes one snapshot that many milliseconds
-//! after navigation start.
+//! `HIWAVE_DUMP_RENDER_AT_MS` also writes one snapshot once that many
+//! milliseconds have passed since navigation start. A frozen page does not
+//! lay out on the live clock, so the snapshot is the latest one, stamped
+//! when the clock passes, not when the next layout happens to commit.
 //!
 //! The file is `{ "dumps": [ ... ] }`. The same object is copied onto the
 //! page trace as `render` (the latest dump) so `diff_trace.py` can compare
@@ -240,6 +242,36 @@ pub(crate) fn after_commit(document: &Document, layout: &LayoutBox, paint: Optio
         }
     }
     page_trace::poll_settle();
+}
+
+/// Stamp the at-ms dump from the latest layout once trace time has reached
+/// `HIWAVE_DUMP_RENDER_AT_MS`. Called from the live turn, which runs even
+/// when the page is not laying out. A later layout does not write a second
+/// at-ms dump, and it does not move this stamp.
+pub(crate) fn poll_at_ms() {
+    if !enabled() {
+        return;
+    }
+    let Some(at_ms) = dump_at_ms() else {
+        return;
+    };
+    let t_ms = elapsed_ms();
+    let due = STATE.with(|slot| {
+        let state = slot.borrow();
+        !state.at_dumped && state.latest.is_some() && t_ms >= at_ms
+    });
+    if !due {
+        return;
+    }
+    let Some(mut snapshot) = STATE.with(|slot| slot.borrow().latest.clone()) else {
+        return;
+    };
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("t_ms".into(), json!(t_ms));
+        object.insert("when".into(), json!("at-ms"));
+    }
+    push_dump(snapshot);
+    STATE.with(|slot| slot.borrow_mut().at_dumped = true);
 }
 
 pub(crate) fn write_quiet_if_due() {
@@ -724,4 +756,70 @@ fn css_overflow_one(overflow: rustkit_css::Overflow) -> &'static str {
 
 fn round_px(value: f32) -> f64 {
     (value as f64 * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustkit_css::ComputedStyle;
+    use rustkit_dom::Document;
+    use rustkit_layout::{BoxType, LayoutBox};
+
+    #[test]
+    fn an_at_ms_dump_is_stamped_when_the_clock_passes() {
+        let path = std::env::temp_dir().join(format!(
+            "hiwave-at-ms-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _force = force_for_test(&path);
+        FORCE_AT.with(|slot| *slot.borrow_mut() = Some(Some(40)));
+        let document = Document::parse_html("<main id=\"main-content\"></main>").unwrap();
+        let layout = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        after_commit(&document, &layout, None);
+        let early = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !early.contains("\"when\": \"at-ms\""),
+            "a layout before the mark must not stamp at-ms: {early}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        poll_at_ms();
+        let body = std::fs::read_to_string(&path).expect("at-ms dump");
+        let dump: Value = serde_json::from_str(&body).unwrap();
+        let at = dump["dumps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["when"] == "at-ms")
+            .expect("at-ms");
+        let t_ms = at["t_ms"].as_u64().unwrap();
+        assert!(
+            (40..2_000).contains(&t_ms),
+            "stamped with the live clock, not a later layout: {t_ms}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        after_commit(&document, &layout, None);
+        let again: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stamps = again["dumps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["when"] == "at-ms")
+            .count();
+        assert_eq!(stamps, 1);
+        assert_eq!(
+            again["dumps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["when"] == "at-ms")
+                .unwrap()["t_ms"]
+                .as_u64(),
+            Some(t_ms)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

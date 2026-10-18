@@ -3420,6 +3420,10 @@ impl Engine {
             Ok(resized) => out.relaid_out = resized,
             Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
         }
+        // A frozen page does not lay out on this clock. Stamp the at-ms
+        // render dump from the latest snapshot when the trace clock passes
+        // the mark, instead of waiting for a later commit.
+        render_dump::poll_at_ms();
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
