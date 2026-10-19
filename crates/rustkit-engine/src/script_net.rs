@@ -261,12 +261,7 @@ async fn execute(
     let guard = inspector
         .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
         .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(
-        deadline,
-        super::await_with_chrome_ui(policy.execute(loader, script_request)),
-    )
-    .await
-    {
+    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -419,11 +414,7 @@ pub(crate) async fn pump_modules(
             }
             let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
             let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-            let fetched = tokio::time::timeout_at(
-                deadline,
-                super::await_with_chrome_ui(policy.fetch_module(loader, &parsed, document)),
-            )
-            .await;
+            let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
             inspector::answer_module(guard, &fetched);
             match fetched {
                 Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
@@ -541,10 +532,10 @@ pub(crate) async fn pump_inserted_scripts(
                 .begin_request(&url, "GET", ResourceType::Script, Some("script"))
                 .map(|g| g.timeout_at(deadline, "timed out"));
             let fetch = async {
-                match super::await_with_chrome_ui(loader.fetch(referrer.get_for(url, RequestDestination::Script))).await {
+                match loader.fetch(referrer.get_for(url, RequestDestination::Script)).await {
                     Ok(response) if response.ok() => {
                         let received = guard.map(|g| g.received(&response));
-                        match super::await_with_chrome_ui(response.text()).await {
+                        match response.text().await {
                             Ok(text) => {
                                 if let Some(received) = received {
                                     received.read(text.len());
