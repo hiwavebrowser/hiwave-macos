@@ -135,7 +135,10 @@ fn an_interrupt_set_between_turns_does_not_kill_the_next_turn() {
         !stopped,
         "a word naming an ended turn is not this turn's stop (took {took:?}, watchdog stops {watchdog_stops})"
     );
-    assert_eq!(watchdog_stops, 0, "the watchdog stopped a turn (took {took:?})");
+    assert_eq!(
+        watchdog_stops, 0,
+        "the watchdog stopped a turn (took {took:?})"
+    );
 }
 
 #[test]
