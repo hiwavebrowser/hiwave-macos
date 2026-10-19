@@ -212,3 +212,60 @@ document.getElementById('p').addEventListener('click', function () { console.log
         "{lines:#?}"
     );
 }
+
+/// The CNN shape (#720 R1, Handtest's freeze): a page script spends the
+/// load budget, and then a `load` listener and a timer due during the load
+/// each spin, in loops short enough that the loop-iteration limit never
+/// ends them. A spent budget stops JavaScript; it never takes the watchdog
+/// away. Each of the two is stopped as `OverBudget` within the stop grace
+/// plus a tick, the load returns, and the page still answers.
+#[test]
+fn a_spin_after_the_load_budget_is_spent_is_still_stopped() {
+    let page = "<html><body><p id=p>alive</p><script>
+function spin(name, ms) {
+  window[name] = Date.now();
+  // Nested, each loop well under the iteration limit; the outer one gives
+  // up after `ms` so a build with no watchdog fails the test, not hangs it.
+  var t0 = Date.now();
+  while (Date.now() - t0 < ms) { for (var i = 0; i < 100000; i++) {} }
+  window[name + 'Done'] = true;
+}
+window.addEventListener('load', function () { spin('loadRan', 4000); });
+setTimeout(function () { spin('timerRan', 4000); }, 0);
+[1].forEach(function () { for (;;) {} });
+</script></body></html>";
+    let config = EngineConfig {
+        script_budget_ms: BUDGET_MS,
+        ..config()
+    };
+    let (mut engine, view, took) = load_timed(config, page);
+    let log = engine.script_log(view).unwrap();
+    assert_eq!(
+        over_budget(&engine, view),
+        ["inline#1", "event:load", "timers"],
+        "{log:#?}"
+    );
+    // The budget, then the stop grace plus one watchdog tick for each of
+    // the two spins, plus the load itself; a spin that ran to its own 4 s
+    // limit means it was never stopped.
+    assert!(
+        took < std::time::Duration::from_millis(BUDGET_MS + 2 * SLACK_MS + 2_000),
+        "the load took {took:?}\n{log:#?}"
+    );
+    assert_eq!(
+        engine
+            .execute_script(
+                view,
+                "typeof window.loadRan === 'number' && window.loadRanDone === undefined \
+                 && typeof window.timerRan === 'number' && window.timerRanDone === undefined"
+            )
+            .unwrap(),
+        "Boolean(true)"
+    );
+    // The page is still alive after the load: the next turn runs script.
+    runtime().block_on(engine.pump_live(view, 1_000));
+    assert_eq!(
+        engine.execute_script(view, "document.getElementById('p').textContent").unwrap(),
+        "String(\"alive\")"
+    );
+}
