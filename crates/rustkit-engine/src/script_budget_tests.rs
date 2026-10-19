@@ -429,3 +429,67 @@ document.createElement('burn');"#
         "the later bundle should resume the async function and its reaction\n{got}\n{log}"
     );
 }
+
+/// The chrome UI is another turn on the thread that is loading the page.
+/// A slow content fetch must still run it, and must not charge it to the
+/// content script budget or leave the content watchdog armed.
+#[test]
+fn the_chrome_ui_turn_runs_during_a_slow_content_load() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let clear = Arc::new(AtomicUsize::new(0));
+    let suspended = Arc::new(AtomicUsize::new(0));
+    let (hits_h, clear_h, suspended_h) = (hits.clone(), clear.clone(), suspended.clone());
+    set_chrome_ui_turn(Some(Box::new(move || {
+        hits_h.fetch_add(1, Ordering::SeqCst);
+        if chrome_ui_turn_is_clear() {
+            clear_h.fetch_add(1, Ordering::SeqCst);
+        }
+        if chrome_ui_turn_suspended_content_budget() {
+            suspended_h.fetch_add(1, Ordering::SeqCst);
+        }
+    })));
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            set_chrome_ui_turn(None);
+        }
+    }
+    let _clear = ClearHook;
+    let server = serve(vec![
+        (
+            "/",
+            Duration::ZERO,
+            "text/html",
+            r#"<html><body><script>
+fetch('/slow').then(function () { window.fetched = true; });
+</script></body></html>"#
+                .into(),
+        ),
+        (
+            "/slow",
+            Duration::from_millis(180),
+            "text/plain",
+            "ok".into(),
+        ),
+    ]);
+    let (mut engine, view) = load(config(1_000), &server);
+    assert!(
+        hits.load(Ordering::SeqCst) > 0,
+        "the chrome turn never ran while the content fetch was in flight"
+    );
+    assert_eq!(
+        clear.load(Ordering::SeqCst),
+        hits.load(Ordering::SeqCst),
+        "a chrome turn ran inside the content budget or watchdog turn"
+    );
+    assert!(
+        suspended.load(Ordering::SeqCst) > 0,
+        "the content script budget was not installed during the wait, so the turn was not the one a loading page skips"
+    );
+    assert_eq!(
+        engine.execute_script(view, "String(window.fetched)").unwrap(),
+        r#"String("true")"#
+    );
+}
