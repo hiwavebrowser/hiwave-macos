@@ -115,7 +115,8 @@ pub(crate) async fn pump(
                 inspector,
                 FailureStage::Timeout,
             )
-        }))        .await;
+        }))
+        .await;
 
         // In the order the page made them (the take order), not completion
         // order. JavaScript budget spent: keep the callback and the answer
@@ -135,7 +136,8 @@ pub(crate) async fn pump(
                     bindings.deliver_net_response(request.id, outcome)
                 }))
             });
-            match delivered {                Ok(Ok(_)) => {}
+            match delivered {
+                Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
                     if !stopped {
                         out.threw.push(e.to_string());
@@ -164,7 +166,8 @@ pub(crate) async fn pump(
                     Err(_) => {
                         out.poisoned = true;
                         return out;
-                    }                }
+                    }
+                }
             }
         }
     }
@@ -280,7 +283,8 @@ async fn execute(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
         Err(_) => {
-            debug!(id = request.id, "Script request hit its network cap");            if let Some(guard) = guard {
+            debug!(id = request.id, "Script request hit its network cap");
+            if let Some(guard) = guard {
                 let reason = match on_deadline {
                     FailureStage::OverBudget => "script budget spent",
                     _ => "timed out",
@@ -572,7 +576,8 @@ pub(crate) async fn pump_inserted_scripts(
                 Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
                     "timed out".into(),
                 ))),
-            }        }))
+            }
+        }))
         .await;
 
         // Run in the order the page inserted them.

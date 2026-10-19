@@ -380,7 +380,8 @@ mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
-mod hover_restyle_tests;#[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -1397,7 +1398,8 @@ fn record_stopped_script(
     } else {
         config.script_budget_ms
     };
-    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");
+    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
     begin_script_turn(bindings, STOP_NOTE_BUDGET);
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
     end_script_turn(bindings);
@@ -4790,7 +4792,8 @@ impl Engine {
                     Err(_) => {
                         poisoned.set(true);
                         ScriptOutcome::EngineFailed(EngineFailure::Panic)
-                    }                }
+                    }
+                }
             };
             ScriptRecord {
                 source,
@@ -29740,7 +29743,8 @@ window.addEventListener('load', function () {
                 .execute_script(view, "slow === true && ranAfter === true")
                 .unwrap(),
             "Boolean(true)"
-        );    }
+        );
+    }
 
     /// `document.currentScript` is the classic <script> element while it
     /// runs and null otherwise. x.com ends inline scripts with
