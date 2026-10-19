@@ -34,6 +34,26 @@ use crate::inspector::{self, FailureStage, Inspector, ResourceType};
 /// What the page sees for every refusal and every failure.
 const NETWORK_ERROR: &str = "network error";
 
+thread_local! {
+    /// Answers fetched while the JavaScript budget was already spent. The
+    /// load hands them to the next live turn; failing them here would reject
+    /// the page's promise, and delivering them would resume it under a
+    /// deadline that has already passed.
+    static PARKED: std::cell::RefCell<Vec<(u64, NetDelivery)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn clear_parked_deliveries() {
+    PARKED.with(|parked| parked.borrow_mut().clear());
+}
+
+pub(crate) fn take_parked_deliveries() -> Vec<(u64, NetDelivery)> {
+    PARKED.with(|parked| std::mem::take(&mut *parked.borrow_mut()))
+}
+
+fn park_delivery(delivery: (u64, NetDelivery)) {
+    PARKED.with(|parked| parked.borrow_mut().push(delivery));
+}
+
 /// What one pump found.
 #[derive(Debug, Default)]
 pub(crate) struct Pump {
@@ -57,7 +77,10 @@ pub(crate) struct Pump {
 /// work); `None` delivers only.
 ///
 /// Whatever is still waiting when the rounds or the deadline run out
-/// completes with a network error.
+/// completes with a network error. `deadline` is a network cap: it does
+/// not arm the watchdog and it does not refuse a host call. A delivery
+/// whose JavaScript budget is already spent is parked for a later turn
+/// instead of being run or failed.
 pub(crate) async fn pump(
     bindings: &DomBindings,
     policy: &FetchPolicy,
@@ -83,19 +106,43 @@ pub(crate) async fn pump(
         out.rounds += 1;
         out.requests += requests.len();
 
-        let outcomes = futures::future::join_all(
-            requests
-                .iter()
-                .map(|request| execute(policy, loader, deadline, request, inspector, FailureStage::OverBudget)),
-        )
+        let outcomes = futures::future::join_all(requests.iter().map(|request| {
+            execute(
+                policy,
+                loader,
+                deadline,
+                request,
+                inspector,
+                FailureStage::Timeout,
+            )
+        }))
         .await;
 
         // In the order the page made them (the take order), not completion
-        // order.
+        // order. JavaScript budget spent: keep the callback and the answer
+        // for a turn that still has some. Delivering now would resume the
+        // page under a stop, and the bridge would forget the request.
         for (request, outcome) in requests.iter().zip(outcomes) {
-            match catch_unwind(AssertUnwindSafe(|| bindings.deliver_net_response(request.id, outcome))) {
+            // Exhausted, or so little left that resuming the page's async
+            // function would land in a turn the watchdog stops at once.
+            if super::script_js_exhausted() || super::script_js_resume_would_be_stopped() {
+                if bindings.shelve_net_request(request.id) {
+                    park_delivery((request.id, outcome));
+                }
+                continue;
+            }
+            let (delivered, stopped) = super::with_script_js(bindings, || {
+                catch_unwind(AssertUnwindSafe(|| {
+                    bindings.deliver_net_response(request.id, outcome)
+                }))
+            });
+            match delivered {
                 Ok(Ok(_)) => {}
-                Ok(Err(e)) => out.threw.push(e.to_string()),
+                Ok(Err(e)) => {
+                    if !stopped {
+                        out.threw.push(e.to_string());
+                    }
+                }
                 Err(_) => {
                     out.poisoned = true;
                     return out;
@@ -103,12 +150,23 @@ pub(crate) async fn pump(
             }
         }
         if let Some((horizon_ms, max_callbacks)) = timers {
-            match catch_unwind(AssertUnwindSafe(|| bindings.run_timers(horizon_ms, max_callbacks))) {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => out.threw.push(e.to_string()),
-                Err(_) => {
-                    out.poisoned = true;
-                    return out;
+            if !super::script_js_exhausted() {
+                let (ran, stopped) = super::with_script_js(bindings, || {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        bindings.run_timers(horizon_ms, max_callbacks)
+                    }))
+                });
+                match ran {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        if !stopped {
+                            out.threw.push(e.to_string());
+                        }
+                    }
+                    Err(_) => {
+                        out.poisoned = true;
+                        return out;
+                    }
                 }
             }
         }
@@ -220,7 +278,7 @@ async fn execute(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
         Err(_) => {
-            debug!(id = request.id, "Script request ran out of the script budget");
+            debug!(id = request.id, "Script request hit its network cap");
             if let Some(guard) = guard {
                 let reason = match on_deadline {
                     FailureStage::OverBudget => "script budget spent",
@@ -367,13 +425,16 @@ pub(crate) async fn pump_modules(
                     debug!(%url, ?denial, "Module fetch denied");
                     Err(NETWORK_ERROR.to_string())
                 }
-                Err(_) => Err("script budget spent".to_string()),
+                Err(_) => Err("timed out".to_string()),
             }
         }))
         .await;
 
         for (url, outcome) in urls.iter().zip(outcomes) {
-            if catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome))).is_err() {
+            let (supplied, _) = super::with_script_js(bindings, || {
+                catch_unwind(AssertUnwindSafe(|| bindings.supply_module(url, outcome)))
+            });
+            if supplied.is_err() {
                 out.poisoned = true;
                 return out;
             }
@@ -441,8 +502,11 @@ const MAX_INSERTED_SCRIPT_ROUNDS: u32 = 16;
 /// destination the shield classifies by, the loader's cookies), never
 /// through page script, and run as its element's script: `currentScript`
 /// is the element, then the element hears `load`, or `error` when the fetch
-/// failed. A script not fetched by `deadline` is over budget and its
-/// element hears neither. What each did is in the pump's `records`.
+/// failed. `deadline` is a network cap: a script still out then fails
+/// and its element hears `error`. A body that arrived still runs, unless
+/// the JavaScript budget is already spent, in which case it is over
+/// budget and its element hears neither. What each did is in the pump's
+/// `records`.
 pub(crate) async fn pump_inserted_scripts(
     bindings: &DomBindings,
     loader: &ResourceLoader,
@@ -464,7 +528,9 @@ pub(crate) async fn pump_inserted_scripts(
         out.requests += scripts.len();
         let fetched = futures::future::join_all(scripts.iter().map(|(_, url)| async move {
             let url = Url::parse(url).map_err(|_| ScriptOutcome::Skipped("unparseable src"))?;
-            let guard = inspector.begin_request(&url, "GET", ResourceType::Script, Some("script"));
+            let guard = inspector
+                .begin_request(&url, "GET", ResourceType::Script, Some("script"))
+                .map(|g| g.timeout_at(deadline, "timed out"));
             let fetch = async {
                 match loader.fetch(referrer.get_for(url, RequestDestination::Script)).await {
                     Ok(response) if response.ok() => {
@@ -496,7 +562,12 @@ pub(crate) async fn pump_inserted_scripts(
                     }
                 }
             };
-            tokio::time::timeout_at(deadline, fetch).await.unwrap_or(Err(ScriptOutcome::OverBudget))
+            match tokio::time::timeout_at(deadline, fetch).await {
+                Ok(result) => result,
+                Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                    "timed out".into(),
+                ))),
+            }
         }))
         .await;
 
@@ -504,7 +575,7 @@ pub(crate) async fn pump_inserted_scripts(
         for ((node, url), result) in scripts.into_iter().zip(fetched) {
             let mut record = ScriptRecord { source: url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
             let text = match result {
-                Ok(text) if tokio::time::Instant::now() >= deadline => {
+                Ok(text) if super::script_js_exhausted() => {
                     record.bytes = text.len();
                     Err(ScriptOutcome::OverBudget)
                 }
@@ -527,28 +598,37 @@ pub(crate) async fn pump_inserted_scripts(
                     let name = format!("inserted#{node}");
                     inspector.alias_script(&name, &record.source);
                     let started = std::time::Instant::now();
-                    let _ = bindings.set_current_script(Some(node));
-                    let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
-                    let _ = bindings.set_current_script(None);
+                    let (ran, stopped) = super::with_script_js(bindings, || {
+                        let _ = bindings.set_current_script(Some(node));
+                        let ran = catch_unwind(AssertUnwindSafe(|| {
+                            bindings.evaluate_named(&text, &name)
+                        }));
+                        let _ = bindings.set_current_script(None);
+                        ran
+                    });
                     record.elapsed_ms = started.elapsed().as_millis() as u64;
-                    record.outcome = match ran {
-                        Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
-                        Ok(Ok(_)) => ScriptOutcome::Ran,
-                        Ok(Err(e)) => {
-                            let message = e.to_string();
-                            ScriptOutcome::Threw(
-                                message
-                                    .strip_prefix("JS error: Execution error: ")
-                                    .map(str::to_string)
-                                    .unwrap_or(message),
-                            )
+                    record.outcome = if stopped {
+                        crate::log_script_stopped(
+                            &record.source,
+                            record.elapsed_ms,
+                            crate::take_script_js_overrun(),
+                        );
+                        ScriptOutcome::OverBudget
+                    } else {
+                        match ran {
+                            Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                            Ok(Ok(_)) => ScriptOutcome::Ran,
+                            Ok(Err(e)) => {
+                                let message = e.to_string();
+                                ScriptOutcome::Threw(
+                                    message
+                                        .strip_prefix("JS error: Execution error: ")
+                                        .map(str::to_string)
+                                        .unwrap_or(message),
+                                )
+                            }
                         }
-                    };
-                    if bindings.take_deadline_hit() {
-                        crate::log_script_stopped(&record.source, record.elapsed_ms, bindings.take_deadline_overrun());
-                        record.outcome = ScriptOutcome::OverBudget;
-                    }
-                    // Run, thrown or not, the element hears `load`.
+                    };                    // Run, thrown or not, the element hears `load`.
                     matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_)).then_some("load")
                 }
             };
@@ -559,7 +639,24 @@ pub(crate) async fn pump_inserted_scripts(
                 return out;
             }
             if let Some(event) = event {
-                if let Err(e) = bindings.fire_script_event(node, event) {
+                if super::script_js_exhausted() {
+                    continue;
+                }
+                let (fired, stopped) =
+                    super::with_script_js(bindings, || bindings.fire_script_event(node, event));
+                if stopped {
+                    crate::log_script_stopped(
+                        &out.records
+                            .last()
+                            .map(|r| r.source.clone())
+                            .unwrap_or_default(),
+                        crate::script_js_stopped_ms(),
+                        crate::take_script_js_overrun(),
+                    );
+                    if let Some(record) = out.records.last_mut() {
+                        record.outcome = ScriptOutcome::OverBudget;
+                    }
+                } else if let Err(e) = fired {
                     out.threw.push(e.to_string());
                 }
             }

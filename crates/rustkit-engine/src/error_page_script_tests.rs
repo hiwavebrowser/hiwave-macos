@@ -319,7 +319,9 @@ document.body.appendChild(inline);
         text(&mut engine, view, "log.join(',') + ' runs=' + runs"),
         r#"String("inline true,ran a,load /a.js,error /gone.js runs=1")"#
     );
-    let paths: Vec<String> = server.requests().into_iter().map(|(p, _)| p).collect();
+    // The two fetches overlap, so the server may see either first.
+    let mut paths: Vec<String> = server.requests().into_iter().map(|(p, _)| p).collect();
+    paths.sort();
     assert_eq!(paths, vec!["/", "/a.js", "/gone.js"]);
 }
 
@@ -397,11 +399,11 @@ fn a_cancelled_load_does_not_run_the_script_it_inserted() {
     );
 }
 
-/// An inserted script still arriving when the load's script budget is spent
-/// is over budget, as a parser-inserted one is: not run, and its element
-/// hears neither `load` nor `error`.
+/// An inserted script whose fetch outlasts the script budget still runs.
+/// The wait is the network cap, not JavaScript time, so the element hears
+/// `load`.
 #[test]
-fn an_inserted_script_past_the_script_budget_does_not_run() {
+fn an_inserted_script_slower_than_the_script_budget_still_runs() {
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/slow.js" => {
@@ -427,12 +429,15 @@ document.head.appendChild(s);</script>"#
         .expect("view");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
-    assert_eq!(text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()"), r#"String("undefined ")"#);
+    assert_eq!(
+        text(&mut engine, view, "String(window.slowRan) + ' ' + heard.join()"),
+        r#"String("true load")"#
+    );
     let record = engine.views[&view]
         .script_log
         .iter()
         .find(|r| r.source.ends_with("/slow.js"))
         .expect("the inserted script is in the script log");
-    assert_eq!(record.outcome, ScriptOutcome::OverBudget);
+    assert_eq!(record.outcome, ScriptOutcome::Ran);
 }
 

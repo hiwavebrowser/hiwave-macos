@@ -539,6 +539,10 @@ impl JsRuntime {
         {
             use boa_engine::Source;
 
+            // Max frame depth is per script, including the microtask drain
+            // below. The live counters are not touched: a stop already
+            // unwinds them.
+            self.context.reset_recursion_max();
             let result = match path {
                 Some(path) => {
                     self.diag.know_path(path);
@@ -699,6 +703,15 @@ impl JsRuntime {
         }
         self.deadline.hit.set(true);
         self.deadline.graced.set(true);
+        // The grace turn is a new id, so the interrupt word still names the
+        // stopped turn and the opcode check stays quiet. The host deadline
+        // is a separate clock and is already in the past: a reaction's first
+        // host call then throws uncatchable `LoopIteration`, which the await
+        // path reports as "async function was interrupted". Move the deadline
+        // with the grace turn.
+        self.deadline
+            .at
+            .set(Some(std::time::Instant::now() + control::STOP_GRACE));
         let control = self.deadline.control.borrow().clone();
         let stamp = self.deadline.stamp.borrow().clone();
         if let (Some(control), Some(stamp)) = (control, stamp) {
@@ -997,6 +1010,21 @@ impl Default for JsRuntime {
     fn default() -> Self {
         Self::new().expect("Failed to create default JsRuntime")
     }
+}
+
+/// `depth=`, the host depth, both configured limits, and the deepest frame
+/// count since this script started.
+///
+/// The interrupt log appends this. The check records it on the thread
+/// because the interrupt hook has no context.
+#[cfg(feature = "boa")]
+#[must_use]
+pub fn recursion_depth_log() -> String {
+    let sample = boa_engine::vm::recursion_sample();
+    format!(
+        "depth={} host_depth={} recursion_limit={} host_limit={} max_depth={}",
+        sample.frames, sample.host, sample.recursion_limit, sample.host_limit, sample.max_frames
+    )
 }
 
 #[cfg(test)]
@@ -1615,5 +1643,152 @@ mod tests {
             let report = runtime.diag.describe_error(&error, &mut runtime.context);
             assert_eq!((report.frames, report.located), (Vec::new(), false), "{message}");
         }
+    }
+
+    /// Thirty recursion stops, twenty setter stops and thirty interrupt
+    /// stops in one runtime, then a recursion that only fits if every stop
+    /// gave the frames and the host depth back.
+    #[test]
+    fn uncatchable_stops_do_not_leak_recursion_depth() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.context.runtime_limits_mut().set_recursion_limit(40);
+        for _ in 0..30 {
+            assert!(
+                runtime
+                    .evaluate_script("function blow(n) { blow(n - 1); } blow(0);")
+                    .is_err()
+            );
+        }
+        runtime.context.runtime_limits_mut().set_recursion_limit(80);
+        let shallow = runtime
+            .evaluate_script("function f(n) { return n <= 0 ? 7 : f(n - 1); } f(50)")
+            .unwrap();
+        assert!(matches!(shallow, JsValue::Number(n) if n == 7.0));
+
+        runtime.context.runtime_limits_mut().set_recursion_limit(8192);
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(12);
+        for _ in 0..20 {
+            assert!(
+                runtime
+                    .evaluate_script("var obj = { set x(v) { this.x = v; } }; obj.x = 1;")
+                    .is_err()
+            );
+        }
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(15);
+        let setters = runtime
+            .evaluate_script(
+                "var n = 0; var obj = { set x(v) { n++; if (n < 8) this.x = v; } }; obj.x = 1; n",
+            )
+            .unwrap();
+        assert!(matches!(setters, JsValue::Number(n) if n == 8.0));
+
+        let word = Arc::new(AtomicU64::new(0));
+        runtime.context.set_interrupt_word(Some(word.clone()));
+        runtime.context.set_interrupt_turn(7);
+        let flag = word.clone();
+        runtime
+            .register_host_function(
+                "arm",
+                0,
+                Box::new(move |_| {
+                    flag.store(7, Ordering::Relaxed);
+                    JsValue::Undefined
+                }),
+            )
+            .unwrap();
+        runtime.context.runtime_limits_mut().set_recursion_limit(80);
+        runtime.context.runtime_limits_mut().set_host_recursion_limit(1024);
+        let dive = "function dive(n) { if (n === 15) arm(); if (n > 0) dive(n - 1); } dive(30);";
+        for _ in 0..30 {
+            word.store(0, Ordering::Relaxed);
+            assert!(runtime.evaluate_script(dive).is_err());
+        }
+        word.store(0, Ordering::Relaxed);
+        let after = runtime
+            .evaluate_script("function g(n) { return n <= 0 ? 7 : g(n - 1); } g(50)")
+            .unwrap();
+        assert!(matches!(after, JsValue::Number(n) if n == 7.0));
+    }
+
+    /// A promise job calls the host, and the host queues another job and
+    /// asks for a checkpoint. That checkpoint is already running, so the
+    /// inner job waits until the host has returned.
+    #[test]
+    fn a_nested_microtask_checkpoint_does_not_reenter() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let saw = std::rc::Rc::new(std::cell::Cell::new(false));
+        let saw_in_host = saw.clone();
+        // SAFETY: the closure captures an `Rc<Cell<bool>>`, which holds no
+        // GC-managed data.
+        let native = unsafe {
+            boa_engine::NativeFunction::from_closure(move |_this, _args, context| {
+                context.eval(boa_engine::Source::from_bytes(
+                    "Promise.resolve().then(function () { globalThis.__inner = true; });",
+                ))?;
+                context.run_jobs()?;
+                let inner = context.eval(boa_engine::Source::from_bytes("globalThis.__inner === true"))?;
+                saw_in_host.set(inner.as_boolean() == Some(true));
+                Ok(boa_engine::JsValue::undefined())
+            })
+        };
+        runtime
+            .context
+            .register_global_callable(boa_engine::js_string!("hostNest"), 0, native)
+            .unwrap();
+        runtime
+            .evaluate_script(
+                "globalThis.__inner = false; Promise.resolve().then(function () { hostNest(); });",
+            )
+            .unwrap();
+        assert!(!saw.get(), "the nested checkpoint ran the inner job");
+        let inner = runtime.evaluate_script("globalThis.__inner").unwrap();
+        assert!(matches!(inner, JsValue::Boolean(true)));
+    }
+
+    /// The default limits fit a setter chain and a pure call that Boa's 512,
+    /// counted twice for each host callback, rejected. The setter chain
+    /// re-enters the VM on the native stack: the default test thread is 2MB
+    /// and overflows near 270 of those, so this runs on an 8MB thread, the
+    /// size of the main thread page script uses.
+    #[test]
+    fn a_deep_setter_chain_and_call_fit_the_default_recursion_limit() {
+        std::thread::Builder::new()
+            .name("setter-depth".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut runtime = JsRuntime::new().unwrap();
+                let setters = runtime
+                    .evaluate_script(
+                        "var n = 0; var obj = { set x(v) { n++; if (n < 400) this.x = v; } }; obj.x = 1; n",
+                    )
+                    .unwrap();
+                assert!(matches!(setters, JsValue::Number(n) if n == 400.0), "{setters:?}");
+                let calls = runtime
+                    .evaluate_script("function f(n) { return n <= 0 ? 0 : f(n - 1); } f(1000)")
+                    .unwrap();
+                assert!(matches!(calls, JsValue::Number(n) if n == 0.0), "{calls:?}");
+            })
+            .expect("spawn")
+            .join()
+            .expect("setter depth");
+    }
+
+    #[test]
+    fn the_recursion_log_names_the_depth_and_the_configured_limit() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime
+            .evaluate_script("function f(n) { return n <= 0 ? 0 : f(n - 1); } f(20)")
+            .unwrap();
+        let line = recursion_depth_log();
+        assert!(line.contains("depth="), "{line}");
+        assert!(line.contains("recursion_limit=8192"), "{line}");
+        assert!(line.contains("host_limit=1024"), "{line}");
+        let max = line
+            .split("max_depth=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
+        assert!(max >= 20, "{line}");
     }
 }
