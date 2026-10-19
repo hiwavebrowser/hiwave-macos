@@ -108,22 +108,34 @@ fn after_a_stop_the_same_runtime_runs_new_scripts_correctly() {
 
 #[test]
 fn an_interrupt_set_between_turns_does_not_kill_the_next_turn() {
+    // Nothing here is about time: the next turn must run whatever the
+    // word says. It gets a budget no loaded runner reaches, so a stop can
+    // only come from the stale word. With `BUDGET` (300 ms) the debug
+    // build's 10,000 iterations ran past it on a loaded Mac (load 50:
+    // 1 run in 10), and the watchdog's own stop read as the stale word's.
+    const NO_TIME_LIMIT: Duration = Duration::from_secs(60);
     let mut page = page();
     // The previous turn's id, set after it ended: as a watchdog or Stop
     // that fired just too late would.
-    page.runtime.begin_turn(&page.stamp, BUDGET);
+    page.runtime.begin_turn(&page.stamp, NO_TIME_LIMIT);
     let ended = page.stamp.current_turn();
     page.runtime.end_turn(&page.stamp);
     page.control.interrupt_turn(ended);
-    let (value, stopped, _) = page.turn(
+    let (value, stopped, took) = page.turn(
         "var n = 0; for (var i = 0; i < 10000; i++) { n++; } n",
-        BUDGET,
+        NO_TIME_LIMIT,
     );
-    assert_eq!(value.unwrap(), "Number(10000.0)");
+    let watchdog_stops = page._watchdog.turns_stopped();
+    assert_eq!(
+        value.as_deref(),
+        Ok("Number(10000.0)"),
+        "took {took:?}, watchdog stops {watchdog_stops}"
+    );
     assert!(
         !stopped,
-        "a word naming an ended turn is not this turn's stop"
+        "a word naming an ended turn is not this turn's stop (took {took:?}, watchdog stops {watchdog_stops})"
     );
+    assert_eq!(watchdog_stops, 0, "the watchdog stopped a turn (took {took:?})");
 }
 
 #[test]
