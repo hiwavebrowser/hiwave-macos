@@ -2106,47 +2106,6 @@ fn main() {
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
-        // A content load is pumping the run loop so the chrome WebView can
-        // paint. The engine is borrowed for that load; handling the nested
-        // event here would borrow it again (a resize, a navigate, the live
-        // turn). Put user events back and let WebKit's own sources, which
-        // already ran, do the paint.
-        #[cfg(all(target_os = "macos", feature = "rustkit"))]
-        if webview_rustkit::chrome_pump_active() {
-            if let Event::UserEvent(user_event) = &event {
-                // The engine is borrowed for the load, so `apply_layout`
-                // cannot run. Move the NSView now; the requeued event
-                // resizes the surface and relayouts once the load returns.
-                let sidebar = match user_event {
-                    UserEvent::SetSidebarOpen(open) => {
-                        Some((if *open { SIDEBAR_WIDTH } else { 0.0 }, None))
-                    }
-                    UserEvent::SetSidebarWidth(width) => Some((*width, None)),
-                    UserEvent::SetRightPanelOpen(open) => Some((
-                        *sidebar_width_for_events.lock().unwrap(),
-                        Some(*open),
-                    )),
-                    _ => None,
-                };
-                if let Some((width, right)) = sidebar {
-                    *sidebar_width_for_events.lock().unwrap() = width;
-                    if let Some(open) = right {
-                        *right_sidebar_open_for_events.lock().unwrap() = open;
-                    }
-                    let bounds = content_host_bounds(
-                        &window,
-                        *chrome_height_for_events.lock().unwrap(),
-                        *shelf_height_for_events.lock().unwrap(),
-                        *inspector_height_for_events.lock().unwrap(),
-                        *sidebar_width_for_events.lock().unwrap(),
-                        *right_sidebar_open_for_events.lock().unwrap(),
-                    );
-                    content_for_events.place_host_frame(bounds);
-                }
-                let _ = click_proxy.send_event(user_event.clone());
-            }
-            return;
-        }
         *control_flow = match live_wake.get() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,

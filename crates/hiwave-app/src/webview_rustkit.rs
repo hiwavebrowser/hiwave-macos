@@ -82,49 +82,6 @@ pub struct RustKitView {
 /// the hand tests of 2026-10-08 needed more than about 8 s.
 const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 
-thread_local! {
-    /// Set while the content load is pumping the run loop so the chrome
-    /// WebView can paint. The event loop must not re-enter the load: the
-    /// engine is already borrowed on this thread.
-    static CHROME_PUMP: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Whether the window thread is inside a chrome paint turned from a content
-/// load. Event-loop handlers use it to avoid borrowing the engine again.
-pub(crate) fn chrome_pump_active() -> bool {
-    CHROME_PUMP.with(|flag| flag.get())
-}
-
-/// Give WebKit one short turn of the main run loop so the toolbar and
-/// sidebar composite while a content load is waiting on the network.
-fn pump_chrome_run_loop() {
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
-        fn CFRunLoopRunInMode(
-            mode: *const std::ffi::c_void,
-            seconds: f64,
-            return_after_source_handled: u8,
-        ) -> i32;
-    }
-    unsafe {
-        // A few milliseconds, and keep going through the sources already
-        // queued (WebKit's paint among them). `returnAfterSourceHandled`
-        // would stop at the first source, which can be this process's own.
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 0);
-    }
-}
-
-fn install_chrome_ui_turn() {
-    rustkit_engine::set_chrome_ui_turn(Some(Box::new(|| {
-        if CHROME_PUMP.with(|flag| flag.replace(true)) {
-            return;
-        }
-        pump_chrome_run_loop();
-        CHROME_PUMP.with(|flag| flag.set(false));
-    })));
-}
-
 /// The longest the script of one turn after the load may run: the timer
 /// callbacks and response handlers of one pass of the live loop, or the
 /// listeners of one input event. Until 2026-10-12 there was no limit, and a
@@ -220,11 +177,6 @@ impl RustKitView {
         info!(?view_id, "RustKit view created");
         let host_view = engine.host_view_raw(view_id);
         rustkit_viewhost::clip_raw_view(host_view);
-        // The chrome WebView is WebKit on this same thread. A content load
-        // blocks the thread through its network waits (it already did,
-        // before the script budget stopped counting those waits). The hook
-        // gives that WebView a run-loop turn during each wait.
-        install_chrome_ui_turn();
 
         Ok(Self {
             engine: RefCell::new(engine),
