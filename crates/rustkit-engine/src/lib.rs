@@ -1501,19 +1501,27 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
     });
     SCRIPT_JS.with(|js| js.depth.set(1));
     let started = std::time::Instant::now();
-    // A zero allowance used to arm a deadline of now and a watchdog turn of
-    // no time. The next `evaluate` (a lifecycle step) then resumed a pending
-    // async function under that stop, and Boa reported it as
-    // "async function was interrupted". The step still runs. It is not a
-    // turn: there is no time left to arm.
-    let arm = interrupt && !allowance.is_zero();
-    if arm {
+    // A spent budget stops JavaScript; it never takes the watchdog away.
+    // A lifecycle step (`DOMContentLoaded`, `load`, the load's timers) and
+    // a module supplied late still run once the budget is gone, and a
+    // listener that spins in one of them used to run with no deadline and
+    // no turn, holding the window's thread for good (a CNN load; #720 R1).
+    // It gets the stop grace: a deadline of now would have resumed a
+    // pending async function under an immediate stop, which Boa reports as
+    // "async function was interrupted". Deliveries that would land in a
+    // turn this short are parked instead (`script_js_resume_would_be_stopped`).
+    let allowance = if allowance.is_zero() {
+        rustkit_js::control::STOP_GRACE
+    } else {
+        allowance
+    };
+    if interrupt {
         bindings.set_execution_deadline(Some(std::time::Instant::now() + allowance));
         begin_script_turn(bindings, allowance);
     }
     let mut armed = ArmedExecution {
         bindings,
-        interrupt: arm,
+        interrupt,
         open: true,
     };
     let result = body();
