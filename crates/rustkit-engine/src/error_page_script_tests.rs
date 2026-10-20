@@ -712,10 +712,15 @@ insert('/chunk-a.js', function () { insert('/chunk-b.js', function () { insert('
 /// on the next page. The first load does not wait the fetch out.
 #[test]
 fn navigating_away_drops_an_inserted_script_still_fetching() {
+    // Set once /slow.js is answered. The load must end before that: a
+    // wall-clock limit also counted the debug build's first layout, which
+    // on macOS alone took longer than the limit.
+    static SLOW_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/slow.js" => {
                 std::thread::sleep(std::time::Duration::from_millis(2000));
+                SLOW_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
                 (200, "text/javascript", vec![], "window.fromFirst = 'ran';".into())
             }
             "/next" => (
@@ -744,7 +749,7 @@ setTimeout(function () {
     let started = std::time::Instant::now();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("first load");
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
+        !SLOW_ANSWERED.load(std::sync::atomic::Ordering::SeqCst),
         "the load waited out a script inserted after load: {:?}",
         started.elapsed()
     );
@@ -1029,10 +1034,13 @@ window.addEventListener('load', function () { L('window load readyState=' + docu
 /// not wait for it.
 #[test]
 fn a_script_inserted_by_the_load_handler_does_not_delay_load() {
+    // Set once /after.js is answered; the load ends before that.
+    static AFTER_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/after.js" => {
                 std::thread::sleep(std::time::Duration::from_millis(400));
+                AFTER_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
                 (200, "text/javascript", vec![], "L('/after.js ran');".into())
             }
             _ => (
@@ -1061,7 +1069,11 @@ L('readyState=' + document.readyState);
     let (mut engine, view, rt) = engine();
     let started = std::time::Instant::now();
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
-    assert!(started.elapsed() < std::time::Duration::from_secs(1), "load waited for a script inserted by the load handler");
+    assert!(
+        !AFTER_ANSWERED.load(std::sync::atomic::Ordering::SeqCst),
+        "load waited for a script inserted by the load handler: {:?}",
+        started.elapsed()
+    );
     let log = page_log(&mut engine, view);
     assert_eq!(
         event_trace(&log),
@@ -1230,14 +1242,17 @@ document.head.appendChild(s);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         canceller.cancel_current();
+        std::time::Instant::now()
     });
-    let started = std::time::Instant::now();
     let _ = rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap()));
-    cancel.join().unwrap();
+    // From the cancel, not from the load's start: the debug build's first
+    // layout comes before the request and took over a second on macOS. The
+    // server holds the fetch for 3 s.
+    let cancelled_at = cancel.join().unwrap();
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(1500),
-        "the cancelled load waited out the fetch: {:?}",
-        started.elapsed()
+        cancelled_at.elapsed() < std::time::Duration::from_millis(1500),
+        "the cancelled load waited out the fetch: {:?} after the cancel",
+        cancelled_at.elapsed()
     );
     assert!(asked.load(Ordering::SeqCst), "the inserted script was never requested");
     let ran = engine.execute_script(view, "String(window.slowRan)").unwrap_or_default();
@@ -1487,10 +1502,13 @@ L('readyState=' + document.readyState);
 /// frame was presented for the interactive document.
 #[test]
 fn a_yielding_load_returns_during_the_inserted_script_fetch() {
+    // Set once /a.js is answered; the load returns before that.
+    static A_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         match path {
             "/a.js" => {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
+                A_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
                 (200, "text/javascript", vec![], "L('/a.js ran');".into())
             }
             _ => (
@@ -1524,7 +1542,7 @@ L('/a.js inserted');
     let returned_in = started.elapsed();
     assert_eq!(yielded, LoadYield::Yielded);
     assert!(
-        returned_in < std::time::Duration::from_millis(1000),
+        !A_ANSWERED.load(std::sync::atomic::Ordering::SeqCst),
         "the load held the event loop for the fetch: {returned_in:?}"
     );
     assert!(
