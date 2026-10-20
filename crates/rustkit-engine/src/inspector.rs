@@ -946,7 +946,8 @@ impl Drop for RequestGuard {
             return;
         }
         let (stage, reason) = match self.budget {
-            Some((deadline, stage, reason)) if Instant::now() >= deadline => (stage, reason),            _ => (self.dropped_as, self.dropped_reason),
+            Some((deadline, stage, reason)) if Instant::now() >= deadline => (stage, reason),
+            _ => (self.dropped_as, self.dropped_reason),
         };
         let event = InspectorEvent::Failure {
             id: self.id,

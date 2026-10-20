@@ -47,6 +47,16 @@ jobs:
             cargo test -p "$pkg" --lib --no-fail-fast || status=1
             echo "::endgroup::"
           done
+          # `--lib` skips crates/rustkit-js/tests/, including
+          # vm_interrupt_promises.rs. Cookie coverage lives in rustkit-http's
+          # lib (there is no tests/*.rs cookie integration file); that crate
+          # is not in the package list above.
+          echo "::group::cargo test -p rustkit-js --tests"
+          cargo test -p rustkit-js --tests --no-fail-fast || status=1
+          echo "::endgroup::"
+          echo "::group::cargo test -p rustkit-http --lib"
+          cargo test -p rustkit-http --lib --no-fail-fast || status=1
+          echo "::endgroup::"
           exit $status
 
       - name: Flag develop-broken
