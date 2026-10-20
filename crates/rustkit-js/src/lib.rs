@@ -1303,6 +1303,79 @@ mod tests {
         assert_eq!(logs2[2], ("Error".to_string(), "oops".to_string()));
     }
 
+    /// Every member of the WHATWG Console namespace is a function. A page
+    /// that calls one the engine lacked threw "not a callable function" and
+    /// lost the rest of its code: squarespace's homepage bundle calls
+    /// `console.table(t)` while it boots and never mounted its app.
+    #[test]
+    fn every_console_namespace_member_is_a_function() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let missing = runtime
+            .evaluate_script(
+                "['assert', 'clear', 'count', 'countReset', 'debug', 'dir', 'dirxml', 'error', 'group',
+                  'groupCollapsed', 'groupEnd', 'info', 'log', 'table', 'time', 'timeEnd', 'timeLog',
+                  'trace', 'warn'].filter(function (m) { return typeof console[m] !== 'function'; }).join(' ')",
+            )
+            .unwrap();
+        assert!(matches!(&missing, JsValue::String(m) if m.is_empty()), "missing console members: {missing:?}");
+        let after = runtime
+            .evaluate_script_named(
+                "var t = {location: 'https://a.test/', lang: 'en'};\nconsole.table(t);\nvar booted = true;\nbooted",
+                "inline#1",
+            )
+            .unwrap();
+        assert!(matches!(after, JsValue::Boolean(true)), "{after:?}");
+    }
+
+    /// What each member prints, as the Console standard's printer gets it:
+    /// `table` and `dir` print their data, `assert` prints only when its
+    /// condition is false, `count` and `time` keep per-label state, and
+    /// `group` prints its label.
+    #[test]
+    fn console_namespace_members_print_as_the_standard_says() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recv_clone = received.clone();
+        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+            recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
+        }));
+        runtime
+            .evaluate_script(
+                "console.table([1, 2], ['a']); console.dir('d', 'ignored'); console.dirxml('x', 1);
+                 console.assert(true, 'never'); console.assert(false, 'bad', 2); console.assert(0, {}); console.assert(false);
+                 console.count(); console.count(); console.count('k'); console.countReset(); console.count();
+                 console.group('g'); console.groupCollapsed(); console.groupEnd(); console.clear();
+                 console.trace('tr');
+                 console.time('t'); console.timeLog('t', 'mid'); console.timeEnd('t'); console.timeEnd('t');",
+            )
+            .unwrap();
+        let lines = received.lock().unwrap().clone();
+        let fixed: Vec<(&str, &str)> = lines[..13].iter().map(|(l, m)| (l.as_str(), m.as_str())).collect();
+        assert_eq!(
+            fixed,
+            vec![
+                ("Log", "[object Array]"),
+                ("Log", "d"),
+                ("Log", "x 1"),
+                ("Error", "Assertion failed: bad 2"),
+                ("Error", "Assertion failed [object Object]"),
+                ("Error", "Assertion failed"),
+                ("Info", "default: 1"),
+                ("Info", "default: 2"),
+                ("Info", "k: 1"),
+                ("Info", "default: 1"),
+                ("Log", "g"),
+                ("Log", "tr"),
+                ("Info", lines[12].1.as_str()),
+            ]
+        );
+        assert_eq!(lines.len(), 14, "{lines:?}");
+        let (log_line, end_line) = (&lines[12].1, &lines[13].1);
+        assert!(log_line.starts_with("t: ") && log_line.ends_with("ms mid"), "{log_line}");
+        assert!(end_line.starts_with("t: ") && end_line.ends_with("ms"), "{end_line}");
+        assert_eq!(lines[13].0, "Info");
+    }
+
     #[test]
     fn console_calls_carry_the_named_scripts_position() {
         let mut runtime = JsRuntime::new().unwrap();
