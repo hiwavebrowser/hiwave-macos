@@ -191,6 +191,33 @@ impl RustKitView {
         })
     }
 
+    /// A content view with no window (tests).
+    #[cfg(test)]
+    fn headless(bounds: Bounds) -> Self {
+        let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
+        let event_rx = engine.take_event_receiver();
+        let view_id = engine.create_headless_view(bounds).expect("headless view");
+        Self {
+            engine: RefCell::new(engine),
+            view_id: Some(view_id),
+            current_url: RefCell::new(None),
+            current_title: RefCell::new(None),
+            zoom_level: RefCell::new(1.0),
+            visible: RefCell::new(true),
+            loading: RefCell::new(false),
+            event_rx,
+            blocked_counter: None,
+            history: RefCell::new(Vec::new()),
+            history_index: RefCell::new(0),
+            replace_next: Cell::new(false),
+            live_clock: Cell::new(Instant::now()),
+            live_runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok(),
+        }
+    }
+
     /// One turn of the live loop for the page (call this in the event
     /// loop): run the timers that came due since the last turn, answer the
     /// page's network requests, and lay out what they changed.
@@ -735,6 +762,52 @@ mod tests {
     fn content_views_follow_a_page_s_own_navigation() {
         assert!(content_engine_builder().config().follows_script_navigation);
         assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
+    }
+
+    /// A server that answers every request with `body` after `delay`.
+    fn slow_server(delay: Duration, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    fn view() -> RustKitView {
+        RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// #739 / Pete's item 4: the window took no click while a page loaded,
+    /// because the load ran to its end inside the event handler.
+    #[test]
+    fn a_slow_load_gives_the_event_loop_back_at_once() {
+        let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
+        let view = view();
+        let started = Instant::now();
+        view.wry_load_url(&url).unwrap();
+        let held = started.elapsed();
+        assert!(held < Duration::from_millis(500), "the load held its caller for {held:?}");
     }
 
     #[test]
