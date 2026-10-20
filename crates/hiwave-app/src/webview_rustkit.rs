@@ -10,6 +10,7 @@ use hiwave_core::{HiWaveError, HiWaveResult};
 use rustkit_engine::{Engine, EngineBuilder, EngineEvent, EngineViewId};
 use rustkit_viewhost::Bounds;
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,8 +36,10 @@ const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 ///
 /// This type is NOT Send or Sync. All operations must be performed on the main thread.
 pub struct RustKitView {
-    /// The engine managing this view.
-    engine: RefCell<Engine>,
+    /// The engine managing this view. Shared with the load in progress
+    /// ([`PendingLoad`]), which holds it mutably until the load ends; every
+    /// other call takes it with `try_borrow` and does nothing meanwhile.
+    engine: Rc<RefCell<Engine>>,
     /// The view ID within the engine.
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
@@ -71,7 +74,38 @@ pub struct RustKitView {
     /// The content `NSView`. Kept outside the engine so a load can move the
     /// frame while `engine` is borrowed.
     host_view: isize,
+    /// The load in progress, polled a slice at a time by the event loop
+    /// ([`RustKitView::step_load`]).
+    pending_load: RefCell<Option<PendingLoad>>,
+    /// Bounds set while a load held the engine, applied when it ends.
+    pending_bounds: Cell<Option<Bounds>>,
 }
+
+/// A content load the event loop drives: `Engine::load_url` as a future on
+/// the live runtime, polled for at most [`LOAD_SLICE`] per wake.
+///
+/// Until 2026-10-19 the load ran to its end inside tao's event handler
+/// (`block_on`), and the window took no click, key or chrome message for
+/// as long as the page's network and scripts took (20 s on ebay). A nested
+/// run loop pumped from inside the load (#739 as split from #720) re-enters
+/// tao's handler lock from `drawRect:` and still dispatches no `NSEvent`.
+/// Returning to tao between slices does neither. M4 (#730) replaces this
+/// with the page's own thread.
+struct PendingLoad {
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+    /// Cancels the load without the engine (M3b): Stop, or a new load.
+    canceller: Option<rustkit_engine::NavCanceller>,
+    started: Instant,
+}
+
+/// The longest one poll of a pending load may wait on the network before
+/// the event loop takes its next event. Script that runs inside the poll
+/// is not cut by it; the script budgets bound that.
+const LOAD_SLICE: Duration = Duration::from_millis(8);
+
+/// How long a load that was cancelled may take to unwind before it is
+/// dropped where it stands.
+const CANCEL_UNWIND: Duration = Duration::from_secs(2);
 
 /// Script budget for pages in the live app. The engine default (5 s) is
 /// what parity-capture and the board keep; a person waits longer than a
@@ -84,49 +118,6 @@ pub struct RustKitView {
 /// new module graph held the window for the full minute. Nothing loaded in
 /// the hand tests of 2026-10-08 needed more than about 8 s.
 const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
-
-thread_local! {
-    /// Set while the content load is pumping the run loop so the chrome
-    /// WebView can paint. The event loop must not re-enter the load: the
-    /// engine is already borrowed on this thread.
-    static CHROME_PUMP: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Whether the window thread is inside a chrome paint turned from a content
-/// load. Event-loop handlers use it to avoid borrowing the engine again.
-pub(crate) fn chrome_pump_active() -> bool {
-    CHROME_PUMP.with(|flag| flag.get())
-}
-
-/// Give WebKit one short turn of the main run loop so the toolbar and
-/// sidebar composite while a content load is waiting on the network.
-fn pump_chrome_run_loop() {
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
-        fn CFRunLoopRunInMode(
-            mode: *const std::ffi::c_void,
-            seconds: f64,
-            return_after_source_handled: u8,
-        ) -> i32;
-    }
-    unsafe {
-        // A few milliseconds, and keep going through the sources already
-        // queued (WebKit's paint among them). `returnAfterSourceHandled`
-        // would stop at the first source, which can be this process's own.
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 0);
-    }
-}
-
-fn install_chrome_ui_turn() {
-    rustkit_engine::set_chrome_ui_turn(Some(Box::new(|| {
-        if CHROME_PUMP.with(|flag| flag.replace(true)) {
-            return;
-        }
-        pump_chrome_run_loop();
-        CHROME_PUMP.with(|flag| flag.set(false));
-    })));
-}
 
 /// The longest the script of one turn after the load may run: the timer
 /// callbacks and response handlers of one pass of the live loop, or the
@@ -220,14 +211,28 @@ impl RustKitView {
         info!(?view_id, "RustKit view created");
         let host_view = engine.host_view_raw(view_id);
         rustkit_viewhost::clip_raw_view(host_view);
-        // The chrome WebView is WebKit on this same thread. A content load
-        // blocks the thread through its network waits (it already did,
-        // before the script budget stopped counting those waits). The hook
-        // gives that WebView a run-loop turn during each wait.
-        install_chrome_ui_turn();
 
-        Ok(Self {
-            engine: RefCell::new(engine),
+        Ok(Self::from_engine(engine, view_id, event_rx, counter_clone, host_view))
+    }
+
+    /// A content view with no window (tests).
+    #[cfg(test)]
+    fn headless(bounds: Bounds) -> Self {
+        let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
+        let event_rx = engine.take_event_receiver();
+        let view_id = engine.create_headless_view(bounds).expect("headless view");
+        Self::from_engine(engine, view_id, event_rx, None, 0)
+    }
+
+    fn from_engine(
+        engine: Engine,
+        view_id: EngineViewId,
+        event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
+        counter_clone: Option<Arc<AtomicU64>>,
+        host_view: isize,
+    ) -> Self {
+        Self {
+            engine: Rc::new(RefCell::new(engine)),
             view_id: Some(view_id),
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
@@ -246,14 +251,9 @@ impl RustKitView {
                 .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
                 .ok(),
             host_view,
-        })
-    }
-
-    /// Move the content view's frame without borrowing the engine. The GPU
-    /// surface and the page layout still follow `set_bounds_internal` once
-    /// the load has returned the engine.
-    pub fn place_host_frame(&self, bounds: Bounds) {
-        rustkit_viewhost::place_raw_view(self.host_view, bounds);
+            pending_load: RefCell::new(None),
+            pending_bounds: Cell::new(None),
+        }
     }
 
     /// One turn of the live loop for the page (call this in the event
@@ -276,7 +276,7 @@ impl RustKitView {
         self.live_clock
             .set(self.live_clock.get() + Duration::from_millis(elapsed_ms));
 
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         let turn = runtime.block_on(engine.pump_live(view_id, elapsed_ms));
         if turn.timers_ran > 0 || turn.requests > 0 {
             debug!(?turn, "Live turn");
@@ -303,7 +303,7 @@ impl RustKitView {
     /// is the old behaviour, for telling a stale frame from a wrong one.
     pub fn render(&self) {
         rustkit_viewhost::clip_raw_view(self.host_view);
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         // The live turn lays out a resized view; without a live runtime
         // there is no turn, so the frame does it.
         if let Some(view_id) = self.view_id {
@@ -371,7 +371,7 @@ impl RustKitView {
     /// sequence number `seq` (W-gate: input-to-present latency). Called
     /// before the event is delivered.
     pub fn note_input(&self, at: Instant, seq: u64) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.note_input(view_id, rustkit_engine::InputMark { at, seq });
         }
@@ -379,7 +379,7 @@ impl RustKitView {
 
     /// Route OS keyboard delivery to the content view (first responder).
     pub fn grab_keyboard(&self) {
-        let engine = self.engine.borrow();
+        let Ok(engine) = self.engine.try_borrow() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.grab_keyboard(view_id);
         }
@@ -397,7 +397,7 @@ impl RustKitView {
         shift: bool,
         alt: bool,
     ) -> bool {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         self.view_id
             .map(|view_id| engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt))
             .unwrap_or(false)
@@ -405,7 +405,7 @@ impl RustKitView {
 
     /// A key was released: the page hears `keyup`.
     pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.handle_key_up(view_id, key_code, key, ctrl, shift, alt);
         }
@@ -416,7 +416,7 @@ impl RustKitView {
     /// when there is no form, a listener cancelled, or the form is not a
     /// GET.
     pub fn form_submit_url(&self) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         self.view_id
             .and_then(|view_id| engine.submit_focused_form(view_id))
     }
@@ -427,7 +427,7 @@ impl RustKitView {
     /// A reload, `location.replace()` or a meta refresh replaces the
     /// current history entry when it is loaded, as in Chrome.
     pub fn take_script_navigation(&self) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         let (url, replace) = self
             .view_id
             .and_then(|view_id| engine.take_script_navigation_with_replace(view_id))?;
@@ -437,7 +437,7 @@ impl RustKitView {
 
     /// Whether a content element currently holds focus.
     pub fn has_focused_element(&self) -> bool {
-        let engine = self.engine.borrow();
+        let Ok(engine) = self.engine.try_borrow() else { return Default::default() };
         self.view_id
             .and_then(|view_id| engine.focused_node(view_id))
             .is_some()
@@ -445,7 +445,7 @@ impl RustKitView {
 
     /// Rebuild layout and repaint after an edit changed a control's value.
     pub fn relayout(&self) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             if let Err(e) = engine.relayout_for(view_id, rustkit_engine::RelayoutCause::Input) {
                 debug!(error = %e, "relayout after edit failed");
@@ -457,7 +457,7 @@ impl RustKitView {
     /// clearing focus when nothing focusable is there. Returns the focused
     /// element's tag name.
     pub fn focus_at_point(&self, x: f32, y: f32) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         self.view_id
             .and_then(|view_id| engine.focus_at_point(view_id, x, y))
     }
@@ -465,7 +465,7 @@ impl RustKitView {
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.mouse_down_at_point(view_id, x, y);
         }
@@ -475,7 +475,7 @@ impl RustKitView {
     /// over/out/enter/leave events when the element under it changed, then
     /// `pointermove` and `mousemove`).
     pub fn mouse_move_at_point(&self, x: f32, y: f32) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.mouse_move_at_point(view_id, x, y);
         }
@@ -483,7 +483,7 @@ impl RustKitView {
 
     /// Tell the page the pointer left the view.
     pub fn mouse_leave(&self) {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             engine.mouse_leave(view_id);
         }
@@ -493,7 +493,7 @@ impl RustKitView {
     /// (`mouseup`, `click`), then report the click's default actions: what
     /// it focused and the link to follow unless a listener cancelled it.
     pub fn click_at_point(&self, x: f32, y: f32) -> rustkit_engine::ClickOutcome {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         self.view_id
             .map(|view_id| engine.click_at_point(view_id, x, y))
             .unwrap_or_default()
@@ -501,7 +501,7 @@ impl RustKitView {
 
     /// Resolve a click at viewport coordinates to a link URL, if any.
     pub fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
-        let engine = self.engine.borrow();
+        let Ok(engine) = self.engine.try_borrow() else { return Default::default() };
         self.view_id
             .and_then(|view_id| engine.link_at_point(view_id, x, y))
     }
@@ -512,7 +512,7 @@ impl RustKitView {
     /// Wheel events that reach the tao window loop are exactly the ones the
     /// UI-frame WebView did not consume, i.e. the pointer was over content.
     pub fn scroll_by(&self, delta_x: f32, delta_y: f32) -> bool {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             match engine.scroll_view(view_id, delta_x, delta_y) {
                 Ok(changed) => changed,
@@ -528,7 +528,10 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
-        let mut engine = self.engine.borrow_mut();
+        self.cancel_load();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else {
+            return Err(HiWaveError::WebView("engine busy".into()));
+        };
         if let Some(view_id) = self.view_id {
             engine
                 .load_html(view_id, html)
@@ -545,7 +548,11 @@ impl RustKitView {
     /// many sizes a drag delivered since the last one (H9: every size laid
     /// the page out in full before the next was read).
     pub fn set_bounds_internal(&self, bounds: Bounds) -> HiWaveResult<()> {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else {
+            // A load holds the engine: the size waits for its end.
+            self.pending_bounds.set(Some(bounds));
+            return Ok(());
+        };
         if let Some(view_id) = self.view_id {
             engine
                 .set_view_bounds(view_id, bounds)
@@ -621,7 +628,9 @@ impl RustKitView {
         self.view_id
     }
 
-    /// Load a URL using a blocking runtime.
+    /// Start loading a URL. The event loop drives the load
+    /// ([`Self::step_load`]); a load already in progress is cancelled first.
+    /// Without a live runtime the load runs to its end here, as before.
     fn load_url_blocking(&self, url: &str) {
         let parsed = match Url::parse(url) {
             Ok(u) => u,
@@ -630,39 +639,125 @@ impl RustKitView {
                 return;
             }
         };
+        let Some(view_id) = self.view_id else { return };
+        self.cancel_load();
 
-        // Create a single-threaded tokio runtime for this operation
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                error!(error = %e, "Failed to create runtime");
-                return;
-            }
-        };
-
-        let mut engine = self.engine.borrow_mut();
-        if let Some(view_id) = self.view_id {
-            // Returns after DOMContentLoaded when an inserted script is
-            // still arriving. Live turns (`process_events`) run the chain
-            // one script at a time and send PageLoaded at the end. A page
-            // with no inserted script still finishes inside this call.
+        if self.live_runtime.is_none() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!(error = %e, "Failed to create runtime");
+                    return;
+                }
+            };
+            let Ok(mut engine) = self.engine.try_borrow_mut() else { return };
             rt.block_on(async {
                 if let Err(e) = engine.load_url_yielding(view_id, parsed).await {
                     error!(error = %e, "Failed to load URL");
                 }
             });
+            self.live_clock.set(Instant::now());
+            return;
         }
-        // The new page's clock starts now: the time the load took is not
-        // time its timers have waited.
+
+        let canceller = self
+            .engine
+            .try_borrow()
+            .ok()
+            .and_then(|engine| engine.nav_canceller(view_id));
+        let engine = Rc::clone(&self.engine);
+        let future = Box::pin(async move {
+            let Ok(mut engine) = engine.try_borrow_mut() else {
+                warn!("Load not started: the engine is busy");
+                return;
+            };
+            if let Err(e) = engine.load_url_yielding(view_id, parsed).await {
+                error!(error = %e, "Failed to load URL");
+            }
+        });
+        *self.pending_load.borrow_mut() = Some(PendingLoad {
+            future,
+            canceller,
+            started: Instant::now(),
+        });
+        // The first slice runs now: a page that answers at once loads in
+        // the same wake, as it did when the load blocked.
+        self.step_load();
+    }
+
+    /// Whether a load is in progress.
+    pub fn is_loading(&self) -> bool {
+        self.pending_load.borrow().is_some()
+    }
+
+    /// Poll the load in progress for at most [`LOAD_SLICE`] (call this in
+    /// the event loop). Returns true while the load goes on: the caller
+    /// returns to tao and wakes again soon.
+    pub fn step_load(&self) -> bool {
+        let Some(runtime) = self.live_runtime.as_ref() else { return false };
+        let done = {
+            let mut slot = self.pending_load.borrow_mut();
+            let Some(load) = slot.as_mut() else { return false };
+            runtime
+                .block_on(async { tokio::time::timeout(LOAD_SLICE, load.future.as_mut()).await })
+                .is_ok()
+        };
+        if !done {
+            return true;
+        }
+        if let Some(load) = self.pending_load.borrow_mut().take() {
+            debug!(ms = load.started.elapsed().as_millis() as u64, "Load finished");
+        }
+        self.load_ended();
+        false
+    }
+
+    /// Stop the load in progress (the user's Stop). Returns whether there
+    /// was one.
+    pub fn stop_load(&self) -> bool {
+        let loading = self.is_loading();
+        self.cancel_load();
+        loading
+    }
+
+    /// Cancel the load in progress, if any, and let it unwind: a cancelled
+    /// load ends at its next wait. One that has not ended within
+    /// [`CANCEL_UNWIND`] is dropped where it stands.
+    fn cancel_load(&self) {
+        let Some(mut load) = self.pending_load.borrow_mut().take() else { return };
+        if let Some(canceller) = load.canceller.as_ref() {
+            canceller.cancel_current();
+        }
+        if let Some(runtime) = self.live_runtime.as_ref() {
+            if runtime
+                .block_on(async { tokio::time::timeout(CANCEL_UNWIND, load.future.as_mut()).await })
+                .is_err()
+            {
+                warn!("A cancelled load did not end; dropped");
+            }
+        }
+        drop(load);
+        self.load_ended();
+    }
+
+    /// After a load, finished or cancelled: the size set meanwhile, and a
+    /// page clock that starts now (the time the load took is not time its
+    /// timers have waited).
+    fn load_ended(&self) {
+        if let Some(bounds) = self.pending_bounds.take() {
+            if let Err(e) = self.set_bounds_internal(bounds) {
+                debug!(error = %e, "bounds after the load failed");
+            }
+        }
         self.live_clock.set(Instant::now());
     }
 
     /// Execute JavaScript synchronously.
     pub fn execute_script_sync(&self, script: &str) -> Option<String> {
-        let mut engine = self.engine.borrow_mut();
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return Default::default() };
         if let Some(view_id) = self.view_id {
             match engine.execute_script(view_id, script) {
                 Ok(result) => Some(result),
@@ -679,8 +774,9 @@ impl RustKitView {
 
 impl Drop for RustKitView {
     fn drop(&mut self) {
+        self.cancel_load();
         if let Some(view_id) = self.view_id {
-            let mut engine = self.engine.borrow_mut();
+            let Ok(mut engine) = self.engine.try_borrow_mut() else { return };
             if let Err(e) = engine.destroy_view(view_id) {
                 warn!(error = %e, "Failed to destroy RustKit view");
             }
@@ -805,6 +901,115 @@ mod tests {
     fn content_views_follow_a_page_s_own_navigation() {
         assert!(content_engine_builder().config().follows_script_navigation);
         assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
+    }
+
+    /// A server that answers every request with `body` after `delay`.
+    fn slow_server(delay: Duration, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    fn view() -> RustKitView {
+        RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// #739 / Pete's item 4: the window took no click while a page loaded,
+    /// because the load ran to its end inside the event handler.
+    #[test]
+    fn a_slow_load_gives_the_event_loop_back_at_once() {
+        let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
+        let view = view();
+        let started = Instant::now();
+        view.wry_load_url(&url).unwrap();
+        let held = started.elapsed();
+        assert!(held < Duration::from_millis(500), "the load held its caller for {held:?}");
+    }
+
+    #[test]
+    fn a_load_driven_a_slice_at_a_time_finishes() {
+        let url = slow_server(Duration::from_millis(300), "<title>slow</title><p>late</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut slices = 0;
+        while view.step_load() {
+            slices += 1;
+            assert!(Instant::now() < deadline, "the load never finished");
+        }
+        assert!(slices > 1, "the 300 ms wait was not split into slices");
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("slow"), "document.title = {title:?}");
+    }
+
+    #[test]
+    fn engine_calls_during_a_load_do_nothing_and_do_not_panic() {
+        let url = slow_server(Duration::from_millis(1_000), "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        assert!(!view.scroll_by(0.0, -40.0));
+        view.render();
+        assert_eq!(view.process_events(), None);
+        let _ = view.click_at_point(10.0, 10.0);
+        assert_eq!(view.execute_script_sync("1"), None);
+        // A size set meanwhile waits for the load's end.
+        view.set_bounds_internal(Bounds::new(0, 0, 500, 300)).unwrap();
+        assert!(view.pending_bounds.get().is_some());
+        while view.step_load() {}
+        assert!(view.pending_bounds.get().is_none());
+    }
+
+    #[test]
+    fn stop_cancels_a_slow_load_without_waiting_for_it() {
+        let url = slow_server(Duration::from_secs(10), "<p>never</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let started = Instant::now();
+        assert!(view.stop_load());
+        assert!(!view.is_loading());
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "stop took {took:?}");
+        assert!(!view.stop_load(), "nothing left to stop");
+    }
+
+    #[test]
+    fn a_new_load_replaces_the_one_in_progress() {
+        let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
+        let fast = slow_server(Duration::ZERO, "<title>new</title>");
+        let view = view();
+        view.wry_load_url(&slow).unwrap();
+        let started = Instant::now();
+        view.wry_load_url(&fast).unwrap();
+        while view.step_load() {}
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("new"), "document.title = {title:?}");
     }
 
     #[test]

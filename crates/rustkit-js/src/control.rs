@@ -388,12 +388,19 @@ impl ThreadStamp {
     }
 }
 
-#[derive(Default)]
 struct Shared {
+    /// The longest this watchdog sleeps while a turn is open ([`TICK`];
+    /// a test may lengthen it to tell a missed wake from a slow runner).
+    tick: Duration,
     stamps: Mutex<Vec<Weak<ThreadStamp>>>,
     views: Mutex<HashMap<u64, Weak<ViewControl>>>,
     /// Set by the watchdog before it parks with no turn open.
     parked: AtomicBool,
+    /// Set by the watchdog from just before it parks (a tick, or for good)
+    /// until it is running again. A diagnostic: the timing tests wait for
+    /// it so that the turn they open finds the watchdog asleep, not
+    /// between its two looks.
+    sleeping: AtomicBool,
     /// When the watchdog next wakes on its own (`now_us`); `u64::MAX`
     /// while parked with no turn open.
     wake_at_us: AtomicU64,
@@ -429,9 +436,9 @@ impl Shared {
                     let ends = open.started_us.saturating_add(open.budget_us);
                     let wait = if now >= ends {
                         over.push(open);
-                        TICK
+                        self.tick
                     } else {
-                        Duration::from_micros(ends - now).min(TICK)
+                        Duration::from_micros(ends - now).min(self.tick)
                     };
                     due = Some(due.map_or(wait, |d| d.min(wait)));
                 }
@@ -473,7 +480,23 @@ pub struct Watchdog {
 impl Watchdog {
     /// A watchdog with a thread of its own.
     pub fn spawn() -> Self {
-        let shared = Arc::new(Shared::default());
+        Self::spawn_with_tick(TICK)
+    }
+
+    /// [`Watchdog::spawn`] with its own longest sleep. Tests use a long
+    /// one: a wake the watchdog misses then costs the whole tick, which no
+    /// loaded runner is slow enough to hide.
+    fn spawn_with_tick(tick: Duration) -> Self {
+        let shared = Arc::new(Shared {
+            tick,
+            stamps: Mutex::default(),
+            views: Mutex::default(),
+            parked: AtomicBool::new(false),
+            sleeping: AtomicBool::new(false),
+            wake_at_us: AtomicU64::new(0),
+            thread: OnceLock::new(),
+            stopped: AtomicU64::new(0),
+        });
         let weak = Arc::downgrade(&shared);
         let handle = std::thread::Builder::new()
             .name("watchdog".into())
@@ -529,6 +552,7 @@ fn run(shared: Weak<Shared>) {
         let Some(live) = shared.upgrade() else {
             return;
         };
+        live.sleeping.store(false, Ordering::Relaxed);
         let first = live.scan();
         // Say when this thread wakes next (never, with nothing open), then
         // look once more: a turn published after that look sees it and
@@ -544,6 +568,7 @@ fn run(shared: Weak<Shared>) {
             // A turn opened or closed between the looks: look again.
             continue;
         }
+        live.sleeping.store(true, Ordering::Relaxed);
         drop(live);
         match wait {
             Some(wait) => std::thread::park_timeout(wait),
@@ -747,15 +772,23 @@ mod tests {
         stamp.end_turn();
     }
 
+    /// After stopping a turn the watchdog sleeps a whole tick; a turn whose
+    /// budget ends sooner (the grace turn after a stop) wakes it. A missed
+    /// wake waits out that sleep, so the stop lands at about a tick after
+    /// the short turn opened. With the process's 250 ms tick that is too
+    /// close to what a loaded runner adds to a 30 ms turn (275 ms and
+    /// 396 ms were seen on CI): the watchdog here gets a tick of its own,
+    /// long enough that a missed wake lands far past any runner's slack,
+    /// and the ceiling sits between the two.
     #[test]
     fn a_short_turn_opened_while_the_watchdog_sleeps_a_tick_is_stopped_on_time() {
-        // After stopping a turn the watchdog sleeps a whole tick; a turn
-        // whose budget ends sooner (the grace turn after a stop) wakes it.
-        // A missed wake waits out that sleep, so the stop lands at about a
-        // tick. One tick still fails that, which a 200 ms ceiling did not
-        // leave room for on a loaded runner.
+        const LONG_TICK: Duration = Duration::from_secs(2);
+        const SHORT_TURN: Duration = Duration::from_millis(30);
+        // Half a tick: a missed wake costs the whole tick, a slow runner
+        // has had up to about 970 ms on top of the 30 ms turn.
+        const CEILING: Duration = Duration::from_secs(1);
         let _timing = one_watchdog_timing_test();
-        let watchdog = Watchdog::spawn();
+        let watchdog = Watchdog::spawn_with_tick(LONG_TICK);
         let stamp = watchdog.thread_stamp();
         let view = watchdog.view_control();
         let first = stamp.begin_turn(&view, Duration::from_millis(0));
@@ -767,19 +800,37 @@ mod tests {
             );
             std::thread::yield_now();
         }
-        stamp.end_turn();
+        // With the stopped turn still open (the script is unwinding), wait
+        // for the watchdog to be in its tick-long sleep: both its looks saw
+        // that turn, so it is not parked, and only the short turn's own
+        // wake can bring it back before the tick ends. Ending the turn
+        // first would let the watchdog park with nothing open, and the
+        // short turn would then wake it by the other path.
         let started = Instant::now();
-        let short = stamp.begin_turn(&view, Duration::from_millis(30));
-        while !view.stops(short) {
+        while !watchdog.shared.sleeping.load(Ordering::Relaxed) {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
+                "the watchdog never went to sleep after the first stop"
+            );
+            std::thread::yield_now();
+        }
+        stamp.end_turn();
+        let started = Instant::now();
+        let short = stamp.begin_turn(&view, SHORT_TURN);
+        while !view.stops(short) {
+            assert!(
+                started.elapsed() < LONG_TICK + Duration::from_secs(2),
                 "the short turn was never stopped"
             );
             std::thread::yield_now();
         }
         let took = started.elapsed();
         stamp.end_turn();
-        assert!(took < TICK, "stopped after {took:?}, a tick late");
+        assert!(took >= SHORT_TURN, "stopped early: {took:?}");
+        assert!(
+            took < CEILING,
+            "stopped after {took:?}: the short turn did not wake the watchdog from its {LONG_TICK:?} tick"
+        );
     }
 
     #[test]

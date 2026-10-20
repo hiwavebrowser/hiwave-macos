@@ -385,7 +385,8 @@ mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
-mod hover_restyle_tests;#[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -1153,14 +1154,10 @@ const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// JavaScript time only: `load_url` is `block_on` there. They were not
 /// moved onto that thread. They are no longer cut off by the script
 /// budget, so a slow page can hold the thread for the waits plus the
-/// JavaScript. [`await_with_chrome_ui`] gives the chrome UI a turn during
-/// a wait, so that hold does not skip the toolbar and sidebar paint.
+/// JavaScript. Giving the app's chrome a turn during a wait is a
+/// follow-up of its own: it needs the window thread's event-loop lock
+/// to be re-entrant, which tao's is not.
 const SCRIPT_NETWORK_CAP: std::time::Duration = LIVE_REQUEST_TIMEOUT;
-
-/// How often a network wait lets the chrome UI run. Short enough that a
-/// toolbar paints during a slow document, long enough that a fast response
-/// is not sliced.
-const CHROME_UI_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Most records the live loop adds to a view's script log. A timer that
 /// throws on every tick would otherwise grow it for as long as the page is
@@ -1451,7 +1448,8 @@ fn record_stopped_script(
     } else {
         config.script_budget_ms
     };
-    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");
+    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
     begin_script_turn(bindings, STOP_NOTE_BUDGET);
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
     end_script_turn(bindings);
@@ -1561,19 +1559,27 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
         js.exec_started_us.set(rustkit_js::mono_us());
     });
     let started = std::time::Instant::now();
-    // A zero allowance used to arm a deadline of now and a watchdog turn of
-    // no time. The next `evaluate` (a lifecycle step) then resumed a pending
-    // async function under that stop, and Boa reported it as
-    // "async function was interrupted". The step still runs. It is not a
-    // turn: there is no time left to arm.
-    let arm = interrupt && !allowance.is_zero();
-    if arm {
+    // A spent budget stops JavaScript; it never takes the watchdog away.
+    // A lifecycle step (`DOMContentLoaded`, `load`, the load's timers) and
+    // a module supplied late still run once the budget is gone, and a
+    // listener that spins in one of them used to run with no deadline and
+    // no turn, holding the window's thread for good (a CNN load; #720 R1).
+    // It gets the stop grace: a deadline of now would have resumed a
+    // pending async function under an immediate stop, which Boa reports as
+    // "async function was interrupted". Deliveries that would land in a
+    // turn this short are parked instead (`script_js_resume_would_be_stopped`).
+    let allowance = if allowance.is_zero() {
+        rustkit_js::control::STOP_GRACE
+    } else {
+        allowance
+    };
+    if interrupt {
         bindings.set_execution_deadline(Some(std::time::Instant::now() + allowance));
         begin_script_turn(bindings, allowance);
     }
     let mut armed = ArmedExecution {
         bindings,
-        interrupt: arm,
+        interrupt,
         open: true,
     };
     let result = body();
@@ -1687,111 +1693,6 @@ fn test_leave_script_budget(remaining: std::time::Duration) {
         js.spent_us.set(limit.saturating_sub(remain));
         js.stopped.set(false);
     });
-}
-
-thread_local! {
-    /// The app's chrome (toolbar, sidebar) runs on this same thread. A
-    /// content load's network wait used to hold the thread straight through,
-    /// so the chrome got no turn and a screenshot caught it blank. The app
-    /// registers a hook; it is called only while the content turn is
-    /// disarmed and the content budget is suspended.
-    static CHROME_UI_TURN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Set for the hook: this yield suspended an installed content budget.
-    static CHROME_UI_SUSPENDED_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Register the chrome UI turn, or clear it. One per thread: a thread runs
-/// one page at a time. The hook runs during a content load's network waits
-/// and must not re-enter the load.
-pub fn set_chrome_ui_turn(hook: Option<Box<dyn FnMut()>>) {
-    CHROME_UI_TURN.with(|slot| *slot.borrow_mut() = hook);
-}
-
-fn chrome_ui_turn_is_set() -> bool {
-    CHROME_UI_TURN.with(|slot| slot.borrow().is_some())
-}
-
-/// The hook is running with the content budget suspended and no script
-/// turn open, so a chrome script is not charged to the content page and
-/// the content watchdog does not stop it.
-#[cfg(test)]
-fn chrome_ui_turn_is_clear() -> bool {
-    let js_clear = SCRIPT_JS.with(|js| js.limit_us.get() == 0 && js.depth.get() == 0);
-    let turn_clear = SCRIPT_STAMP.with(|stamp| stamp.current_turn() == 0);
-    js_clear && turn_clear
-}
-
-/// This yield took the content budget off the thread for the hook.
-#[cfg(test)]
-fn chrome_ui_turn_suspended_content_budget() -> bool {
-    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.get())
-}
-
-/// Run the chrome hook once, with the content budget not installed, and
-/// put that budget back afterwards. A hook that panics still restores both.
-fn yield_chrome_ui_turn() {
-    let hook = CHROME_UI_TURN.with(|slot| slot.borrow_mut().take());
-    let Some(hook) = hook else { return };
-    struct Restore {
-        limit: u64,
-        depth: u32,
-        hook: Option<Box<dyn FnMut()>>,
-    }
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SCRIPT_JS.with(|js| {
-                if js.limit_us.get() == 0 {
-                    js.limit_us.set(self.limit);
-                }
-                if js.depth.get() == 0 {
-                    js.depth.set(self.depth);
-                }
-            });
-            let hook = self.hook.take();
-            CHROME_UI_TURN.with(|slot| {
-                if slot.borrow().is_none() {
-                    *slot.borrow_mut() = hook;
-                }
-            });
-        }
-    }
-    let (limit, depth) = SCRIPT_JS.with(|js| (js.limit_us.replace(0), js.depth.replace(0)));
-    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.set(limit > 0));
-    let mut restore = Restore {
-        limit,
-        depth,
-        hook: Some(hook),
-    };
-    if let Some(hook) = restore.hook.as_mut() {
-        hook();
-    }
-}
-
-/// Await `fut`, and while it is pending let the chrome UI run. With no
-/// hook registered this is just `fut`: fast tests do not slice their waits.
-///
-/// Boxed so the select does not enlarge `load_url`'s future. That future
-/// is already built on the stack before it is moved to the heap, and the
-/// debug stack does not have room for another state machine in it.
-pub(crate) fn await_with_chrome_ui<'a, F: std::future::Future + 'a>(
-    fut: F,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = F::Output> + 'a>> {
-    Box::pin(async move {
-        if !chrome_ui_turn_is_set() {
-            return fut.await;
-        }
-        tokio::pin!(fut);
-        loop {
-            let slice = tokio::time::sleep(CHROME_UI_SLICE);
-            tokio::pin!(slice);
-            tokio::select! {
-                biased;
-                result = &mut fut => return result,
-                _ = &mut slice => yield_chrome_ui_turn(),
-            }
-        }
-    })
 }
 
 fn script_in_shadow(node: &Node) -> bool {
@@ -2880,9 +2781,8 @@ impl Engine {
         self.presenter.host_bounds(view.viewhost_id).ok()
     }
 
-    /// The host view's frame, when a load moved it without borrowing the
-    /// engine (`place_host_frame`). `None` for a headless view and on
-    /// platforms without that frame.
+    /// The host view's frame as the window has it now. `None` for a
+    /// headless view and on platforms without that frame.
     fn live_frame_size(&self, id: EngineViewId) -> Option<(u32, u32)> {
         #[cfg(target_os = "macos")]
         {
@@ -5374,7 +5274,7 @@ impl Engine {
                             ))),
                             Some(policy) => {
                                 let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = await_with_chrome_ui(policy.fetch_module(&loader, &url, &base));
+                                let fetch = policy.fetch_module(&loader, &url, &base);
                                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
                                 inspector::answer_module(guard, &fetched);
@@ -5403,13 +5303,13 @@ impl Engine {
                                     .map(|g| g.timeout_at(deadline, "timed out"));
                                 let fetched = tokio::time::timeout_at(
                                     deadline,
-                                    await_with_chrome_ui(loader.fetch(referrer.get_for(url, RequestDestination::Script))),
+                                    loader.fetch(referrer.get_for(url, RequestDestination::Script)),
                                 )
                                 .await;
                                 match fetched {
                                     Ok(Ok(response)) if response.ok() => {
                                         let received = guard.map(|g| g.received(&response));
-                                        match await_with_chrome_ui(response.text()).await {
+                                        match response.text().await {
                                             Ok(text) => {
                                                 if let Some(received) = received {
                                                     received.read(text.len());
@@ -5715,7 +5615,8 @@ impl Engine {
                     Err(_) => {
                         poisoned.set(true);
                         ScriptOutcome::EngineFailed(EngineFailure::Panic)
-                    }                }
+                    }
+                }
             };
             ScriptRecord {
                 source,
@@ -6411,10 +6312,7 @@ impl Engine {
             .inspector
             .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
             .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
-        let Some(fetched) = watch
-            .unless_cancelled(await_with_chrome_ui(self.loader.fetch(request)))
-            .await
-        else {
+        let Some(fetched) = watch.unless_cancelled(self.loader.fetch(request)).await else {
             debug!(?id, %url, "Navigation cancelled during the document fetch");
             return Ok(());
         };
@@ -6464,7 +6362,7 @@ impl Engine {
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
-                Some(response) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
+                Some(response) => match watch.unless_cancelled(response.text()).await {
                     Some(text) => text.unwrap_or_default(),
                     None => return Ok(()),
                 },
@@ -6523,7 +6421,7 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
+            (None, Some(response)) => match watch.unless_cancelled(response.text()).await {
                 None => {
                     debug!(?id, %url, "Navigation cancelled while its body was read");
                     return Ok(());
@@ -31049,7 +30947,8 @@ window.addEventListener('load', function () {
                 .execute_script(view, "slow === true && ranAfter === true")
                 .unwrap(),
             "Boolean(true)"
-        );    }
+        );
+    }
 
     /// `document.currentScript` is the classic <script> element while it
     /// runs and null otherwise. x.com ends inline scripts with
