@@ -9607,6 +9607,9 @@ impl Engine {
         // used to keep the 5px frame).
         zero_width_of_borderless_sides(&mut style);
 
+        // Needs all three line-clamp properties, whatever their order.
+        style.apply_line_clamp_display();
+
         style.custom_properties = vars;
 
         style_share_store(share, &style);
@@ -10343,8 +10346,23 @@ impl Engine {
                 }
             }
             "display" => {
-                if let Some(display) = parse_display(value) {
+                if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
+                    style.webkit_box = Some(inline);
+                } else if let Some(display) = parse_display(value) {
                     style.display = display;
+                    style.webkit_box = None;
+                }
+            }
+            // css-overflow-4 §4.2's legacy line clamp; see
+            // `ComputedStyle::line_clamp`.
+            "-webkit-box-orient" => match value.to_ascii_lowercase().as_str() {
+                "vertical" | "block-axis" => style.webkit_box_orient_vertical = true,
+                "horizontal" | "inline-axis" => style.webkit_box_orient_vertical = false,
+                _ => {}
+            },
+            "-webkit-line-clamp" => {
+                if let Some(clamp) = rustkit_css::parse_webkit_line_clamp(value) {
+                    style.webkit_line_clamp = clamp;
                 }
             }
             // Flexbox properties
@@ -11380,7 +11398,10 @@ impl Engine {
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
-            "display" => style.display = rustkit_css::Display::Block,
+            "display" => {
+                style.display = rustkit_css::Display::Block;
+                style.webkit_box = None;
+            }
             "opacity" => style.opacity = 1.0,
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
@@ -24289,6 +24310,67 @@ mod web_font_tests {
             y("p"),
             y("q")
         );
+    }
+
+    #[test]
+    fn webkit_line_clamp_cuts_a_vertical_webkit_box_after_n_lines() {
+        // `display: -webkit-box; -webkit-box-orient: vertical;
+        // -webkit-line-clamp: N` was dropped (display unparsed), so every
+        // clamped title card showed all its lines. Chrome sizes the box to
+        // its first N line boxes; the rest overflow (and `overflow: hidden`
+        // hides them). Any one of the three missing: no clamp.
+        let Some(engine) = test_engine() else { return };
+        let clamp = "display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden";
+        let lines = "one<br>two<br>three<br>four<br>five<br>six";
+        let html = format!(
+            r#"<!DOCTYPE html><html><body style="margin: 0; font: 20px/25px monospace">
+            <div id="a" style="{clamp}; -webkit-line-clamp: 2">{lines}</div>
+            <div id="b" style="{clamp}; -webkit-line-clamp: none">{lines}</div>
+            <div id="c" style="display: -webkit-box; -webkit-line-clamp: 2; overflow: hidden">{lines}</div>
+            <div id="d" style="{clamp}; -webkit-line-clamp: 3">one <span>two</span><br>three</div>
+            <div id="e" style="-webkit-line-clamp: 1; {clamp}; display: block">{lines}</div>
+            <div id="f" style="{clamp}; -webkit-line-clamp: 3">one<br>two<br>three<br>four</div>
+        </body></html>"#
+        );
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let mut layout = engine.build_layout_from_document(&document, &[]);
+        layout.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+
+        fn heights(b: &LayoutBox, out: &mut Vec<(String, f32, rustkit_css::Display)>) {
+            if let Some(id) = b
+                .identity
+                .as_ref()
+                .and_then(|i| i.selector.strip_prefix('#'))
+            {
+                out.push((id.to_string(), b.dimensions.content.height, b.style.display));
+            }
+            for c in &b.children {
+                heights(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        heights(&layout, &mut found);
+        let h = |id: &str| {
+            found
+                .iter()
+                .find(|(i, ..)| i == id)
+                .map(|(_, h, d)| (*h, *d))
+                .unwrap_or_else(|| panic!("no #{id} in {found:?}"))
+        };
+        use rustkit_css::Display;
+        assert_eq!(h("a"), (50.0, Display::Block), "clamped to 2 of 6 lines");
+        assert_eq!(h("b").0, 150.0, "line-clamp: none");
+        assert_eq!(h("c").0, 150.0, "no -webkit-box-orient: vertical");
+        assert_eq!(h("d").0, 50.0, "fewer lines than the clamp: natural height");
+        assert_eq!(
+            h("e").0,
+            150.0,
+            "a later display: block drops the -webkit-box"
+        );
+        assert_eq!(h("f").0, 75.0, "clamped to 3 of 4 lines");
     }
 
     #[test]
