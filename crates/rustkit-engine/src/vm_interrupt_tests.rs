@@ -15,6 +15,14 @@ fn config() -> EngineConfig {
     EngineConfig {
         interrupt_scripts_at_budget: true,
         live_turn_budget_ms: BUDGET_MS,
+        // These tests are about the watchdog, so nothing else may end a
+        // spin. With the app's 10M loop-iteration limit an optimized build
+        // runs a bare `while (true) {}` into Boa's `RuntimeLimitError` in
+        // 75 to 233 ms, under the 300 ms budget, and the record reads
+        // `Threw` instead of `OverBudget` (5 of 6 red in `--release` on
+        // develop 004b316f; green in debug, where 10M iterations take
+        // longer than the budget). `load_cancel_tests` pins it the same way.
+        script_loop_iteration_limit: u64::MAX / 2,
         ..EngineConfig::default()
     }
 }
