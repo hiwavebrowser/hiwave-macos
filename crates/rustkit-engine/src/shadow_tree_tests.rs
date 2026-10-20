@@ -858,7 +858,7 @@ fn a_lost_script_is_one_chromium_would_have_run() {
     for outcome in [
         ScriptOutcome::OverBudget,
         ScriptOutcome::Threw("Error: lost".into()),
-        ScriptOutcome::Skipped("too large to run inside the script budget"),
+        ScriptOutcome::Skipped(crate::SCRIPT_TOO_LARGE),
         ScriptOutcome::FetchFailed(FetchFailure::Transport("connection refused".into())),
     ] {
         assert!(

@@ -1147,12 +1147,17 @@ enum ScriptTiming {
     Async,
 }
 
-/// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
-/// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
-const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+/// The largest script the engine starts, of any kind (inline, external,
+/// module, inserted, data:): a memory-safety ceiling, not a time limit. The
+/// budget and the watchdog stop a long-running script (#709, #720), so a
+/// big app bundle (youtube's is 10.9 MB) runs. Boa cannot be interrupted
+/// while it parses and compiles, though: about 4.7 s for 10.9 MB in
+/// --release (rustkit-js `tests/large_script.rs`), all of it inside the
+/// turn that runs the script.
+const MAX_PAGE_SCRIPT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Why a script over [`MAX_PAGE_SCRIPT_BYTES`] is not run.
-const SCRIPT_TOO_LARGE: &str = "too large to run inside the script budget";
+const SCRIPT_TOO_LARGE: &str = "larger than the 64 MiB script ceiling";
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
@@ -1168,7 +1173,7 @@ pub enum ScriptOutcome {
     Ran,
     /// Threw, with `String(error)` (`TypeError: x is not a function`).
     Threw(String),
-    /// Not run, and why (`too large to run inside the script budget`).
+    /// Not run, and why (`larger than the 64 MiB script ceiling`).
     Skipped(&'static str),
     /// A classic `nomodule` script: not run, as module-capable browsers
     /// skip it by design.
@@ -4777,16 +4782,12 @@ impl Engine {
                 });
                 continue;
             }
-            // Boa cannot be interrupted mid-script, so the budget can only
-            // be enforced between scripts. Boa takes about 1s per MB here,
-            // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
-            // and hung the capture. A script that big is not started.
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
                 log.push(ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
-                    outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
+                    outcome: ScriptOutcome::Skipped(SCRIPT_TOO_LARGE),
                 });
                 continue;
             }
@@ -29919,9 +29920,13 @@ document.currentScript.remove();
         assert!(took < std::time::Duration::from_secs(30), "the spin ran on: {took:?}");
         let log = engine.script_log(view).unwrap();
         assert!(log[0].bytes > 5 * 1024 * 1024, "{log:#?}");
+        // Started, then stopped: not skipped. Boa cannot be interrupted while
+        // it parses and compiles, so when that alone outlasts the budget (a
+        // debug build) the stop lands on the script's first instruction.
         assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
-        // It started: the stop came inside it, not before it.
-        assert_eq!(engine.execute_script(view, "bigSpin").unwrap(), "Boolean(true)");
+        assert_eq!(log[1].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        // The page is still a page.
+        assert_eq!(engine.execute_script(view, "1 + 1").unwrap(), "Number(2.0)");
     }
 
     #[test]

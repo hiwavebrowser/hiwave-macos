@@ -581,7 +581,7 @@ pub(crate) async fn pump_inserted_scripts(
                 }
                 Ok(text) if text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
                     record.bytes = text.len();
-                    Err(ScriptOutcome::Skipped("too large to run inside the script budget"))
+                    Err(ScriptOutcome::Skipped(crate::SCRIPT_TOO_LARGE))
                 }
                 other => other,
             };
