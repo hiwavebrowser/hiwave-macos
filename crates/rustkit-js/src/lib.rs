@@ -481,7 +481,8 @@ impl JsRuntime {
     }
 
     /// Set up console API: `console.log`, `info`, `warn`, `error` and
-    /// `debug` are native functions. Without a handler a call does nothing;
+    /// `debug` are native functions, and so is every other member of the
+    /// Console namespace ([`diag::Diagnostics::console_member`]). Without a handler a call does nothing;
     /// with one its line is built at the call (no page code runs) and queued
     /// in Rust with the caller's position. Nothing on `console` or anywhere
     /// else page script can reach turns redaction off or adds to the queue.
@@ -503,6 +504,32 @@ impl JsRuntime {
                 let method = unsafe {
                     NativeFunction::from_closure(move |_this, args, context| {
                         diag.console_call(level, args, context);
+                        Ok(boa_engine::JsValue::undefined())
+                    })
+                };
+                console.function(method, js_string!(name), 0);
+            }
+            for name in [
+                "assert",
+                "clear",
+                "count",
+                "countReset",
+                "dir",
+                "dirxml",
+                "group",
+                "groupCollapsed",
+                "groupEnd",
+                "table",
+                "time",
+                "timeEnd",
+                "timeLog",
+                "trace",
+            ] {
+                let diag = self.diag.clone();
+                // SAFETY: as above.
+                let method = unsafe {
+                    NativeFunction::from_closure(move |_this, args, context| {
+                        diag.console_member(name, args, context);
                         Ok(boa_engine::JsValue::undefined())
                     })
                 };
@@ -1369,7 +1396,8 @@ mod tests {
                 ("Info", lines[12].1.as_str()),
             ]
         );
-        assert_eq!(lines.len(), 14, "{lines:?}");
+        assert_eq!(lines.len(), 15, "{lines:?}");
+        assert_eq!(lines[14], ("Warn".to_string(), "Timer 't' does not exist".to_string()));
         let (log_line, end_line) = (&lines[12].1, &lines[13].1);
         assert!(log_line.starts_with("t: ") && log_line.ends_with("ms mid"), "{log_line}");
         assert!(end_line.starts_with("t: ") && end_line.ends_with("ms"), "{end_line}");
