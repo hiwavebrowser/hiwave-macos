@@ -41,7 +41,8 @@ fn a_ten_megabyte_bundle_parse_and_run_times() {
     for run in 0..3 {
         let mut context = Context::default();
         let started = Instant::now();
-        let script = Script::parse(Source::from_bytes(&source), None, &mut context).expect("parses");
+        let script =
+            Script::parse(Source::from_bytes(&source), None, &mut context).expect("parses");
         let parsed = started.elapsed();
         let compile_at = Instant::now();
         script.codeblock(&mut context).expect("compiles");
