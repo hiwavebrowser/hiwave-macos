@@ -1151,6 +1151,9 @@ enum ScriptTiming {
 /// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
 const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Why a script over [`MAX_PAGE_SCRIPT_BYTES`] is not run.
+const SCRIPT_TOO_LARGE: &str = "too large to run inside the script budget";
+
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
 /// `(label, node id, fetched source or why not, is a module script)`. A
@@ -29852,23 +29855,89 @@ document.currentScript.remove();
         assert!(state.layout.is_some());
     }
 
+    /// `bytes` of script: `name = true`, then comment lines, then `tail`.
+    fn padded_script(name: &str, bytes: usize, tail: &str) -> String {
+        format!("var {name} = true;\n{}{tail}\n", "// padding\n".repeat(bytes / 11 + 1))
+    }
+
+    // youtube's 10.9 MB app bundle was skipped by the old 4 MiB cap, which
+    // dates from before the watchdog could stop a running script.
     #[test]
-    fn a_script_too_large_for_the_budget_is_not_started() {
+    fn a_script_over_four_megabytes_runs() {
         let page = r#"<html><head>
-<script src="/huge.js"></script>
+<script src="/big.js"></script>
 <script>var after = true;</script>
 </head><body>hi</body></html>"#;
-        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(MAX_PAGE_SCRIPT_BYTES / 11 + 1));
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
-            ("/huge.js", "text/javascript", huge),
+            ("/big.js", "text/javascript", padded_script("big", 5 * 1024 * 1024, "")),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
+        assert!(log[0].bytes > 5 * 1024 * 1024, "{log:#?}");
+        assert_eq!(engine.execute_script(view, "big").unwrap(), "Boolean(true)");
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn an_inserted_script_over_four_megabytes_runs() {
+        let page = r#"<html><head>
+<script>var s = document.createElement('script'); s.src = '/big.js'; document.head.appendChild(s);</script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/big.js", "text/javascript", padded_script("bigInserted", 5 * 1024 * 1024, "")),
         ]);
         let (mut engine, view) = load(EngineConfig::default(), port);
         let log = engine.script_log(view).unwrap();
         assert!(
-            matches!(log[0].outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")),
+            log.iter().any(|r| r.source.ends_with("/big.js") && r.outcome == ScriptOutcome::Ran),
             "{log:#?}"
         );
+        assert_eq!(engine.execute_script(view, "bigInserted").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_spin_inside_a_large_script_is_stopped_by_the_budget() {
+        let page = r#"<html><head>
+<script src="/big.js"></script>
+<script>var after = true;</script>
+</head><body><p>alive</p></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/big.js", "text/javascript", padded_script("bigSpin", 5 * 1024 * 1024, "while (true) {}")),
+        ]);
+        let config = EngineConfig {
+            script_budget_ms: 200,
+            interrupt_scripts_at_budget: true,
+            // The budget stops the spin, not Boa's loop limit.
+            script_loop_iteration_limit: u64::MAX / 2,
+            ..EngineConfig::default()
+        };
+        let (mut engine, view, took) = load_timed(config, port);
+        assert!(took < std::time::Duration::from_secs(30), "the spin ran on: {took:?}");
+        let log = engine.script_log(view).unwrap();
+        assert!(log[0].bytes > 5 * 1024 * 1024, "{log:#?}");
+        assert_eq!(log[0].outcome, ScriptOutcome::OverBudget, "{log:#?}");
+        // It started: the stop came inside it, not before it.
+        assert_eq!(engine.execute_script(view, "bigSpin").unwrap(), "Boolean(true)");
+    }
+
+    #[test]
+    fn a_script_over_the_memory_ceiling_is_not_started() {
+        let page = r#"<html><head>
+<script src="/huge.js"></script>
+<script>var after = true;</script>
+</head><body>hi</body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/huge.js", "text/javascript", padded_script("huge", MAX_PAGE_SCRIPT_BYTES, "")),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert_eq!(log[0].outcome, ScriptOutcome::Skipped(SCRIPT_TOO_LARGE), "{log:#?}");
+        assert!(log[0].bytes > MAX_PAGE_SCRIPT_BYTES, "{log:#?}");
         assert_eq!(engine.execute_script(view, "typeof huge").unwrap(), r#"String("undefined")"#);
         assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
     }
