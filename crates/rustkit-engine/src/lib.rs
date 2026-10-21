@@ -3932,13 +3932,19 @@ impl Engine {
     /// The chain is idle. `readyState` becomes `complete`, `window` `load`
     /// fires, then the timer horizon and scripts the load handler inserted.
     /// `PageLoaded` is sent after that, not before.
+    ///
+    /// This runs inside a live turn, on the window's thread, so it waits
+    /// for no answer. What the load handler and the horizon's timers ask
+    /// of the network is started by the rest of this turn, as any live
+    /// request is, and answered on a later one. Until #727's R1 (H1) the
+    /// tail pumped those requests here with the load's 30 s network cap:
+    /// a slow beacon from a `load` handler held the window for as long.
     async fn complete_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
         if self.nav_superseded(id, nav_id) {
             self.abandon_load_tail(id, nav_id);
             return;
         }
         let horizon = self.config.timer_horizon_ms;
-        let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
@@ -3954,47 +3960,11 @@ impl Engine {
         };
         let mut log = std::mem::take(&mut view.script_log);
         let inspector = view.inspector.clone();
-        let policy = view.script_policy.clone();
-        let document_url = view.url.clone();
-        let modules_fetched = Cell::new(0usize);
         let watch = NavWatch {
             canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
             nav_id,
         };
         let watch = Some(watch);
-
-        let mut pump = |timers: Option<(u64, u32)>| {
-            let policy = policy.clone();
-            let loader = loader.clone();
-            let document = document_url.clone();
-            let modules_fetched = &modules_fetched;
-            let inspector = &inspector;
-            let watch = watch.clone();
-            let bindings = &bindings;
-            async move {
-                let Some(policy) = policy else {
-                    return None;
-                };
-                let mut count = modules_fetched.get();
-                let found = nav_cancel::unless_cancelled(
-                    watch.as_ref(),
-                    script_net::pump_all(
-                        bindings,
-                        &policy,
-                        &loader,
-                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
-                        net_rounds,
-                        timers,
-                        document.as_ref(),
-                        &mut count,
-                        inspector,
-                    ),
-                )
-                .await;
-                modules_fetched.set(count);
-                found
-            }
-        };
 
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
@@ -4048,15 +4018,6 @@ impl Engine {
             );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
         }
-        if !stopped {
-            if let Some(found) = pump(None).await {
-                if Self::absorb_network_pump(&mut log, &inspector, found) {
-                    stopped = true;
-                }
-            } else if nav_cancel::cancelled(watch.as_ref()) {
-                stopped = true;
-            }
-        }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
             info!(source = "timers", "Running page lifecycle step");
@@ -4098,17 +4059,12 @@ impl Engine {
                 "Page lifecycle step done"
             );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
-            if !stopped {
-                if let Some(found) = pump(Some((horizon, MAX_TIMER_CALLBACKS))).await {
-                    if Self::absorb_network_pump(&mut log, &inspector, found) {
-                        stopped = true;
-                    }
-                }
-            }
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
             // which has already fired. Run one whose body is already here.
+            // Not waiting, it never pumps the network.
+            let mut no_pump = |_: Option<(u64, u32)>| async { None };
             stopped = self
                 .settle_inserted_scripts(
                     id,
@@ -4121,14 +4077,10 @@ impl Engine {
                     tokio::time::Instant::now(),
                     !script_js_exhausted(),
                     false,
-                    &mut pump,
+                    &mut no_pump,
                 )
                 .await;
         }
-        // `pump` only holds references, so it is `Copy`. Using it here ends
-        // that borrow and `bindings` can move back onto the view.
-        #[allow(dropping_copy_types)]
-        drop(pump);
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
             view.script_log = log;
@@ -4161,35 +4113,6 @@ impl Engine {
             .strip_prefix("JS error: Execution error: ")
             .map(str::to_string)
             .unwrap_or(message)
-    }
-
-    /// Record a network pump the way the load's lifecycle steps do.
-    /// `true` when the JS engine panicked.
-    fn absorb_network_pump(
-        log: &mut Vec<ScriptRecord>,
-        inspector: &Arc<Inspector>,
-        mut found: script_net::Pump,
-    ) -> bool {
-        for record in found.records.drain(..) {
-            inspector_glue::log_script(log, inspector, record);
-        }
-        for message in found.threw {
-            log.push(ScriptRecord {
-                source: "network".into(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
-            });
-        }
-        if found.poisoned {
-            log.push(ScriptRecord {
-                source: "network".into(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
-            });
-        }
-        found.poisoned
     }
 
     /// Images the yielded load's scripts added, then `PageLoaded`.
@@ -4230,25 +4153,19 @@ impl Engine {
                 "Page asked to navigate: not waiting for images its scripts added"
             );
         }
-        let added = match leaving {
-            true => Ok(0),
-            false => match watch
-                .unless_cancelled(self.load_images_added_by_scripts(id))
-                .await
-            {
-                Some(added) => added,
-                None => return Ok(()),
-            },
-        };
-        match added {
-            Ok(0) => {}
-            Ok(count) => {
-                info!(count, "Loaded images added by page scripts");
-                if !self.nav_superseded(id, nav_id) {
-                    self.relayout_for(id, RelayoutCause::ImageLoaded { count })?;
+        // The images the scripts added are fetched as a live turn's are: no
+        // turn waits for them, and the turn they arrive on lays them out.
+        // This is the window's thread (#727 R1 H1).
+        if !leaving && !watch.is_cancelled() {
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                    }
                 }
+                Ok(_) => {}
+                Err(e) => warn!(?e, "Failed to load images added by page scripts"),
             }
-            Err(e) => warn!(?e, "Failed to load images added by page scripts"),
         }
         if self.nav_superseded(id, nav_id) {
             return Ok(());
@@ -12598,6 +12515,14 @@ impl Engine {
                     NavCanceller::new(view.control.clone(), view.nav_signal.clone())
                         .cancel_nav(view.nav_id);
                 }
+                // A yielded load parked on this view: its queued scripts are
+                // dropped and `load` never fires (#727 R1 H2).
+                if let Some(nav_id) = view.load_tail.take() {
+                    if view.nav_id == nav_id {
+                        view.live_inserted.abandon();
+                    }
+                    view.control.end_load(nav_id);
+                }
                 // Decodes out for this document are dropped either way (D1).
                 view.decode_epoch = view.decode_epoch.wrapping_add(1);
                 self.image_manager.begin_navigation(id.0, view.decode_epoch);
@@ -12642,6 +12567,13 @@ impl Engine {
             view.control.clone(),
             view.nav_signal.clone(),
         ))
+    }
+
+    /// Whether a yielded load is parked on the view: it has returned to
+    /// the event loop, and a live turn will fire its `load`. A Stop then
+    /// goes to [`Engine::stop`].
+    pub fn load_tail_open(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.load_tail.is_some())
     }
 
     /// The view's newest navigation id; 0 before its first navigation.

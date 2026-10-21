@@ -1600,6 +1600,85 @@ L('/a.js inserted');
     );
 }
 
+/// The turn that finishes a yielded load fires `load` and returns. A fetch
+/// the `load` handler starts, and one a timer of the load's horizon
+/// starts, are answered on later turns: no turn waits for them (#727 R1
+/// H1: the tail pumped them with the 30 s network cap, a 4 s turn here).
+#[test]
+fn a_yielded_load_does_not_wait_for_a_load_handler_fetch() {
+    // Set once a held request is answered.
+    static BEACON_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/a.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                (200, "text/javascript", vec![], "L('/a.js ran');".into())
+            }
+            "/beacon" | "/late" => {
+                std::thread::sleep(std::time::Duration::from_millis(4000));
+                BEACON_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+                (200, "text/plain", vec![], "ok".into())
+            }
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+window.addEventListener('load', function () {
+  L('window load');
+  fetch('/beacon').then(function (r) { return r.text(); }).then(function (t) { L('beacon ' + t); });
+  setTimeout(function () {
+    fetch('/late').then(function (r) { return r.text(); }).then(function (t) { L('late ' + t); });
+  }, 0);
+});
+var s = document.createElement('script');
+s.src = '/a.js';
+document.head.appendChild(s);
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    let yielded = rt
+        .block_on(engine.load_url_yielding(view, server.url("/")))
+        .expect("yield");
+    assert_eq!(yielded, LoadYield::Yielded);
+    let started = std::time::Instant::now();
+    let mut longest = std::time::Duration::ZERO;
+    let mut load_fired = false;
+    loop {
+        let turn = std::time::Instant::now();
+        rt.block_on(engine.pump_live(view, 16));
+        longest = longest.max(turn.elapsed());
+        let log = page_log(&mut engine, view);
+        if !load_fired && log.contains("window load") {
+            load_fired = true;
+            assert!(
+                !BEACON_ANSWERED.load(std::sync::atomic::Ordering::SeqCst),
+                "the turn that fired load waited for its fetch: {:?}",
+                turn.elapsed()
+            );
+            assert!(engine.views[&view].load_tail.is_none());
+        }
+        if log.contains("beacon ok") && log.contains("late ok") {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "the held requests were never answered: {log}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(load_fired);
+    assert!(
+        longest < std::time::Duration::from_millis(500),
+        "a live turn held the window for {longest:?}"
+    );
+}
+
 /// Navigating away while the chain is still fetching drops it. `load` does
 /// not fire for the old document, and it does not fire an extra time on
 /// the next one. The late script does not run there.

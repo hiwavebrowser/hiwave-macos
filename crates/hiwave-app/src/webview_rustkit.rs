@@ -717,10 +717,22 @@ impl RustKitView {
 
     /// Stop the load in progress (the user's Stop). Returns whether there
     /// was one.
+    ///
+    /// A load that yielded after `DOMContentLoaded` has no future here any
+    /// more, but the engine still finishes it from the live turns: that one
+    /// is stopped in the engine, and its `load` never fires (#727 R1 H2).
     pub fn stop_load(&self) -> bool {
-        let loading = self.is_loading();
-        self.cancel_load();
-        loading
+        if self.is_loading() {
+            self.cancel_load();
+            return true;
+        }
+        let Some(view_id) = self.view_id else { return false };
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return false };
+        if !engine.load_tail_open(view_id) {
+            return false;
+        }
+        engine.stop(view_id);
+        true
     }
 
     /// Cancel the load in progress, if any, and let it unwind: a cancelled
@@ -995,6 +1007,91 @@ mod tests {
         assert!(!view.is_loading());
         let took = started.elapsed();
         assert!(took < Duration::from_secs(1), "stop took {took:?}");
+        assert!(!view.stop_load(), "nothing left to stop");
+    }
+
+    /// A page whose inserted `/a.js` is answered after `delay`; the page
+    /// itself at once. `load` marks `window.loadFired`.
+    fn yielding_server(delay: Duration) -> String {
+        use std::io::{Read, Write};
+        const PAGE: &str = "<script>window.addEventListener('load', function () { window.loadFired = true; });\
+var s = document.createElement('script'); s.src = '/a.js'; document.head.appendChild(s);</script>";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let (kind, body) = if request.starts_with(b"GET /a.js") {
+                        std::thread::sleep(delay);
+                        ("text/javascript", "window.aRan = true;")
+                    } else {
+                        ("text/html", PAGE)
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// #727 R1 H2: a load that yielded after `DOMContentLoaded` is finished
+    /// by the live turns. Stop used to find no `pending_load`, log "nothing
+    /// loading" and let the tail run its script, fire `load` and send
+    /// `PageLoaded`.
+    #[test]
+    fn stop_ends_a_load_that_yielded_while_an_inserted_script_fetches() {
+        let url = yielding_server(Duration::from_millis(1_500));
+        let mut view = view();
+        view.wry_load_url(&url).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while view.step_load() {
+            assert!(Instant::now() < deadline, "the load never yielded");
+        }
+        let view_id = view.view_id.unwrap();
+        assert!(!view.is_loading());
+        assert!(
+            view.engine.borrow().load_tail_open(view_id),
+            "the load did not yield: it waited out /a.js"
+        );
+        assert!(view.stop_load(), "Stop found nothing to stop");
+        assert!(!view.engine.borrow().load_tail_open(view_id));
+        // Past the time /a.js is answered.
+        let until = Instant::now() + Duration::from_millis(2_500);
+        while Instant::now() < until {
+            view.process_events();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let fired = view
+            .execute_script_sync("String(window.loadFired) + ',' + String(window.aRan)")
+            .unwrap_or_default();
+        assert!(!fired.contains("true"), "the stopped load went on: {fired}");
+        let mut events = Vec::new();
+        if let Some(rx) = view.event_rx.as_mut() {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+        assert!(
+            !events.iter().any(|e| matches!(e, EngineEvent::PageLoaded { .. })),
+            "a stopped load sent PageLoaded"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, EngineEvent::NavigationFailed { error, .. } if error == "stopped")),
+            "the navigation was not ended as stopped"
+        );
         assert!(!view.stop_load(), "nothing left to stop");
     }
 
