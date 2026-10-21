@@ -95,6 +95,8 @@ baselines/seat-control/
 # The scripts recreate these; committed copies went stale and nothing read them.
 multisurface-captures/
 builtins-captures/*.layout.json
+# scripts/websuite_capture.sh frames (6.8 MB each). Nothing reads them back.
+websuite/captures/*.ppm
 
 # Per-session agent scratch directories. Put anything worth keeping in
 # trench/forensics or docs/ instead. (scratch_n41/ and scratch_n42/ are still
