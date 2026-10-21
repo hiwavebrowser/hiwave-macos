@@ -1051,11 +1051,18 @@ enum Dialed<S> {
 const H2_STREAM_WINDOW: u32 = 6 * 1024 * 1024;
 const H2_CONNECTION_WINDOW: u32 = 15 * 1024 * 1024;
 
+/// Streams the client opens before the server's SETTINGS are read. h2's
+/// default is 100, and a server whose limit is lower answers the extra
+/// streams with REFUSED_STREAM. With one, later requests queue on the
+/// connection until SETTINGS give the server's own limit.
+const H2_STREAMS_BEFORE_SETTINGS: usize = 1;
+
 fn h2_client() -> h2::client::Builder {
     let mut builder = h2::client::Builder::new();
     builder
         .initial_window_size(H2_STREAM_WINDOW)
-        .initial_connection_window_size(H2_CONNECTION_WINDOW);
+        .initial_connection_window_size(H2_CONNECTION_WINDOW)
+        .initial_max_send_streams(H2_STREAMS_BEFORE_SETTINGS);
     builder
 }
 
