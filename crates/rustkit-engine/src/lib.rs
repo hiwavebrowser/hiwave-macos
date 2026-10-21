@@ -5215,12 +5215,13 @@ impl Engine {
                     let reserved = page_trace::next_inline_label();
                     let label = script_external_label(node, base).unwrap_or(reserved);
                     page_trace::remember_script_label(node_id, label.clone());
-                    let status = if label.starts_with("inline#") {
-                        None
+                    // An external body has not arrived yet: its status is
+                    // recorded when it does.
+                    if label.starts_with("inline#") {
+                        page_trace::note_parser_script(&label, None);
                     } else {
-                        Some(200)
-                    };
-                    page_trace::note_parser_script(&label, status);
+                        page_trace::note_parser_script_fetching(&label);
+                    }
                     if template {
                         // Inert until script inserts the content (HTML template contents).
                         page_trace::note_detail(&label, "template");
@@ -5773,15 +5774,21 @@ impl Engine {
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
         // Every parser script is in the trace even when this loop returns
-        // before it runs. `fetched_scripts` then says why.
+        // before it runs. `fetched_scripts` then says why. Only a body that
+        // has arrived is recorded as a 200; one still in flight is recorded
+        // when the runner takes it.
         for slot in &plan.slots {
             if slot.timing.is_none() {
                 continue;
             }
-            if slot.label.starts_with("inline#") {
-                page_trace::note_parser_script(&slot.label, None);
-            } else {
-                page_trace::note_parser_script(&slot.label, Some(200));
+            match &slot.body {
+                SlotBody::Inline(_) => page_trace::note_parser_script(&slot.label, None),
+                SlotBody::Ready(Ok(_)) if slot.label.starts_with("inline#") => {
+                    page_trace::note_parser_script(&slot.label, None)
+                }
+                SlotBody::Ready(Ok(_)) => page_trace::note_parser_script(&slot.label, Some(200)),
+                SlotBody::Ready(Err(outcome)) => page_trace::note_observed(&slot.label, outcome),
+                SlotBody::Pending(_) => page_trace::note_parser_script_fetching(&slot.label),
             }
         }
         // `$slots` is one HTML list. Called for the parser-blocking and
@@ -5817,8 +5824,8 @@ impl Engine {
             let text = match source {
                 Ok(text) => text,
                 Err(outcome) => {
-                    // A module script that could not be fetched: logged, and
-                    // its element hears `error`.
+                    // A classic or module script that could not be fetched:
+                    // logged, and its element hears `error`.
                     let record = ScriptRecord {
                         source: label,
                         bytes: 0,
