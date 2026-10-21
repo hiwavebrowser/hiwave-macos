@@ -2234,4 +2234,101 @@ mod governed_tests {
             }
         }
     }
+
+    /// How the h2 fixture below answers on its first `bad` connections.
+    #[derive(Clone, Copy)]
+    enum Unprocessed {
+        /// RST_STREAM(REFUSED_STREAM) on every stream.
+        Refuse,
+        /// GOAWAY(NO_ERROR) before any stream is read, so every stream is
+        /// above its last stream id.
+        GoAway,
+    }
+
+    /// An h2 server whose first `bad` connections leave every stream
+    /// unprocessed (RFC 9113 §8.7); later connections answer `ok`. Returns
+    /// the address and the accept count.
+    async fn serve_h2_unprocessed(
+        how: Unprocessed,
+        bad: usize,
+    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let nth = seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut connection) = h2::server::handshake(sock).await else {
+                        return;
+                    };
+                    if nth < bad && matches!(how, Unprocessed::GoAway) {
+                        connection.abrupt_shutdown(h2::Reason::NO_ERROR);
+                        while let Some(next) = connection.accept().await {
+                            if next.is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+                    while let Some(next) = connection.accept().await {
+                        let Ok((_request, mut respond)) = next else {
+                            break;
+                        };
+                        if nth < bad {
+                            respond.send_reset(h2::Reason::REFUSED_STREAM);
+                            continue;
+                        }
+                        let response = http::Response::builder().status(200).body(()).unwrap();
+                        if let Ok(mut body) = respond.send_response(response, false) {
+                            let _ = body.send_data(Bytes::from_static(b"ok"), true);
+                        }
+                    }
+                });
+            }
+        });
+        (addr, accepts)
+    }
+
+    /// A refused stream was never processed (RFC 9113 §8.7): an idempotent
+    /// request is sent again once, on a new connection.
+    #[tokio::test]
+    async fn a_refused_h2_stream_is_retried_once_on_a_new_connection() {
+        let (addr, accepts) = serve_h2_unprocessed(Unprocessed::Refuse, 1).await;
+        let response = client()
+            .request_h2_cleartext(&format!("http://{addr}/a.js"))
+            .await
+            .expect("a refused GET is retried on a new connection");
+        assert_eq!(response.body.as_ref(), b"ok");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A stream above a GOAWAY's last stream id was never processed either.
+    #[tokio::test]
+    async fn an_h2_stream_above_a_goaway_is_retried_once_on_a_new_connection() {
+        let (addr, accepts) = serve_h2_unprocessed(Unprocessed::GoAway, 1).await;
+        let response = client()
+            .request_h2_cleartext(&format!("http://{addr}/a.js"))
+            .await
+            .expect("a GET above the GOAWAY is retried on a new connection");
+        assert_eq!(response.body.as_ref(), b"ok");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Once only: a host that refuses on the new connection too is an error,
+    /// not a loop.
+    #[tokio::test]
+    async fn an_h2_retry_happens_at_most_once() {
+        let (addr, accepts) = serve_h2_unprocessed(Unprocessed::Refuse, usize::MAX).await;
+        let result = client()
+            .request_h2_cleartext(&format!("http://{addr}/a.js"))
+            .await;
+        assert!(result.is_err(), "a GET refused on every connection succeeded");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 }
