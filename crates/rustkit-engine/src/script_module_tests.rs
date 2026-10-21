@@ -341,3 +341,37 @@ import('bare-specifier').then(function () { log.push('RESOLVED'); }, function (e
         "{got}"
     );
 }
+
+/// Under `HIWAVE_REPLAY` the page keeps its recorded origin; only the
+/// sockets go to the replay server. A module's identity (`import.meta.url`)
+/// and the base its own imports resolve against must be that recorded
+/// origin too. They were the proxy's `http://127.0.0.1:PORT/...`, so an
+/// https page refused every nested import (mixed content, wrong origin).
+#[test]
+fn replayed_modules_resolve_against_the_recorded_page_origin() {
+    let server = serve_routes(vec![
+        (
+            "/app/",
+            "text/html",
+            page(r#"<script type="module">import './a.js'; log.push('page');</script>"#),
+        ),
+        ("/app/a.js", JS, "import '../b.js'; log.push('a:' + import.meta.url);".into()),
+        ("/b.js", JS, "log.push('b:' + import.meta.url);".into()),
+    ]);
+    let proxy = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let mut engine = EngineBuilder::new().replay_proxy(Some(proxy)).build().expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+        .expect("view");
+    let url = Url::parse("https://recorded.example/app/").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    assert_eq!(
+        log(&mut engine, view),
+        "b:https://recorded.example/b.js,a:https://recorded.example/app/a.js,page"
+    );
+    assert_eq!(server.hits.load(std::sync::atomic::Ordering::SeqCst), 3, "page, a.js, b.js");
+}

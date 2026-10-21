@@ -708,7 +708,16 @@ impl ResourceLoader {
                 proxy_target.set_path(req.url.path());
                 proxy_target.set_query(req.url.query());
                 req.url = proxy_target;
-                return Box::pin(self.fetch_with(req, client, false)).await;
+                // Only the socket goes to the replay server. The response
+                // keeps the recorded URL: it is a module's identity and the
+                // base its imports resolve against, and the proxy's
+                // `http://127.0.0.1:PORT` made an https page refuse them.
+                let mut response = Box::pin(self.fetch_with(req, client, false)).await?;
+                response.url = unproxied_url(&response.url, proxy, &request.url);
+                for (hop, _) in &mut response.redirect_chain {
+                    *hop = unproxied_url(hop, proxy, &request.url);
+                }
+                return Ok(response);
             }
         }
 
@@ -1117,6 +1126,22 @@ mod tests {
     }
 }
 
+/// `url` as the page sees it: a URL on the replay `proxy`'s origin is the
+/// `recorded` request's origin with `url`'s path and query. Anything else
+/// (the proxy redirected off itself) is left as it is.
+fn unproxied_url(url: &Url, proxy: &Url, recorded: &Url) -> Url {
+    if url.origin() != proxy.origin() {
+        return url.clone();
+    }
+    let mut out = recorded.clone();
+    if out.path() != url.path() || out.query() != url.query() {
+        out.set_path(url.path());
+        out.set_query(url.query());
+        out.set_fragment(None);
+    }
+    out
+}
+
 /// Largest `data:` payload the loader will decode (bytes, after decoding).
 pub const MAX_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
 
@@ -1288,6 +1313,23 @@ mod replay_proxy_tests {
         assert!(policy.permits(&loopback_match), "loopback with proxy port must be allowed");
         assert!(!policy.permits(&loopback_wrong_port), "loopback with different port must be denied");
         assert!(!policy.permits(&non_loopback), "non-loopback address must be denied");
+    }
+
+    #[test]
+    fn a_replayed_response_keeps_the_recorded_url() {
+        let proxy = Url::parse("http://127.0.0.1:8765/").unwrap();
+        let recorded = Url::parse("https://recorded.example/app/a.js?v=1#f").unwrap();
+        let served = Url::parse("http://127.0.0.1:8765/app/a.js?v=1").unwrap();
+        assert_eq!(unproxied_url(&served, &proxy, &recorded), recorded);
+        // A redirect on the replay server lands on the recorded origin.
+        let moved = Url::parse("http://127.0.0.1:8765/app/b.js").unwrap();
+        assert_eq!(
+            unproxied_url(&moved, &proxy, &recorded).as_str(),
+            "https://recorded.example/app/b.js"
+        );
+        // Not the proxy's origin: left alone.
+        let other = Url::parse("https://cdn.example/x.js").unwrap();
+        assert_eq!(unproxied_url(&other, &proxy, &recorded), other);
     }
 }
 

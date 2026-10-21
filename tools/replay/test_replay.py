@@ -92,6 +92,47 @@ class ServerTests(unittest.TestCase):
         self.assertIn("MISS GET https://example.test/missing", logged)
         self.assertNotIn(SECRET, logged)
 
+    def test_a_decoded_body_is_not_labelled_with_its_content_encoding(self):
+        # A HAR stores bodies decoded (HAR 1.2 `content.text`), base64 or
+        # not. The recorded `Content-Encoding: br` describes the bytes on
+        # the wire then, not this body: sent with it, the client tries to
+        # brotli-decode plain JavaScript.
+        import base64
+        body = b"export const x = 1;"
+        har = {"log": {"entries": [
+            {
+                "time": 0,
+                "request": {"method": "GET", "url": f"https://example.test/{name}", "headers": []},
+                "response": {
+                    "status": 200,
+                    "statusText": "OK",
+                    "headers": [
+                        {"name": "Content-Type", "value": "text/javascript"},
+                        {"name": "Content-Encoding", "value": "br"},
+                    ],
+                    "content": content,
+                },
+            }
+            for name, content in [
+                ("b64.js", {"mimeType": "text/javascript", "encoding": "base64", "text": base64.b64encode(body).decode()}),
+                ("text.js", {"mimeType": "text/javascript", "text": body.decode()}),
+            ]
+        ]}}
+        path = Path(tempfile.mkdtemp()) / "encoded.har"
+        path.write_text(json.dumps(har), encoding="utf-8")
+        server = serve(path, time_scale=0, tls=False)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            self.port = server.server_address[1]
+            for name in ("b64.js", "text.js"):
+                _, headers, got = self.hiwave(f"https://example.test/{name}")
+                self.assertEqual(got, body, name)
+                self.assertNotIn("Content-Encoding", headers, name)
+                self.assertEqual(int(headers["Content-Length"]), len(body), name)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_time_scale_zero_skips_the_recorded_wait(self):
         self.server.time_scale = 0
         started = time.monotonic()

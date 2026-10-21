@@ -301,7 +301,10 @@ class ReplayHandler(BaseHTTPRequestHandler):
             value = str(header.get("value") or "")
             if not name or name.lower() in HOP_BY_HOP:
                 continue
-            if name.lower() == "content-encoding" and encoding != "base64":
+            # HAR bodies are stored decoded (base64 is only how binary is
+            # kept in JSON). The recorded Content-Encoding (br, gzip)
+            # described the wire bytes, not this body, so it is not sent.
+            if name.lower() == "content-encoding":
                 continue
             if name.lower() == "content-type":
                 saw_type = True
