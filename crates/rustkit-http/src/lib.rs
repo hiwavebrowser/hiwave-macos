@@ -605,7 +605,7 @@ impl Client {
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
         match negotiated {
             NegotiatedProtocol::H2 => {
-                let (send, connection) = h2::client::handshake(tls_stream)
+                let (send, connection) = h2_client().handshake(tls_stream)
                     .await
                     .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
                 // The driver is bound to whichever runtime is current. Page
@@ -726,7 +726,7 @@ impl Client {
                 .await;
         }
         let stream = self.connect(host, port).await?;
-        let (send, connection) = h2::client::handshake(stream)
+        let (send, connection) = h2_client().handshake(stream)
             .await
             .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
         tokio::spawn(async move {
@@ -1044,6 +1044,21 @@ enum Dialed<S> {
     Http1(S),
 }
 
+/// Chromium's HTTP/2 receive windows: 6 MB per stream, 15 MB per connection.
+/// At h2's defaults (64 KB each) a stream whose body is not being read, such
+/// as a parser image parked while a load yields, filled the connection window,
+/// and every other stream to that host waited for the client timeout.
+const H2_STREAM_WINDOW: u32 = 6 * 1024 * 1024;
+const H2_CONNECTION_WINDOW: u32 = 15 * 1024 * 1024;
+
+fn h2_client() -> h2::client::Builder {
+    let mut builder = h2::client::Builder::new();
+    builder
+        .initial_window_size(H2_STREAM_WINDOW)
+        .initial_connection_window_size(H2_CONNECTION_WINDOW);
+    builder
+}
+
 fn is_idempotent(method: &Method) -> bool {
     matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
 }
@@ -1329,7 +1344,7 @@ impl Client {
         // incremental h2 streaming is the follow-up.
         let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
         if negotiated == NegotiatedProtocol::H2 {
-            let (send, connection) = h2::client::handshake(tls_stream)
+            let (send, connection) = h2_client().handshake(tls_stream)
                 .await
                 .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
             tokio::spawn(async move {
