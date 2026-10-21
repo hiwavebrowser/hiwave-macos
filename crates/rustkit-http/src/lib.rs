@@ -554,30 +554,44 @@ impl Client {
         if key.policy != h2_pool::POLICY_CUSTOM {
             let slot = self.h2_pool.slot(key).await;
             let cached = slot.lock().await.as_ref().cloned();
+            // One retry in all, on a new connection, for an idempotent
+            // request whose connection was lost or whose stream the server
+            // never processed (REFUSED_STREAM, above a GOAWAY).
+            let mut retried = false;
             if let Some(send) = cached {
                 match self.dispatch_h2(send, method, url, headers, body).await {
                     Ok(response) => return Ok(response),
                     Err(e) if h2_connection_lost(&e) && is_idempotent(method) => {
                         *slot.lock().await = None;
+                        retried = true;
                     }
                     Err(e) => return Err(e),
                 }
             }
-            let mut guard = slot.lock().await;
-            if let Some(send) = guard.as_ref().cloned() {
-                drop(guard);
-                return self.dispatch_h2(send, method, url, headers, body).await;
-            }
-            let dialed = self.dial_tls(host, port).await?;
-            match dialed {
-                Dialed::H2(send) => {
-                    *guard = Some(send.clone());
+            loop {
+                let mut guard = slot.lock().await;
+                let result = if let Some(send) = guard.as_ref().cloned() {
                     drop(guard);
                     self.dispatch_h2(send, method, url, headers, body).await
-                }
-                Dialed::Http1(stream) => {
-                    drop(guard);
-                    self.send_request(stream, host, method, url, headers, body).await
+                } else {
+                    match self.dial_tls(host, port).await? {
+                        Dialed::H2(send) => {
+                            *guard = Some(send.clone());
+                            drop(guard);
+                            self.dispatch_h2(send, method, url, headers, body).await
+                        }
+                        Dialed::Http1(stream) => {
+                            drop(guard);
+                            return self.send_request(stream, host, method, url, headers, body).await;
+                        }
+                    }
+                };
+                match result {
+                    Err(e) if !retried && h2_connection_lost(&e) && is_idempotent(method) => {
+                        *slot.lock().await = None;
+                        retried = true;
+                    }
+                    result => return result,
                 }
             }
         } else {
@@ -664,9 +678,14 @@ impl Client {
                 .map_err(|e| HttpError::ConnectionFailed(format!("h2 body: {e}")))?;
         }
 
-        let response = response_fut
-            .await
-            .map_err(|e| HttpError::InvalidResponse(format!("h2 response: {e}")))?;
+        let response = response_fut.await.map_err(|e| {
+            if h2_unprocessed(&e) {
+                // Never processed (RFC 9113 8.7): safe to send again.
+                HttpError::ConnectionFailed(format!("h2 unprocessed: {e}"))
+            } else {
+                HttpError::InvalidResponse(format!("h2 response: {e}"))
+            }
+        })?;
         let status = response.status();
         let mut response_headers = HeaderMap::new();
         for (name, value) in response.headers() {
@@ -712,30 +731,36 @@ impl Client {
             .port()
             .ok_or_else(|| HttpError::InvalidUrl("Missing port".to_string()))?;
         let slot = self.h2_pool.slot(self.h2_key(host, port)).await;
-        let cached = slot.lock().await.as_ref().cloned();
-        if let Some(send) = cached {
-            return self
+        // The same single retry as `request_https` (a GET is idempotent).
+        let mut retried = false;
+        loop {
+            let mut guard = slot.lock().await;
+            let send = if let Some(send) = guard.as_ref().cloned() {
+                drop(guard);
+                send
+            } else {
+                let stream = self.connect(host, port).await?;
+                let (send, connection) = h2_client().handshake(stream)
+                    .await
+                    .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                *guard = Some(send.clone());
+                drop(guard);
+                send
+            };
+            match self
                 .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-                .await;
+                .await
+            {
+                Err(e) if !retried && h2_connection_lost(&e) => {
+                    *slot.lock().await = None;
+                    retried = true;
+                }
+                result => return result,
+            }
         }
-        let mut guard = slot.lock().await;
-        if let Some(send) = guard.as_ref().cloned() {
-            drop(guard);
-            return self
-                .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-                .await;
-        }
-        let stream = self.connect(host, port).await?;
-        let (send, connection) = h2_client().handshake(stream)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        *guard = Some(send.clone());
-        drop(guard);
-        self.dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-            .await
     }
 
     /// HTTP request.
@@ -1074,6 +1099,13 @@ fn is_idempotent(method: &Method) -> bool {
 /// status is not this: the request reached the server.
 fn h2_connection_lost(err: &HttpError) -> bool {
     matches!(err, HttpError::ConnectionFailed(_))
+}
+
+/// The server never processed this stream (RFC 9113 8.7): it refused it, or
+/// it is above the last stream id of the server's GOAWAY. h2 resets only
+/// those streams with the GOAWAY's error; the ones at or below it go on.
+fn h2_unprocessed(err: &h2::Error) -> bool {
+    err.reason() == Some(h2::Reason::REFUSED_STREAM) || (err.is_go_away() && err.is_remote())
 }
 
 fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
