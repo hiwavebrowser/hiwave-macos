@@ -462,11 +462,17 @@ pub(crate) async fn pump_all(
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
     scripts: Option<&crate::SubresourceReferrer>,
+    requests: bool,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
     let mut total = Pump::default();
     for _ in 0..ALTERNATIONS {
-        let net = pump(bindings, policy, loader, deadline, rounds, timers, inspector).await;
+        // Without `requests` the page's fetches stay queued for the live
+        // loop (`pump_live` takes them), and nothing here fails them.
+        let net = match requests {
+            true => pump(bindings, policy, loader, deadline, rounds, timers, inspector).await,
+            false => Pump::default(),
+        };
         let modules = match document {
             Some(document) => {
                 pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await

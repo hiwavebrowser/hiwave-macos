@@ -150,6 +150,11 @@ fn content_engine_builder() -> EngineBuilder {
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
         .follows_script_navigation(true)
+        // What a page asks of the network after its `load` event (beacons,
+        // pixels, metrics fetches that may never stop) is the live loop's:
+        // it neither holds the window thread inside the load nor delays
+        // PageLoaded. 3.3 s of the eBay listing's 17.7 s hold was this.
+        .post_load_requests_live(true)
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
@@ -889,6 +894,12 @@ mod tests {
     fn content_views_follow_a_page_s_own_navigation() {
         assert!(content_engine_builder().config().follows_script_navigation);
         assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
+    }
+
+    #[test]
+    fn content_views_leave_requests_after_load_to_the_live_loop() {
+        assert!(content_engine_builder().config().post_load_requests_live);
+        assert!(!rustkit_engine::EngineConfig::default().post_load_requests_live);
     }
 
     /// A server that answers every request with `body` after `delay`.
