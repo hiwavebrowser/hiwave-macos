@@ -32,11 +32,9 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// and shares `grid-area: content`, a name no area has, with an `::after`).
 /// Their heights and rows match since the missing name resolves to the first
 /// implicit line; `percent-height-item-sharing-an-area-in-a-block` and
-/// `...-in-a-row-with-a-width` pin that. What is left is width:
-///
-/// `percent-height-item-sharing-an-area-in-a-row`: the grid is 38 wide, its
-/// word, where the item's `min-width: 200px` makes it 200 in Chromium (the
-/// content-width estimate does not read `min-width`).
+/// `...-in-a-row-with-a-width` pin that, and
+/// `percent-height-item-sharing-an-area-in-a-row` matches too. What is left
+/// is width:
 ///
 /// `bing-textarea-and-its-replica-in-a-row`: the grid and the textarea are
 /// 214 wide; Chromium has 200, the `min-width`.
@@ -55,13 +53,11 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// percentage (`html, body, #x { height: 100% }`). The block pass resolves
 /// that height and hands it to the flex pass, so a `height: 25%` item, a
 /// `flex: 1` item, `justify-content: center` and a border-box column with
-/// padding are as in Chromium. Two neighbours are not:
+/// padding are as in Chromium, and so is `percent-height-row-is-not-touched`.
+/// One neighbour is not:
 ///
 /// `percent-height-column-items-shrink`: a `height: 200px` item in an 80px
 /// column stays 200; Chromium shrinks it to 60 beside its 20px sibling.
-///
-/// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
-/// is 400 tall is 110; Chromium has 200.
 ///
 /// In the six below the grid is as wide as in Chromium and the columns in
 /// it are not. They are text-free, so the every-OS test reads the list too.
@@ -98,11 +94,9 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// column the whole grid keeps the content floors (third column 60;
 /// Chromium 32).
 const GAPS: &[&str] = &[
-    "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
     "percent-height-column-items-shrink",
-    "percent-height-row-is-not-touched",
     "auto-tracks-min-width-0-items-flex-1-beside-a-sibling",
     "auto-tracks-min-width-0-items-in-a-narrow-float",
     "auto-tracks-min-width-20px-items-flex-1-beside-a-sibling",
