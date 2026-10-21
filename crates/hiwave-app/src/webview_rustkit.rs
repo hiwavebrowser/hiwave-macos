@@ -960,65 +960,87 @@ mod tests {
         RustKitView::headless(Bounds::new(0, 0, 400, 300))
     }
 
+    /// Run `body` on a thread with the macOS main thread's 8 MB stack, where
+    /// the app drives its loads. A test thread has 2 MB, and in a debug build
+    /// the poll frames of a load that cancels another load need between 2 and
+    /// 4 MB (parity-capture runs its loads on a 16 MB worker for the same
+    /// reason).
+    fn on_main_sized_stack(body: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(body)
+            .expect("test thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
     /// #739 / Pete's item 4: the window took no click while a page loaded,
     /// because the load ran to its end inside the event handler.
     #[test]
     fn a_slow_load_gives_the_event_loop_back_at_once() {
-        let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
-        let view = view();
-        let started = Instant::now();
-        view.wry_load_url(&url).unwrap();
-        let held = started.elapsed();
-        assert!(held < Duration::from_millis(500), "the load held its caller for {held:?}");
+        on_main_sized_stack(|| {
+            let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
+            let view = view();
+            let started = Instant::now();
+            view.wry_load_url(&url).unwrap();
+            let held = started.elapsed();
+            assert!(held < Duration::from_millis(500), "the load held its caller for {held:?}");
+        });
     }
 
     #[test]
     fn a_load_driven_a_slice_at_a_time_finishes() {
-        let url = slow_server(Duration::from_millis(300), "<title>slow</title><p>late</p>");
-        let view = view();
-        view.wry_load_url(&url).unwrap();
-        assert!(view.is_loading());
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut slices = 0;
-        while view.step_load() {
-            slices += 1;
-            assert!(Instant::now() < deadline, "the load never finished");
-        }
-        assert!(slices > 1, "the 300 ms wait was not split into slices");
-        let title = view.execute_script_sync("document.title").unwrap_or_default();
-        assert!(title.contains("slow"), "document.title = {title:?}");
+        on_main_sized_stack(|| {
+            let url = slow_server(Duration::from_millis(300), "<title>slow</title><p>late</p>");
+            let view = view();
+            view.wry_load_url(&url).unwrap();
+            assert!(view.is_loading());
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut slices = 0;
+            while view.step_load() {
+                slices += 1;
+                assert!(Instant::now() < deadline, "the load never finished");
+            }
+            assert!(slices > 1, "the 300 ms wait was not split into slices");
+            let title = view.execute_script_sync("document.title").unwrap_or_default();
+            assert!(title.contains("slow"), "document.title = {title:?}");
+        });
     }
 
     #[test]
     fn engine_calls_during_a_load_do_nothing_and_do_not_panic() {
-        let url = slow_server(Duration::from_millis(1_000), "<p>x</p>");
-        let view = view();
-        view.wry_load_url(&url).unwrap();
-        assert!(view.is_loading());
-        assert!(!view.scroll_by(0.0, -40.0));
-        view.render();
-        assert_eq!(view.process_events(), None);
-        let _ = view.click_at_point(10.0, 10.0);
-        assert_eq!(view.execute_script_sync("1"), None);
-        // A size set meanwhile waits for the load's end.
-        view.set_bounds_internal(Bounds::new(0, 0, 500, 300)).unwrap();
-        assert!(view.pending_bounds.get().is_some());
-        while view.step_load() {}
-        assert!(view.pending_bounds.get().is_none());
+        on_main_sized_stack(|| {
+            let url = slow_server(Duration::from_millis(1_000), "<p>x</p>");
+            let view = view();
+            view.wry_load_url(&url).unwrap();
+            assert!(view.is_loading());
+            assert!(!view.scroll_by(0.0, -40.0));
+            view.render();
+            assert_eq!(view.process_events(), None);
+            let _ = view.click_at_point(10.0, 10.0);
+            assert_eq!(view.execute_script_sync("1"), None);
+            // A size set meanwhile waits for the load's end.
+            view.set_bounds_internal(Bounds::new(0, 0, 500, 300)).unwrap();
+            assert!(view.pending_bounds.get().is_some());
+            while view.step_load() {}
+            assert!(view.pending_bounds.get().is_none());
+        });
     }
 
     #[test]
     fn stop_cancels_a_slow_load_without_waiting_for_it() {
-        let url = slow_server(Duration::from_secs(10), "<p>never</p>");
-        let view = view();
-        view.wry_load_url(&url).unwrap();
-        assert!(view.is_loading());
-        let started = Instant::now();
-        assert!(view.stop_load());
-        assert!(!view.is_loading());
-        let took = started.elapsed();
-        assert!(took < Duration::from_secs(1), "stop took {took:?}");
-        assert!(!view.stop_load(), "nothing left to stop");
+        on_main_sized_stack(|| {
+            let url = slow_server(Duration::from_secs(10), "<p>never</p>");
+            let view = view();
+            view.wry_load_url(&url).unwrap();
+            assert!(view.is_loading());
+            let started = Instant::now();
+            assert!(view.stop_load());
+            assert!(!view.is_loading());
+            let took = started.elapsed();
+            assert!(took < Duration::from_secs(1), "stop took {took:?}");
+            assert!(!view.stop_load(), "nothing left to stop");
+        });
     }
 
     /// A page whose inserted `/a.js` is answered after `delay`; the page
@@ -1064,60 +1086,64 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// `PageLoaded`.
     #[test]
     fn stop_ends_a_load_that_yielded_while_an_inserted_script_fetches() {
-        let url = yielding_server(Duration::from_millis(1_500));
-        let mut view = view();
-        view.wry_load_url(&url).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while view.step_load() {
-            assert!(Instant::now() < deadline, "the load never yielded");
-        }
-        let view_id = view.view_id.unwrap();
-        assert!(!view.is_loading());
-        assert!(
-            view.engine.borrow().load_tail_open(view_id),
-            "the load did not yield: it waited out /a.js"
-        );
-        assert!(view.stop_load(), "Stop found nothing to stop");
-        assert!(!view.engine.borrow().load_tail_open(view_id));
-        // Past the time /a.js is answered.
-        let until = Instant::now() + Duration::from_millis(2_500);
-        while Instant::now() < until {
-            view.process_events();
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        let fired = view
-            .execute_script_sync("String(window.loadFired) + ',' + String(window.aRan)")
-            .unwrap_or_default();
-        assert!(!fired.contains("true"), "the stopped load went on: {fired}");
-        let mut events = Vec::new();
-        if let Some(rx) = view.event_rx.as_mut() {
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
+        on_main_sized_stack(|| {
+            let url = yielding_server(Duration::from_millis(1_500));
+            let mut view = view();
+            view.wry_load_url(&url).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while view.step_load() {
+                assert!(Instant::now() < deadline, "the load never yielded");
             }
-        }
-        assert!(
-            !events.iter().any(|e| matches!(e, EngineEvent::PageLoaded { .. })),
-            "a stopped load sent PageLoaded"
-        );
-        assert!(
-            events.iter().any(|e| matches!(e, EngineEvent::NavigationFailed { error, .. } if error == "stopped")),
-            "the navigation was not ended as stopped"
-        );
-        assert!(!view.stop_load(), "nothing left to stop");
+            let view_id = view.view_id.unwrap();
+            assert!(!view.is_loading());
+            assert!(
+                view.engine.borrow().load_tail_open(view_id),
+                "the load did not yield: it waited out /a.js"
+            );
+            assert!(view.stop_load(), "Stop found nothing to stop");
+            assert!(!view.engine.borrow().load_tail_open(view_id));
+            // Past the time /a.js is answered.
+            let until = Instant::now() + Duration::from_millis(2_500);
+            while Instant::now() < until {
+                view.process_events();
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            let fired = view
+                .execute_script_sync("String(window.loadFired) + ',' + String(window.aRan)")
+                .unwrap_or_default();
+            assert!(!fired.contains("true"), "the stopped load went on: {fired}");
+            let mut events = Vec::new();
+            if let Some(rx) = view.event_rx.as_mut() {
+                while let Ok(event) = rx.try_recv() {
+                    events.push(event);
+                }
+            }
+            assert!(
+                !events.iter().any(|e| matches!(e, EngineEvent::PageLoaded { .. })),
+                "a stopped load sent PageLoaded"
+            );
+            assert!(
+                events.iter().any(|e| matches!(e, EngineEvent::NavigationFailed { error, .. } if error == "stopped")),
+                "the navigation was not ended as stopped"
+            );
+            assert!(!view.stop_load(), "nothing left to stop");
+        });
     }
 
     #[test]
     fn a_new_load_replaces_the_one_in_progress() {
-        let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
-        let fast = slow_server(Duration::ZERO, "<title>new</title>");
-        let view = view();
-        view.wry_load_url(&slow).unwrap();
-        let started = Instant::now();
-        view.wry_load_url(&fast).unwrap();
-        while view.step_load() {}
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let title = view.execute_script_sync("document.title").unwrap_or_default();
-        assert!(title.contains("new"), "document.title = {title:?}");
+        on_main_sized_stack(|| {
+            let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
+            let fast = slow_server(Duration::ZERO, "<title>new</title>");
+            let view = view();
+            view.wry_load_url(&slow).unwrap();
+            let started = Instant::now();
+            view.wry_load_url(&fast).unwrap();
+            while view.step_load() {}
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let title = view.execute_script_sync("document.title").unwrap_or_default();
+            assert!(title.contains("new"), "document.title = {title:?}");
+        });
     }
 
     #[test]
