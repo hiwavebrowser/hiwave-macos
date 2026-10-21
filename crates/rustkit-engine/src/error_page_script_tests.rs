@@ -1679,6 +1679,72 @@ document.head.appendChild(s);
     );
 }
 
+/// After the load, a timer starts a `fetch()` and a dynamic `import()` the
+/// server holds for 3 s each. No live turn waits for either: each starts
+/// on one turn and is answered on a later one (#727 Atlas hold, item 1:
+/// a turn fetched the modules an `import()` asked for inside itself, for
+/// up to `LIVE_NETWORK_BUDGET`, and failed the import as timed out).
+#[test]
+fn a_slow_post_load_fetch_or_import_holds_no_live_turn() {
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        match path {
+            "/slow" => {
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                (200, "text/plain", vec![], "ok".into())
+            }
+            "/m.js" => {
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                (200, "text/javascript", vec![], "export const v = 'ok';".into())
+            }
+            _ => (
+                200,
+                "text/html",
+                vec![],
+                r#"<pre id="log"></pre><script>
+function L(m) { document.getElementById('log').textContent += m + '\n'; }
+window.addEventListener('load', function () {
+  setTimeout(function () {
+    fetch('/slow').then(function (r) { return r.text(); }).then(function (t) { L('fetch ' + t); });
+    import('/m.js').then(function (m) { L('import ' + m.v); }, function (e) { L('import failed ' + e); });
+  }, 6000);
+});
+</script>"#
+                    .into(),
+            ),
+        }
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    // Past the load's timer horizon (5 s), so the timer runs on a live
+    // turn, not inside the load.
+    assert!(!page_log(&mut engine, view).contains("fetch"));
+    let started = std::time::Instant::now();
+    let mut longest = std::time::Duration::ZERO;
+    let mut turns = 0;
+    loop {
+        let turn = std::time::Instant::now();
+        rt.block_on(engine.pump_live(view, if turns == 0 { 6_000 } else { 16 }));
+        longest = longest.max(turn.elapsed());
+        turns += 1;
+        let log = page_log(&mut engine, view);
+        if log.contains("fetch ok") && log.contains("import ") {
+            assert!(log.contains("import ok"), "{log}");
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the held requests were never answered: {log}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(turns > 2, "both answers came on the turn that asked for them");
+    assert!(
+        longest < std::time::Duration::from_millis(100),
+        "a live turn held the window for {longest:?}"
+    );
+}
+
 /// Navigating away while the chain is still fetching drops it. `load` does
 /// not fire for the old document, and it does not fire an extra time on
 /// the next one. The late script does not run there.
