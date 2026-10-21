@@ -4426,6 +4426,12 @@ impl Engine {
         self.views.get(&id).map(|v| v.script_events.notice())
     }
 
+    /// [`ScriptNotice::generation`] without building the notice: a caller
+    /// polling for changes reads this on every turn.
+    pub fn script_notice_generation(&self, id: EngineViewId) -> Option<u64> {
+        self.views.get(&id).map(|v| v.script_events.generation())
+    }
+
     /// The view's Inspector: its event buffer and sinks. The handle can be
     /// kept and read from any thread, including while the page's script is
     /// running ([`Inspector::snapshot_since`]); reading runs no script.

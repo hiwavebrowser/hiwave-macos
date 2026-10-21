@@ -67,6 +67,8 @@ pub struct RustKitView {
     /// Runtime the live loop's network turns block on. `None` if it could
     /// not be built: the page then gets no timers or late fetches, as before.
     live_runtime: Option<tokio::runtime::Runtime>,
+    /// The generation of the script notice the chrome last showed.
+    script_notice_seen: Cell<u64>,
 }
 
 /// Script budget for pages in the live app. The engine default (5 s) is
@@ -188,7 +190,20 @@ impl RustKitView {
                 .build()
                 .map_err(|e| warn!(error = %e, "No runtime for the live loop; page timers will not run"))
                 .ok(),
+            script_notice_seen: Cell::new(0),
         })
+    }
+
+    /// The page's skipped and stopped scripts, as the JSON the chrome's
+    /// `hiwaveScriptNotice` reads, when they changed since it last did.
+    pub fn take_script_notice(&self) -> Option<String> {
+        let view_id = self.view_id?;
+        let engine = self.engine.borrow();
+        let generation = engine.script_notice_generation(view_id)?;
+        if self.script_notice_seen.replace(generation) == generation {
+            return None;
+        }
+        serde_json::to_string(&engine.script_notice(view_id)?).ok()
     }
 
     /// One turn of the live loop for the page (call this in the event

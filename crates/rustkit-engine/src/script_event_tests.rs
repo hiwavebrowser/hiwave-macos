@@ -30,6 +30,10 @@ fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static 
 </head><body></body></html>"#,
         ),
         "/loop" => html("<html><head><script>for (;;) {}</script></head><body></body></html>"),
+        "/inserted" => html(
+            "<html><head><script>var s = document.createElement('script'); s.src = '/gone.js'; \
+             document.head.appendChild(s);</script></head><body></body></html>",
+        ),
         "/clean" => html("<html><head><script>window.ok = 1;</script></head><body></body></html>"),
         _ => (404, "text/plain", vec![], "not found".into()),
     }
@@ -221,6 +225,17 @@ fn a_page_whose_scripts_all_ran_has_no_events_and_a_new_document_starts_clean() 
     assert_eq!(notice.document, server.url("/clean").as_str());
 }
 
+#[test]
+fn a_script_the_page_inserted_is_an_inserted_event() {
+    let server = serve(site);
+    let (engine, view) = load(&server, "/inserted", EngineConfig::default());
+    let event = only_event(&engine, view, &server, "/inserted");
+    assert_eq!(event.reason, ScriptEventReason::FetchError, "{event:#?}");
+    assert_eq!(event.kind, ScriptKind::Inserted);
+    assert_eq!(event.source, server.url("/gone.js").as_str());
+    assert_eq!(event.http_status, Some(404));
+}
+
 /// The payload the browser's chrome reads (`window.hiwaveScriptNotice`):
 /// its field names and spellings are the chrome's contract.
 #[test]
@@ -245,6 +260,11 @@ fn the_notice_serializes_as_the_chrome_reads_it() {
         assert!(keys.contains(&key), "{key} missing from {notice}");
     }
     assert_eq!(notice["count"], 1);
+    // The browser polls the generation, and redraws when it changes.
+    assert_eq!(
+        notice["generation"],
+        engine.script_notice_generation(view).unwrap()
+    );
     let event = &notice["events"][0];
     for key in [
         "source",

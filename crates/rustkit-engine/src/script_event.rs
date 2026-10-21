@@ -202,6 +202,10 @@ impl ScriptEvents {
         }
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
     pub(crate) fn events(&self) -> Vec<ScriptEvent> {
         self.lock().events.clone()
     }

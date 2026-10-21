@@ -3056,6 +3056,41 @@
             font-weight: 600;
         }
 
+        /* Script notice: page scripts the engine skipped or stopped */
+        .script-notice-btn {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 10px;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.6);
+            border-radius: 6px;
+            color: #fbbf24;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.15s ease;
+        }
+
+        .script-notice-btn:hover {
+            background: rgba(245, 158, 11, 0.22);
+        }
+
+        .script-notice-btn #scriptNoticeCount {
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .script-notice-hold {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .script-notice-reason {
+            font-size: 12px;
+            font-weight: 600;
+            color: #fbbf24;
+        }
+
         /* Address Bar */
         .address-bar {
             flex: 1;
@@ -3728,6 +3763,12 @@
                 <span id="shieldCount">0</span>
             </div>
 
+            <!-- Script Notice (hidden while no script was skipped or stopped) -->
+            <div class="script-notice-btn" id="scriptNoticeBtn" title="Page scripts skipped or stopped" style="display: none;">
+                <span>&#x26A0;</span>
+                <span id="scriptNoticeCount">0</span>
+            </div>
+
             <!-- Peek Mode Exit Button (only visible in peek mode) -->
             <button class="peek-exit-btn" id="peekExitBtn" title="Exit Focus Mode">
                 <span>&#x2715;</span> Exit Focus
@@ -3777,6 +3818,15 @@
                 </button>
             </div>
             <button type="button" class="tab-actions-close" id="tabActionsPanelClose" title="Close panel">&times;</button>
+        </div>
+
+        <div class="history-panel hidden" id="scriptNoticePanel">
+            <div class="history-panel-header">
+                <span>Scripts skipped or stopped</span>
+                <button id="scriptNoticeCopy" title="Copy the records as JSON">Copy details</button>
+            </div>
+            <div class="script-notice-hold" id="scriptNoticeHold"></div>
+            <div class="history-list" id="scriptNoticeList"></div>
         </div>
 
         <div class="downloads-panel hidden" id="downloadsPanel">
@@ -6852,6 +6902,112 @@
         if (historySearch) {
             historySearch.addEventListener('input', () => {
                 renderHistoryList();
+            });
+        }
+
+        // Script notice. The RustKit view pushes the page's skipped and
+        // stopped scripts as `window.hiwaveScriptNotice(notice)` whenever
+        // they change (rustkit_engine::ScriptNotice). Its strings come from
+        // the page, so they are only ever set as text.
+        const scriptNoticeBtn = document.getElementById('scriptNoticeBtn');
+        const scriptNoticeCount = document.getElementById('scriptNoticeCount');
+        const scriptNoticePanel = document.getElementById('scriptNoticePanel');
+        const scriptNoticeHold = document.getElementById('scriptNoticeHold');
+        const scriptNoticeList = document.getElementById('scriptNoticeList');
+        const scriptNoticeCopy = document.getElementById('scriptNoticeCopy');
+        // A script that held the window this long shows the badge even
+        // when nothing was skipped or stopped.
+        const SCRIPT_HOLD_NOTICE_MS = 1000;
+        let scriptNotice = null;
+        let scriptNoticeOpen = false;
+
+        function scriptNoticeSeconds(ms) {
+            return (ms / 1000).toFixed(1) + ' s';
+        }
+
+        function scriptNoticeWhy(event) {
+            const parts = [event.reason];
+            if (event.http_status) parts.push('HTTP ' + event.http_status);
+            if (event.limit) parts.push(event.limit + ' = ' + event.limit_value);
+            if (event.js_ms) parts.push(event.js_ms + ' ms of JS');
+            parts.push(event.kind, event.bytes + ' bytes');
+            return parts.join(' · ');
+        }
+
+        function renderScriptNotice() {
+            const notice = scriptNotice || { count: 0, events: [], longest_hold_ms: 0 };
+            scriptNoticeHold.textContent = notice.longest_hold_ms
+                ? 'Longest window hold: ' + scriptNoticeSeconds(notice.longest_hold_ms) +
+                  ' (' + (notice.longest_hold_source || 'a script') + ')'
+                : '';
+            scriptNoticeList.replaceChildren();
+            for (const event of notice.events) {
+                const item = document.createElement('div');
+                item.className = 'history-item';
+                const reason = document.createElement('div');
+                reason.className = 'script-notice-reason';
+                reason.textContent = scriptNoticeWhy(event);
+                const source = document.createElement('div');
+                source.className = 'history-item-url';
+                source.textContent = event.source;
+                source.title = event.source;
+                item.append(reason, source);
+                scriptNoticeList.append(item);
+            }
+            if (notice.count > notice.events.length) {
+                const more = document.createElement('div');
+                more.className = 'history-empty';
+                more.textContent = (notice.count - notice.events.length) + ' more in the log (target script_event)';
+                scriptNoticeList.append(more);
+            }
+        }
+
+        function showScriptNoticePanel() {
+            if (scriptNoticeOpen) return;
+            renderScriptNotice();
+            expandChromePanel();
+            scriptNoticePanel.classList.remove('hidden');
+            scriptNoticeOpen = true;
+        }
+
+        function hideScriptNoticePanel() {
+            if (!scriptNoticeOpen) return;
+            scriptNoticePanel.classList.add('hidden');
+            scriptNoticeOpen = false;
+            collapseChromePanel();
+        }
+
+        window.hiwaveScriptNotice = (notice) => {
+            scriptNotice = notice;
+            const count = (notice && notice.count) || 0;
+            const hold = (notice && notice.longest_hold_ms) || 0;
+            scriptNoticeCount.textContent = count;
+            scriptNoticeBtn.title = count + ' page script(s) skipped or stopped; longest window hold ' +
+                scriptNoticeSeconds(hold);
+            const shown = count > 0 || hold >= SCRIPT_HOLD_NOTICE_MS;
+            scriptNoticeBtn.style.display = shown ? 'flex' : 'none';
+            if (!shown) {
+                hideScriptNoticePanel();
+            } else if (scriptNoticeOpen) {
+                renderScriptNotice();
+            }
+        };
+
+        if (scriptNoticeBtn && scriptNoticePanel) {
+            scriptNoticeBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                scriptNoticeOpen ? hideScriptNoticePanel() : showScriptNoticePanel();
+            });
+            scriptNoticeCopy.addEventListener('click', () => {
+                copyToClipboard(JSON.stringify(scriptNotice, null, 2));
+            });
+            document.addEventListener('click', (event) => {
+                if (scriptNoticeOpen && !event.target.closest('#scriptNoticePanel')) {
+                    hideScriptNoticePanel();
+                }
+            });
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') hideScriptNoticePanel();
             });
         }
 

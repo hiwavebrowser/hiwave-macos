@@ -2454,6 +2454,12 @@ fn main() {
                     // input above started; then sleep until the next timer.
                     let sleep = view.process_events();
                     live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
+                    // The toolbar's notice of skipped and stopped scripts,
+                    // when they changed (a load, a stopped listener).
+                    if let Some(notice) = view.take_script_notice() {
+                        let script = format!("window.hiwaveScriptNotice && window.hiwaveScriptNotice({notice});");
+                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                    }
                     // A navigation the page started itself: `location.href
                     // = url`, a script's `link.click()` or `form.submit()`,
                     // a submit from a timer. Until 2026-10-06 these were
