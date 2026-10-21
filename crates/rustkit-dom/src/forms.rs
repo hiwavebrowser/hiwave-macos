@@ -1065,32 +1065,26 @@ impl FormState {
         // Resolve action URL relative to base
         let url = if action.is_empty() {
             base_url.to_string()
-        } else if action.starts_with("http://") || action.starts_with("https://") {
-            action
-        } else if action.starts_with('/') {
-            // Absolute path
-            if let Some(origin) = extract_origin(base_url) {
-                format!("{}{}", origin, action)
-            } else {
-                action
-            }
         } else {
-            // Relative path
-            if let Some(base) = base_url.rfind('/') {
-                format!("{}/{}", &base_url[..base], action)
-            } else {
-                action
-            }
+            resolve_url(base_url, &action).unwrap_or(action)
         };
 
         match method {
             FormMethod::Get => {
                 // Append data to URL as query string
                 let query = String::from_utf8_lossy(&FormState::encode_url(entries)).to_string();
-                let final_url = if url.contains('?') {
-                    format!("{}&{}", url, query)
-                } else {
-                    format!("{}?{}", url, query)
+                let final_url = match url::Url::parse(&url) {
+                    // Into the query, ahead of any fragment.
+                    Ok(mut parsed) => {
+                        let joined = match parsed.query() {
+                            Some(existing) => format!("{}&{}", existing, query),
+                            None => query,
+                        };
+                        parsed.set_query(Some(&joined));
+                        parsed.to_string()
+                    }
+                    Err(_) if url.contains('?') => format!("{}&{}", url, query),
+                    Err(_) => format!("{}?{}", url, query),
                 };
 
                 FormSubmission {
@@ -1133,16 +1127,10 @@ impl FormState {
     }
 }
 
-/// Extract the origin (scheme + host + port) from a URL.
-fn extract_origin(url: &str) -> Option<String> {
-    if let Some(idx) = url.find("://") {
-        let rest = &url[idx + 3..];
-        if let Some(path_idx) = rest.find('/') {
-            return Some(format!("{}{}", &url[..idx + 3], &rest[..path_idx]));
-        }
-        return Some(url.to_string());
-    }
-    None
+/// `input` resolved against `base` as the URL Standard says (`//host/path`
+/// keeps only the base's scheme), or `None` when either does not parse.
+pub fn resolve_url(base: &str, input: &str) -> Option<String> {
+    url::Url::parse(base).ok()?.join(input).ok().map(String::from)
 }
 
 /// A prepared form submission ready to be sent.
@@ -2127,15 +2115,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_origin() {
-        assert_eq!(
-            extract_origin("https://example.com/path/page"),
-            Some("https://example.com".to_string())
-        );
-        assert_eq!(
-            extract_origin("http://localhost:8080/"),
-            Some("http://localhost:8080".to_string())
-        );
-        assert_eq!(extract_origin("invalid"), None);
+    fn test_resolve_url() {
+        let base = "https://www.wikipedia.org/";
+        assert_eq!(resolve_url(base, "//example.test/path").as_deref(), Some("https://example.test/path"));
+        assert_eq!(resolve_url(base, "//example.test").as_deref(), Some("https://example.test/"));
+        assert_eq!(resolve_url(base, "//example.test/p?q#f").as_deref(), Some("https://example.test/p?q#f"));
+        assert_eq!(resolve_url("http://localhost:8080/a/b", "c").as_deref(), Some("http://localhost:8080/a/c"));
+        assert_eq!(resolve_url("invalid", "/x"), None);
     }
 }
