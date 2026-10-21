@@ -574,6 +574,9 @@ pub(crate) async fn pump_inserted_scripts(
         // Run in the order the page inserted them.
         for ((node, url), result) in scripts.into_iter().zip(fetched) {
             let mut record = ScriptRecord { source: url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
+            // What its `script_event` quotes, should it be skipped or stopped.
+            let head: Option<String> =
+                result.as_ref().ok().map(|text| text.chars().take(200).collect());
             let text = match result {
                 Ok(text) if super::script_js_exhausted() => {
                     record.bytes = text.len();
@@ -638,10 +641,7 @@ pub(crate) async fn pump_inserted_scripts(
                 out.poisoned = true;
                 return out;
             }
-            if let Some(event) = event {
-                if super::script_js_exhausted() {
-                    continue;
-                }
+            if let Some(event) = event.filter(|_| !super::script_js_exhausted()) {
                 let (fired, stopped) =
                     super::with_script_js(bindings, || bindings.fire_script_event(node, event));
                 if stopped {
@@ -659,6 +659,9 @@ pub(crate) async fn pump_inserted_scripts(
                 } else if let Err(e) = fired {
                     out.threw.push(e.to_string());
                 }
+            }
+            if let Some(record) = out.records.last() {
+                crate::script_event::observe(record, Some(crate::ScriptKind::Inserted), head.as_deref());
             }
         }
     }

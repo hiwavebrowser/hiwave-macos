@@ -318,6 +318,10 @@ pub use rustkit_bindings::MutationKind;
 mod script_net;
 #[cfg(test)]
 mod script_net_tests;
+mod script_event;
+pub use script_event::{ScriptEvent, ScriptEventReason, ScriptKind, ScriptNotice};
+#[cfg(all(test, feature = "headless"))]
+mod script_event_tests;
 #[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -893,6 +897,8 @@ struct ViewState {
     pending_resize: Option<Bounds>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
+    /// The current document's skipped and stopped scripts ([`ScriptEvent`]).
+    script_events: script_event::ScriptEvents,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
     header_referrer_policy: Option<ReferrerPolicy>,
     /// Every image URL the last full `load_images` pass and the post-script
@@ -973,6 +979,7 @@ impl ViewState {
         self.press_settled_focus = false;
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
+        self.script_events.reset();
         self.script_policy = None;
         // The last document's requests are nobody's now.
         self.live_requests.clear();
@@ -1314,6 +1321,7 @@ pub struct LivePump {
 /// had run, and how long it ran on past the budget before the host call
 /// that ended it. The window is frozen for all of `elapsed_ms`.
 fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Duration>) {
+    script_event::note_stop(late.is_some());
     warn!(
         %source,
         elapsed_ms,
@@ -1408,12 +1416,14 @@ fn record_stopped_script(
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
     end_script_turn(bindings);
     bindings.set_execution_deadline(None);
-    ScriptRecord {
+    let record = ScriptRecord {
         source: source.to_string(),
         bytes: 0,
         elapsed_ms,
         outcome: ScriptOutcome::OverBudget,
-    }
+    };
+    script_event::observe(&record, None, None);
+    record
 }
 
 /// JavaScript execution charged against the script budget of one load, or
@@ -2272,6 +2282,7 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             script_log: Vec::new(),
+            script_events: Default::default(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
@@ -2359,6 +2370,7 @@ impl Engine {
             headless_bounds: None,
             pending_resize: None,
             script_log: Vec::new(),
+            script_events: Default::default(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
@@ -2445,6 +2457,7 @@ impl Engine {
             headless_bounds: Some(bounds),
             pending_resize: None,
             script_log: Vec::new(),
+            script_events: Default::default(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
@@ -2562,6 +2575,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
+                let _events = script_event::enter(&view.script_events, &self.config, true);
                 let armed = arm_live_turn(&self.config, bindings);
                 let fired = sized.and_then(|()| {
                     bindings.fire_lifecycle_event(
@@ -3591,6 +3605,7 @@ impl Engine {
             return true;
         };
         let source = format!("event:{event_type}");
+        let _events = script_event::enter(&view.script_events, &self.config, true);
         let armed = arm_live_turn(&self.config, bindings);
         let fired = bindings.fire_mouse_event(target, event_type, data);
         let stopped = end_live_turn(&self.config, armed, bindings, &source);
@@ -3647,6 +3662,7 @@ impl Engine {
         let policy = view.script_policy.clone();
         let document = view.url.clone();
         let inspector = view.inspector.clone();
+        let _events = script_event::enter(&view.script_events.clone(), &self.config, true);
         let live_requests = &mut view.live_requests;
         let mut threw: Vec<(&str, ScriptOutcome)> = Vec::new();
         // One budget of JavaScript time for the script this turn runs.
@@ -3824,6 +3840,7 @@ impl Engine {
                 elapsed_ms: 0,
                 outcome,
             };
+            script_event::observe(&record, None, None);
             inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
         }
 
@@ -3918,7 +3935,9 @@ impl Engine {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
-            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            if let Some(view) = self.views.get(&id) {
+                let Some(bindings) = view.bindings.as_ref() else { return false };
+                let _events = script_event::enter(&view.script_events, &self.config, true);
                 bindings.sync_control_value(focused.raw(), state.value());
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
                 let armed = arm_live_turn(&self.config, bindings);
@@ -4067,9 +4086,11 @@ impl Engine {
             0x2E => "Delete",
             _ => text,
         };
-        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+        let Some(view) = self.views.get(&id) else { return true };
+        let Some(bindings) = view.bindings.as_ref() else {
             return true;
         };
+        let _events = script_event::enter(&view.script_events, &self.config, true);
         let data = rustkit_bindings::KeyboardEventBindingData {
             key: key.to_string(),
             // A named key's code is its name; a character's physical key
@@ -4393,6 +4414,18 @@ impl Engine {
         self.views.get(&id).map(|v| v.script_log.as_slice())
     }
 
+    /// The scripts of the view's document that were skipped or stopped,
+    /// in the order they were (see [`ScriptEvent`]).
+    pub fn script_events(&self, id: EngineViewId) -> Option<Vec<ScriptEvent>> {
+        self.views.get(&id).map(|v| v.script_events.events())
+    }
+
+    /// The per-tab notice for the view's document: its skipped and stopped
+    /// scripts, and the longest a script held the window.
+    pub fn script_notice(&self, id: EngineViewId) -> Option<ScriptNotice> {
+        self.views.get(&id).map(|v| v.script_events.notice())
+    }
+
     /// The view's Inspector: its event buffer and sinks. The handle can be
     /// kept and read from any thread, including while the page's script is
     /// running ([`Inspector::snapshot_since`]); reading runs no script.
@@ -4425,7 +4458,10 @@ impl Engine {
         base: &Url,
         policy: Option<Arc<FetchPolicy>>,
     ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
-        let document = self.views.get(&id).and_then(|v| v.document.clone())?;
+        let view = self.views.get(&id)?;
+        let document = view.document.clone()?;
+        view.script_events.set_document(base.as_str());
+        let _events = script_event::enter(&view.script_events, &self.config, false);
 
         // Collect in document order.
         enum Body {
@@ -4434,11 +4470,29 @@ impl Engine {
         }
         let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool)> = Vec::new();
         let mut index = 0usize;
+        let mut unsupported_inline = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
                 return;
             }
-            let Some(timing) = script_timing(node) else { return };
+            let Some(timing) = script_timing(node) else {
+                let script_type = node.get_attribute("type").unwrap_or_default().trim().to_ascii_lowercase();
+                let essence = script_type.split(';').next().unwrap_or("").trim();
+                if let Some(essence) = script_event::unsupported_script_type(essence) {
+                    match node.get_attribute("src").map(str::trim) {
+                        Some(s) => {
+                            let url = base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string());
+                            script_event::observe_unsupported(&url, essence, None);
+                        }
+                        None => {
+                            unsupported_inline += 1;
+                            let label = format!("inline#unsupported-{unsupported_inline}");
+                            script_event::observe_unsupported(&label, essence, Some(&node.text_content()));
+                        }
+                    }
+                }
+                return;
+            };
             index += 1;
             let src = node.get_attribute("src").map(str::trim);
             let label = match src {
@@ -4600,6 +4654,10 @@ impl Engine {
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
         let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+        let _events = self
+            .views
+            .get(&id)
+            .map(|view| script_event::enter(&view.script_events, &self.config, false));
         self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
             .await;
         let parked = script_net::take_parked_deliveries();
@@ -4658,6 +4716,7 @@ impl Engine {
                 Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
                 Err(outcome) => {
                     let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    script_event::observe(&record, None, None);
                     inspector_glue::log_script(log, &inspector, record);
                 }
             }
@@ -4759,18 +4818,21 @@ impl Engine {
                 Err(outcome) => {
                     // A module script that could not be fetched: logged, and
                     // its element hears `error`.
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: label,
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome,
-                    });
+                    };
+                    script_event::observe(&record, Some(ScriptKind::Module), None);
+                    log.push(record);
                     let _ = bindings.fire_script_event(node_id, "error");
                     continue;
                 }
             };
+            let kind = is_module.then_some(ScriptKind::Module);
             if poisoned.get() || script_js_exhausted() {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
@@ -4779,16 +4841,20 @@ impl Engine {
                     } else {
                         ScriptOutcome::OverBudget
                     },
-                });
+                };
+                script_event::observe(&record, kind, Some(&text));
+                log.push(record);
                 continue;
             }
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Skipped(SCRIPT_TOO_LARGE),
-                });
+                };
+                script_event::observe(&record, kind, Some(&text));
+                log.push(record);
                 continue;
             }
             if is_module {
@@ -4920,6 +4986,7 @@ impl Engine {
                     elapsed_ms,
                     outcome,
                 };
+                script_event::observe(&record, kind, Some(&text));
                 inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
@@ -4952,6 +5019,7 @@ impl Engine {
                 result
             });
             let source = record.source.clone();
+            script_event::observe(&record, None, Some(&text));
             inspector_glue::log_script(log, &inspector, record);
             // What its listeners threw (a synchronous `click()`, an `on*`
             // attribute) is this script's in the Inspector; the script log
@@ -5080,6 +5148,7 @@ impl Engine {
             );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
+            script_event::observe(&record, None, None);
             if record.outcome != ScriptOutcome::Ran {
                 inspector_glue::log_script(log, &inspector, record);
             }
