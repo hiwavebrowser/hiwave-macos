@@ -20,7 +20,8 @@
 //! script can reach, and describing a value runs none of the page's code.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use boa_engine::builtins::error::Error;
 use boa_engine::{Context, JsObject, JsValue};
@@ -56,6 +57,9 @@ pub(crate) const EMBEDDER_PATH: &str = "rustkit#embedder";
 
 /// Console calls held between flushes; past it the oldest is dropped.
 const MAX_CONSOLE_PENDING: usize = 1024;
+/// `console.count` and `console.time` labels held at once; a new label past
+/// it is not counted or timed.
+const MAX_CONSOLE_LABELS: usize = 1024;
 /// Distinct unsupported members held.
 const MAX_UNSUPPORTED: usize = 64;
 
@@ -118,6 +122,8 @@ pub(crate) struct Diagnostics {
     /// Console arguments are recorded as type and length only.
     pub(crate) console_redacted: Cell<bool>,
     console: RefCell<VecDeque<ConsoleCall>>,
+    console_counts: RefCell<HashMap<String, u64>>,
+    console_timers: RefCell<HashMap<String, Instant>>,
     unsupported: RefCell<Vec<Unsupported>>,
 }
 
@@ -139,6 +145,87 @@ impl Diagnostics {
             pending.pop_front();
         }
         pending.push_back((level, line, at));
+    }
+
+    /// A Console namespace member other than the five logging ones, as
+    /// the standard's printer gets it: `table` and `dir` print their data,
+    /// `assert` prints only when its condition is false, `count` and `time`
+    /// keep per-label state here, `group` prints its label, `groupEnd` and
+    /// `clear` print nothing. None of the page's code runs.
+    pub(crate) fn console_member(&self, member: &str, args: &[JsValue], context: &mut Context) {
+        if !self.console_capturing.get() {
+            return;
+        }
+        let label = match args.first().filter(|v| !v.is_undefined()) {
+            Some(value) => crate::describe::text(value, context),
+            None => "default".to_string(),
+        };
+        let text = |line: String| JsValue::from(boa_engine::JsString::from(line.as_str()));
+        match member {
+            "table" | "dir" => self.console_call(LogLevel::Log, &args[..args.len().min(1)], context),
+            "dirxml" | "trace" => self.console_call(LogLevel::Log, args, context),
+            "group" | "groupCollapsed" if !args.is_empty() => self.console_call(LogLevel::Log, args, context),
+            "assert" => {
+                if args.first().is_some_and(JsValue::to_boolean) {
+                    return;
+                }
+                let data = args.get(1..).unwrap_or_default();
+                let mut line = Vec::with_capacity(data.len() + 1);
+                match data.first().and_then(JsValue::as_string) {
+                    Some(first) => {
+                        line.push(text(format!("Assertion failed: {}", first.to_std_string_escaped())));
+                        line.extend_from_slice(&data[1..]);
+                    }
+                    None => {
+                        line.push(text("Assertion failed".to_string()));
+                        line.extend_from_slice(data);
+                    }
+                }
+                self.console_call(LogLevel::Error, &line, context);
+            }
+            "count" => {
+                let n = {
+                    let mut counts = self.console_counts.borrow_mut();
+                    if counts.len() >= MAX_CONSOLE_LABELS && !counts.contains_key(&label) {
+                        return;
+                    }
+                    let n = counts.entry(label.clone()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                self.console_call(LogLevel::Info, &[text(format!("{label}: {n}"))], context);
+            }
+            "countReset" => match self.console_counts.borrow_mut().get_mut(&label) {
+                Some(n) => *n = 0,
+                None => self.console_call(LogLevel::Warn, &[text(format!("Count for '{label}' does not exist"))], context),
+            },
+            "time" => {
+                let mut timers = self.console_timers.borrow_mut();
+                if timers.contains_key(&label) {
+                    drop(timers);
+                    self.console_call(LogLevel::Warn, &[text(format!("Timer '{label}' already exists"))], context);
+                } else if timers.len() < MAX_CONSOLE_LABELS {
+                    timers.insert(label, Instant::now());
+                }
+            }
+            "timeLog" | "timeEnd" => {
+                let started = match member {
+                    "timeEnd" => self.console_timers.borrow_mut().remove(&label),
+                    _ => self.console_timers.borrow().get(&label).copied(),
+                };
+                let Some(started) = started else {
+                    self.console_call(LogLevel::Warn, &[text(format!("Timer '{label}' does not exist"))], context);
+                    return;
+                };
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut line = vec![text(format!("{label}: {ms:.3}ms"))];
+                if member == "timeLog" {
+                    line.extend_from_slice(args.get(1..).unwrap_or_default());
+                }
+                self.console_call(LogLevel::Info, &line, context);
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn take_console(&self) -> Vec<ConsoleCall> {

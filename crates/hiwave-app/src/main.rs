@@ -42,6 +42,10 @@ const SHELF_HEIGHT_DEFAULT: u32 = 0;
 /// Expanded height when command palette/shelf is open
 const SHELF_HEIGHT_EXPANDED: u32 = 280;
 const SIDEBAR_WIDTH: f64 = 220.0;
+/// While a content load is in progress the loop wakes this soon after each
+/// slice, so the load keeps its pace and tao still takes events in between.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+const LOAD_WAKE: std::time::Duration = std::time::Duration::from_millis(1);
 
 mod ipc;
 mod state;
@@ -344,37 +348,6 @@ fn apply_layout(
     let _ = content.set_bounds(content_rect);
     let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
-}
-
-/// The content view's top-left frame, in the same coordinates as
-/// [`apply_layout`]. Used while a load has the engine borrowed.
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-fn content_host_bounds(
-    window: &tao::window::Window,
-    chrome_height: f64,
-    shelf_height: f64,
-    inspector_height: f64,
-    sidebar_width: f64,
-    right_sidebar_open: bool,
-) -> rustkit_viewhost::Bounds {
-    let scale = window.scale_factor();
-    let window_size = window.inner_size();
-    let width = window_size.width as f64 / scale;
-    let height = window_size.height as f64 / scale;
-    let sidebar_width = sidebar_width.min(width).max(0.0);
-    let right_sidebar_width = if right_sidebar_open {
-        SIDEBAR_WIDTH.min(width - sidebar_width)
-    } else {
-        0.0
-    };
-    let content_width = (width - sidebar_width - right_sidebar_width).max(0.0);
-    let content_height = (height - chrome_height - shelf_height - inspector_height).max(0.0);
-    rustkit_viewhost::Bounds {
-        x: sidebar_width as i32,
-        y: chrome_height as i32,
-        width: content_width as u32,
-        height: content_height as u32,
-    }
 }
 
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
@@ -752,9 +725,8 @@ fn main() {
     // scripts reads that width, then hears one `resize` when chrome opens
     // the sidebar. Creating it already inset made that first read the
     // narrowed width, and chrome's initial width of 0 then dispatched a
-    // stale full-window resize. While a load has the engine borrowed, the
-    // NSView can still move (`place_host_frame`); the resize event follows
-    // the viewport the view has when the load returns.
+    // stale full-window resize. Bounds set while a load holds the engine
+    // are applied when it ends.
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
@@ -2104,47 +2076,6 @@ fn main() {
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
-        // A content load is pumping the run loop so the chrome WebView can
-        // paint. The engine is borrowed for that load; handling the nested
-        // event here would borrow it again (a resize, a navigate, the live
-        // turn). Put user events back and let WebKit's own sources, which
-        // already ran, do the paint.
-        #[cfg(all(target_os = "macos", feature = "rustkit"))]
-        if webview_rustkit::chrome_pump_active() {
-            if let Event::UserEvent(user_event) = &event {
-                // The engine is borrowed for the load, so `apply_layout`
-                // cannot run. Move the NSView now; the requeued event
-                // resizes the surface and relayouts once the load returns.
-                let sidebar = match user_event {
-                    UserEvent::SetSidebarOpen(open) => {
-                        Some((if *open { SIDEBAR_WIDTH } else { 0.0 }, None))
-                    }
-                    UserEvent::SetSidebarWidth(width) => Some((*width, None)),
-                    UserEvent::SetRightPanelOpen(open) => Some((
-                        *sidebar_width_for_events.lock().unwrap(),
-                        Some(*open),
-                    )),
-                    _ => None,
-                };
-                if let Some((width, right)) = sidebar {
-                    *sidebar_width_for_events.lock().unwrap() = width;
-                    if let Some(open) = right {
-                        *right_sidebar_open_for_events.lock().unwrap() = open;
-                    }
-                    let bounds = content_host_bounds(
-                        &window,
-                        *chrome_height_for_events.lock().unwrap(),
-                        *shelf_height_for_events.lock().unwrap(),
-                        *inspector_height_for_events.lock().unwrap(),
-                        *sidebar_width_for_events.lock().unwrap(),
-                        *right_sidebar_open_for_events.lock().unwrap(),
-                    );
-                    content_for_events.place_host_frame(bounds);
-                }
-                let _ = click_proxy.send_event(user_event.clone());
-            }
-            return;
-        }
         *control_flow = match live_wake.get() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -2428,161 +2359,169 @@ fn main() {
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
-                    // The page's clock catches up before it hears any input:
-                    // a timer a click sets counts from the click, not from
-                    // the last time the loop woke.
-                    view.process_events();
-                    // Clicks come from the content NSView's own handlers in
-                    // VIEW-LOCAL coordinates — already viewport space, no
-                    // chrome-height/sidebar math and none of its staleness
-                    // bugs. The old window-loop MouseInput arm never fired:
-                    // events delivered to a child NSView do not surface as
-                    // tao window events (measured with a synthetic
-                    // sendEvent:, 2026-08-07).
-                    // One queue, drained in arrival order across clicks,
-                    // the wheel and keys (threads plan M2, #575): until
-                    // 2026-10-14 three queues were drained one after another,
-                    // so a click made after a wheel burst reached the page
-                    // before the burst, and a key typed before a click after
-                    // it. An event for a view that is gone was dropped by the
-                    // viewhost when the view was destroyed.
-                    for event in rustkit_viewhost::drain_input() {
-                        // When it arrived, for the W-gate's input-to-present
-                        // figure (logged by the presenter with the frame).
-                        view.note_input(event.at, event.seq);
-                        match event.kind {
-                        rustkit_viewhost::InputKind::Pointer(click) => {
-                        // The page hears the click before the browser
-                        // acts on it: mousedown on press; mouseup and click
-                        // on release, and only then focus and the link,
-                        // which a listener's preventDefault() cancels. Until
-                        // 2026-10-03 no event reached the page at all, so
-                        // every script-driven control was dead (Z lane I0).
-                        // Where the pointer is, and when it goes: what a
-                        // hover menu or a drag listens for.
-                        match click.input {
-                            rustkit_viewhost::PointerInput::Move => {
-                                view.mouse_move_at_point(click.x as f32, click.y as f32);
+                    // A load in progress gets one slice, then the loop goes back to
+                    // tao, which dispatches the clicks, keys and chrome messages that
+                    // came meanwhile (a load used to hold the window to its end). The
+                    // page's input waits in the viewhost queue for the new page.
+                    if view.step_load() {
+                        live_wake.set(Some(std::time::Instant::now() + LOAD_WAKE));
+                    } else {
+                        // The page's clock catches up before it hears any input:
+                        // a timer a click sets counts from the click, not from
+                        // the last time the loop woke.
+                        view.process_events();
+                        // Clicks come from the content NSView's own handlers in
+                        // VIEW-LOCAL coordinates — already viewport space, no
+                        // chrome-height/sidebar math and none of its staleness
+                        // bugs. The old window-loop MouseInput arm never fired:
+                        // events delivered to a child NSView do not surface as
+                        // tao window events (measured with a synthetic
+                        // sendEvent:, 2026-08-07).
+                        // One queue, drained in arrival order across clicks,
+                        // the wheel and keys (threads plan M2, #575): until
+                        // 2026-10-14 three queues were drained one after another,
+                        // so a click made after a wheel burst reached the page
+                        // before the burst, and a key typed before a click after
+                        // it. An event for a view that is gone was dropped by the
+                        // viewhost when the view was destroyed.
+                        for event in rustkit_viewhost::drain_input() {
+                            // When it arrived, for the W-gate's input-to-present
+                            // figure (logged by the presenter with the frame).
+                            view.note_input(event.at, event.seq);
+                            match event.kind {
+                            rustkit_viewhost::InputKind::Pointer(click) => {
+                            // The page hears the click before the browser
+                            // acts on it: mousedown on press; mouseup and click
+                            // on release, and only then focus and the link,
+                            // which a listener's preventDefault() cancels. Until
+                            // 2026-10-03 no event reached the page at all, so
+                            // every script-driven control was dead (Z lane I0).
+                            // Where the pointer is, and when it goes: what a
+                            // hover menu or a drag listens for.
+                            match click.input {
+                                rustkit_viewhost::PointerInput::Move => {
+                                    view.mouse_move_at_point(click.x as f32, click.y as f32);
+                                    continue;
+                                }
+                                rustkit_viewhost::PointerInput::Leave => {
+                                    view.mouse_leave();
+                                    continue;
+                                }
+                                rustkit_viewhost::PointerInput::Button => {}
+                            }
+                            if click.down {
+                                view.mouse_down_at_point(click.x as f32, click.y as f32);
                                 continue;
                             }
-                            rustkit_viewhost::PointerInput::Leave => {
-                                view.mouse_leave();
+                            info!(x = click.x, y = click.y, "content click (view-local)");
+                            let outcome = view.click_at_point(click.x as f32, click.y as f32);
+                            // ENGINE focus is not APPKIT focus: without making
+                            // the content view the window's first responder,
+                            // macOS keeps delivering keys to the chrome WebView
+                            // — observed live as "text entry goes back up to
+                            // the URL bar". Any click on the page takes the
+                            // keyboard, focused element or not: the page's own
+                            // shortcuts are keys with nothing focused.
+                            view.grab_keyboard();
+                            if let Some(tag) = outcome.focused {
+                                info!(%tag, "Focused content element");
+                                view.relayout();
+                            }
+                            if let Some(url) = outcome.navigate {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
+                            }
+                            // The wheel, from the content view's own `scrollWheel:`.
+                            // The window-loop MouseWheel arm above stays as it was;
+                            // the view consumes the wheel, so only one of the two
+                            // fires for an event. Until 2026-10-06 the wheel reached
+                            // neither in the built app (hand-test item H6). A burst
+                            // arrives summed by the queue, pointer drift between
+                            // its steps included, so a drain costs one scroll per
+                            // burst and one present (#692), not one per step.
+                            rustkit_viewhost::InputKind::Wheel(scroll) => {
+                            if wheel_burst_started() {
+                                info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
+                            }
+                            if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
+                            }
+                            }
+                            rustkit_viewhost::InputKind::Key(key) => {
+                            if key.cmd {
+                                continue; // menu shortcuts are not text
+                            }
+                            // macOS keyCodes -> the Win32 VK numbering the edit
+                            // model speaks. Text keys carry their characters.
+                            let (vk, text): (u32, &str) = match key.mac_keycode {
+                                51 => (0x08, ""),   // delete (backspace)
+                                117 => (0x2E, ""),  // forward delete
+                                123 => (0x25, ""),  // left
+                                124 => (0x27, ""),  // right
+                                115 => (0x24, ""),  // home
+                                119 => (0x23, ""),  // end
+                                36 | 76 => (0x0D, ""), // return / keypad enter
+                                48 => (0x09, ""),   // tab
+                                53 => (0x1B, ""),   // escape
+                                116 => (0x21, ""),  // page up
+                                121 => (0x22, ""),  // page down
+                                126 => (0x26, ""),  // up
+                                125 => (0x28, ""),  // down
+                                _ => (0, key.text.as_str()),
+                            };
+                            if vk == 0 && text.is_empty() {
                                 continue;
                             }
-                            rustkit_viewhost::PointerInput::Button => {}
+                            if key.up {
+                                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                                continue;
+                            }
+                            if vk == 0x0D {
+                                if let Some(url) = view.form_submit_url() {
+                                    info!(%url, "Form submitted");
+                                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                    continue;
+                                }
+                            }
+                            let focused = view.has_focused_element();
+                            if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
+                                view.relayout();
+                            } else if !focused {
+                                // Nothing focused and the page did not take
+                                // the key: the keys that scroll, as in the
+                                // window-level arm (wheel sign convention).
+                                let dy: Option<f32> = match (vk, text) {
+                                    (0x28, _) => Some(-40.0),
+                                    (0x26, _) => Some(40.0),
+                                    (0x22, _) | (0, " ") => Some(-600.0),
+                                    (0x21, _) => Some(600.0),
+                                    (0x23, _) => Some(-f32::MAX),
+                                    (0x24, _) => Some(f32::MAX),
+                                    _ => None,
+                                };
+                                if let Some(dy) = dy {
+                                    view.scroll_by(0.0, dy);
+                                }
+                            }
+                            }
+                            }
                         }
-                        if click.down {
-                            view.mouse_down_at_point(click.x as f32, click.y as f32);
-                            continue;
-                        }
-                        info!(x = click.x, y = click.y, "content click (view-local)");
-                        let outcome = view.click_at_point(click.x as f32, click.y as f32);
-                        // ENGINE focus is not APPKIT focus: without making
-                        // the content view the window's first responder,
-                        // macOS keeps delivering keys to the chrome WebView
-                        // — observed live as "text entry goes back up to
-                        // the URL bar". Any click on the page takes the
-                        // keyboard, focused element or not: the page's own
-                        // shortcuts are keys with nothing focused.
-                        view.grab_keyboard();
-                        if let Some(tag) = outcome.focused {
-                            info!(%tag, "Focused content element");
-                            view.relayout();
-                        }
-                        if let Some(url) = outcome.navigate {
-                            info!(%url, "Link clicked");
+                        // Timers that came due, late fetches, and what the
+                        // input above started; then sleep until the next timer.
+                        let sleep = view.process_events();
+                        live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
+                        // A navigation the page started itself: `location.href
+                        // = url`, a script's `link.click()` or `form.submit()`,
+                        // a submit from a timer. Until 2026-10-06 these were
+                        // dropped: only the user's own click on a link or a
+                        // submit button went anywhere (hand tests H14, H16).
+                        if let Some(url) = view.take_script_navigation() {
+                            info!(%url, "Script navigation");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
-                        }
-                        // The wheel, from the content view's own `scrollWheel:`.
-                        // The window-loop MouseWheel arm above stays as it was;
-                        // the view consumes the wheel, so only one of the two
-                        // fires for an event. Until 2026-10-06 the wheel reached
-                        // neither in the built app (hand-test item H6). A burst
-                        // arrives summed by the queue, pointer drift between
-                        // its steps included, so a drain costs one scroll per
-                        // burst and one present (#692), not one per step.
-                        rustkit_viewhost::InputKind::Wheel(scroll) => {
-                        if wheel_burst_started() {
-                            info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
-                        }
-                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
-                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                        }
-                        }
-                        rustkit_viewhost::InputKind::Key(key) => {
-                        if key.cmd {
-                            continue; // menu shortcuts are not text
-                        }
-                        // macOS keyCodes -> the Win32 VK numbering the edit
-                        // model speaks. Text keys carry their characters.
-                        let (vk, text): (u32, &str) = match key.mac_keycode {
-                            51 => (0x08, ""),   // delete (backspace)
-                            117 => (0x2E, ""),  // forward delete
-                            123 => (0x25, ""),  // left
-                            124 => (0x27, ""),  // right
-                            115 => (0x24, ""),  // home
-                            119 => (0x23, ""),  // end
-                            36 | 76 => (0x0D, ""), // return / keypad enter
-                            48 => (0x09, ""),   // tab
-                            53 => (0x1B, ""),   // escape
-                            116 => (0x21, ""),  // page up
-                            121 => (0x22, ""),  // page down
-                            126 => (0x26, ""),  // up
-                            125 => (0x28, ""),  // down
-                            _ => (0, key.text.as_str()),
-                        };
-                        if vk == 0 && text.is_empty() {
-                            continue;
-                        }
-                        if key.up {
-                            view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
-                            continue;
-                        }
-                        if vk == 0x0D {
-                            if let Some(url) = view.form_submit_url() {
-                                info!(%url, "Form submitted");
-                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                                continue;
-                            }
-                        }
-                        let focused = view.has_focused_element();
-                        if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
-                            view.relayout();
-                        } else if !focused {
-                            // Nothing focused and the page did not take
-                            // the key: the keys that scroll, as in the
-                            // window-level arm (wheel sign convention).
-                            let dy: Option<f32> = match (vk, text) {
-                                (0x28, _) => Some(-40.0),
-                                (0x26, _) => Some(40.0),
-                                (0x22, _) | (0, " ") => Some(-600.0),
-                                (0x21, _) => Some(600.0),
-                                (0x23, _) => Some(-f32::MAX),
-                                (0x24, _) => Some(f32::MAX),
-                                _ => None,
-                            };
-                            if let Some(dy) = dy {
-                                view.scroll_by(0.0, dy);
-                            }
-                        }
-                        }
-                        }
+                        view.render();
                     }
-                    // Timers that came due, late fetches, and what the
-                    // input above started; then sleep until the next timer.
-                    let sleep = view.process_events();
-                    live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
-                    // A navigation the page started itself: `location.href
-                    // = url`, a script's `link.click()` or `form.submit()`,
-                    // a submit from a timer. Until 2026-10-06 these were
-                    // dropped: only the user's own click on a link or a
-                    // submit button went anywhere (hand tests H14, H16).
-                    if let Some(url) = view.take_script_navigation() {
-                        info!(%url, "Script navigation");
-                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                    }
-                    view.render();
                 }
             }
             Event::UserEvent(user_event) => {
@@ -2744,7 +2683,17 @@ fn main() {
                         info!("Stopping load");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement stop in RustKit
+                            // The load in progress, cancelled without the
+                            // engine it holds (M3b's canceller).
+                            #[cfg(feature = "rustkit")]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.stop_load() {
+                                    info!("Stop: nothing loading");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("window.stop();");
+                            }
+                            #[cfg(not(feature = "rustkit"))]
                             let _ = content_for_events.evaluate_script("window.stop();");
                         }
                         #[cfg(not(target_os = "macos"))]
