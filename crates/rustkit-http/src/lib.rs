@@ -2181,4 +2181,50 @@ mod governed_tests {
         let small = small.expect("a parked stream's unread body stalled the host's other streams");
         assert_eq!(small.unwrap().body.as_ref(), b"ok");
     }
+
+    /// A burst to a fresh connection goes out before the server's SETTINGS
+    /// are read. h2 lets the client open 100 streams until then, so a server
+    /// whose limit is lower refuses the rest (walmart's ~113 scripts got
+    /// REFUSED_STREAM at its limit). Streams over the limit must wait instead.
+    #[tokio::test]
+    async fn a_burst_waits_for_the_servers_stream_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut connection = match h2::server::Builder::new()
+                .max_concurrent_streams(2)
+                .handshake::<_, Bytes>(sock)
+                .await
+            {
+                Ok(connection) => connection,
+                Err(_) => return,
+            };
+            while let Some(next) = connection.accept().await {
+                let (_request, mut respond) = match next {
+                    Ok(parts) => parts,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let response = http::Response::builder().status(200).body(()).unwrap();
+                    if let Ok(mut body) = respond.send_response(response, false) {
+                        let _ = body.send_data(Bytes::from_static(b"js"), true);
+                    }
+                });
+            }
+        });
+
+        let client = client();
+        let urls: Vec<String> = (0..6).map(|i| format!("http://{addr}/s{i}.js")).collect();
+        let results = futures::future::join_all(urls.iter().map(|u| client.request_h2_cleartext(u))).await;
+        for (url, result) in urls.iter().zip(results) {
+            match result {
+                Ok(response) => assert_eq!(response.body.as_ref(), b"js", "{url}"),
+                Err(e) => panic!("{url} failed over the server's stream limit: {e:?}"),
+            }
+        }
+    }
 }
