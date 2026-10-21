@@ -18623,6 +18623,65 @@ pub(crate) fn scrolled_commands(
     scrolled
 }
 
+#[cfg(test)]
+mod scrolled_commands_tests {
+    use super::scrolled_commands;
+    use rustkit_css::Color;
+    use rustkit_layout::{DisplayCommand, Rect};
+
+    fn paint() -> DisplayCommand {
+        DisplayCommand::SolidColor(Color::BLACK, Rect::new(0.0, 0.0, 10.0, 10.0))
+    }
+
+    fn is_translate(command: &DisplayCommand, x: f32, y: f32) -> bool {
+        matches!(
+            command,
+            DisplayCommand::PushTransform {
+                matrix: [1.0, 0.0, 0.0, 1.0, mx, my],
+                origin: (0.0, 0.0),
+            } if *mx == x && *my == y
+        )
+    }
+
+    #[test]
+    fn a_zero_offset_still_wraps_the_list_and_rewrites_fixed_markers() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+        ];
+        let out = scrolled_commands(&list, (0.0, 0.0));
+        assert_eq!(out.len(), 6);
+        assert!(is_translate(&out[0], 0.0, 0.0));
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 0.0, 0.0), "fixed → +offset translate");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::PopTransform));
+    }
+
+    #[test]
+    fn a_scroll_offset_wraps_the_page_and_counters_fixed_runs() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+            paint(),
+        ];
+        let out = scrolled_commands(&list, (12.0, 34.0));
+        assert_eq!(out.len(), 7);
+        assert!(is_translate(&out[0], -12.0, -34.0), "outer −offset");
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 12.0, 34.0), "fixed → +offset");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[6], DisplayCommand::PopTransform));
+    }
+}
+
 /// The page-space affine this box's own `transform` contributes, or `None`
 /// when it has none.
 ///

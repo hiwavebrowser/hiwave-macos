@@ -168,3 +168,35 @@ pub(crate) fn load_phase(_name: &str) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::ready;
+
+    fn watch(nav_id: u64) -> NavWatch {
+        let control = rustkit_js::Watchdog::shared().view_control();
+        control.begin_nav(nav_id);
+        NavWatch {
+            canceller: NavCanceller::new(control, Arc::new(Notify::new())),
+            nav_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn unless_cancelled_prefers_a_ready_cancel_over_a_ready_response() {
+        let watch = watch(1);
+        assert!(watch.canceller.cancel_nav(1));
+        // Both arms are ready on the first poll; cancel is selected first so
+        // the response is dropped (see [`NavCanceller::unless_cancelled`]).
+        let got = watch.unless_cancelled(ready("payload")).await;
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn unless_cancelled_returns_the_response_when_nothing_was_cancelled() {
+        let watch = watch(1);
+        let got = watch.unless_cancelled(ready("payload")).await;
+        assert_eq!(got, Some("payload"));
+    }
+}
