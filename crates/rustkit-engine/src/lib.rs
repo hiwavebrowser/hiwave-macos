@@ -884,8 +884,13 @@ struct ViewState {
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
     max_scroll_offset: (f32, f32),
-    /// External stylesheets loaded from <link> elements.
-    external_stylesheets: Vec<Stylesheet>,
+    /// External stylesheets loaded from <link> elements. Shared, so a
+    /// relayout takes them without copying every rule, and so the rule
+    /// index can tell the same list from a new one by identity
+    /// (`SheetsFingerprint`).
+    external_stylesheets: Rc<Vec<Stylesheet>>,
+    /// The parsed `<style>` sheets of this view's document, by text.
+    sheet_cache: std::cell::RefCell<SheetCache>,
     /// The load skipped its pre-stylesheet layout because the document has
     /// `<link rel=stylesheet>` (render-blocking, as in Chrome): the layout
     /// with no sheets was cascaded in full and then thrown away.
@@ -986,7 +991,10 @@ impl ViewState {
         // `load_subresources` assigns the new document's when they have
         // been fetched, which is after a document that links none has been
         // laid out; and `load_html` fetches nothing at all.
-        self.external_stylesheets.clear();
+        self.external_stylesheets = Rc::default();
+        // And the parsed `<style>` sheets: correct to keep (they are keyed
+        // by text), but the new document is unlikely to share them.
+        self.sheet_cache.get_mut().clear();
         self.initial_layout_deferred = false;
         self.images_attempted.clear();
     }
@@ -2274,7 +2282,8 @@ impl Engine {
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Vec::new(),
+            external_stylesheets: Rc::default(),
+            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2361,7 +2370,8 @@ impl Engine {
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Vec::new(),
+            external_stylesheets: Rc::default(),
+            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2447,7 +2457,8 @@ impl Engine {
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Vec::new(),
+            external_stylesheets: Rc::default(),
+            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
@@ -6874,8 +6885,14 @@ impl Engine {
             }
         }
 
-        // Extract stylesheets from <style> elements
-        let mut stylesheets = self.extract_stylesheets(document);
+        // Extract stylesheets from <style> elements: parsed, or taken from
+        // the view's sheet cache when their text is one it has seen.
+        let inline_sheets = self.inline_sheets(document, self.building_view.get());
+        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport);
+        // Copies: the steps below filter and rank the rules in place, and
+        // must not reach the cached sheets.
+        let mut stylesheets: Vec<Stylesheet> =
+            inline_sheets.into_iter().map(Rc::unwrap_or_clone).collect();
 
         // Everything from here to the finished box tree is what Chrome's
         // `UpdateLayoutTree` covers; stylesheet parsing above is its `parse`.
@@ -6918,7 +6935,7 @@ impl Engine {
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
             false => {
-                let index = self.shared_rule_index(&stylesheets);
+                let index = self.shared_rule_index(&stylesheets, fingerprint);
                 if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
                     *view.rule_reads.borrow_mut() = Some(index.clone());
                 }
@@ -11735,40 +11752,51 @@ impl Engine {
         true
     }
 
-    /// Extract CSS text from <style> elements in the document.
+    /// The document's `<style>` sheets, as copies a test may change. The
+    /// engine itself goes through `inline_sheets`.
+    #[cfg(test)]
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
-        let mut stylesheets = Vec::new();
+        self.inline_sheets(document, self.building_view.get())
+            .into_iter()
+            .map(Rc::unwrap_or_clone)
+            .collect()
+    }
 
-        // Find all <style> elements
-        let style_elements = document.get_elements_by_tag_name("style");
-
-        for style_el in style_elements {
+    /// The parsed sheet of each `<style>` element the document has, in
+    /// tree order. Parsing is a function of the text alone (no base URL,
+    /// no `media` attribute, nothing from the element), so a sheet whose
+    /// text `view`'s cache has seen is taken from it instead of parsed
+    /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
+    /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
+    fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
+        let mut texts = Vec::new();
+        for style_el in document.get_elements_by_tag_name("style") {
             if !self.sheet_element_counts(&style_el) {
                 continue;
             }
-
-            // Get text content
             let mut css_text = String::new();
             for child in style_el.children() {
                 if let NodeType::Text(text) = &child.node_type {
                     css_text.push_str(text);
                 }
             }
-
             if !css_text.is_empty() {
-                match Stylesheet::parse(&css_text) {
-                    Ok(stylesheet) => {
-                        debug!(rules = stylesheet.rules.len(), "Parsed stylesheet");
-                        stylesheets.push(stylesheet);
-                    }
-                    Err(e) => {
-                        warn!(?e, "Failed to parse stylesheet");
-                    }
-                }
+                texts.push(css_text);
             }
         }
 
-        stylesheets
+        if !sheet_cache_enabled() {
+            return texts.iter().filter_map(|text| parse_style_sheet(text)).map(Rc::new).collect();
+        }
+        let lookup = |cache: &mut SheetCache| {
+            let sheets = texts.into_iter().filter_map(|text| cache.get_or_parse(text)).collect();
+            cache.end_lookup();
+            sheets
+        };
+        match view.and_then(|id| self.views.get(&id)) {
+            Some(view) => lookup(&mut view.sheet_cache.borrow_mut()),
+            None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
+        }
     }
 
     /// Discover external stylesheets from <link> elements.
@@ -12675,7 +12703,7 @@ impl Engine {
 
         let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
-            view.external_stylesheets = external_stylesheets;
+            view.external_stylesheets = Rc::new(external_stylesheets);
             // Read, not taken: a cancel before the relayout below (which
             // may drop this future at any await) finds it still set and
             // lays the document out (`load_cancelled`).
@@ -12797,10 +12825,10 @@ impl Engine {
             return Vec::new();
         };
         let mut rules = Vec::new();
-        for sheet in self.extract_stylesheets(document) {
+        for sheet in self.inline_sheets(document, Some(id)) {
             rules.extend(sheet.font_face_rules());
         }
-        for sheet in &view.external_stylesheets {
+        for sheet in view.external_stylesheets.iter() {
             rules.extend(sheet.font_face_rules());
         }
         rules
@@ -13225,14 +13253,55 @@ impl Engine {
         ix
     }
 
+    /// The identity of the sheets a build is about to index, when it can
+    /// vouch for them: the cached `<style>` sheets (immutable while shared)
+    /// and the view's external list (likewise), plus the viewport the
+    /// `@media` filter will use. `None` when the external sheets are not
+    /// the building view's own list or the cache is off; the rule index
+    /// then compares selectors.
+    fn sheets_fingerprint(
+        &self,
+        inline: &[Rc<Stylesheet>],
+        external: &[Stylesheet],
+        viewport: Option<(f32, f32)>,
+    ) -> Option<SheetsFingerprint> {
+        if !sheet_cache_enabled() {
+            return None;
+        }
+        let external = match external.is_empty() {
+            true => None,
+            false => {
+                let own = &self.views.get(&self.building_view.get()?)?.external_stylesheets;
+                if !std::ptr::eq(own.as_slice(), external) {
+                    return None;
+                }
+                Some(own.clone())
+            }
+        };
+        Some(SheetsFingerprint {
+            viewport,
+            inline: inline.to_vec(),
+            external,
+        })
+    }
+
     /// `build_rule_index`, reused while the selectors don't change. A page
     /// load lays out 2-3 times over a freshly extracted copy of the same
     /// sheets, and rebuilding the index each time was ~38% of github's
     /// cascade. The index is a function of the selectors alone (their
     /// keys, specificity and prepared form are pure, and rules are found
     /// by position), so the same selectors in the same sheets in the same
-    /// order get the same index. Comparing them is a memcmp per rule.
-    fn shared_rule_index(&self, stylesheets: &[Stylesheet]) -> Rc<RuleIndex> {
+    /// order get the same index.
+    ///
+    /// Two ways to know they are the same: `fingerprint` equal to the one
+    /// the index was last reused or built under (a pointer compare per
+    /// sheet: the sheets themselves are the same, see `SheetsFingerprint`),
+    /// or, failing that, a compare of every selector.
+    fn shared_rule_index(
+        &self,
+        stylesheets: &[Stylesheet],
+        fingerprint: Option<SheetsFingerprint>,
+    ) -> Rc<RuleIndex> {
         let same = |built: &[Vec<String>]| {
             built.len() == stylesheets.len()
                 && built.iter().zip(stylesheets).all(|(selectors, sheet)| {
@@ -13244,21 +13313,40 @@ impl Engine {
                 })
         };
         let reused = LAST_RULE_INDEX.with(|c| {
-            c.borrow()
-                .as_ref()
-                .filter(|(built, _)| same(built))
-                .map(|(_, ix)| ix.clone())
+            let mut last = c.borrow_mut();
+            let last = last.as_mut()?;
+            let identical = matches!(
+                (&fingerprint, &last.fingerprint),
+                (Some(now), Some(then)) if now.same_as(then)
+            );
+            if identical {
+                rule_index_reuse_count(0);
+                return Some(last.index.clone());
+            }
+            if !same(&last.selectors) {
+                return None;
+            }
+            rule_index_reuse_count(1);
+            last.fingerprint = fingerprint.clone();
+            Some(last.index.clone())
         });
         if let Some(ix) = reused {
             return ix;
         }
-        let ix = Rc::new(self.build_rule_index(stylesheets));
-        let built = stylesheets
+        rule_index_reuse_count(2);
+        let index = Rc::new(self.build_rule_index(stylesheets));
+        let selectors = stylesheets
             .iter()
             .map(|sheet| sheet.rules.iter().map(|r| r.selector.clone()).collect())
             .collect();
-        LAST_RULE_INDEX.with(|c| *c.borrow_mut() = Some((built, ix.clone())));
-        ix
+        LAST_RULE_INDEX.with(|c| {
+            *c.borrow_mut() = Some(LastRuleIndex {
+                selectors,
+                fingerprint,
+                index: index.clone(),
+            })
+        });
+        index
     }
 
     fn rule_may_match(
@@ -19411,8 +19499,7 @@ mod tests {
             .views
             .get_mut(&id)
             .expect("view exists")
-            .external_stylesheets
-            .push(Stylesheet::default());
+            .external_stylesheets = Rc::new(vec![Stylesheet::default()]);
         assert_eq!(
             engine.views[&id].external_stylesheets.len(),
             1,
@@ -28764,8 +28851,8 @@ mod rule_prefilter_tests {
         // different allocation (and possibly different declarations).
         let first = parse(".a { color: red } #b > p { color: blue }");
         let again = parse(".a { color: green } #b > p { color: blue }");
-        let ix = engine.shared_rule_index(&first);
-        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again)));
+        let ix = engine.shared_rule_index(&first, None);
+        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again, None)));
 
         // It is installed for the slice at hand, not the one it was built from.
         {
@@ -28782,7 +28869,7 @@ mod rule_prefilter_tests {
         ] {
             let sheets: Vec<Stylesheet> =
                 css.iter().map(|c| Stylesheet::parse(c).expect("css")).collect();
-            let rebuilt = engine.shared_rule_index(&sheets);
+            let rebuilt = engine.shared_rule_index(&sheets, None);
             assert!(!Rc::ptr_eq(&ix, &rebuilt), "{css:?} reused a stale index");
             assert_eq!(rebuilt.rules.len(), sheets.iter().map(|s| s.rules.len()).sum::<usize>());
         }
@@ -31095,10 +31182,152 @@ thread_local! {
     /// cleared by `RuleIndexScope`.
     static RULE_INDEX: std::cell::RefCell<Option<InstalledRuleIndex>> =
         const { std::cell::RefCell::new(None) };
-    /// The last index `shared_rule_index` built on this thread, with the
-    /// selectors it was built from (one list per sheet, in order).
-    static LAST_RULE_INDEX: std::cell::RefCell<Option<(Vec<Vec<String>>, Rc<RuleIndex>)>> =
+    /// The last index `shared_rule_index` built on this thread.
+    static LAST_RULE_INDEX: std::cell::RefCell<Option<LastRuleIndex>> =
         const { std::cell::RefCell::new(None) };
+    /// The `<style>` sheet cache of builds that have no view.
+    static ADHOC_SHEET_CACHE: std::cell::RefCell<SheetCache> =
+        std::cell::RefCell::new(SheetCache::default());
+}
+
+/// The index `shared_rule_index` last built or reused, with the selectors
+/// it was built from (one list per sheet, in order) and the identity of
+/// the sheets it was last used for.
+struct LastRuleIndex {
+    selectors: Vec<Vec<String>>,
+    fingerprint: Option<SheetsFingerprint>,
+    index: Rc<RuleIndex>,
+}
+
+/// What a layout build's sheet list is made of, by identity: the `<style>`
+/// sheets as the sheet cache holds them, the view's external list, and
+/// the viewport that decides which `@media` rules stay. The build's sheets
+/// are a pure function of these (copies, filtered by the viewport), so two
+/// equal fingerprints mean the same selectors in the same places.
+///
+/// Holding the `Rc`s is what makes a pointer compare sound: an address
+/// cannot be reused for other sheets while this keeps the old ones alive,
+/// and nothing can change a shared sheet in place (`Rc::make_mut` copies).
+#[derive(Clone)]
+struct SheetsFingerprint {
+    viewport: Option<(f32, f32)>,
+    inline: Vec<Rc<Stylesheet>>,
+    /// `None` when the build has no external sheets.
+    external: Option<Rc<Vec<Stylesheet>>>,
+}
+
+impl SheetsFingerprint {
+    fn same_as(&self, other: &SheetsFingerprint) -> bool {
+        self.viewport == other.viewport
+            && self.inline.len() == other.inline.len()
+            && self.inline.iter().zip(&other.inline).all(|(a, b)| Rc::ptr_eq(a, b))
+            && match (&self.external, &other.external) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+/// Parsed `<style>` sheets by their text, so a relayout over the same
+/// document (a script's style write, a timer, an image arriving) does not
+/// parse every sheet again. Entries are immutable once cached. Bounded:
+/// past `MAX_ENTRIES` sheets or `MAX_BYTES` of text, a lookup pass drops
+/// every entry it did not use.
+#[derive(Default)]
+struct SheetCache {
+    /// Text -> parsed sheet (`None`: the text does not parse), and the
+    /// lookup pass that last used it.
+    entries: HashMap<String, (Option<Rc<Stylesheet>>, u64)>,
+    /// The lookup pass in progress.
+    pass: u64,
+    /// Text bytes held.
+    bytes: usize,
+    /// Lookups answered from the cache and parsed, for tests.
+    hits: usize,
+    misses: usize,
+}
+
+impl SheetCache {
+    const MAX_ENTRIES: usize = 256;
+    const MAX_BYTES: usize = 32 << 20;
+
+    fn get_or_parse(&mut self, text: String) -> Option<Rc<Stylesheet>> {
+        let pass = self.pass;
+        if let Some((sheet, used)) = self.entries.get_mut(text.as_str()) {
+            *used = pass;
+            self.hits += 1;
+            return sheet.clone();
+        }
+        self.misses += 1;
+        let sheet = parse_style_sheet(&text).map(Rc::new);
+        self.bytes += text.len();
+        self.entries.insert(text, (sheet.clone(), pass));
+        sheet
+    }
+
+    /// Ends one document's lookups: enforce the bound, start a new pass.
+    fn end_lookup(&mut self) {
+        if self.entries.len() > Self::MAX_ENTRIES || self.bytes > Self::MAX_BYTES {
+            let pass = self.pass;
+            self.entries.retain(|_, (_, used)| *used == pass);
+            self.bytes = self.entries.keys().map(String::len).sum();
+        }
+        self.pass += 1;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+/// `Stylesheet::parse` for a `<style>` element's text, logged as before.
+fn parse_style_sheet(css_text: &str) -> Option<Stylesheet> {
+    match Stylesheet::parse(css_text) {
+        Ok(stylesheet) => {
+            debug!(rules = stylesheet.rules.len(), "Parsed stylesheet");
+            Some(stylesheet)
+        }
+        Err(e) => {
+            warn!(?e, "Failed to parse stylesheet");
+            None
+        }
+    }
+}
+
+/// `RUSTKIT_SHEET_CACHE`: on unless `0` or `off`. Off, every layout build
+/// parses every `<style>` sheet again and the rule index is reused only
+/// after comparing every selector.
+fn sheet_cache_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SHEET_CACHE_TEST_MODE.with(|m| m.get()) {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| sheet_cache_from(std::env::var("RUSTKIT_SHEET_CACHE").ok().as_deref()))
+}
+
+fn sheet_cache_from(value: Option<&str>) -> bool {
+    !matches!(value.map(str::trim), Some("0" | "off"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Overrides `RUSTKIT_SHEET_CACHE` for the builds of one test.
+    static SHEET_CACHE_TEST_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    /// How `shared_rule_index` answered on this thread: by fingerprint, by
+    /// comparing selectors, by building.
+    static RULE_INDEX_REUSE: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+}
+
+fn rule_index_reuse_count(_how: usize) {
+    #[cfg(test)]
+    RULE_INDEX_REUSE.with(|c| {
+        let mut counts = c.get();
+        counts[_how] += 1;
+        c.set(counts);
+    });
 }
 
 /// Installs a rule index for the duration of one layout build. Dropping it
@@ -34159,8 +34388,7 @@ mod windows_engine_pins {
         e.views
             .get_mut(&id)
             .unwrap()
-            .external_stylesheets
-            .push(Stylesheet::parse("p { width: 123px }").expect("css"));
+            .external_stylesheets = Rc::new(vec![Stylesheet::parse("p { width: 123px }").expect("css")]);
         e.load_html(id, "<html><body><p>next page</p></body></html>")
             .expect("load_html");
         assert!(
@@ -38530,5 +38758,209 @@ mod scroll_extent_tests {
             gaps_that_pass.is_empty(),
             "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
         );
+    }
+}
+
+// ── `<style>` sheet cache and O(1) rule-index reuse (`RUSTKIT_SHEET_CACHE`) ──
+#[cfg(test)]
+mod sheet_cache_tests {
+    use super::*;
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    /// Sets `RUSTKIT_SHEET_CACHE` for one test, and puts it back.
+    struct CacheMode;
+
+    impl CacheMode {
+        fn set(on: bool) -> Self {
+            SHEET_CACHE_TEST_MODE.with(|m| m.set(Some(on)));
+            CacheMode
+        }
+    }
+
+    impl Drop for CacheMode {
+        fn drop(&mut self) {
+            SHEET_CACHE_TEST_MODE.with(|m| m.set(None));
+        }
+    }
+
+    fn doc(styles: &[&str]) -> Document {
+        let mut html = String::from("<html><head>");
+        for css in styles {
+            html.push_str(&format!("<style>{css}</style>"));
+        }
+        html.push_str("</head><body><p class=a>a</p><p id=b>b</p></body></html>");
+        Document::parse_html(&html).expect("parse")
+    }
+
+    fn cache_stats() -> (usize, usize) {
+        ADHOC_SHEET_CACHE.with(|c| {
+            let c = c.borrow();
+            (c.hits, c.misses)
+        })
+    }
+
+    /// (by fingerprint, by comparing selectors, built) since the last call.
+    fn index_reuse() -> [usize; 3] {
+        RULE_INDEX_REUSE.with(|c| c.replace([0; 3]))
+    }
+
+    #[test]
+    fn the_switch_is_on_unless_turned_off() {
+        assert!(sheet_cache_from(None));
+        assert!(sheet_cache_from(Some("1")));
+        assert!(sheet_cache_from(Some("")));
+        assert!(!sheet_cache_from(Some("0")));
+        assert!(!sheet_cache_from(Some("off")));
+    }
+
+    #[test]
+    fn unchanged_text_hits_and_edited_text_misses() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let first = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: blue }"]), None);
+        let (hits, misses) = cache_stats();
+
+        // A relayout of the same document: both sheets from the cache.
+        let again = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: blue }"]), None);
+        assert!(first.iter().zip(&again).all(|(a, b)| Rc::ptr_eq(a, b)));
+        assert_eq!(cache_stats(), (hits + 2, misses));
+
+        // A script rewrote the second sheet's text: it alone is parsed again.
+        let edited = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: green }"]), None);
+        assert!(Rc::ptr_eq(&first[0], &edited[0]));
+        assert!(!Rc::ptr_eq(&first[1], &edited[1]));
+        assert_eq!(cache_stats(), (hits + 3, misses + 1));
+
+        // `insertRule` writes the rule into the element's text (see
+        // rustkit-bindings' web_cssom_tests), so it is a text change too.
+        let inserted = e.inline_sheets(
+            &doc(&[".hit-1 { color: red }", "#hit-2 { color: green }\n.hit-3 { top: 0 }"]),
+            None,
+        );
+        assert_eq!(inserted[1].rules.len(), 2);
+        assert_eq!(cache_stats(), (hits + 4, misses + 2));
+    }
+
+    #[test]
+    fn a_build_changes_its_own_copy_not_the_cached_sheet() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let css = "@layer base { .leak { color: red } } @media (min-width: 9999px) { .leak { color: blue } }";
+        let d = doc(&[css]);
+        let cached = e.inline_sheets(&d, None).remove(0);
+        assert_eq!(cached.rules.len(), 2);
+        // The build drops the `@media` rule (no viewport) and ranks the layer.
+        e.build_layout_from_document(&d, &[]);
+        e.build_layout_from_document(&d, &[]);
+        let after = e.inline_sheets(&d, None).remove(0);
+        assert!(Rc::ptr_eq(&cached, &after));
+        assert_eq!(after.rules.len(), 2, "the @media filter reached the cache");
+        assert!(after.rules.iter().all(|r| r.layer_order == rustkit_css::UNLAYERED));
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        for i in 0..SheetCache::MAX_ENTRIES + 10 {
+            e.inline_sheets(&doc(&[&format!(".bound-{i} {{ color: red }}")]), None);
+        }
+        let held = ADHOC_SHEET_CACHE.with(|c| c.borrow().entries.len());
+        assert!(held <= SheetCache::MAX_ENTRIES + 1, "{held} sheets held");
+    }
+
+    #[test]
+    fn the_rule_index_is_rebuilt_exactly_when_selectors_change() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let build = |styles: &[&str]| {
+            e.build_layout_from_document(&doc(styles), &[]);
+            index_reuse()
+        };
+        build(&[".ix-a { color: red }", "#b { color: blue }"]);
+        // Same text: same cached sheets, so the fingerprint answers.
+        assert_eq!(build(&[".ix-a { color: red }", "#b { color: blue }"]), [1, 0, 0]);
+        // A declaration changed: a new sheet, the same selectors.
+        assert_eq!(build(&[".ix-a { color: green }", "#b { color: blue }"]), [0, 1, 0]);
+        // And now that is the fingerprint the index answers to.
+        assert_eq!(build(&[".ix-a { color: green }", "#b { color: blue }"]), [1, 0, 0]);
+        // Any selector change, rule added, or sheet boundary moved rebuilds.
+        assert_eq!(build(&[".ix-a { color: green }", "#b p { color: blue }"]), [0, 0, 1]);
+        assert_eq!(build(&[".ix-a { color: green } .c { top: 0 }", "#b p { color: blue }"]), [0, 0, 1]);
+        assert_eq!(build(&[".ix-a { color: green } .c { top: 0 } #b p { color: blue }"]), [0, 0, 1]);
+        // Off, the selectors are compared every time.
+        let _off = CacheMode::set(false);
+        let off = &[".ix-a { color: green } .c { top: 0 } #b p { color: blue }"];
+        assert_eq!(build(off), [0, 1, 0]);
+        assert_eq!(build(off), [0, 1, 0]);
+    }
+
+    fn painted_page(e: &Engine, page: &str) -> (String, LayoutBox) {
+        let d = Document::parse_html(page).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        let painted = DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (painted, root)
+    }
+
+    #[test]
+    fn cached_sheets_paint_what_freshly_parsed_ones_paint() {
+        let pages = [
+            include_str!("../../../fixtures/layout_comprehensive.html"),
+            include_str!("../../../fixtures/pseudo-elements.html"),
+            include_str!("../../../fixtures/typography.html"),
+            include_str!("../../../fixtures/gradient_basic.html"),
+            "<html><head><style>@layer a, b; @layer b { p { color: red } } @layer a { p { color: blue } }\
+             @media (max-width: 1px) { p { margin: 40px } } p.x { padding: 3px }</style>\
+             <style>p:first-child::before { content: 'x'; color: green }</style></head>\
+             <body><p class=x>one</p><p>two</p></body></html>",
+        ];
+        let e = engine();
+        for page in pages {
+            let (fresh, fresh_tree) = {
+                let _off = CacheMode::set(false);
+                painted_page(&e, page)
+            };
+            let _on = CacheMode::set(true);
+            // The first build fills the cache; the second takes from it and
+            // reuses the index by fingerprint.
+            let (filled, _) = painted_page(&e, page);
+            index_reuse();
+            let (cached, cached_tree) = painted_page(&e, page);
+            assert_eq!(index_reuse()[2], 0, "the second build rebuilt the index");
+            assert_eq!(filled, fresh);
+            assert_eq!(cached, fresh);
+            let mut differences = 0;
+            count_tree_differences(&cached_tree, &fresh_tree, &mut differences);
+            assert_eq!(differences, 0);
+        }
+    }
+
+    #[cfg(feature = "headless")]
+    #[test]
+    fn a_new_document_starts_with_an_empty_sheet_cache() {
+        let _on = CacheMode::set(true);
+        let mut e = engine();
+        let id = e
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("headless view");
+        e.load_html(id, "<html><head><style>p { color: red }</style></head><body><p>a</p></body></html>")
+            .expect("load_html");
+        let held = |e: &Engine| e.views[&id].sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(held(&e), ["p { color: red }"]);
+        e.load_html(id, "<html><head><style>p { color: blue }</style></head><body><p>b</p></body></html>")
+            .expect("load_html");
+        assert_eq!(held(&e), ["p { color: blue }"]);
     }
 }
