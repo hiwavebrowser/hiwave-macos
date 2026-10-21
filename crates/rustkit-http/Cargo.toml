@@ -24,7 +24,7 @@ native-tls = { version = "0.2", optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 
 # Async runtime
-tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread"] }
 
 # HTTP types
 http = "1.2"

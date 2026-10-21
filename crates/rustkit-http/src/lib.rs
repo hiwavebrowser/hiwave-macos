@@ -553,145 +553,218 @@ impl Client {
     ) -> Result<RawResponse, HttpError> {
         let key = self.h2_key(host, port);
         // A custom address policy does not share a socket with another policy.
-        if key.policy != h2_pool::POLICY_CUSTOM {
-            let slot = self.h2_pool.slot(key).await;
-            let cached = slot.lock().await.as_ref().cloned();
-            if let Some(send) = cached {
-                match self.dispatch_h2(send, method, url, headers, body).await {
-                    Ok(response) => return Ok(response),
-                    Err(e) if h2_connection_lost(&e) && is_idempotent(method) => {
-                        *slot.lock().await = None;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            let mut guard = slot.lock().await;
-            if let Some(send) = guard.as_ref().cloned() {
-                drop(guard);
-                return self.dispatch_h2(send, method, url, headers, body).await;
-            }
-            let dialed = self.dial_tls(host, port).await?;
-            match dialed {
-                Dialed::H2(send) => {
-                    *guard = Some(send.clone());
-                    drop(guard);
-                    self.dispatch_h2(send, method, url, headers, body).await
-                }
+        if key.policy == h2_pool::POLICY_CUSTOM {
+            return match self.dial(host, port, Transport::Tls, None).await? {
+                Dialed::H2(conn) => self
+                    .send_h2(&conn, method, url, headers, body)
+                    .await
+                    .map_err(H2Fail::into_error),
                 Dialed::Http1(stream) => {
-                    drop(guard);
-                    self.send_request(stream, host, method, url, headers, body).await
+                    self.send_request(stream, host, method, url, headers, body)
+                        .await
                 }
-            }
-        } else {
-            match self.dial_tls(host, port).await? {
-                Dialed::H2(send) => self.dispatch_h2(send, method, url, headers, body).await,
-                Dialed::Http1(stream) => {
-                    self.send_request(stream, host, method, url, headers, body).await
-                }
-            }
+            };
         }
+        self.request_pooled(key, host, port, Transport::Tls, method, url, headers, body)
+            .await
     }
 
-    /// TCP + TLS. HTTP/2 stores the sender on the pool's lock (the caller
-    /// holds it) after the connection driver is spawned.
-    async fn dial_tls(
+    /// A request on the host's shared HTTP/2 connection, or on its own
+    /// HTTP/1.1 connection when the host does not speak h2.
+    ///
+    /// A GET, HEAD or OPTIONS the server did not process (REFUSED_STREAM, a stream
+    /// above a GOAWAY's last stream id, or a stream the closed connection
+    /// never took) goes out once more on a fresh connection, RFC 9113 §8.7.
+    /// Nothing else is retried.
+    #[allow(clippy::too_many_arguments)]
+    async fn request_pooled(
         &self,
+        key: h2_pool::H2Key,
         host: &str,
         port: u16,
-    ) -> Result<
-        Dialed<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>,
-        HttpError,
-    > {
-        let addr = format!("{host}:{port}");
-        let stream = self.connect(host, port).await?;
-        let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
-        match negotiated {
-            NegotiatedProtocol::H2 => {
-                let (send, connection) = h2::client::handshake(tls_stream)
-                    .await
-                    .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
-                // The driver is bound to whichever runtime is current. Page
-                // loads and live turns share the process host runtime, so a
-                // stream opened during the load is still driven after it
-                // returns. One driver per host: every later request to this
-                // host is another stream, and `ready` waits when the server's
-                // stream limit is full instead of opening a socket the server
-                // will not read.
-                tokio::spawn(async move {
-                    let _ = connection.await;
-                });
-                Ok(Dialed::H2(send))
-            }
-            NegotiatedProtocol::Http1 => Ok(Dialed::Http1(tls_stream)),
-        }
-    }
-
-    /// One request on an HTTP/2 connection this process already drives.
-    ///
-    /// `ready` is the stream slot. Connection-specific headers are h2-illegal
-    /// and are not sent.
-    async fn dispatch_h2(
-        &self,
-        mut send_request: h2::client::SendRequest<Bytes>,
+        transport: Transport,
         method: &Method,
         url: &Url,
         headers: &HeaderMap,
         body: &Option<Bytes>,
     ) -> Result<RawResponse, HttpError> {
-        send_request = send_request
-            .ready()
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(format!("h2 ready: {e}")))?;
+        let mut retried = false;
+        loop {
+            let conn = match self.checkout(&key, host, port, transport).await? {
+                Dialed::H2(conn) => conn,
+                Dialed::Http1(stream) => {
+                    return self
+                        .send_request(stream, host, method, url, headers, body)
+                        .await;
+                }
+            };
+            let fail = match self.send_h2(&conn, method, url, headers, body).await {
+                Ok(response) => return Ok(response),
+                Err(fail) => fail,
+            };
+            if !fail.unprocessed() || !is_idempotent(method) || retried {
+                return Err(fail.into_error());
+            }
+            debug!(%url, conn = conn.id, "h2 stream not processed; retrying on a fresh connection");
+            self.h2_pool.evict(&key, conn.id);
+            retried = true;
+        }
+    }
 
-        let mut request = http::Request::builder()
+    /// The host's pooled connection: the one in the pool, the one another
+    /// request is dialing, or a new one.
+    async fn checkout(
+        &self,
+        key: &h2_pool::H2Key,
+        host: &str,
+        port: u16,
+        transport: Transport,
+    ) -> Result<Dialed, HttpError> {
+        match self.h2_pool.checkout(key) {
+            h2_pool::Checkout::Ready(conn) => Ok(Dialed::H2(conn)),
+            h2_pool::Checkout::Wait(mut rx) => {
+                let outcome = rx
+                    .wait_for(|outcome| outcome.is_some())
+                    .await
+                    .map(|outcome| {
+                        outcome
+                            .clone()
+                            .unwrap_or_else(|| Err("h2 dial abandoned".into()))
+                    })
+                    .unwrap_or_else(|_| Err("h2 dial abandoned".into()));
+                match outcome {
+                    Ok(Some(conn)) => Ok(Dialed::H2(conn)),
+                    // HTTP/1.1 host: one connection per request.
+                    Ok(None) => self.dial(host, port, transport, None).await,
+                    Err(e) => Err(HttpError::ConnectionFailed(e)),
+                }
+            }
+            h2_pool::Checkout::Lead(ticket) => {
+                self.dial(host, port, transport, Some((key.clone(), ticket)))
+                    .await
+            }
+        }
+    }
+
+    /// TCP (+ TLS) and, when h2 is spoken, the h2 handshake, all on the
+    /// [driver](h2_pool::driver) runtime. The connection is driven there
+    /// for as long as it lives, whatever runtime the caller is on and
+    /// whether or not the caller is being polled. With a ticket the
+    /// outcome goes into the pool, and the dial finishes even if the
+    /// caller is dropped: other requests are waiting on it.
+    async fn dial(
+        &self,
+        host: &str,
+        port: u16,
+        transport: Transport,
+        ticket: Option<(h2_pool::H2Key, h2_pool::DialTicket)>,
+    ) -> Result<Dialed, HttpError> {
+        let client = self.clone();
+        let host = host.to_string();
+        let task = h2_pool::driver().spawn(async move {
+            let pooled = ticket.as_ref().map(|(key, _)| key.clone());
+            let dialed = timeout(
+                client.config.timeout,
+                client.dial_on_driver(&host, port, transport, pooled.clone()),
+            )
+            .await
+            .unwrap_or(Err(HttpError::Timeout));
+            if let Some((key, ticket)) = ticket {
+                let outcome = match &dialed {
+                    Ok(Dialed::H2(conn)) => Ok(Some(conn.clone())),
+                    Ok(Dialed::Http1(_)) => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                };
+                client.h2_pool.finish(&key, ticket, outcome);
+            }
+            dialed
+        });
+        task.await
+            .map_err(|e| HttpError::ConnectionFailed(format!("h2 dial task: {e}")))?
+    }
+
+    async fn dial_on_driver(
+        &self,
+        host: &str,
+        port: u16,
+        transport: Transport,
+        pooled: Option<h2_pool::H2Key>,
+    ) -> Result<Dialed, HttpError> {
+        let stream = self.connect(host, port).await?;
+        let io: BoxIo = match transport {
+            Transport::Tls => {
+                let addr = format!("{host}:{port}");
+                let (tls_stream, negotiated) = self.connect_tls(host, &addr, stream).await?;
+                if negotiated == NegotiatedProtocol::Http1 {
+                    return Ok(Dialed::Http1(Box::new(tls_stream)));
+                }
+                Box::new(tls_stream)
+            }
+            #[cfg(test)]
+            Transport::H2c => Box::new(stream),
+        };
+        let initial_streams = pooled.as_ref().map_or(h2_pool::DEFAULT_MAX_STREAMS, |key| {
+            self.h2_pool.initial_streams(key)
+        });
+        let (send, connection) = h2::client::Builder::new()
+            .initial_max_send_streams(initial_streams)
+            .initial_window_size(h2_pool::STREAM_WINDOW)
+            .initial_connection_window_size(h2_pool::CONNECTION_WINDOW)
+            .handshake::<_, Bytes>(io)
+            .await
+            .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
+        let conn = h2_pool::H2Conn::new(send);
+        // On the driver runtime: this task is the connection's only driver.
+        let pool = self.h2_pool.clone();
+        let id = conn.id;
+        tokio::spawn(async move {
+            let _ = connection.await;
+            if let Some(key) = pooled {
+                pool.evict(&key, id);
+            }
+        });
+        Ok(Dialed::H2(conn))
+    }
+
+    /// One request on an HTTP/2 connection.
+    ///
+    /// The stream (slot wait, send, body read) runs on the driver runtime,
+    /// so a caller that is parked, or running script, does not hold the
+    /// connection's flow-control window with an unread body. Dropping the
+    /// returned future cancels the stream.
+    async fn send_h2(
+        &self,
+        conn: &Arc<h2_pool::H2Conn>,
+        method: &Method,
+        url: &Url,
+        headers: &HeaderMap,
+        body: &Option<Bytes>,
+    ) -> Result<RawResponse, H2Fail> {
+        let request = http::Request::builder()
             .method(method.clone())
             .uri(url.as_str())
             .version(http::Version::HTTP_2);
-
-        for (name, value) in h2_request_headers(&self.config.user_agent, headers) {
-            request = request.header(name, value);
-        }
-
-        let request = request
+        let request = h2_request_headers(&self.config.user_agent, headers)
+            .into_iter()
+            .fold(request, |request, (name, value)| {
+                request.header(name, value)
+            })
             .body(())
-            .map_err(|e| HttpError::InvalidResponse(format!("h2 request build: {e}")))?;
-
-        let has_body = body.is_some();
-        let (response_fut, mut send_stream) = send_request
-            .send_request(request, !has_body)
-            .map_err(|e| HttpError::ConnectionFailed(format!("h2 send: {e}")))?;
-        if let Some(b) = body {
-            send_stream
-                .send_data(b.clone(), true)
-                .map_err(|e| HttpError::ConnectionFailed(format!("h2 body: {e}")))?;
-        }
-
-        let response = response_fut
-            .await
-            .map_err(|e| HttpError::InvalidResponse(format!("h2 response: {e}")))?;
-        let status = response.status();
-        let mut response_headers = HeaderMap::new();
-        for (name, value) in response.headers() {
-            response_headers.insert(name.clone(), value.clone());
-        }
-
-        let mut recv = response.into_body();
-        let mut collected: Vec<u8> = Vec::new();
-        while let Some(chunk) = recv.data().await {
-            let chunk =
-                chunk.map_err(|e| HttpError::InvalidResponse(format!("h2 body read: {e}")))?;
-            collected.extend_from_slice(&chunk);
-            if self.max_body.is_some_and(|max| collected.len() > max) {
-                return Err(HttpError::BodyTooLarge(self.max_body.unwrap_or(0)));
-            }
-            // Flow control: hand the window back or the peer stalls at 64KB.
-            let _ = recv.flow_control().release_capacity(chunk.len());
-        }
-
+            .map_err(|e| {
+                H2Fail::Other(HttpError::InvalidResponse(format!("h2 request build: {e}")))
+            })?;
+        let task = h2_pool::AbortOnDrop(h2_pool::driver().spawn(stream_h2(
+            conn.clone(),
+            request,
+            body.clone(),
+            self.max_body,
+        )));
+        let (status, mut response_headers, collected) = task.await.map_err(|e| {
+            H2Fail::Other(HttpError::ConnectionFailed(format!("h2 stream task: {e}")))
+        })??;
         let encoded_len = collected.len() as u64;
-        let body =
-            decode_content_encoding_capped(Bytes::from(collected), &mut response_headers, self.max_body)?;
-
+        let body = decode_content_encoding_capped(collected, &mut response_headers, self.max_body)
+            .map_err(H2Fail::Other)?;
         Ok(RawResponse {
             status,
             version: Version::HTTP_2,
@@ -723,27 +796,18 @@ impl Client {
         let port = url
             .port()
             .ok_or_else(|| HttpError::InvalidUrl("Missing port".to_string()))?;
-        let headers = HeaderMap::new();
-        let slot = self.h2_pool.slot(self.h2_key(host, port)).await;
-        let cached = slot.lock().await.as_ref().cloned();
-        if let Some(send) = cached {
-            return self.dispatch_h2(send, &method, &url, &headers, &body).await;
-        }
-        let mut guard = slot.lock().await;
-        if let Some(send) = guard.as_ref().cloned() {
-            drop(guard);
-            return self.dispatch_h2(send, &method, &url, &headers, &body).await;
-        }
-        let stream = self.connect(host, port).await?;
-        let (send, connection) = h2::client::handshake(stream)
-            .await
-            .map_err(|e| HttpError::ConnectionFailed(format!("h2 handshake: {e}")))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        *guard = Some(send.clone());
-        drop(guard);
-        self.dispatch_h2(send, &method, &url, &headers, &body).await
+        let key = self.h2_key(host, port);
+        self.request_pooled(
+            key,
+            host,
+            port,
+            Transport::H2c,
+            &method,
+            &url,
+            &HeaderMap::new(),
+            &body,
+        )
+        .await
     }
 
     /// HTTP request.
@@ -1044,24 +1108,118 @@ fn is_h2_illegal_request_header(name: &str) -> bool {
     )
 }
 
-/// Header pairs `send_request_h2` writes onto the request, in emission order.
-/// Caller headers that are connection-specific, already emitted, or the
-/// user-agent (set from config) are dropped.
-enum Dialed<S> {
-    H2(h2::client::SendRequest<Bytes>),
-    Http1(S),
+/// A dialed host: a shared or new HTTP/2 connection, or a stream that
+/// negotiated HTTP/1.1.
+enum Dialed {
+    H2(Arc<h2_pool::H2Conn>),
+    Http1(BoxIo),
+}
+
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+type BoxIo = Box<dyn Io>;
+
+#[derive(Clone, Copy)]
+enum Transport {
+    Tls,
+    /// h2 with prior knowledge, for the local test servers.
+    #[cfg(test)]
+    H2c,
 }
 
 fn is_idempotent(method: &Method) -> bool {
     matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
 }
 
-/// The connection is gone, so a retry on a new one can succeed. An HTTP error
-/// status is not this: the request reached the server.
-fn h2_connection_lost(err: &HttpError) -> bool {
-    matches!(err, HttpError::ConnectionFailed(_))
+/// Why a request on an HTTP/2 connection failed.
+enum H2Fail {
+    /// The connection would not open the stream (closed, or going away).
+    /// Nothing reached the server.
+    Unsent(String),
+    /// RST_STREAM(REFUSED_STREAM): the server did no work on it.
+    Refused(String),
+    /// Above the peer's GOAWAY last stream id: never processed.
+    GoneAway(String),
+    Other(HttpError),
 }
 
+impl H2Fail {
+    /// RFC 9113 §8.7: the request may be retried as is.
+    fn unprocessed(&self) -> bool {
+        !matches!(self, H2Fail::Other(_))
+    }
+
+    fn into_error(self) -> HttpError {
+        match self {
+            H2Fail::Unsent(m) => HttpError::ConnectionFailed(m),
+            H2Fail::Refused(m) | H2Fail::GoneAway(m) => HttpError::InvalidResponse(m),
+            H2Fail::Other(e) => e,
+        }
+    }
+
+    fn of_response(e: h2::Error) -> Self {
+        let message = format!("h2 response: {e}");
+        if e.is_remote() && e.is_reset() && e.reason() == Some(h2::Reason::REFUSED_STREAM) {
+            H2Fail::Refused(message)
+        } else if e.is_remote() && e.is_go_away() {
+            // h2 hands a stream the peer's GOAWAY only when its id is above
+            // the frame's last stream id; streams at or below it run on.
+            H2Fail::GoneAway(message)
+        } else {
+            H2Fail::Other(HttpError::InvalidResponse(message))
+        }
+    }
+}
+
+/// One stream, start to end of body, on the driver runtime. The body is
+/// returned still encoded; the caller decodes it off the driver.
+async fn stream_h2(
+    conn: Arc<h2_pool::H2Conn>,
+    request: http::Request<()>,
+    body: Option<Bytes>,
+    max_body: Option<usize>,
+) -> Result<(StatusCode, HeaderMap, Bytes), H2Fail> {
+    let _slot = conn.open_stream().await;
+    let mut send = conn
+        .send
+        .clone()
+        .ready()
+        .await
+        .map_err(|e| H2Fail::Unsent(format!("h2 ready: {e}")))?;
+    let (response, mut send_stream) = send
+        .send_request(request, body.is_none())
+        .map_err(|e| H2Fail::Unsent(format!("h2 send: {e}")))?;
+    if let Some(b) = body {
+        send_stream
+            .send_data(b, true)
+            .map_err(|e| H2Fail::Other(HttpError::ConnectionFailed(format!("h2 body: {e}"))))?;
+    }
+    let response = response.await.map_err(H2Fail::of_response)?;
+    let status = response.status();
+    let mut headers = HeaderMap::new();
+    for (name, value) in response.headers() {
+        headers.insert(name.clone(), value.clone());
+    }
+    let mut recv = response.into_body();
+    let mut collected: Vec<u8> = Vec::new();
+    while let Some(chunk) = recv.data().await {
+        let chunk = chunk
+            .map_err(|e| H2Fail::Other(HttpError::InvalidResponse(format!("h2 body read: {e}"))))?;
+        collected.extend_from_slice(&chunk);
+        if max_body.is_some_and(|max| collected.len() > max) {
+            return Err(H2Fail::Other(HttpError::BodyTooLarge(
+                max_body.unwrap_or(0),
+            )));
+        }
+        // Flow control: hand the window back or the peer stalls.
+        let _ = recv.flow_control().release_capacity(chunk.len());
+    }
+    Ok((status, headers, Bytes::from(collected)))
+}
+
+/// Header pairs `stream_h2` writes onto the request, in emission order.
+/// Caller headers that are connection-specific, already emitted, or the
+/// user-agent (set from config) are dropped.
 fn h2_request_headers(user_agent: &str, headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
     const ORDERED_H2: &[(&str, Option<&str>)] = &[
         (
@@ -1343,9 +1501,11 @@ impl Client {
             tokio::spawn(async move {
                 let _ = connection.await;
             });
+            let conn = h2_pool::H2Conn::new(send);
             let raw = self
-                .dispatch_h2(send, &Method::GET, url, &HeaderMap::new(), &None)
-                .await?;
+                .send_h2(&conn, &Method::GET, url, &HeaderMap::new(), &None)
+                .await
+                .map_err(H2Fail::into_error)?;
             let len = raw.body.len() as u64;
             return Ok(StreamingResponse {
                 status: raw.status,

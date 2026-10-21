@@ -196,14 +196,12 @@ impl RawGoAway {
     }
 }
 
-fn bounded<T>(
+async fn bounded<T>(
     fut: impl std::future::Future<Output = Result<T, HttpError>>,
-) -> impl std::future::Future<Output = Result<T, HttpError>> {
-    async move {
-        tokio::time::timeout(Duration::from_secs(5), fut)
-            .await
-            .unwrap_or(Err(HttpError::Timeout))
-    }
+) -> Result<T, HttpError> {
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .unwrap_or(Err(HttpError::Timeout))
 }
 
 /// The server allows two streams. Ten GETs go out in one burst before its
@@ -223,7 +221,11 @@ async fn ten_concurrent_gets_past_a_two_stream_limit_all_succeed() {
         assert_eq!(raw.body.as_ref(), b"ok");
     }
     for i in 0..10 {
-        assert_eq!(seen.hits(&format!("GET /s{i}")), 1, "/s{i} was sent more than once");
+        assert_eq!(
+            seen.hits(&format!("GET /s{i}")),
+            1,
+            "/s{i} was sent more than once"
+        );
     }
 }
 
@@ -238,7 +240,11 @@ async fn a_refused_get_is_retried_once_on_a_fresh_connection() {
         .expect("the refused GET is retried");
     assert_eq!(raw.body.as_ref(), b"ok");
     assert_eq!(seen.hits("GET /refuse-once"), 2, "exactly one retry");
-    assert_eq!(seen.accepts.load(Ordering::SeqCst), 2, "the retry uses a fresh connection");
+    assert_eq!(
+        seen.accepts.load(Ordering::SeqCst),
+        2,
+        "the retry uses a fresh connection"
+    );
 }
 
 /// A POST is not idempotent. Refused or not, it is not sent twice.
@@ -252,7 +258,10 @@ async fn a_refused_post_is_not_retried() {
         Some(Bytes::from_static(b"form=1")),
     ))
     .await;
-    assert!(result.is_err(), "the refused POST must surface, not be resent");
+    assert!(
+        result.is_err(),
+        "the refused POST must surface, not be resent"
+    );
     assert_eq!(seen.hits("POST /refuse-once"), 1);
 }
 
@@ -261,7 +270,14 @@ async fn a_refused_post_is_not_retried() {
 /// again on a new connection; the two answered ones do not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_goaway_retries_unprocessed_gets_and_not_processed_ones() {
-    let (addr, seen) = spawn_server(100, Duration::ZERO, Some(RawGoAway { burst: 6, answer: 2 }));
+    let (addr, seen) = spawn_server(
+        100,
+        Duration::ZERO,
+        Some(RawGoAway {
+            burst: 6,
+            answer: 2,
+        }),
+    );
     let client = Client::new().unwrap();
     let results = futures::future::join_all((0..6).map(|i| {
         let client = client.clone();
@@ -272,7 +288,11 @@ async fn a_goaway_retries_unprocessed_gets_and_not_processed_ones() {
         let raw = result.unwrap_or_else(|e| panic!("GET /g{i}: {e}"));
         assert_eq!(raw.body.as_ref(), b"ok");
     }
-    assert_eq!(seen.hits("raw"), 6, "all six went out on the first connection");
+    assert_eq!(
+        seen.hits("raw"),
+        6,
+        "all six went out on the first connection"
+    );
     let resent: usize = (0..6).map(|i| seen.hits(&format!("GET /g{i}"))).sum();
     assert_eq!(resent, 4, "only the four unprocessed streams are retried");
     assert_eq!(seen.accepts.load(Ordering::SeqCst), 2);
@@ -293,8 +313,11 @@ fn a_request_parked_on_an_idle_runtime_does_not_hold_the_host() {
         .build()
         .unwrap();
     let hang_client = client.clone();
-    let mut hung =
-        Box::pin(async move { hang_client.request_h2_cleartext(&format!("http://{addr}/hang")).await });
+    let mut hung = Box::pin(async move {
+        hang_client
+            .request_h2_cleartext(&format!("http://{addr}/hang"))
+            .await
+    });
     host_rt.block_on(async {
         tokio::select! {
             _ = &mut hung => panic!("/hang was answered"),
@@ -338,7 +361,11 @@ async fn a_parked_response_body_does_not_stall_the_connection() {
     let mut parked: Vec<_> = (0..2)
         .map(|_| {
             let client = client.clone();
-            Box::pin(async move { client.request_h2_cleartext(&format!("http://{addr}/big")).await })
+            Box::pin(async move {
+                client
+                    .request_h2_cleartext(&format!("http://{addr}/big"))
+                    .await
+            })
         })
         .collect();
     {
