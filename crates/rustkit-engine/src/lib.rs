@@ -38704,3 +38704,207 @@ mod scroll_extent_tests {
         );
     }
 }
+
+// ── `<style>` sheet cache and O(1) rule-index reuse (`RUSTKIT_SHEET_CACHE`) ──
+#[cfg(test)]
+mod sheet_cache_tests {
+    use super::*;
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    /// Sets `RUSTKIT_SHEET_CACHE` for one test, and puts it back.
+    struct CacheMode;
+
+    impl CacheMode {
+        fn set(on: bool) -> Self {
+            SHEET_CACHE_TEST_MODE.with(|m| m.set(Some(on)));
+            CacheMode
+        }
+    }
+
+    impl Drop for CacheMode {
+        fn drop(&mut self) {
+            SHEET_CACHE_TEST_MODE.with(|m| m.set(None));
+        }
+    }
+
+    fn doc(styles: &[&str]) -> Document {
+        let mut html = String::from("<html><head>");
+        for css in styles {
+            html.push_str(&format!("<style>{css}</style>"));
+        }
+        html.push_str("</head><body><p class=a>a</p><p id=b>b</p></body></html>");
+        Document::parse_html(&html).expect("parse")
+    }
+
+    fn cache_stats() -> (usize, usize) {
+        ADHOC_SHEET_CACHE.with(|c| {
+            let c = c.borrow();
+            (c.hits, c.misses)
+        })
+    }
+
+    /// (by fingerprint, by comparing selectors, built) since the last call.
+    fn index_reuse() -> [usize; 3] {
+        RULE_INDEX_REUSE.with(|c| c.replace([0; 3]))
+    }
+
+    #[test]
+    fn the_switch_is_on_unless_turned_off() {
+        assert!(sheet_cache_from(None));
+        assert!(sheet_cache_from(Some("1")));
+        assert!(sheet_cache_from(Some("")));
+        assert!(!sheet_cache_from(Some("0")));
+        assert!(!sheet_cache_from(Some("off")));
+    }
+
+    #[test]
+    fn unchanged_text_hits_and_edited_text_misses() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let first = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: blue }"]), None);
+        let (hits, misses) = cache_stats();
+
+        // A relayout of the same document: both sheets from the cache.
+        let again = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: blue }"]), None);
+        assert!(first.iter().zip(&again).all(|(a, b)| Rc::ptr_eq(a, b)));
+        assert_eq!(cache_stats(), (hits + 2, misses));
+
+        // A script rewrote the second sheet's text: it alone is parsed again.
+        let edited = e.inline_sheets(&doc(&[".hit-1 { color: red }", "#hit-2 { color: green }"]), None);
+        assert!(Rc::ptr_eq(&first[0], &edited[0]));
+        assert!(!Rc::ptr_eq(&first[1], &edited[1]));
+        assert_eq!(cache_stats(), (hits + 3, misses + 1));
+
+        // `insertRule` writes the rule into the element's text (see
+        // rustkit-bindings' web_cssom_tests), so it is a text change too.
+        let inserted = e.inline_sheets(
+            &doc(&[".hit-1 { color: red }", "#hit-2 { color: green }\n.hit-3 { top: 0 }"]),
+            None,
+        );
+        assert_eq!(inserted[1].rules.len(), 2);
+        assert_eq!(cache_stats(), (hits + 4, misses + 2));
+    }
+
+    #[test]
+    fn a_build_changes_its_own_copy_not_the_cached_sheet() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let css = "@layer base { .leak { color: red } } @media (min-width: 9999px) { .leak { color: blue } }";
+        let d = doc(&[css]);
+        let cached = e.inline_sheets(&d, None).remove(0);
+        assert_eq!(cached.rules.len(), 2);
+        // The build drops the `@media` rule (no viewport) and ranks the layer.
+        e.build_layout_from_document(&d, &[]);
+        e.build_layout_from_document(&d, &[]);
+        let after = e.inline_sheets(&d, None).remove(0);
+        assert!(Rc::ptr_eq(&cached, &after));
+        assert_eq!(after.rules.len(), 2, "the @media filter reached the cache");
+        assert!(after.rules.iter().all(|r| r.layer_order == rustkit_css::UNLAYERED));
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        for i in 0..SheetCache::MAX_ENTRIES + 10 {
+            e.inline_sheets(&doc(&[&format!(".bound-{i} {{ color: red }}")]), None);
+        }
+        let held = ADHOC_SHEET_CACHE.with(|c| c.borrow().entries.len());
+        assert!(held <= SheetCache::MAX_ENTRIES + 1, "{held} sheets held");
+    }
+
+    #[test]
+    fn the_rule_index_is_rebuilt_exactly_when_selectors_change() {
+        let _on = CacheMode::set(true);
+        let e = engine();
+        let build = |styles: &[&str]| {
+            e.build_layout_from_document(&doc(styles), &[]);
+            index_reuse()
+        };
+        build(&[".ix-a { color: red }", "#b { color: blue }"]);
+        // Same text: same cached sheets, so the fingerprint answers.
+        assert_eq!(build(&[".ix-a { color: red }", "#b { color: blue }"]), [1, 0, 0]);
+        // A declaration changed: a new sheet, the same selectors.
+        assert_eq!(build(&[".ix-a { color: green }", "#b { color: blue }"]), [0, 1, 0]);
+        // And now that is the fingerprint the index answers to.
+        assert_eq!(build(&[".ix-a { color: green }", "#b { color: blue }"]), [1, 0, 0]);
+        // Any selector change, rule added, or sheet boundary moved rebuilds.
+        assert_eq!(build(&[".ix-a { color: green }", "#b p { color: blue }"]), [0, 0, 1]);
+        assert_eq!(build(&[".ix-a { color: green } .c { top: 0 }", "#b p { color: blue }"]), [0, 0, 1]);
+        assert_eq!(build(&[".ix-a { color: green } .c { top: 0 } #b p { color: blue }"]), [0, 0, 1]);
+        // Off, the selectors are compared every time.
+        let _off = CacheMode::set(false);
+        let off = &[".ix-a { color: green } .c { top: 0 } #b p { color: blue }"];
+        assert_eq!(build(off), [0, 1, 0]);
+        assert_eq!(build(off), [0, 1, 0]);
+    }
+
+    fn painted_page(e: &Engine, page: &str) -> (String, LayoutBox) {
+        let d = Document::parse_html(page).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.layout(&Dimensions {
+            content: Rect::new(0.0, 0.0, 800.0, 600.0),
+            ..Default::default()
+        });
+        let painted = DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (painted, root)
+    }
+
+    #[test]
+    fn cached_sheets_paint_what_freshly_parsed_ones_paint() {
+        let pages = [
+            include_str!("../../../fixtures/layout_comprehensive.html"),
+            include_str!("../../../fixtures/pseudo-elements.html"),
+            include_str!("../../../fixtures/typography.html"),
+            include_str!("../../../fixtures/gradient_basic.html"),
+            "<html><head><style>@layer a, b; @layer b { p { color: red } } @layer a { p { color: blue } }\
+             @media (max-width: 1px) { p { margin: 40px } } p.x { padding: 3px }</style>\
+             <style>p:first-child::before { content: 'x'; color: green }</style></head>\
+             <body><p class=x>one</p><p>two</p></body></html>",
+        ];
+        let e = engine();
+        for page in pages {
+            let (fresh, fresh_tree) = {
+                let _off = CacheMode::set(false);
+                painted_page(&e, page)
+            };
+            let _on = CacheMode::set(true);
+            // The first build fills the cache; the second takes from it and
+            // reuses the index by fingerprint.
+            let (filled, _) = painted_page(&e, page);
+            index_reuse();
+            let (cached, cached_tree) = painted_page(&e, page);
+            assert_eq!(index_reuse()[2], 0, "the second build rebuilt the index");
+            assert_eq!(filled, fresh);
+            assert_eq!(cached, fresh);
+            let mut differences = 0;
+            count_tree_differences(&cached_tree, &fresh_tree, &mut differences);
+            assert_eq!(differences, 0);
+        }
+    }
+
+    #[cfg(feature = "headless")]
+    #[test]
+    fn a_new_document_starts_with_an_empty_sheet_cache() {
+        let _on = CacheMode::set(true);
+        let mut e = engine();
+        let id = e
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("headless view");
+        e.load_html(id, "<html><head><style>p { color: red }</style></head><body><p>a</p></body></html>")
+            .expect("load_html");
+        let held = |e: &Engine| e.views[&id].sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(held(&e), ["p { color: red }"]);
+        e.load_html(id, "<html><head><style>p { color: blue }</style></head><body><p>b</p></body></html>")
+            .expect("load_html");
+        assert_eq!(held(&e), ["p { color: blue }"]);
+    }
+}
