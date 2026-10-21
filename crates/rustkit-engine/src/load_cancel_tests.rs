@@ -706,3 +706,154 @@ fn a_cancel_before_the_commit_leaves_the_shown_pages_script_running() {
     );
     assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
 }
+
+/// The tab-switch bound: from the cancel of a slow load to the start of
+/// the next page's load.
+const SWITCH_BOUND: Duration = Duration::from_millis(100);
+
+/// A page heavy enough that a full cascade and layout of it takes a while,
+/// committed and then held on a render-blocking sheet: what a slow site is
+/// doing when the user switches tabs.
+fn heavy_page_held_on_its_sheet() -> String {
+    let mut page = String::from(
+        "<html><head><title>heavy</title><link rel=stylesheet href=/held/a.css></head><body>",
+    );
+    for i in 0..3000 {
+        page.push_str(&format!(
+            "<div class=row><span>item {i}</span> <a href=/x{i}>link</a> <b>{i}</b></div>"
+        ));
+    }
+    page.push_str("</body></html>");
+    page
+}
+
+/// Starts the heavy page's load and cancels it with `cancel` once it waits
+/// on its sheet; returns when the cancelled load has ended, with the
+/// instant of the cancel.
+fn cancel_the_heavy_load(
+    engine: &mut Engine,
+    view: EngineViewId,
+    server: &Server,
+    rt: &tokio::runtime::Runtime,
+    cancel: fn(&NavCanceller) -> bool,
+) -> Instant {
+    let canceller = engine.nav_canceller(view).unwrap();
+    let requested = server.held_requested.clone();
+    let held_before = requested.load(Ordering::SeqCst);
+    let cancel_thread = std::thread::spawn(move || {
+        wait_until_held(&requested, held_before + 1);
+        assert!(cancel(&canceller), "a load in progress was cancelled");
+        Instant::now()
+    });
+    rt.block_on(engine.load_url(view, server.url("/heavy")))
+        .expect("a cancelled load is not an error");
+    cancel_thread.join().unwrap()
+}
+
+/// A tab switch during a slow load: the app cancels the load with
+/// `cancel_for_navigation` and loads the target tab's page in the same
+/// view. Until 2026-10-21 the cancelled load first laid out the whole
+/// committed document it was abandoning (`load_cancelled`), on the window
+/// thread: 600 to 665 ms for this page in a debug build, 109 to 134 ms in
+/// a release one.
+#[test]
+fn a_switch_during_a_slow_load_starts_the_next_page_within_100_ms() {
+    let target = "<html><head><title>target</title></head><body><p>target</p></body></html>";
+    let server = serve(vec![
+        ("/heavy", heavy_page_held_on_its_sheet()),
+        ("/target", target.to_string()),
+    ]);
+    let (mut engine, view) = engine_and_view();
+    let mut rx = engine.take_event_receiver().unwrap();
+    let rt = runtime();
+    let done = hang_guard();
+
+    let sent = cancel_the_heavy_load(&mut engine, view, &server, &rt, |c| {
+        c.cancel_for_navigation()
+    });
+    let unwound = sent.elapsed();
+    let seen = events(&mut rx);
+    assert!(cancelled(&seen), "{seen:?}");
+    // The heavy document was committed and is to be replaced: not laid out.
+    assert_eq!(engine.get_title(view).as_deref(), Some("heavy"));
+    assert!(engine.views[&view].initial_layout_deferred);
+    assert!(
+        unwound < SWITCH_BOUND,
+        "the next load could start only {unwound:?} after the cancel"
+    );
+
+    let target_url = server.url("/target");
+    rt.block_on(engine.load_url(view, target_url.clone()))
+        .expect("the target loads");
+    let seen = events(&mut rx);
+    assert!(page_loaded(&seen, &target_url), "{seen:?}");
+    assert_eq!(engine.get_title(view).as_deref(), Some("target"));
+    assert!(!engine.views[&view].initial_layout_deferred);
+    // The target's own load is not bounded here: it sets up a new script
+    // context for its document (about 100 ms in a release build on Linux,
+    // most of a second in a debug one). A tab switch that does not reload
+    // is threads plan M5.
+    done.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn a_document_left_for_a_navigation_that_fails_is_laid_out() {
+    let server = serve(vec![("/heavy", heavy_page_held_on_its_sheet())]);
+    let (mut engine, view) = engine_and_view();
+    let rt = runtime();
+    let done = hang_guard();
+    let blank = frame_of(&engine, view);
+
+    cancel_the_heavy_load(&mut engine, view, &server, &rt, |c| {
+        c.cancel_for_navigation()
+    });
+    assert!(engine.views[&view].initial_layout_deferred);
+
+    // Nothing listens on the port the closed listener had: the fetch fails
+    // before any commit, and the heavy document stays.
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let unreachable = Url::parse(&format!("http://127.0.0.1:{closed}/")).unwrap();
+    assert!(rt.block_on(engine.load_url(view, unreachable)).is_err());
+    assert_eq!(engine.get_title(view).as_deref(), Some("heavy"));
+    assert!(!engine.views[&view].initial_layout_deferred);
+    assert_ne!(
+        frame_of(&engine, view),
+        blank,
+        "the heavy document was laid out"
+    );
+    done.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn stop_still_lays_out_the_document_a_replacing_cancel_left() {
+    let server = serve(vec![("/heavy", heavy_page_held_on_its_sheet())]);
+    let (mut engine, view) = engine_and_view();
+    let rt = runtime();
+    let done = hang_guard();
+    let blank = frame_of(&engine, view);
+
+    cancel_the_heavy_load(&mut engine, view, &server, &rt, |c| {
+        c.cancel_for_navigation()
+    });
+    // The next navigation is stopped before its document arrives.
+    let canceller = engine.nav_canceller(view).unwrap();
+    let requested = server.held_requested.clone();
+    let stop = std::thread::spawn(move || {
+        wait_until_held(&requested, 2);
+        assert!(canceller.cancel_current());
+    });
+    rt.block_on(engine.load_url(view, server.url("/held/next")))
+        .expect("a cancelled load is not an error");
+    stop.join().unwrap();
+    assert_eq!(engine.get_title(view).as_deref(), Some("heavy"));
+    assert!(!engine.views[&view].initial_layout_deferred);
+    assert_ne!(
+        frame_of(&engine, view),
+        blank,
+        "the heavy document was laid out"
+    );
+    done.store(true, Ordering::SeqCst);
+}

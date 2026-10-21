@@ -18,6 +18,7 @@
 //! when it returns (invariant 10 covers a call that never does).
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rustkit_js::ViewControl;
@@ -29,11 +30,24 @@ use tokio::sync::Notify;
 pub struct NavCanceller {
     control: Arc<ViewControl>,
     signal: Arc<Notify>,
+    /// Set by [`NavCanceller::cancel_for_navigation`]: the view's next
+    /// navigation is about to replace the cancelled load's document, so
+    /// `load_cancelled` does not lay that document out. Taken there, and
+    /// cleared when the next navigation begins.
+    replacing: Arc<AtomicBool>,
 }
 
 impl NavCanceller {
-    pub(crate) fn new(control: Arc<ViewControl>, signal: Arc<Notify>) -> Self {
-        Self { control, signal }
+    pub(crate) fn new(
+        control: Arc<ViewControl>,
+        signal: Arc<Notify>,
+        replacing: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            control,
+            signal,
+            replacing,
+        }
     }
 
     pub(crate) fn control(&self) -> &Arc<ViewControl> {
@@ -52,6 +66,24 @@ impl NavCanceller {
     /// Cancel the view's newest navigation (the user's Stop).
     pub fn cancel_current(&self) -> bool {
         self.cancel_nav(self.control.current_nav())
+    }
+
+    /// Cancel the view's newest navigation because another one is about to
+    /// start in the view (a tab switch, a typed URL): as
+    /// [`Self::cancel_current`], except that a document the cancelled load
+    /// committed but never laid out stays unlaid. The next navigation
+    /// replaces it, and its full layout on the window thread was what a
+    /// tab switch during a slow load waited for. If that navigation ends
+    /// before its own commit, it lays the document out then.
+    pub fn cancel_for_navigation(&self) -> bool {
+        self.replacing.store(true, Ordering::SeqCst);
+        self.cancel_current()
+    }
+
+    /// Whether the last cancel was [`Self::cancel_for_navigation`]; clears
+    /// it.
+    pub(crate) fn take_replacing(&self) -> bool {
+        self.replacing.swap(false, Ordering::SeqCst)
     }
 
     /// The view's newest navigation id; 0 = none yet.

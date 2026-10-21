@@ -94,6 +94,19 @@ struct PendingLoad {
     started: Instant,
 }
 
+/// Why a load in progress is cancelled ([`RustKitView::cancel_load`]).
+#[derive(Clone, Copy)]
+enum Cancel {
+    /// The user's Stop: a document the load committed stays, laid out as
+    /// it is.
+    Stop,
+    /// Another load starts in the view at once (a tab switch, a typed
+    /// URL, a built-in page): the document is not laid out only to be
+    /// replaced. That full layout ran on the window thread before the tab
+    /// switch could start the next load.
+    Replace,
+}
+
 /// The longest one poll of a pending load may wait on the network before
 /// the event loop takes its next event. Script that runs inside the poll
 /// is not cut by it; the script budgets bound that.
@@ -521,7 +534,7 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
-        self.cancel_load();
+        self.cancel_load(Cancel::Replace);
         let Ok(mut engine) = self.engine.try_borrow_mut() else {
             return Err(HiWaveError::WebView("engine busy".into()));
         };
@@ -633,7 +646,9 @@ impl RustKitView {
             }
         };
         let Some(view_id) = self.view_id else { return };
-        self.cancel_load();
+        // The load this one replaces (a tab switch, a typed URL) ends
+        // without laying out its document: this load replaces it.
+        self.cancel_load(Cancel::Replace);
 
         if self.live_runtime.is_none() {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -712,17 +727,20 @@ impl RustKitView {
     /// was one.
     pub fn stop_load(&self) -> bool {
         let loading = self.is_loading();
-        self.cancel_load();
+        self.cancel_load(Cancel::Stop);
         loading
     }
 
     /// Cancel the load in progress, if any, and let it unwind: a cancelled
     /// load ends at its next wait. One that has not ended within
     /// [`CANCEL_UNWIND`] is dropped where it stands.
-    fn cancel_load(&self) {
+    fn cancel_load(&self, why: Cancel) {
         let Some(mut load) = self.pending_load.borrow_mut().take() else { return };
         if let Some(canceller) = load.canceller.as_ref() {
-            canceller.cancel_current();
+            match why {
+                Cancel::Stop => canceller.cancel_current(),
+                Cancel::Replace => canceller.cancel_for_navigation(),
+            };
         }
         if let Some(runtime) = self.live_runtime.as_ref() {
             if runtime
@@ -767,7 +785,8 @@ impl RustKitView {
 
 impl Drop for RustKitView {
     fn drop(&mut self) {
-        self.cancel_load();
+        // The view goes with it: nothing to lay out.
+        self.cancel_load(Cancel::Replace);
         if let Some(view_id) = self.view_id {
             let Ok(mut engine) = self.engine.try_borrow_mut() else { return };
             if let Err(e) = engine.destroy_view(view_id) {
@@ -1009,6 +1028,94 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         let title = view.execute_script_sync("document.title").unwrap_or_default();
         assert!(title.contains("new"), "document.title = {title:?}");
+    }
+
+    /// A site that commits a heavy document and then holds its stylesheet:
+    /// `/` is the document, `/a.css` answers after 10 s, anything else is a
+    /// small page at once. The second value counts requests for the sheet.
+    fn site_held_on_its_sheet() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut heavy = String::from(
+            "<html><head><title>heavy</title><link rel=stylesheet href=/a.css></head><body>",
+        );
+        for i in 0..3000 {
+            heavy.push_str(&format!("<div><span>item {i}</span> <a href=/x{i}>link</a></div>"));
+        }
+        heavy.push_str("</body></html>");
+        let heavy: &'static str = Box::leak(heavy.into_boxed_str());
+        let sheet_asked = Arc::new(AtomicUsize::new(0));
+        let asked = sheet_asked.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let asked = asked.clone();
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&request).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (content_type, body) = match path.as_str() {
+                        "/" => ("text/html", heavy),
+                        "/a.css" => {
+                            asked.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_secs(10));
+                            ("text/css", "body { color: black; }")
+                        }
+                        _ => ("text/html", "<title>target</title><p>target</p>"),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), sheet_asked)
+    }
+
+    /// A tab switch during a slow load is a new load in the one content
+    /// view, and the load in progress is cancelled first, on the window
+    /// thread: within 100 ms while the slow page waits on its sheet. Until
+    /// 2026-10-21 that cancel first laid out the slow page's whole document
+    /// (`load_cancelled`), only for the target's load to replace it.
+    #[test]
+    fn a_tab_switch_during_a_slow_load_cancels_it_within_100_ms() {
+        use std::sync::atomic::Ordering;
+        let (site, sheet_asked) = site_held_on_its_sheet();
+        let view = view();
+        view.wry_load_url(&format!("{site}/")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while sheet_asked.load(Ordering::SeqCst) == 0 {
+            assert!(view.step_load(), "the slow page finished before its sheet came");
+            assert!(Instant::now() < deadline, "the slow page never asked for its sheet");
+        }
+        // A few more slices: the load now waits on the sheet.
+        for _ in 0..3 {
+            assert!(view.step_load());
+        }
+
+        // What `load_url_blocking` does first for the target tab's page.
+        let switched = Instant::now();
+        view.cancel_load(Cancel::Replace);
+        let took = switched.elapsed();
+        assert!(!view.is_loading());
+        assert!(took < Duration::from_millis(100), "the cancel held the switch for {took:?}");
+
+        view.wry_load_url(&format!("{site}/target")).unwrap();
+        while view.step_load() {}
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("target"), "document.title = {title:?}");
     }
 
     #[test]

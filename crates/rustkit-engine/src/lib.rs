@@ -814,6 +814,9 @@ struct ViewState {
     /// Wakes a load waiting on the network when its navigation is
     /// cancelled from another thread ([`NavCanceller`]).
     nav_signal: Arc<tokio::sync::Notify>,
+    /// The last cancel was for a navigation about to replace the load
+    /// ([`NavCanceller::cancel_for_navigation`]).
+    nav_replacing: Arc<std::sync::atomic::AtomicBool>,
     /// The decode pool's key (D1): a decode that comes back with an older
     /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
     /// with every new `nav_id` and also on every Stop and observed cancel,
@@ -938,6 +941,15 @@ struct ViewState {
 }
 
 impl ViewState {
+    /// The handle that cancels this view's navigations.
+    fn canceller(&self) -> NavCanceller {
+        NavCanceller::new(
+            self.control.clone(),
+            self.nav_signal.clone(),
+            self.nav_replacing.clone(),
+        )
+    }
+
     /// What `log`'s writes could restyle, against the rule index this view
     /// was last built with (see `restyle_invalidation`).
     fn dirty_set(&self, log: &rustkit_bindings::MutationLog) -> restyle_invalidation::DirtySet {
@@ -2282,6 +2294,7 @@ impl Engine {
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
+            nav_replacing: Arc::default(),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
@@ -2372,6 +2385,7 @@ impl Engine {
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
+            nav_replacing: Arc::default(),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
@@ -2461,6 +2475,7 @@ impl Engine {
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
+            nav_replacing: Arc::default(),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             focused_node: None,
@@ -5257,6 +5272,8 @@ impl Engine {
         let result = Box::pin(self.load_url_for_nav(id, url, &watch)).await;
         if self.nav_superseded(id, watch.nav_id) {
             self.load_cancelled(id, watch.nav_id);
+        } else {
+            self.lay_out_unreplaced_document(id, watch.nav_id);
         }
         result
     }
@@ -11560,8 +11577,7 @@ impl Engine {
                 // interrupted and none of its later scripts or subresources
                 // reach the document (M3b).
                 if view.control.loading_nav() != 0 {
-                    NavCanceller::new(view.control.clone(), view.nav_signal.clone())
-                        .cancel_nav(view.nav_id);
+                    view.canceller().cancel_nav(view.nav_id);
                 }
                 // Decodes out for this document are dropped either way (D1).
                 view.decode_epoch = view.decode_epoch.wrapping_add(1);
@@ -11603,10 +11619,7 @@ impl Engine {
     /// requested while the page thread is still loading the last one.
     pub fn nav_canceller(&self, id: EngineViewId) -> Option<NavCanceller> {
         let view = self.views.get(&id)?;
-        Some(NavCanceller::new(
-            view.control.clone(),
-            view.nav_signal.clone(),
-        ))
+        Some(view.canceller())
     }
 
     /// The view's newest navigation id; 0 before its first navigation.
@@ -11630,8 +11643,11 @@ impl Engine {
             .views
             .get_mut(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        let canceller = NavCanceller::new(view.control.clone(), view.nav_signal.clone());
+        let canceller = view.canceller();
         canceller.cancel_nav(view.control.loading_nav());
+        // A replacing cancel the earlier load never saw (it had ended) is
+        // not this navigation's.
+        canceller.take_replacing();
         view.nav_id = view.nav_id.wrapping_add(1);
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
@@ -11663,8 +11679,14 @@ impl Engine {
         // A cancel during a render-blocking sheet (or before the first
         // layout) leaves the committed document never laid out: lay it out
         // as it is, unstyled as Chrome shows a stopped one, so the frame and
-        // hit-testing are not the previous page's.
-        let unlaid = committed && std::mem::take(&mut view.initial_layout_deferred);
+        // hit-testing are not the previous page's. Not when a navigation is
+        // about to replace it (`cancel_for_navigation`): that layout was a
+        // full cascade of a page nobody would see, on the window thread,
+        // before a tab switch could start the next load.
+        let replacing = view.canceller().take_replacing();
+        // Before this load's commit the flag is the shown document's: one
+        // an earlier replacing cancel left unlaid for this load to replace.
+        let unlaid = !replacing && std::mem::take(&mut view.initial_layout_deferred);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
         self.image_manager.begin_navigation(id.0, view.decode_epoch);
         if view.navigation.is_loading() {
@@ -11689,6 +11711,22 @@ impl Engine {
             if let Err(e) = self.relayout_for(id, RelayoutCause::InitialLoad) {
                 warn!(?e, "Failed to lay out a cancelled load's document");
             }
+        }
+    }
+
+    /// Navigation `nav_id` ended without committing (its document fetch
+    /// failed) after a `cancel_for_navigation` left the shown document
+    /// unlaid for it to replace: that document stays, so it is laid out
+    /// now, as `load_cancelled` would have.
+    fn lay_out_unreplaced_document(&mut self, id: EngineViewId, nav_id: u64) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.control.nav_committed(nav_id) || !std::mem::take(&mut view.initial_layout_deferred) {
+            return;
+        }
+        if let Err(e) = self.relayout_for(id, RelayoutCause::InitialLoad) {
+            warn!(?e, "Failed to lay out the document a failed navigation left");
         }
     }
 
