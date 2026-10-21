@@ -6215,6 +6215,86 @@ mod tests {
         assert!(tracks[0].is_flexible);
     }
 
+    // #685: a percentage track is a share of the container when counting
+    // auto-fill/auto-fit repetitions. It used to count as 0, so
+    // `repeat(auto-fit, minmax(25%, 1fr))` collapsed to one column.
+
+    #[test]
+    fn auto_fill_counts_a_percentage_track() {
+        // 25% of 568px = 142; with a 24px gap three repetitions fit
+        // (142 + 166 + 166 = 474 ≤ 568; a fourth would overshoot).
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Percent(25.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 568.0, 24.0, 568.0);
+        assert_eq!(tracks.len(), 3);
+        for track in &tracks {
+            assert_eq!(track.percent, Some(25.0));
+        }
+    }
+
+    #[test]
+    fn auto_fit_counts_minmax_percent_fr() {
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::MinMax(
+                Box::new(TrackSize::Percent(25.0)),
+                Box::new(TrackSize::Fr(1.0)),
+            ))],
+            is_auto_fit: true,
+            insert_position: 0,
+        };
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 568.0, 24.0, 568.0);
+        assert_eq!(tracks.len(), 3);
+        for track in &tracks {
+            assert!(track.is_auto_fit);
+            assert!(track.is_flexible);
+            assert_eq!(track.percent, Some(25.0));
+        }
+    }
+
+    #[test]
+    fn auto_fill_percent_with_indefinite_base_is_one_repetition() {
+        // Auto-height rows: percent_base is 0, so a % track has no definite
+        // size and the count falls back to one repetition (same as fr-only).
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Percent(25.0))],
+            is_auto_fit: false,
+            insert_position: 0,
+        };
+        let tracks = GridLayout::calculate_auto_repeat_tracks(&pattern, 400.0, 0.0, 0.0);
+        assert_eq!(tracks.len(), 1);
+    }
+
+    #[test]
+    fn space_beside_auto_repeat_takes_a_fixed_neighbours_size() {
+        // `100px repeat(auto-fill, 25%)`: the 100px track (and its trailing
+        // gap) must leave the container before repetitions are counted.
+        // Counting only gaps used to admit one repetition too many.
+        let beside = vec![GridTrack::new(&TrackSize::Px(100.0))];
+        assert_eq!(
+            GridLayout::space_beside_auto_repeat(&beside, 0.0, 400.0),
+            100.0
+        );
+        assert_eq!(
+            GridLayout::space_beside_auto_repeat(&beside, 20.0, 400.0),
+            120.0
+        );
+
+        let pattern = AutoRepeatPattern {
+            tracks: vec![TrackDefinition::simple(TrackSize::Percent(25.0))],
+            is_auto_fit: false,
+            insert_position: 1,
+        };
+        let available =
+            400.0 - GridLayout::space_beside_auto_repeat(&beside, 0.0, 400.0);
+        // 25% of 400 = 100; 300px free → three repetitions, not four.
+        let tracks =
+            GridLayout::calculate_auto_repeat_tracks(&pattern, available, 0.0, 400.0);
+        assert_eq!(tracks.len(), 3);
+    }
+
     #[test]
     fn test_grid_layout_expand_auto_repeats() {
         // Test that GridLayout properly expands auto-repeat patterns
