@@ -13889,6 +13889,7 @@ impl Engine {
     /// When a subresource phase starting now must be done by
     /// (`subresource_budget_ms`).
     fn subresource_deadline(&self) -> tokio::time::Instant {
+        load_phase("subresource budget");
         tokio::time::Instant::now() + std::time::Duration::from_millis(self.config.subresource_budget_ms)
     }
 
@@ -31192,14 +31193,40 @@ document.currentScript.remove();
             ("/slow.css", "text/css", "body { color: red }".into()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
+        let budget = std::time::Duration::from_millis(500);
         let config = EngineConfig {
-            subresource_budget_ms: 500,
+            subresource_budget_ms: budget.as_millis() as u64,
             ..EngineConfig::default()
         };
+        // Timed from the first subresource budget to the end of the load, so
+        // the debug build's DOM and binding setup (about 1.4 s on macOS) is
+        // not in the bound. Each phase starts its own budget, one after the
+        // other: the sheets, the web fonts (none here, so no wait), the
+        // images, then the SVG images. A stalled image and a stalled SVG
+        // therefore cost two budgets, not one.
+        let budgets: std::rc::Rc<std::cell::RefCell<Vec<std::time::Instant>>> = Default::default();
+        let marks = budgets.clone();
+        crate::nav_cancel::LOAD_PHASE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |phase: &str| {
+                if phase == "subresource budget" {
+                    marks.borrow_mut().push(std::time::Instant::now());
+                }
+            }))
+        });
         let (engine, view, took) = load_timed(config, port);
+        let ended = std::time::Instant::now();
+        crate::nav_cancel::LOAD_PHASE_HOOK.with(|hook| *hook.borrow_mut() = None);
+        let budgets = budgets.borrow();
+        let first = *budgets.first().expect("the load started no subresource budget");
+        let starts: Vec<_> = budgets.iter().map(|at| *at - first).collect();
+        let subresources = ended - first;
+        // Three budgets that wait (sheets, images, SVG), plus one allowance
+        // for the relayouts between and after them on a loaded machine.
+        let bound = budget * 3 + std::time::Duration::from_millis(1_000);
         assert!(
-            took < std::time::Duration::from_millis(2_500),
-            "waited for the stalled subresources: {took:?}"
+            subresources < bound,
+            "waited for the stalled subresources: {subresources:?} from the first budget \
+             (bound {bound:?}; budgets started at {starts:?}; whole load {took:?})"
         );
         // The sheet that did arrive still applies — and it must be the fast
         // one. A count-only assertion would still pass if the stalled red
@@ -31222,8 +31249,8 @@ document.currentScript.remove();
             "the fast sheet must be the survivor, not the stalled red one: {sheets:#?}"
         );
 
-        // Image and SVG lanes share the same budget: a hung image must not
-        // keep the load open past the deadline, and must not land in cache.
+        // A hung image or SVG must not keep the load open past its budget,
+        // and must not land in cache.
         let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let slow_png = base.join("/slow.png").unwrap();
         let slow_svg = base.join("/slow.svg").unwrap();
