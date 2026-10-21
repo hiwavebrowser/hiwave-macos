@@ -1,0 +1,6 @@
+[env]
+# Threads that run page script need more than Rust's 2MB default: Boa
+# re-enters the VM on the native stack for every host callback. Threads
+# that run script also set 16MB themselves (rustkit_js::spawn_script_thread);
+# this covers the rest, test harness threads included.
+RUST_MIN_STACK = "8388608"

@@ -2009,7 +2009,9 @@ const WRAPPERS_JS: &str = r#"
     };
     // Navigation from script is not wired; submission stays engine-side.
     HTMLFormElement.prototype.submit = function () {};
-    [['name', 'name'], ['action', 'action'], ['target', 'target']].forEach(function (p) {
+    // `action` is web_reflect.js's: the attribute resolved against the
+    // document's base URL.
+    [['name', 'name'], ['target', 'target']].forEach(function (p) {
         accessor(HTMLFormElement.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
             function (v) { this.setAttribute(p[1], v); });
     });

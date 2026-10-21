@@ -250,11 +250,12 @@ pub(crate) mod test_gpu {
     ) -> T {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        rustkit_js::spawn_script_thread("helper-engine", move || {
             let e = crate::Engine::new(crate::EngineConfig::default()).expect("engine");
             let _ = ready_tx.send(());
             let _ = done_tx.send(work(&e));
-        });
+        })
+        .expect("spawn the helper engine thread");
         if !helper_has_its_engine(&ready_rx) {
             panic!("{what}: the helper thread never got an engine");
         }
@@ -373,6 +374,8 @@ mod script_budget_tests;
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
+#[cfg(all(test, feature = "headless"))]
+mod form_action_url_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
