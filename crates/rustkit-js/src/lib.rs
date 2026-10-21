@@ -1384,6 +1384,29 @@ pub fn recursion_depth_log() -> String {
     )
 }
 
+/// Native stack for a thread that runs page script: 16MB.
+///
+/// Set on the thread itself so a shipped binary does not depend on
+/// `RUST_MIN_STACK` from the cargo config.
+pub const SCRIPT_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Start a thread that will run page script, with
+/// [`SCRIPT_THREAD_STACK_SIZE`] of stack.
+///
+/// Boa re-enters the VM on the native stack for every host callback (a
+/// setter, a getter, `call` from a native), so a deep chain of those needs
+/// a bigger stack than Rust's 2MB default for spawned threads.
+pub fn spawn_script_thread<F, T>(name: &str, f: F) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(SCRIPT_THREAD_STACK_SIZE)
+        .spawn(f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2320,6 +2343,28 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("setter depth");
+    }
+
+    /// A setter chain past what an 8MB stack holds runs on a script thread.
+    /// Each link re-enters the VM on the native stack (about 7KB a link in
+    /// a debug build), so 1500 links overflow 2MB and 8MB but fit 16MB. The
+    /// host limit is raised for this runtime only so the stack, not the
+    /// limit, is what the chain meets.
+    #[test]
+    fn a_script_thread_holds_a_setter_chain_deeper_than_8mb() {
+        spawn_script_thread("deep-setters", || {
+            let mut runtime = JsRuntime::new().unwrap();
+            runtime.context.runtime_limits_mut().set_host_recursion_limit(2048);
+            let setters = runtime
+                .evaluate_script(
+                    "var n = 0; var obj = { set x(v) { n++; if (n < 1500) this.x = v; } }; obj.x = 1; n",
+                )
+                .unwrap();
+            assert!(matches!(setters, JsValue::Number(n) if n == 1500.0), "{setters:?}");
+        })
+        .expect("spawn")
+        .join()
+        .expect("deep setter chain");
     }
 
     #[test]

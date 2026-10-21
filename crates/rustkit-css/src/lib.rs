@@ -2719,6 +2719,15 @@ pub struct ComputedStyle {
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
+    /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
+    /// value: the legacy flexbox is not laid out, except in the line-clamp
+    /// form, see [`ComputedStyle::line_clamp`]. Not inherited.
+    pub webkit_box: Option<bool>,
+    /// `-webkit-box-orient: vertical` (or `block-axis`). Not inherited.
+    pub webkit_box_orient_vertical: bool,
+    /// `-webkit-line-clamp: <integer>`; `None` is `none`. Not inherited.
+    pub webkit_line_clamp: Option<u32>,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
@@ -2825,6 +2834,35 @@ impl ComputedStyle {
             .chain(self.transform.ops.iter().cloned())
             .collect();
         std::borrow::Cow::Owned(TransformList { ops })
+    }
+
+    /// css-overflow-4 §4.2, the legacy form: a `display: -webkit-box` (or
+    /// `-webkit-inline-box`) with `-webkit-box-orient: vertical` and
+    /// `-webkit-line-clamp: N` shows only its first N line boxes. `Some(N)`
+    /// when all three are set; any of them alone does nothing, as in Chrome.
+    pub fn line_clamp(&self) -> Option<u32> {
+        match (
+            self.webkit_box,
+            self.webkit_box_orient_vertical,
+            self.webkit_line_clamp,
+        ) {
+            (Some(_), true, Some(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Run once the cascade is done: a line-clamped `-webkit-box` is laid
+    /// out as a block container (Chrome computes its display to
+    /// `flow-root`), so the clamp has line boxes to count. Every other
+    /// `-webkit-box` is left alone.
+    pub fn apply_line_clamp_display(&mut self) {
+        if let (Some(inline), Some(_)) = (self.webkit_box, self.line_clamp()) {
+            self.display = if inline {
+                Display::InlineBlock
+            } else {
+                Display::Block
+            };
+        }
     }
 
     /// Create default style.
@@ -3772,6 +3810,29 @@ pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
     }
 }
 
+/// `display: -webkit-box` / `-webkit-inline-box`: `Some(inline)`, else
+/// `None` (see [`ComputedStyle::webkit_box`]).
+pub fn parse_webkit_box_display(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "-webkit-box" => Some(false),
+        "-webkit-inline-box" => Some(true),
+        _ => None,
+    }
+}
+
+/// `-webkit-line-clamp: none | <integer [1,∞]>`. `Some(None)` is `none`;
+/// `None` is an invalid value (the declaration is dropped).
+pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    match value.parse::<u32>() {
+        Ok(n) if n >= 1 => Some(Some(n)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3915,6 +3976,52 @@ mod tests {
         assert_eq!(Display::None.blockified(), Display::None);
         assert_eq!(Display::Block.blockified(), Display::Block);
         assert_eq!(Display::Flex.blockified(), Display::Flex);
+    }
+
+    #[test]
+    fn webkit_line_clamp_needs_webkit_box_vertical_orient_and_a_count() {
+        assert_eq!(parse_webkit_box_display("-webkit-box"), Some(false));
+        assert_eq!(parse_webkit_box_display(" -WEBKIT-INLINE-BOX "), Some(true));
+        assert_eq!(parse_webkit_box_display("flex"), None);
+        assert_eq!(parse_webkit_line_clamp("2"), Some(Some(2)));
+        assert_eq!(parse_webkit_line_clamp("none"), Some(None));
+        for bad in ["0", "-1", "1.5", "2px", ""] {
+            assert_eq!(parse_webkit_line_clamp(bad), None, "{bad:?}");
+        }
+
+        let mut s = ComputedStyle::new();
+        s.webkit_box = Some(false);
+        s.webkit_box_orient_vertical = true;
+        s.webkit_line_clamp = Some(2);
+        assert_eq!(s.line_clamp(), Some(2));
+        s.display = Display::Flex;
+        s.apply_line_clamp_display();
+        assert_eq!(
+            s.display,
+            Display::Block,
+            "a clamped -webkit-box is a block container"
+        );
+        s.webkit_box = Some(true);
+        s.apply_line_clamp_display();
+        assert_eq!(s.display, Display::InlineBlock);
+
+        // Any one of the three missing: no clamp, display untouched.
+        for (webkit_box, vertical, count) in [
+            (None, true, Some(2)),
+            (Some(false), false, Some(2)),
+            (Some(false), true, None),
+        ] {
+            let mut s = ComputedStyle::new();
+            s.display = Display::Inline;
+            (
+                s.webkit_box,
+                s.webkit_box_orient_vertical,
+                s.webkit_line_clamp,
+            ) = (webkit_box, vertical, count);
+            assert_eq!(s.line_clamp(), None);
+            s.apply_line_clamp_display();
+            assert_eq!(s.display, Display::Inline);
+        }
     }
 
     #[test]

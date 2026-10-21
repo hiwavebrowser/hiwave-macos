@@ -9,14 +9,19 @@ HiWave is a privacy-first browser for macOS built in Rust. It features a custom 
 ## Build Commands
 
 ```bash
-# Build and run (default RustKit mode)
-cargo run -p hiwave-app --features rustkit
+# Build and run (the `rustkit` feature is on by default)
+cargo run -p hiwave-app
 
 # Release build
-cargo run -p hiwave-app --features rustkit --release
+cargo run -p hiwave-app --release
 
-# Quick syntax check
+# Quick syntax check (macOS; on Linux, wry needs the GTK/WebKitGTK dev packages)
 cargo check -p hiwave-app
+
+# What CI runs (macOS): compile every test target, then the per-crate suites
+cargo test --workspace --no-run
+cargo test -p rustkit-layout --lib        # likewise rustkit-engine, rustkit-js, ...
+for t in scripts/tests/test_*.py; do python3 "$t"; done   # instrument guards
 
 # Run tests
 cargo test --workspace                    # All tests
@@ -54,7 +59,7 @@ python3 scripts/generate_baselines.py
 
 The browser uses a multi-WebView architecture:
 - **Chrome WebView** (WRY/WebKit): Browser UI, tabs, address bar, sidebar
-- **Content WebView** (RustKit or WebKit): Web page rendering
+- **Content WebView**: Web page rendering. RustKit on macOS; WRY on Windows/Linux
 - **Shelf WebView** (WRY/WebKit): Command palette, collapsible panels
 
 ### Workspace Crates
@@ -68,18 +73,28 @@ The browser uses a multi-WebView architecture:
 - `hiwave-analytics` - Local-only usage analytics
 
 **RustKit Engine Crates:**
-- `rustkit-engine` - Engine orchestration, multi-view management
+- `rustkit-engine` - Engine orchestration, multi-view management, style cascade
+- `rustkit-core` / `rustkit-common` - Engine runtime, shared utilities and errors
 - `rustkit-dom` - DOM tree representation
 - `rustkit-html` - HTML parser
 - `rustkit-css` / `rustkit-cssparser` - CSS parsing and styling
-- `rustkit-layout` - Flexbox/block layout
+- `rustkit-layout` - Block/inline/flex/grid layout
+- `rustkit-text` - Text shaping and rendering
 - `rustkit-renderer` - GPU rendering via wgpu
 - `rustkit-compositor` - Layer compositing
-- `rustkit-js` / `rustkit-bindings` - JavaScript engine integration
-- `rustkit-net` / `rustkit-http` - Network stack
-- `rustkit-image` / `rustkit-svg` - Image/SVG handling
-- `rustkit-text` - Text shaping and rendering
 - `rustkit-viewhost` - Window/surface management
+- `rustkit-js` / `rustkit-bindings` - JavaScript (Boa, vendored in `third_party/boa_engine`) and DOM bindings
+- `rustkit-net` / `rustkit-http` - Network stack
+- `rustkit-image` / `rustkit-codecs` / `rustkit-svg` - Images, codecs, SVG
+- `rustkit-animation`, `rustkit-canvas`, `rustkit-webgl`, `rustkit-media` - CSS animations, Canvas 2D, WebGL, audio/video
+- `rustkit-worker`, `rustkit-sw`, `rustkit-idb` - Web Workers, Service Workers, IndexedDB
+- `rustkit-a11y` - Accessibility
+- `rustkit-test` / `rustkit-bench` - WPT-style harness, benchmarks
+
+**Tools:**
+- `parity-capture` - Headless frame capture for parity testing
+- `hiwave-mcp` - MCP server exposing the engine to agents (see `docs/HIWAVE_MCP_PLAN.md`)
+- `hiwave-smoke` - Scripted smoke harness (macOS)
 
 ### Key Files
 
@@ -135,37 +150,13 @@ Use conventional commits:
 
 Chrome/Shelf WebViews communicate with Rust via `window.ipc.postMessage()`. The Rust backend handles messages in `ipc/commands.rs` and sends responses via `evaluate_script()`.
 
-## Recent Work (January 2026)
+## Current Status and Plans
 
-### Parity Improvement Progress
-
-Working through `PARITY_IMPROVEMENT_PLAN.md` to improve RustKit visual parity with Chrome.
-
-**Completed:**
-- Phase 1: Background layer foundation (HSL/HSLA colors, gamma-correct gradient interpolation)
-- Phase 2: Selector engine fixes (combinator matching, ancestor traversal)
-- Inline-block layout implementation in `rustkit-layout`
-- Repeating gradient support (linear, radial, conic) in `rustkit-renderer`
-
-**Key commits:**
-- `6a5624c` feat: Add inline-block layout and repeating gradient support (branch: `feat/inline-block-and-repeating-gradients`)
-- `8fb758f` feat: Add HSL/HSLA color parsing to engine
-- `08d996b` fix: Prevent GPU buffer overflow in gradient rendering
-
-**Parity test results (micro scope):**
-- backgrounds: 40.2% → 20.6% (improved)
-- combinators: 16.2% → 15.4% (improved)
-- css-selectors: 32.2% → 29.7% (improved)
-
-**Remaining issues:**
-- Text metrics account for ~59% of remaining diffs (font rendering differences)
-- Gradient interpolation ~16% (color space handling)
-
-**Next phases from plan:**
-- Phase 3: Text rendering alignment
-- Phase 4: Form controls
-- Phase 5: Advanced layout (grid, sticky)
-- Phase 6: Images and replaced elements
+Engine status (parity, WPT, known gaps) lives in `README.md` under "Engine
+Status". Current plans and design notes are in `docs/` (for example
+`docs/PARITY_FINISH_LINE_PLAN_2026-08-04.md` and `docs/HIWAVE_MCP_PLAN.md`);
+`trench/` holds run baselines and forensics. Superseded plans are kept in
+`docs/archive/` for history only; do not treat them as current.
 
 ### Key Files for Parity Work
 
@@ -176,4 +167,4 @@ Working through `PARITY_IMPROVEMENT_PLAN.md` to improve RustKit visual parity wi
 | `crates/rustkit-layout/src/lib.rs` | Block/flex/inline-block layout |
 | `crates/rustkit-renderer/src/lib.rs` | GPU rendering, gradients, backgrounds |
 | `scripts/parity_test.py` | Run parity tests (`--scope micro` for CSS micro-tests) |
-| `parity-baseline/diffs/` | Visual diff results and attribution JSON |
+| `parity-baseline/diffs/` | Visual diff results and attribution JSON (generated, gitignored) |
