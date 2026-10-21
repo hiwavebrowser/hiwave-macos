@@ -471,21 +471,7 @@ pub(crate) async fn pump_modules(
             if i >= room {
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
-            let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-            let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-            let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
-            inspector::answer_module(guard, &fetched);
-            match fetched {
-                Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
-                    final_url: module.final_url.to_string(),
-                    source: module.source,
-                }),
-                Ok(Err(denial)) => {
-                    debug!(%url, ?denial, "Module fetch denied");
-                    Err(NETWORK_ERROR.to_string())
-                }
-                Err(_) => Err("timed out".to_string()),
-            }
+            fetch_module(policy, loader, url, document, deadline, inspector).await
         }))
         .await;
 
@@ -500,6 +486,67 @@ pub(crate) async fn pump_modules(
         }
     }
     out
+}
+
+/// One module through the policy's module entry point, as the page gets
+/// it: its source, or why there is none.
+async fn fetch_module(
+    policy: &FetchPolicy,
+    loader: &ResourceLoader,
+    url: &str,
+    document: &Url,
+    deadline: tokio::time::Instant,
+    inspector: &Arc<Inspector>,
+) -> Result<rustkit_bindings::FetchedModule, String> {
+    let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
+    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
+    let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+    inspector::answer_module(guard, &fetched);
+    match fetched {
+        Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
+            final_url: module.final_url.to_string(),
+            source: module.source,
+        }),
+        Ok(Err(denial)) => {
+            debug!(%url, ?denial, "Module fetch denied");
+            Err(NETWORK_ERROR.to_string())
+        }
+        Err(_) => Err("timed out".to_string()),
+    }
+}
+
+/// A module a dynamic `import()` asked for that is out: the URL as asked
+/// for and, in the end, its source or why there is none.
+pub(crate) type LiveModule = LiveFuture<(String, Result<rustkit_bindings::FetchedModule, String>)>;
+
+/// Start the modules `urls` for the live loop, as [`start_live`] starts a
+/// script request: nothing runs until [`settle_live`] polls them, and no
+/// turn waits for one. Past the page's module cap (`fetched` counts what
+/// this document has started), a module fails at once.
+pub(crate) fn start_live_modules(
+    policy: &Arc<FetchPolicy>,
+    loader: &Arc<ResourceLoader>,
+    urls: Vec<String>,
+    document: &Url,
+    deadline: tokio::time::Instant,
+    fetched: &mut usize,
+    inspector: &Arc<Inspector>,
+) -> Vec<LiveModule> {
+    urls.into_iter()
+        .map(|url| -> LiveModule {
+            if *fetched >= MAX_MODULES_PER_PAGE {
+                let refused = Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
+                return Box::pin(std::future::ready((url, refused)));
+            }
+            *fetched += 1;
+            let (policy, loader, document, inspector) =
+                (policy.clone(), loader.clone(), document.clone(), inspector.clone());
+            Box::pin(async move {
+                let outcome = fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await;
+                (url, outcome)
+            })
+        })
+        .collect()
 }
 
 /// Take-fetch-deliver for the network a page can have waiting: script

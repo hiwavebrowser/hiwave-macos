@@ -914,6 +914,11 @@ struct ViewState {
     /// Script requests the live loop has started for the current document
     /// and not yet delivered.
     live_requests: Vec<script_net::LiveRequest>,
+    /// Modules a dynamic `import()` asked for after the load that the live
+    /// loop has started and not yet supplied, and how many it has started
+    /// for the current document (the page's module cap).
+    live_modules: Vec<script_net::LiveModule>,
+    live_modules_started: usize,
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
@@ -995,6 +1000,8 @@ impl ViewState {
         self.script_policy = None;
         // The last document's requests are nobody's now.
         self.live_requests.clear();
+        self.live_modules.clear();
+        self.live_modules_started = 0;
         self.live_images.clear();
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
@@ -1123,12 +1130,6 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// A page that owes more keeps them for the next turn, so input and paint
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
-
-/// Longest one turn of the live loop waits for the modules a dynamic
-/// `import()` asked for, which are still fetched inside the turn. The loop is
-/// the UI thread, so a module slower than this fails rather than hold the
-/// window longer.
-const LIVE_NETWORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Longest one turn of the live loop spends on the script requests that are
 /// out (XHR, fetch). The loop is the UI thread: a request is started on the
@@ -2374,6 +2375,8 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_modules: Vec::new(),
+            live_modules_started: 0,
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
@@ -2464,6 +2467,8 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_modules: Vec::new(),
+            live_modules_started: 0,
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
@@ -2553,6 +2558,8 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_modules: Vec::new(),
+            live_modules_started: 0,
             live_images: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
@@ -4214,6 +4221,11 @@ impl Engine {
         let document = view.url.clone();
         let inspector = view.inspector.clone();
         let live_requests = &mut view.live_requests;
+        let live_modules = &mut view.live_modules;
+        let live_modules_started = &mut view.live_modules_started;
+        // A module supplied this turn can ask for more, or for the network:
+        // the next turn is due at once.
+        let mut supplied_modules = false;
         let mut threw: Vec<(&str, ScriptOutcome)> = Vec::new();
         // One budget of JavaScript time for the script this turn runs.
         // Each callback arms the watchdog on its own. The waits between
@@ -4317,26 +4329,50 @@ impl Engine {
                 live_requests.insert(at, Box::pin(std::future::ready(answer)));
             }
             out.in_flight = live_requests.len();
-            // The modules a dynamic `import()` asked for are still fetched
-            // inside the turn, unless its budget is gone: they are asked
-            // for again on the next.
-            if let Some(document) = document.as_ref().filter(|_| !script_js_exhausted()) {
-                let mut modules_fetched = 0;
-                let found = script_net::pump_modules(
-                    bindings,
-                    &policy,
-                    &loader,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                    document,
-                    &mut modules_fetched,
-                    &inspector,
-                )
-                .await;
-                out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-                if found.poisoned {
-                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+            // The modules a dynamic `import()` asked for, the same way: an
+            // answer that has come is supplied while the turn has budget,
+            // and what the page asks for now is started, never waited for.
+            // Until #727's second hold a turn fetched them inside itself for
+            // up to two seconds (`LIVE_NETWORK_BUDGET`, now gone) and failed the
+            // import as timed out.
+            if let Some(document) = document.as_ref() {
+                let mut arrived = script_net::settle_live(live_modules, LIVE_NETWORK_SLICE)
+                    .await
+                    .into_iter();
+                while !script_js_exhausted() && !script_js_resume_would_be_stopped() {
+                    let Some((url, outcome)) = arrived.next() else {
+                        break;
+                    };
+                    out.requests += 1;
+                    supplied_modules = true;
+                    let (supplied, _) = with_script_js(bindings, || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.supply_module(&url, outcome)))
+                    });
+                    if supplied.is_err() {
+                        threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+                        break;
+                    }
                 }
+                for (at, module) in arrived.enumerate() {
+                    live_modules.insert(at, Box::pin(std::future::ready(module)));
+                }
+                // With its budget gone, the requests stay with the page
+                // for the next turn.
+                if !script_js_exhausted() {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_module_requests())) {
+                        Ok(urls) => live_modules.extend(script_net::start_live_modules(
+                            &policy,
+                            &loader,
+                            urls,
+                            document,
+                            tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT,
+                            live_modules_started,
+                            &inspector,
+                        )),
+                        Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
+                    }
+                }
+                out.in_flight += live_modules.len();
             }
             // Scripts the page inserted, including one whose fetch is still
             // out. A turn does not wait a fetch out and does not drop it.
@@ -4393,7 +4429,7 @@ impl Engine {
         }
         let reported = bindings.take_reported_errors();
         inspector_glue::drain_quiet(bindings, &view.inspector, "network");
-        out.next_timer_ms = if held_back { Some(0) } else { bindings.next_timer_delay() };
+        out.next_timer_ms = if held_back || supplied_modules { Some(0) } else { bindings.next_timer_delay() };
         view.script_log.extend(stopped);
         let threw = threw
             .into_iter()
