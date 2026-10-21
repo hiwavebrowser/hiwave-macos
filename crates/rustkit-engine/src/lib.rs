@@ -24248,6 +24248,30 @@ mod web_font_tests {
         ));
     }
 
+    /// Fetch serializes a data: URL without its fragment, so the fragment is
+    /// not part of the payload — the rule `rustkit_net::decode_data_url`
+    /// already follows (#712).
+    #[test]
+    #[ignore = "bug: engine decode_data_url keeps a data: URL's #fragment in the payload"]
+    fn a_data_uri_fragment_is_not_part_of_the_payload() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x#tail").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert_eq!(
+            decode_data_url("data:text/plain,a%23b#c").as_deref(),
+            Some(b"a#b".as_slice())
+        );
+        assert!(matches!(
+            resolve_font_source(None, "data:font/ttf;base64,AAEC#frag"),
+            FontSource::Data(b) if b.as_ref() == [0u8, 1, 2]
+        ));
+    }
+
     /// The laid-out advance of the probe text run "XXXX".
     fn widest_inline_block(b: &LayoutBox, out: &mut f32) {
         if matches!(&b.box_type, BoxType::Text(t) if t.trim() == "XXXX") {
