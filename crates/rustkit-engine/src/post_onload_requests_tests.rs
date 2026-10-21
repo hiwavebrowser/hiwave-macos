@@ -46,12 +46,13 @@ struct Loaded {
     view: EngineViewId,
     rt: tokio::runtime::Runtime,
     server: crate::script_net_tests::Server,
-    took: Duration,
+    /// From the `load` event firing to the load's end.
+    after_load_event: Duration,
     page_loaded: bool,
 }
 
-/// Loads `page` the way the app does: one runtime for the load and the live
-/// turns after it, the load future polled a slice at a time.
+/// Loads `page` the way the app does (`step_load`): one runtime for the
+/// load and the live turns after it, the load future polled 8 ms at a time.
 fn load(config: EngineConfig, page: &str) -> Loaded {
     let server = serve_routes(vec![
         ("/", "text/html", page.to_string()),
@@ -69,10 +70,30 @@ fn load(config: EngineConfig, page: &str) -> Loaded {
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     let rt = runtime();
-    let started = Instant::now();
-    rt.block_on(engine.load_url(view, url.clone()))
-        .expect("load_url");
-    let took = started.elapsed();
+    let load_event = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = load_event.clone();
+    nav_cancel::LOAD_PHASE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |phase: &str| {
+            if phase == "event:load" {
+                seen.set(Some(Instant::now()));
+            }
+        }))
+    });
+    {
+        let mut future = Box::pin(engine.load_url(view, url.clone()));
+        loop {
+            let slice = rt.block_on(async {
+                tokio::time::timeout(Duration::from_millis(8), future.as_mut()).await
+            });
+            if let Ok(result) = slice {
+                result.expect("load_url");
+                break;
+            }
+        }
+    }
+    let ended = Instant::now();
+    nav_cancel::LOAD_PHASE_HOOK.with(|hook| *hook.borrow_mut() = None);
+    let fired = load_event.get().expect("the load event fired");
     let page_loaded = std::iter::from_fn(|| events.try_recv().ok())
         .any(|e| matches!(e, EngineEvent::PageLoaded { url: u, .. } if u == url));
     Loaded {
@@ -80,7 +101,7 @@ fn load(config: EngineConfig, page: &str) -> Loaded {
         view,
         rt,
         server,
-        took,
+        after_load_event: ended - fired,
         page_loaded,
     }
 }
@@ -99,9 +120,9 @@ fn requests_made_after_load_do_not_hold_the_load() {
     assert!(loaded.page_loaded, "PageLoaded was announced");
     // The page is local; only the pings are slow (2 s).
     assert!(
-        loaded.took < Duration::from_millis(1000),
+        loaded.after_load_event < Duration::from_millis(500),
         "the load waited for requests its load handler made: {:?}",
-        loaded.took
+        loaded.after_load_event
     );
     assert_eq!(
         js(&mut loaded, "window.got === undefined"),
@@ -115,9 +136,9 @@ fn requests_made_after_load_are_answered_on_later_short_turns() {
     let mut loaded = load(live(), PINGS_AFTER_LOAD);
     // Still out when the load ends: the turns below are what answer them.
     assert!(
-        loaded.took < Duration::from_millis(1000),
+        loaded.after_load_event < Duration::from_millis(500),
         "the load answered them: {:?}",
-        loaded.took
+        loaded.after_load_event
     );
     let began = Instant::now();
     let mut longest = Duration::ZERO;
@@ -175,5 +196,9 @@ fetch('/slow-early').then(function (r) { return r.text(); }).then(function (t) {
 fn without_the_switch_the_load_waits_as_before() {
     let mut loaded = load(EngineConfig::default(), PINGS_AFTER_LOAD);
     assert_eq!(js(&mut loaded, "window.got"), r#"String("/late-metrics")"#);
-    assert!(loaded.took >= Duration::from_secs(2), "{:?}", loaded.took);
+    assert!(
+        loaded.after_load_event >= Duration::from_secs(2),
+        "{:?}",
+        loaded.after_load_event
+    );
 }

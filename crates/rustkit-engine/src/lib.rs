@@ -4631,6 +4631,7 @@ impl Engine {
         watch: Option<&NavWatch>,
     ) {
         let horizon_ms = self.config.timer_horizon_ms;
+        let post_load_live = self.config.post_load_requests_live;
         let loop_limit = self.config.script_loop_iteration_limit;
         let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
@@ -4978,7 +4979,7 @@ impl Engine {
         // lifecycle events fire (a handler can start more; see the rounds).
         // Delivery only: the timers run in their own step below.
         load_phase("network");
-        let pump = |timers: Option<(u64, u32)>| {
+        let pump = |timers: Option<(u64, u32)>, requests: bool| {
             let policy = policy.clone();
             let loader = loader.clone();
             let document = document_url.clone();
@@ -5005,6 +5006,7 @@ impl Engine {
                                 &mut count,
                                 inspector,
                                 Some(referrer),
+                                requests,
                             ),
                         )
                         .await;
@@ -5015,7 +5017,7 @@ impl Engine {
                 }
             }
         };
-        let after_scripts = pump(None).await;
+        let after_scripts = pump(None, true).await;
         if nav_cancel::cancelled(watch) {
             return;
         }
@@ -5077,7 +5079,27 @@ impl Engine {
             // What the scripts (or the previous step) wrote is laid out
             // before the next step runs, so its script reads fresh geometry.
             self.refresh_layout_for_script(id, bindings);
+            // From `load` on, what the page asks of the network is the live
+            // loop's (`post_load_requests_live`). The images its scripts
+            // added before `load` delay it, so they are fetched now, not
+            // with those the load handler and the timers add.
+            let after_load = post_load_live && source != "event:DOMContentLoaded";
+            let leaving = self.config.follows_script_navigation && bindings.navigation_requested();
+            if after_load && source == "event:load" && !leaving {
+                match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
+                    None => return,
+                    Some(Ok(0)) => {}
+                    Some(Ok(count)) => {
+                        info!(count, "Loaded images added by page scripts before load");
+                        if let Err(e) = self.relayout_for(id, RelayoutCause::ImageLoaded { count }) {
+                            warn!(?e, "relayout after images added before load failed");
+                        }
+                    }
+                    Some(Err(e)) => warn!(?e, "Failed to load images added by page scripts"),
+                }
+            }
             info!(%source, "Running page lifecycle step");
+            load_phase(source);
             let step_started = std::time::Instant::now();
             let record = run(source.to_string(), 0, &|_| step());
             info!(
@@ -5097,7 +5119,7 @@ impl Engine {
             // The step's requests are answered now; after the timers step,
             // each round also runs the timers the responses scheduled.
             let timers = (source == "timers").then_some((horizon_ms, MAX_TIMER_CALLBACKS));
-            if let Some(found) = pump(timers).await {
+            if let Some(found) = pump(timers, !after_load).await {
                 for record in found.records {
                     inspector_glue::log_script(log, &inspector, record);
                 }
@@ -5607,7 +5629,22 @@ impl Engine {
             if leaving {
                 info!(?id, "Page asked to navigate: not waiting for images its scripts added");
             }
-            let added = match leaving {
+            // With `post_load_requests_live` the images added before `load`
+            // have arrived; what is new now came after it, and the live loop
+            // fetches it while no turn waits.
+            let post_load_live = self.config.post_load_requests_live;
+            if post_load_live && !leaving {
+                match self.plan_image_loads(id, true) {
+                    Ok(Some(plan)) if !plan.is_empty() => {
+                        if let Some(view) = self.views.get_mut(&id) {
+                            view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(?e, "Failed to look for images added after load"),
+                }
+            }
+            let added = match leaving || post_load_live {
                 true => Ok(0),
                 false => match watch
                     .unless_cancelled(self.load_images_added_by_scripts(id))
