@@ -65,13 +65,6 @@ impl ContentWebView {
         }
     }
 
-    /// Move the RustKit content view without borrowing the engine.
-    pub fn place_host_frame(&self, bounds: rustkit_viewhost::Bounds) {
-        if let ContentWebView::RustKit(view) = self {
-            view.place_host_frame(bounds);
-        }
-    }
-
     /// The window's backing scale, for `devicePixelRatio` and resolution
     /// media queries. A WRY content view has its own.
     pub fn set_device_pixel_ratio(&self, ratio: f64) {

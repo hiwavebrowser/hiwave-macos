@@ -168,7 +168,8 @@ pub(crate) async fn pump(
                 inspector,
                 FailureStage::Timeout,
             )
-        }))        .await;
+        }))
+        .await;
 
         // In the order the page made them (the take order), not completion
         // order. JavaScript budget spent: keep the callback and the answer
@@ -190,7 +191,8 @@ pub(crate) async fn pump(
                     bindings.deliver_net_response(request.id, outcome)
                 }))
             });
-            match delivered {                Ok(Ok(_)) => {}
+            match delivered {
+                Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
                     if !stopped {
                         out.threw.push(e.to_string());
@@ -219,7 +221,8 @@ pub(crate) async fn pump(
                     Err(_) => {
                         out.poisoned = true;
                         return out;
-                    }                }
+                    }
+                }
             }
         }
     }
@@ -317,12 +320,7 @@ async fn execute(
     let guard = inspector
         .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
         .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(
-        deadline,
-        super::await_with_chrome_ui(policy.execute(loader, script_request)),
-    )
-    .await
-    {
+    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -543,9 +541,7 @@ pub(crate) async fn pump_modules(
                         );
                         let fetched = tokio::time::timeout_at(
                             deadline,
-                            super::await_with_chrome_ui(
-                                policy.fetch_module(loader, &parsed, document),
-                            ),
+                            policy.fetch_module(loader, &parsed, document),
                         )
                         .await;
                         inspector::answer_module(guard, &fetched);
@@ -1036,18 +1032,17 @@ pub(crate) async fn drive_inserted_scripts(
         if tokio::time::Instant::now() >= deadline {
             return out;
         }
-        // The fetch itself is on the script thread. This wait is on the
-        // window thread, inside the load, and it used to hold that thread
-        // until a body arrived. Slice it so the chrome UI can paint.
+        // The fetch itself is on the script thread. The event loop polls
+        // the load a slice at a time, so this wait does not hold the window.
         let notify = scripts.notify();
-        let woke = super::await_with_chrome_ui(async move {
+        let woke = async move {
             let notified = notify.notified();
             tokio::pin!(notified);
             tokio::select! {
                 _ = notified => true,
                 _ = tokio::time::sleep_until(deadline) => false,
             }
-        })
+        }
         .await;
         if !woke {
             return out;

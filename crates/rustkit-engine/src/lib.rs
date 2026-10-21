@@ -396,7 +396,8 @@ mod fixed_under_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
-mod hover_restyle_tests;#[cfg(all(test, feature = "headless"))]
+mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -1183,14 +1184,10 @@ const LIVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// JavaScript time only: `load_url` is `block_on` there. They were not
 /// moved onto that thread. They are no longer cut off by the script
 /// budget, so a slow page can hold the thread for the waits plus the
-/// JavaScript. [`await_with_chrome_ui`] gives the chrome UI a turn during
-/// a wait, so that hold does not skip the toolbar and sidebar paint.
+/// JavaScript. Giving the app's chrome a turn during a wait is a
+/// follow-up of its own: it needs the window thread's event-loop lock
+/// to be re-entrant, which tao's is not.
 const SCRIPT_NETWORK_CAP: std::time::Duration = LIVE_REQUEST_TIMEOUT;
-
-/// How often a network wait lets the chrome UI run. Short enough that a
-/// toolbar paints during a slow document, long enough that a fast response
-/// is not sliced.
-const CHROME_UI_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Most records the live loop adds to a view's script log. A timer that
 /// throws on every tick would otherwise grow it for as long as the page is
@@ -1650,7 +1647,8 @@ fn record_stopped_script(
     } else {
         config.script_budget_ms
     };
-    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");
+    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
     begin_script_turn(bindings, STOP_NOTE_BUDGET);
     let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
     end_script_turn(bindings);
@@ -1967,19 +1965,27 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
         js.exec_started_us.set(rustkit_js::mono_us());
     });
     let started = std::time::Instant::now();
-    // A zero allowance used to arm a deadline of now and a watchdog turn of
-    // no time. The next `evaluate` (a lifecycle step) then resumed a pending
-    // async function under that stop, and Boa reported it as
-    // "async function was interrupted". The step still runs. It is not a
-    // turn: there is no time left to arm.
-    let arm = interrupt && !allowance.is_zero();
-    if arm {
+    // A spent budget stops JavaScript; it never takes the watchdog away.
+    // A lifecycle step (`DOMContentLoaded`, `load`, the load's timers) and
+    // a module supplied late still run once the budget is gone, and a
+    // listener that spins in one of them used to run with no deadline and
+    // no turn, holding the window's thread for good (a CNN load; #720 R1).
+    // It gets the stop grace: a deadline of now would have resumed a
+    // pending async function under an immediate stop, which Boa reports as
+    // "async function was interrupted". Deliveries that would land in a
+    // turn this short are parked instead (`script_js_resume_would_be_stopped`).
+    let allowance = if allowance.is_zero() {
+        rustkit_js::control::STOP_GRACE
+    } else {
+        allowance
+    };
+    if interrupt {
         bindings.set_execution_deadline(Some(std::time::Instant::now() + allowance));
         begin_script_turn(bindings, allowance);
     }
     let mut armed = ArmedExecution {
         bindings,
-        interrupt: arm,
+        interrupt,
         open: true,
     };
     let result = body();
@@ -2093,111 +2099,6 @@ fn test_leave_script_budget(remaining: std::time::Duration) {
         js.spent_us.set(limit.saturating_sub(remain));
         js.stopped.set(false);
     });
-}
-
-thread_local! {
-    /// The app's chrome (toolbar, sidebar) runs on this same thread. A
-    /// content load's network wait used to hold the thread straight through,
-    /// so the chrome got no turn and a screenshot caught it blank. The app
-    /// registers a hook; it is called only while the content turn is
-    /// disarmed and the content budget is suspended.
-    static CHROME_UI_TURN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Set for the hook: this yield suspended an installed content budget.
-    static CHROME_UI_SUSPENDED_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Register the chrome UI turn, or clear it. One per thread: a thread runs
-/// one page at a time. The hook runs during a content load's network waits
-/// and must not re-enter the load.
-pub fn set_chrome_ui_turn(hook: Option<Box<dyn FnMut()>>) {
-    CHROME_UI_TURN.with(|slot| *slot.borrow_mut() = hook);
-}
-
-fn chrome_ui_turn_is_set() -> bool {
-    CHROME_UI_TURN.with(|slot| slot.borrow().is_some())
-}
-
-/// The hook is running with the content budget suspended and no script
-/// turn open, so a chrome script is not charged to the content page and
-/// the content watchdog does not stop it.
-#[cfg(test)]
-fn chrome_ui_turn_is_clear() -> bool {
-    let js_clear = SCRIPT_JS.with(|js| js.limit_us.get() == 0 && js.depth.get() == 0);
-    let turn_clear = SCRIPT_STAMP.with(|stamp| stamp.current_turn() == 0);
-    js_clear && turn_clear
-}
-
-/// This yield took the content budget off the thread for the hook.
-#[cfg(test)]
-fn chrome_ui_turn_suspended_content_budget() -> bool {
-    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.get())
-}
-
-/// Run the chrome hook once, with the content budget not installed, and
-/// put that budget back afterwards. A hook that panics still restores both.
-fn yield_chrome_ui_turn() {
-    let hook = CHROME_UI_TURN.with(|slot| slot.borrow_mut().take());
-    let Some(hook) = hook else { return };
-    struct Restore {
-        limit: u64,
-        depth: u32,
-        hook: Option<Box<dyn FnMut()>>,
-    }
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SCRIPT_JS.with(|js| {
-                if js.limit_us.get() == 0 {
-                    js.limit_us.set(self.limit);
-                }
-                if js.depth.get() == 0 {
-                    js.depth.set(self.depth);
-                }
-            });
-            let hook = self.hook.take();
-            CHROME_UI_TURN.with(|slot| {
-                if slot.borrow().is_none() {
-                    *slot.borrow_mut() = hook;
-                }
-            });
-        }
-    }
-    let (limit, depth) = SCRIPT_JS.with(|js| (js.limit_us.replace(0), js.depth.replace(0)));
-    CHROME_UI_SUSPENDED_BUDGET.with(|flag| flag.set(limit > 0));
-    let mut restore = Restore {
-        limit,
-        depth,
-        hook: Some(hook),
-    };
-    if let Some(hook) = restore.hook.as_mut() {
-        hook();
-    }
-}
-
-/// Await `fut`, and while it is pending let the chrome UI run. With no
-/// hook registered this is just `fut`: fast tests do not slice their waits.
-///
-/// Boxed so the select does not enlarge `load_url`'s future. That future
-/// is already built on the stack before it is moved to the heap, and the
-/// debug stack does not have room for another state machine in it.
-pub(crate) fn await_with_chrome_ui<'a, F: std::future::Future + 'a>(
-    fut: F,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = F::Output> + 'a>> {
-    Box::pin(async move {
-        if !chrome_ui_turn_is_set() {
-            return fut.await;
-        }
-        tokio::pin!(fut);
-        loop {
-            let slice = tokio::time::sleep(CHROME_UI_SLICE);
-            tokio::pin!(slice);
-            tokio::select! {
-                biased;
-                result = &mut fut => return result,
-                _ = &mut slice => yield_chrome_ui_turn(),
-            }
-        }
-    })
 }
 
 fn script_in_shadow(node: &Node) -> bool {
@@ -4566,6 +4467,13 @@ impl Engine {
     /// The chain is idle. `readyState` becomes `complete`, `window` `load`
     /// fires, then the timer horizon and scripts the load handler inserted.
     /// `PageLoaded` is sent after that, not before.
+    ///
+    /// This runs inside a live turn, on the window's thread, so it waits
+    /// for no answer. What the load handler and the horizon's timers ask
+    /// of the network is started by the rest of this turn, as any live
+    /// request is, and answered on a later one. Until #727's R1 (H1) the
+    /// tail pumped those requests here with the load's 30 s network cap:
+    /// a slow beacon from a `load` handler held the window for as long.
     async fn complete_load_tail(&mut self, id: EngineViewId, nav_id: u64) {
         if self.nav_superseded(id, nav_id) {
             self.abandon_load_tail(id, nav_id);
@@ -4574,7 +4482,6 @@ impl Engine {
         // Parser images hold window `load`, not DOMContentLoaded.
         self.finish_parked_images(id).await;
         let horizon = self.config.timer_horizon_ms;
-        let net_rounds = self.config.script_network_rounds;
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
@@ -4590,47 +4497,11 @@ impl Engine {
         };
         let mut log = std::mem::take(&mut view.script_log);
         let inspector = view.inspector.clone();
-        let policy = view.script_policy.clone();
-        let document_url = view.url.clone();
-        let modules_fetched = Cell::new(0usize);
         let watch = NavWatch {
             canceller: NavCanceller::new(view.control.clone(), view.nav_signal.clone()),
             nav_id,
         };
         let watch = Some(watch);
-
-        let mut pump = |timers: Option<(u64, u32)>| {
-            let policy = policy.clone();
-            let loader = loader.clone();
-            let document = document_url.clone();
-            let modules_fetched = &modules_fetched;
-            let inspector = &inspector;
-            let watch = watch.clone();
-            let bindings = &bindings;
-            async move {
-                let Some(policy) = policy else {
-                    return None;
-                };
-                let mut count = modules_fetched.get();
-                let found = nav_cancel::unless_cancelled(
-                    watch.as_ref(),
-                    script_net::pump_all(
-                        bindings,
-                        &policy,
-                        &loader,
-                        tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
-                        net_rounds,
-                        timers,
-                        document.as_ref(),
-                        &mut count,
-                        inspector,
-                    ),
-                )
-                .await;
-                modules_fetched.set(count);
-                found
-            }
-        };
 
         let mut stopped = nav_cancel::cancelled(watch.as_ref());
         if !stopped {
@@ -4684,15 +4555,6 @@ impl Engine {
             );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load");
         }
-        if !stopped {
-            if let Some(found) = pump(None).await {
-                if Self::absorb_network_pump(&mut log, &inspector, found) {
-                    stopped = true;
-                }
-            } else if nav_cancel::cancelled(watch.as_ref()) {
-                stopped = true;
-            }
-        }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
             info!(source = "timers", "Running page lifecycle step");
@@ -4734,17 +4596,12 @@ impl Engine {
                 "Page lifecycle step done"
             );
             inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers");
-            if !stopped {
-                if let Some(found) = pump(Some((horizon, MAX_TIMER_CALLBACKS))).await {
-                    if Self::absorb_network_pump(&mut log, &inspector, found) {
-                        stopped = true;
-                    }
-                }
-            }
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
             // which has already fired. Run one whose body is already here.
+            // Not waiting, it never pumps the network.
+            let mut no_pump = |_: Option<(u64, u32)>| async { None };
             stopped = self
                 .settle_inserted_scripts(
                     id,
@@ -4757,14 +4614,10 @@ impl Engine {
                     tokio::time::Instant::now(),
                     !script_js_exhausted(),
                     false,
-                    &mut pump,
+                    &mut no_pump,
                 )
                 .await;
         }
-        // `pump` only holds references, so it is `Copy`. Using it here ends
-        // that borrow and `bindings` can move back onto the view.
-        #[allow(dropping_copy_types)]
-        drop(pump);
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
             view.script_log = log;
@@ -4797,35 +4650,6 @@ impl Engine {
             .strip_prefix("JS error: Execution error: ")
             .map(str::to_string)
             .unwrap_or(message)
-    }
-
-    /// Record a network pump the way the load's lifecycle steps do.
-    /// `true` when the JS engine panicked.
-    fn absorb_network_pump(
-        log: &mut Vec<ScriptRecord>,
-        inspector: &Arc<Inspector>,
-        mut found: script_net::Pump,
-    ) -> bool {
-        for record in found.records.drain(..) {
-            inspector_glue::log_script(log, inspector, record);
-        }
-        for message in found.threw {
-            log.push(ScriptRecord {
-                source: "network".into(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::Threw(message),
-            });
-        }
-        if found.poisoned {
-            log.push(ScriptRecord {
-                source: "network".into(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: ScriptOutcome::EngineFailed(EngineFailure::Panic),
-            });
-        }
-        found.poisoned
     }
 
     /// Images the yielded load's scripts added, then `PageLoaded`.
@@ -4866,25 +4690,19 @@ impl Engine {
                 "Page asked to navigate: not waiting for images its scripts added"
             );
         }
-        let added = match leaving {
-            true => Ok(0),
-            false => match watch
-                .unless_cancelled(self.load_images_added_by_scripts(id))
-                .await
-            {
-                Some(added) => added,
-                None => return Ok(()),
-            },
-        };
-        match added {
-            Ok(0) => {}
-            Ok(count) => {
-                info!(count, "Loaded images added by page scripts");
-                if !self.nav_superseded(id, nav_id) {
-                    self.relayout_for(id, RelayoutCause::ImageLoaded { count })?;
+        // The images the scripts added are fetched as a live turn's are: no
+        // turn waits for them, and the turn they arrive on lays them out.
+        // This is the window's thread (#727 R1 H1).
+        if !leaving && !watch.is_cancelled() {
+            match self.plan_image_loads(id, true) {
+                Ok(Some(plan)) if !plan.is_empty() => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.live_images.push(Box::pin(Self::fetch_planned_images(plan)));
+                    }
                 }
+                Ok(_) => {}
+                Err(e) => warn!(?e, "Failed to load images added by page scripts"),
             }
-            Err(e) => warn!(?e, "Failed to load images added by page scripts"),
         }
         if self.nav_superseded(id, nav_id) {
             return Ok(());
@@ -5979,7 +5797,7 @@ impl Engine {
                             Some("parser"),
                         );
                         let fetch =
-                            await_with_chrome_ui(policy.fetch_module(&loader, &url, &base_url));
+                            policy.fetch_module(&loader, &url, &base_url);
                         let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                         let fetched = tokio::time::timeout_at(deadline, fetch).await;
                         inspector::answer_module(guard, &fetched);
@@ -6021,15 +5839,13 @@ impl Engine {
                     .map(|g| g.timeout_at(deadline, "timed out"));
                 let fetched = tokio::time::timeout_at(
                     deadline,
-                    await_with_chrome_ui(
-                        loader.fetch(referrer.get_for(url, RequestDestination::Script)),
-                    ),
+                    loader.fetch(referrer.get_for(url, RequestDestination::Script)),
                 )
                 .await;
                 let result = match fetched {
                     Ok(Ok(response)) if response.ok() => {
                         let received = guard.map(|g| g.received(&response));
-                        match await_with_chrome_ui(response.text()).await {
+                        match response.text().await {
                             Ok(text) => {
                                 if let Some(received) = received {
                                     received.read(text.len());
@@ -7144,10 +6960,7 @@ impl Engine {
             .inspector
             .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
             .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
-        let Some(fetched) = watch
-            .unless_cancelled(await_with_chrome_ui(self.loader.fetch(request)))
-            .await
-        else {
+        let Some(fetched) = watch.unless_cancelled(self.loader.fetch(request)).await else {
             debug!(?id, %url, "Navigation cancelled during the document fetch");
             return Ok(());
         };
@@ -7197,7 +7010,7 @@ impl Engine {
         let mut error_page = None;
         if !status.is_success() {
             let body = match response.take() {
-                Some(response) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
+                Some(response) => match watch.unless_cancelled(response.text()).await {
                     Some(text) => text.unwrap_or_default(),
                     None => return Ok(()),
                 },
@@ -7256,7 +7069,7 @@ impl Engine {
         // Parse HTML
         let html = match (error_page, response) {
             (Some(body), _) => body,
-            (None, Some(response)) => match watch.unless_cancelled(await_with_chrome_ui(response.text())).await {
+            (None, Some(response)) => match watch.unless_cancelled(response.text()).await {
                 None => {
                     debug!(?id, %url, "Navigation cancelled while its body was read");
                     return Ok(());
@@ -13770,6 +13583,14 @@ impl Engine {
                     NavCanceller::new(view.control.clone(), view.nav_signal.clone())
                         .cancel_nav(view.nav_id);
                 }
+                // A yielded load parked on this view: its queued scripts are
+                // dropped and `load` never fires (#727 R1 H2).
+                if let Some(nav_id) = view.load_tail.take() {
+                    if view.nav_id == nav_id {
+                        view.live_inserted.abandon();
+                    }
+                    view.control.end_load(nav_id);
+                }
                 // Decodes out for this document are dropped either way (D1).
                 view.decode_epoch = view.decode_epoch.wrapping_add(1);
                 self.image_manager.begin_navigation(id.0, view.decode_epoch);
@@ -13814,6 +13635,13 @@ impl Engine {
             view.control.clone(),
             view.nav_signal.clone(),
         ))
+    }
+
+    /// Whether a yielded load is parked on the view: it has returned to
+    /// the event loop, and a live turn will fire its `load`. A Stop then
+    /// goes to [`Engine::stop`].
+    pub fn load_tail_open(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.load_tail.is_some())
     }
 
     /// The view's newest navigation id; 0 before its first navigation.
@@ -32472,7 +32300,8 @@ window.addEventListener('load', function () {
                 .execute_script(view, "slow === true && ranAfter === true")
                 .unwrap(),
             "Boolean(true)"
-        );    }
+        );
+    }
 
     /// `document.currentScript` is the classic <script> element while it
     /// runs and null otherwise. x.com ends inline scripts with

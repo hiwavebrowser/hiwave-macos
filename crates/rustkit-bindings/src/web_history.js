@@ -52,6 +52,13 @@
         replacing = true;
         try { loc.href = String(url); } finally { replacing = false; }
     };
+    // Location's stringifier (HTML §7.2.4): `String(location)` and
+    // `new URL(path, location)` read its URL. Without it the object read as
+    // `[object Location]` and squarespace's app threw Invalid URL.
+    Object.defineProperty(loc, 'toString', {
+        value: function toString() { return loc.href; },
+        writable: false, enumerable: true, configurable: false
+    });
     // `<meta http-equiv=refresh>` (HTML §4.2.5.3, "shared declarative
     // refresh steps"): once the document has loaded, the first one that
     // parses asks for its URL (or this document again) after its seconds.

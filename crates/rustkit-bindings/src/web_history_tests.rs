@@ -332,3 +332,27 @@ fn a_script_click_on_a_fragment_link_stays_in_the_document() {
         "https://site.test/dir/index.html?a=1#sec #sec 2"
     );
 }
+
+// squarespace's homepage bundle, 2026-10-20: `new URL(path, location)` threw
+// "Invalid URL" and its app root unmounted, leaving the page white. Location's
+// stringifier (HTML §7.2.4, `stringifier attribute href`) makes the object
+// read as its URL wherever a string is wanted.
+#[test]
+fn location_reads_as_its_href_wherever_a_string_is_wanted() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "[String(location), '' + location, `${location}`, new URL('/p?q', location).href, \
+             new URL('x', window.location).href, location.toString(), typeof location.toString].join(' ')"
+        ),
+        "https://site.test/dir/index.html?a=1#top https://site.test/dir/index.html?a=1#top \
+         https://site.test/dir/index.html?a=1#top https://site.test/p?q https://site.test/dir/x \
+         https://site.test/dir/index.html?a=1#top function"
+    );
+    // It follows the URL as it changes.
+    assert_eq!(
+        ev(&b, "history.pushState(null, '', '/moved#m'); String(location) + ' ' + new URL('n', location).href"),
+        "https://site.test/moved#m https://site.test/n"
+    );
+}
