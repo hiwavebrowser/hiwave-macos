@@ -5276,13 +5276,23 @@ impl Engine {
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
         let base_url = base.clone();
         use futures::FutureExt;
+        // Parser scripts are fetched at most this many at a time, modules
+        // and classic scripts together. Classic fetches do not go through
+        // the policy's slots, and until #733's R1 every one on the page
+        // started at once beside the stylesheets (microsoft's six sheets
+        // then timed out inside the subresource budget). The old fetch
+        // capped them with `.buffered(8)`.
+        const PARSER_SCRIPT_FETCHES: usize = 8;
+        let fetch_slots = Arc::new(tokio::sync::Semaphore::new(PARSER_SCRIPT_FETCHES));
 
         let fetch_module = |url: Url, label: String| {
             let policy = policy.clone();
             let loader = loader.clone();
             let base_url = base_url.clone();
             let inspector = inspector.clone();
+            let fetch_slots = fetch_slots.clone();
             async move {
+                let _slot = fetch_slots.acquire_owned().await;
                 let result = match &policy {
                     None => Err((
                         label.clone(),
@@ -5333,7 +5343,10 @@ impl Engine {
             let loader = loader.clone();
             let referrer = referrer.clone();
             let inspector = inspector.clone();
+            let fetch_slots = fetch_slots.clone();
             async move {
+                // Held until the body is read.
+                let _slot = fetch_slots.acquire_owned().await;
                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                 let guard = inspector
                     .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
