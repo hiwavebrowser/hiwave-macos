@@ -1054,7 +1054,14 @@ pub fn recursion_depth_log() -> String {
     )
 }
 
-/// Start a thread that will run page script.
+/// Native stack for a thread that runs page script: 16MB.
+///
+/// Set on the thread itself so a shipped binary does not depend on
+/// `RUST_MIN_STACK` from the cargo config.
+pub const SCRIPT_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Start a thread that will run page script, with
+/// [`SCRIPT_THREAD_STACK_SIZE`] of stack.
 ///
 /// Boa re-enters the VM on the native stack for every host callback (a
 /// setter, a getter, `call` from a native), so a deep chain of those needs
@@ -1064,7 +1071,10 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    std::thread::Builder::new().name(name.into()).spawn(f)
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(SCRIPT_THREAD_STACK_SIZE)
+        .spawn(f)
 }
 
 #[cfg(test)]
