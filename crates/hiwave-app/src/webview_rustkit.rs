@@ -68,6 +68,9 @@ pub struct RustKitView {
     /// The page clock: the instant the live loop has run the page's timers
     /// up to. Reset when a page finishes loading.
     live_clock: Cell<Instant>,
+    /// The earliest the next live turn may start: the last one's end plus as
+    /// long as it took, so the window gets its turn in between.
+    next_turn_at: Cell<Option<Instant>>,
     /// Runtime the live loop's network turns block on. `None` if it could
     /// not be built: the page then gets no timers or late fetches, as before.
     live_runtime: Option<tokio::runtime::Runtime>,
@@ -242,6 +245,7 @@ impl RustKitView {
             history_index: RefCell::new(0),
             replace_next: Cell::new(false),
             live_clock: Cell::new(Instant::now()),
+            next_turn_at: Cell::new(None),
             live_runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -267,6 +271,12 @@ impl RustKitView {
         let view_id = self.view_id?;
         let runtime = self.live_runtime.as_ref()?;
         let started = Instant::now();
+        // Too soon after the last turn: the event loop asks for one before
+        // and one after the input of each wake, and until #727's second
+        // hold both ran, back to back, with no window turn between them.
+        if let Some(at) = self.next_turn_at.get().filter(|at| *at > started) {
+            return Some(at - started);
+        }
         // Whole milliseconds only; the remainder stays on the clock for the
         // next turn, so frequent turns do not slow the page's time.
         let elapsed_ms = started.duration_since(self.live_clock.get()).as_millis() as u64;
@@ -278,6 +288,8 @@ impl RustKitView {
         if turn.timers_ran > 0 || turn.requests > 0 {
             debug!(?turn, "Live turn");
         }
+        let took = started.elapsed();
+        self.next_turn_at.set(Some(Instant::now() + took));
         // A page that keeps the loop busy gets at most half of it: the next
         // turn waits at least as long as this one took.
         let timer = turn.next_timer_ms.map(Duration::from_millis);
