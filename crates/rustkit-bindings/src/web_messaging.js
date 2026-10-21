@@ -21,7 +21,10 @@
 (function (g) {
     var Event = g.Event, EventTarget = g.EventTarget;
     if (typeof Event !== 'function' || typeof EventTarget !== 'function') return;
-    var post = g.setTimeout, cancel = g.clearTimeout;
+    // The timer queue's unclamped entry: a message is a task, not a nested
+    // timeout, so the 4 ms nesting clamp does not slow a port loop.
+    var post = g.__rustkit_post_task || g.setTimeout, cancel = g.clearTimeout;
+    delete g.__rustkit_post_task;
 
     function hide(obj, name, value) {
         Object.defineProperty(obj, name, { value: value, writable: true, configurable: true, enumerable: false });

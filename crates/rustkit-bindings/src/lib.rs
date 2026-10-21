@@ -424,6 +424,11 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(document);
 
     var now = 0, nextId = 1, timers = [];
+    // The timer nesting level (HTML §8.6): that of the timer task running,
+    // 0 outside one. A timeout set above level 5 waits at least 4 ms.
+    var nesting = 0;
+    // Wall time for the live turn's slice, taken before page script runs.
+    var wall = Date.now;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
@@ -434,12 +439,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         });
     };
 
-    function schedule(cb, ms, args, repeat, frame) {
+    // `task`: a posted message, a task of its own and not a nested timeout,
+    // so it is not clamped (web_messaging.js).
+    function schedule(cb, ms, args, repeat, frame, task) {
         var delay = Number(ms) || 0;
         if (delay < 0) delay = 0;
+        var timer = !frame && !task;
+        if (timer && nesting > 5 && delay < 4) delay = 4;
         var id = nextId++;
         timers.push({ id: id, seq: id, due: now + delay, cb: cb, args: args,
-                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame });
+                      every: repeat ? Math.max(delay, 1) : 0, frame: !!frame,
+                      nest: timer ? nesting + 1 : 0 });
         return id;
     }
     function clearTimer(id) {
@@ -453,6 +463,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.setInterval = function (cb, ms) {
         return schedule(cb, ms, Array.prototype.slice.call(arguments, 2), true);
     };
+    window.__rustkit_post_task = function (cb, ms) {
+        return schedule(cb, ms, [], false, false, true);
+    };
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
@@ -464,19 +477,29 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         Promise.resolve().then(function () { try { cb(); } catch (e) { report(e); } });
     };
 
-    function call(timer) {
+    function call(timer, level) {
+        var outer = nesting;
+        nesting = level === undefined ? timer.nest : level;
         try {
             if (typeof timer.cb === 'function') timer.cb.apply(window, timer.args);
             else (0, eval)(String(timer.cb));
         } catch (e) { report(e); }
+        nesting = outer;
     }
     // Run due timers in (due, scheduling) order until the virtual clock
     // would pass `horizon` ms or `max` callbacks have run. The load's clock
     // has no frames, so an animation frame there is a 16 ms timer; the live
-    // loop keeps them for its one round a turn (`timersOnly`).
-    function runTimers(horizon, max, timersOnly) {
-        var ran = 0;
+    // loop keeps them for its one round a turn (`timersOnly`). With a
+    // `slice`, it also stops once the callbacks have run that many ms of
+    // wall time (after one at least) and sets `sliced`: each timer is a
+    // task of its own, and the window gets its input and frame between
+    // two slices.
+    var sliced = false;
+    function runTimers(horizon, max, timersOnly, slice) {
+        var ran = 0, started = slice > 0 ? wall() : 0;
+        sliced = false;
         while (ran < max) {
+            if (ran > 0 && slice > 0 && wall() - started >= slice) { sliced = true; break; }
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
                 var t = timers[i];
@@ -485,12 +508,17 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
             if (best < 0 || timers[best].due > horizon) break;
-            var timer = timers[best];
+            var timer = timers[best], level = timer.nest;
             now = timer.due;
-            if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
+            if (timer.every) {
+                // A repeat is set from inside the task that just ran.
+                if (timer.nest > 5 && timer.every < 4) timer.every = 4;
+                timer.due += timer.every; timer.seq = nextId++;
+                if (timer.nest) timer.nest++;
+            }
             else timers.splice(best, 1);
             ran++;
-            call(timer);
+            call(timer, level);
         }
         return ran;
     }
@@ -507,10 +535,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // animation frame callbacks that are due run once, at the turn's time.
     // One asked for during the round is due a frame later. (As 16 ms timers
     // a turn of 3 s ran 187 of them back to back.)
-    window.__rustkit_advance_timers = function (delta, max) {
+    window.__rustkit_advance_timers = function (delta, max, slice) {
         var target = now + delta;
-        var ran = runTimers(target, max, true);
-        if (ran >= max) return ran;
+        var ran = runTimers(target, max, true, slice || 0);
+        if (ran >= max || sliced) return ran;
         if (now < target) now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
@@ -1839,9 +1867,18 @@ impl DomBindings {
     /// time) and run the timers that came due, at most `max_callbacks` of
     /// them. Returns how many ran.
     pub fn advance_timers(&self, delta_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
+        self.advance_timers_for(delta_ms, max_callbacks, 0)
+    }
+
+    /// [`Self::advance_timers`], stopping once the callbacks have run for
+    /// `slice_ms` of wall time (0: no limit). At least one due callback
+    /// runs. What is left stays due, in order, for the next call, and the
+    /// clock stays behind as it does at the cap, so the window thread gets
+    /// its input and its frame between two slices.
+    pub fn advance_timers_for(&self, delta_ms: u64, max_callbacks: u32, slice_ms: u64) -> Result<u32, BindingError> {
         let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers({}, {})",
-            delta_ms, max_callbacks
+            "window.__rustkit_advance_timers({}, {}, {})",
+            delta_ms, max_callbacks, slice_ms
         ))?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
@@ -2711,6 +2748,122 @@ mod tests {
         assert_eq!(bindings.next_timer_delay(), Some(10));
         assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// A page whose `setTimeout(0)` chain reschedules itself and does ~1 ms
+    /// of work a link held the live turn to the 1,000-callback cap (~3.9 s
+    /// a turn on a large portal site, 2026-10). A turn stops at its slice
+    /// and the chain goes on in the next.
+    #[test]
+    fn a_live_turn_stops_a_zero_delay_chain_at_its_time_slice() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var links = 0;
+                 function link() {
+                     links++;
+                     var t = Date.now(); while (Date.now() - t < 1) {}
+                     setTimeout(link, 0);
+                 }
+                 setTimeout(link, 0);",
+            )
+            .unwrap();
+        let links = || match bindings.evaluate("links").unwrap() {
+            JsValue::Number(n) => n as u32,
+            other => panic!("{other:?}"),
+        };
+        let mut total = 0;
+        for turn in 0..5 {
+            let started = std::time::Instant::now();
+            let ran = bindings.advance_timers_for(16, 1_000, 10).unwrap();
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_millis(50), "turn {turn} held {took:?} for {ran} callbacks");
+            assert!(ran >= 1, "turn {turn} made no progress");
+            total += ran;
+            assert_eq!(links(), total);
+        }
+        // Still owed: the chain has not ended.
+        assert!(bindings.next_timer_delay().is_some());
+    }
+
+    /// HTML §8.6 timer initialization steps 5 and 11: a timeout set while the
+    /// nesting level is above 5 waits at least 4 ms. The first five nested
+    /// `setTimeout(0)` are not clamped; the sixth fires 4 ms after its parent.
+    #[test]
+    fn a_sixth_nested_zero_timeout_is_clamped_to_4ms() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var depth = 0;
+                 function nest() { depth++; if (depth < 9) setTimeout(nest, 0); }
+                 setTimeout(nest, 0);",
+            )
+            .unwrap();
+        // The top-level timeout and five nested ones all run at 0.
+        assert_eq!(bindings.run_timers(3, 100).unwrap(), 6);
+        assert_eq!(eval_string(&bindings, "String(depth)"), "6");
+        // The sixth nested one is due 4 ms after its parent, and so is each
+        // one after it.
+        assert_eq!(bindings.next_timer_delay(), Some(4));
+        assert_eq!(bindings.run_timers(4, 100).unwrap(), 1);
+        assert_eq!(bindings.next_timer_delay(), Some(4));
+        assert_eq!(bindings.run_timers(11, 100).unwrap(), 1);
+        assert_eq!(bindings.run_timers(12, 100).unwrap(), 1);
+        assert_eq!(eval_string(&bindings, "String(depth)"), "9");
+        assert_eq!(bindings.next_timer_delay(), None);
+
+        // A repeating interval is clamped the same way. Set at 12, outside
+        // any timer: it runs at 12 and every 1 ms to its sixth run (17),
+        // then every 4 ms.
+        bindings.evaluate("var runs = 0; setInterval(function () { runs++; }, 0);").unwrap();
+        assert_eq!(bindings.run_timers(20, 100).unwrap(), 6);
+        assert_eq!(eval_string(&bindings, "String(runs)"), "6");
+        assert_eq!(bindings.next_timer_delay(), Some(4));
+    }
+
+    /// The clamp is for timers. A message is its own task, not a nested
+    /// timeout: a `MessageChannel` loop (React's scheduler) is not slowed.
+    #[test]
+    fn a_message_channel_loop_is_not_clamped() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var hops = 0, ch = new MessageChannel();
+                 ch.port1.onmessage = function () { if (++hops < 20) ch.port2.postMessage(0); };
+                 ch.port2.postMessage(0);",
+            )
+            .unwrap();
+        bindings.run_timers(0, 100).unwrap();
+        assert_eq!(eval_string(&bindings, "String(hops)"), "20");
+    }
+
+    /// A slice that ends early keeps due-then-insertion order: what is left
+    /// runs first in the next turn, ahead of anything set since.
+    #[test]
+    fn timers_left_by_a_slice_keep_their_order() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var order = [];
+                 function slow(name) {
+                     return function () { order.push(name); var t = Date.now(); while (Date.now() - t < 6) {} };
+                 }
+                 setTimeout(slow('a'), 0);
+                 setTimeout(slow('b'), 0);
+                 setTimeout(slow('c'), 5);
+                 setTimeout(slow('d'), 0);
+                 setTimeout(slow('e'), 5);",
+            )
+            .unwrap();
+        let first = bindings.advance_timers_for(10, 1_000, 10).unwrap();
+        assert!(first < 5, "the slice ended the turn early ({first} ran)");
+        // Due with `c` and `e` on the clock the slice left behind, and set
+        // after them.
+        bindings.evaluate("setTimeout(slow('f'), 5);").unwrap();
+        for _ in 0..10 {
+            bindings.advance_timers_for(10, 1_000, 10).unwrap();
+        }
+        assert_eq!(eval_string(&bindings, "order.join(',')"), "a,b,d,c,e,f");
     }
 
     /// Chromium 143, a `requestAnimationFrame` loop across a task that holds

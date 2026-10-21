@@ -1137,6 +1137,13 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 
+/// Wall time one turn of the live loop gives the page's timer callbacks
+/// before it leaves the rest for the next turn. The count cap alone let a
+/// self-rescheduling `setTimeout(0)` chain hold the window ~3.9 s a turn
+/// (1,000 callbacks of a few ms each, a large portal site, 2026-10); HTML
+/// runs each timer as its own task, with input and rendering between.
+const LIVE_TIMER_SLICE_MS: u64 = 10;
+
 /// Longest one turn of the live loop waits for the modules a dynamic
 /// `import()` asked for, which are still fetched inside the turn. The loop is
 /// the UI thread, so a module slower than this fails rather than hold the
@@ -3710,7 +3717,7 @@ impl Engine {
         // Timers first: what they ask of the network is answered this turn.
         let (timers, timer_stopped) = with_script_js(bindings, || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+                bindings.advance_timers_for(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS, LIVE_TIMER_SLICE_MS)
             }))
         });
         match timers {
@@ -27095,6 +27102,39 @@ mod node_identity_tests {
             engine.link_at_point(id, 5.0, 60.0).as_deref(),
             Some("https://example.com/late")
         );
+    }
+
+    /// A self-rescheduling `setTimeout(0)` chain of ~1 ms links held each
+    /// turn to the 1,000-callback cap (~3.9 s on a large portal site). A turn
+    /// now stops at its slice, and the chain goes on in the next.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "headless"))]
+    fn a_zero_delay_chain_yields_the_window_between_turns() {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let id = engine
+            .create_headless_view(Bounds::new(0, 0, 800, 600))
+            .expect("headless view");
+        engine
+            .load_html(id, r#"<html><body style="margin:0">chain</body></html>"#)
+            .expect("load_html");
+        js(
+            &mut engine,
+            id,
+            "window.links = 0; \
+             function link() { links++; var t = Date.now(); while (Date.now() - t < 1) {} setTimeout(link, 0); } \
+             setTimeout(link, 0);",
+        );
+        let mut total = 0;
+        for turn in 0..5 {
+            let started = std::time::Instant::now();
+            let out = pump(&mut engine, id, 16);
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_millis(50), "turn {turn} held {took:?} for {} callbacks", out.timers_ran);
+            assert!(out.timers_ran >= 1, "turn {turn} made no progress");
+            assert!(out.next_timer_ms.is_some(), "the chain is still owed");
+            total += out.timers_ran;
+        }
+        assert_eq!(js(&mut engine, id, "links"), format!("{:?}", rustkit_js::JsValue::Number(total as f64)));
     }
 
     #[test]

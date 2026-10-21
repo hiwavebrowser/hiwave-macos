@@ -357,13 +357,17 @@ fn idle_callbacks_run_after_the_tasks_due_now_with_a_deadline() {
     );
 }
 
+// The busy loop posts messages, as a scheduler does: a nested
+// `setTimeout(0)` chain is clamped to 4 ms from its sixth level, which is
+// idle time on this clock.
 #[test]
 fn the_idle_timeout_fires_when_the_loop_stays_busy() {
     let b = bound();
     b.evaluate(
-        "var log = [], n = 0; \
+        "var log = [], n = 0, ch = new MessageChannel(); \
          function busy() { var end = Date.now() + 3; while (Date.now() < end) {} \
-             log.push('busy' + n); if (++n < 10) setTimeout(busy, 0); } \
+             log.push('busy' + n); if (++n < 10) ch.port2.postMessage(0); } \
+         ch.port1.onmessage = busy; \
          setTimeout(busy, 0); \
          requestIdleCallback(function (d) { log.push('idle:' + d.didTimeout + ':' + d.timeRemaining()); }, { timeout: 1 }); \
          requestIdleCallback(function (d) { log.push('patient:' + d.didTimeout); });",
