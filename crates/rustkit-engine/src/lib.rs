@@ -284,6 +284,8 @@ pub mod inspector;
 mod inspector_glue;
 mod relayout_cause;
 mod restyle_invalidation;
+#[cfg(test)]
+mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
 mod wgate;
