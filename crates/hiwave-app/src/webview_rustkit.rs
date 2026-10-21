@@ -1092,6 +1092,64 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(!view.stop_load(), "nothing left to stop");
     }
 
+    /// #727 Atlas hold, item 2: a live turn is followed by a window turn.
+    /// The event loop asks for a turn twice per wake (before and after the
+    /// input it drains), so a page whose interval spins ran two turns back
+    /// to back and the window took no event between them.
+    #[test]
+    fn a_slow_live_turn_is_not_followed_at_once_by_another() {
+        let url = slow_server(Duration::ZERO, "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        while view.step_load() {}
+        view.execute_script_sync(
+            "window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 200) {} }, 100);",
+        );
+        std::thread::sleep(Duration::from_millis(105));
+        let first = Instant::now();
+        view.process_events();
+        assert!(first.elapsed() >= Duration::from_millis(200), "the interval did not run");
+        let runs = || view.execute_script_sync("String(window.n)").unwrap_or_default();
+        let after_first = runs();
+        // The first turn's 200 ms put the interval due again.
+        let second = Instant::now();
+        let wait = view.process_events();
+        let took = second.elapsed();
+        let after_second = runs();
+        assert_eq!(after_second, after_first, "two turns ran back to back");
+        assert!(took < Duration::from_millis(50), "the second call took {took:?}");
+        assert!(
+            wait.is_some_and(|w| w >= Duration::from_millis(100)),
+            "the loop was not told to give the window a turn first: {wait:?}"
+        );
+    }
+
+    /// #727 Atlas hold, item 3: a click that comes after a live turn the
+    /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
+    /// listener.
+    #[test]
+    fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
+        let url = slow_server(
+            Duration::ZERO,
+            "<body style='margin:0'><div style='width:300px;height:200px'></div></body>",
+        );
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        while view.step_load() {}
+        view.execute_script_sync(
+            "window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
+             setTimeout(function () { while (true) {} }, 1);",
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        let turn = Instant::now();
+        view.process_events();
+        assert!(turn.elapsed() >= Duration::from_secs(1), "the spin did not run");
+        view.mouse_down_at_point(10.0, 10.0);
+        let _ = view.click_at_point(10.0, 10.0);
+        let clicks = view.execute_script_sync("String(window.clicks)").unwrap_or_default();
+        assert!(clicks.contains('1'), "the click was lost: clicks = {clicks}");
+    }
+
     #[test]
     fn a_new_load_replaces_the_one_in_progress() {
         let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
