@@ -2071,6 +2071,61 @@ mod tests {
         assert!(submission.is_self_target());
     }
 
+    /// A protocol-relative action (`//host/path`) takes only its scheme
+    /// from the document (WHATWG URL): the Wikipedia portal's search form.
+    #[test]
+    fn test_form_submission_protocol_relative_action() {
+        let base = "https://www.wikipedia.org/";
+        let submit = |action: &str, method: FormMethod| {
+            let form = FormState::new();
+            form.set_action(action);
+            form.set_method(method);
+            form.create_submission(base, &[]).url
+        };
+        assert_eq!(
+            submit("//www.wikipedia.org/search-redirect.php", FormMethod::Post),
+            "https://www.wikipedia.org/search-redirect.php"
+        );
+        assert_eq!(submit("//example.test", FormMethod::Post), "https://example.test/");
+        assert_eq!(
+            submit("//example.test/path?q#f", FormMethod::Post),
+            "https://example.test/path?q#f"
+        );
+        assert_eq!(
+            form_with_entry("//www.wikipedia.org/search-redirect.php", base),
+            "https://www.wikipedia.org/search-redirect.php?search=rust"
+        );
+    }
+
+    /// The other relative forms resolve as the URL Standard says too.
+    #[test]
+    fn test_form_submission_relative_actions() {
+        let base = "https://example.com/dir/page?old#frag";
+        let submit = |action: &str| {
+            let form = FormState::new();
+            form.set_action(action);
+            form.set_method(FormMethod::Post);
+            form.create_submission(base, &[]).url
+        };
+        assert_eq!(submit("next"), "https://example.com/dir/next");
+        assert_eq!(submit("../up"), "https://example.com/up");
+        assert_eq!(submit("?q=1"), "https://example.com/dir/page?q=1");
+        assert_eq!(submit("http://other.test/x"), "http://other.test/x");
+        assert_eq!(submit(""), base);
+    }
+
+    /// A GET submission of one `search=rust` pair to `action`.
+    fn form_with_entry(action: &str, base: &str) -> String {
+        let form = FormState::new();
+        form.set_action(action);
+        form.set_method(FormMethod::Get);
+        let entries = vec![FormDataEntry {
+            name: "search".to_string(),
+            value: FormDataValue::String("rust".to_string()),
+        }];
+        form.create_submission(base, &entries).url
+    }
+
     #[test]
     fn test_extract_origin() {
         assert_eq!(

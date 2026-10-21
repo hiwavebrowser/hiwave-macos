@@ -372,6 +372,8 @@ mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
+mod form_action_url_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
