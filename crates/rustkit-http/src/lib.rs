@@ -2110,4 +2110,60 @@ mod governed_tests {
             "a second stylesheet must be a stream on the host connection, not a new socket"
         );
     }
+
+    /// A fetch that is not being polled (a parser image parked while a load
+    /// yields) still receives its body into the connection's flow-control
+    /// window. With h2's default 64 KB connection window, 200 KB of it left
+    /// unread stalls every other stream on the host until the client timeout:
+    /// the 12:15 head-of-line hang (Z lane, 2026-10-21).
+    #[tokio::test]
+    async fn an_unread_h2_body_does_not_stall_the_hosts_other_streams() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut connection = match h2::server::handshake(sock).await {
+                Ok(connection) => connection,
+                Err(_) => return,
+            };
+            while let Some(next) = connection.accept().await {
+                let (request, mut respond) = match next {
+                    Ok(parts) => parts,
+                    Err(_) => break,
+                };
+                let response = http::Response::builder().status(200).body(()).unwrap();
+                let Ok(mut body) = respond.send_response(response, false) else {
+                    break;
+                };
+                if request.uri().path() == "/big.png" {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        let _ = body.send_data(Bytes::from(vec![7u8; 200 * 1024]), true);
+                    });
+                } else {
+                    let _ = body.send_data(Bytes::from_static(b"ok"), true);
+                }
+            }
+        });
+
+        let client = client();
+        let big_url = format!("http://{addr}/big.png");
+        let big = client.request_h2_cleartext(&big_url);
+        tokio::pin!(big);
+        // Polled until it waits for its body, then parked: never polled again.
+        let parked = tokio::time::timeout(std::time::Duration::from_millis(150), &mut big).await;
+        assert!(parked.is_err(), "the big body is sent after 300 ms");
+        // The big body arrives meanwhile, into the parked stream.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let small = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request_h2_cleartext(&format!("http://{addr}/small.js")),
+        )
+        .await;
+        let small = small.expect("a parked stream's unread body stalled the host's other streams");
+        assert_eq!(small.unwrap().body.as_ref(), b"ok");
+    }
 }
