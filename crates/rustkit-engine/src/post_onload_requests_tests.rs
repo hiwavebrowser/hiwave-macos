@@ -13,14 +13,14 @@ use crate::script_net_tests::serve_routes;
 use std::time::{Duration, Instant};
 
 /// The load handler appends a pixel and sends a metrics `fetch`; the server
-/// answers each after 2 s (`/late*`).
+/// answers each after 2 s (`/beacon*`).
 const PINGS_AFTER_LOAD: &str = "<html><body><p id=p>listing</p><script>
 window.addEventListener('load', function () {
   window.loadFired = true;
   var img = document.createElement('img');
-  img.src = '/late-pixel.gif';
+  img.src = '/beacon-pixel.gif';
   document.body.appendChild(img);
-  fetch('/late-metrics').then(function (r) { return r.text(); }).then(function (t) {
+  fetch('/beacon-metrics').then(function (r) { return r.text(); }).then(function (t) {
     window.got = t;
     document.title = 'answered';
   });
@@ -151,7 +151,7 @@ fn requests_made_after_load_are_answered_on_later_short_turns() {
             .rt
             .block_on(loaded.engine.pump_live(loaded.view, elapsed_ms));
         longest = longest.max(turn_started.elapsed());
-        let answered = js(&mut loaded, "window.got === '/late-metrics'") == "Boolean(true)";
+        let answered = js(&mut loaded, "window.got === '/beacon-metrics'") == "Boolean(true)";
         if answered && turn.in_flight == 0 {
             break;
         }
@@ -195,7 +195,7 @@ fetch('/slow-early').then(function (r) { return r.text(); }).then(function (t) {
 #[test]
 fn without_the_switch_the_load_waits_as_before() {
     let mut loaded = load(EngineConfig::default(), PINGS_AFTER_LOAD);
-    assert_eq!(js(&mut loaded, "window.got"), r#"String("/late-metrics")"#);
+    assert_eq!(js(&mut loaded, "window.got"), r#"String("/beacon-metrics")"#);
     assert!(
         loaded.after_load_event >= Duration::from_secs(2),
         "{:?}",
