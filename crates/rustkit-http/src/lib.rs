@@ -26,6 +26,8 @@ use url::Url;
 
 mod addr;
 mod h2_pool;
+#[cfg(test)]
+mod h2_pool_tests;
 pub mod cookies;
 pub use cookies::{CookieJar, CookieSource};
 pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
@@ -704,6 +706,16 @@ impl Client {
     /// rather than a second TCP accept.
     #[cfg(test)]
     async fn request_h2_cleartext(&self, url: &str) -> Result<RawResponse, HttpError> {
+        self.request_h2c(Method::GET, url, None).await
+    }
+
+    #[cfg(test)]
+    async fn request_h2c(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<Bytes>,
+    ) -> Result<RawResponse, HttpError> {
         let url = Url::parse(url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
         let host = url
             .host_str()
@@ -711,19 +723,16 @@ impl Client {
         let port = url
             .port()
             .ok_or_else(|| HttpError::InvalidUrl("Missing port".to_string()))?;
+        let headers = HeaderMap::new();
         let slot = self.h2_pool.slot(self.h2_key(host, port)).await;
         let cached = slot.lock().await.as_ref().cloned();
         if let Some(send) = cached {
-            return self
-                .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-                .await;
+            return self.dispatch_h2(send, &method, &url, &headers, &body).await;
         }
         let mut guard = slot.lock().await;
         if let Some(send) = guard.as_ref().cloned() {
             drop(guard);
-            return self
-                .dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-                .await;
+            return self.dispatch_h2(send, &method, &url, &headers, &body).await;
         }
         let stream = self.connect(host, port).await?;
         let (send, connection) = h2::client::handshake(stream)
@@ -734,8 +743,7 @@ impl Client {
         });
         *guard = Some(send.clone());
         drop(guard);
-        self.dispatch_h2(send, &Method::GET, &url, &HeaderMap::new(), &None)
-            .await
+        self.dispatch_h2(send, &method, &url, &headers, &body).await
     }
 
     /// HTTP request.
