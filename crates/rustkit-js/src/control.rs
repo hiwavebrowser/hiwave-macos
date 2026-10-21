@@ -22,7 +22,7 @@
 //! never need to clear a turn-targeted word: every writer uses `fetch_max`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
