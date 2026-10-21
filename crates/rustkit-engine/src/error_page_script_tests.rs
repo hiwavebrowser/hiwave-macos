@@ -1679,6 +1679,53 @@ document.head.appendChild(s);
     );
 }
 
+/// Parser scripts are fetched at most eight at a time, as before the
+/// script plan, and the page's stylesheets still apply while twenty slow
+/// ones are out (#733 R1 H1: the plan started every script at once and
+/// microsoft's six sheets timed out inside the subresource budget).
+#[test]
+fn parser_script_fetches_are_capped_while_the_sheets_load() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    static MOST: AtomicUsize = AtomicUsize::new(0);
+    fn site(path: &str, _: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        if path.starts_with("/s") && path.ends_with(".js") {
+            let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+            MOST.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            return (200, "text/javascript", vec![], "window.ran = (window.ran || 0) + 1;".into());
+        }
+        if let Some(n) = path.strip_prefix("/c").and_then(|p| p.strip_suffix(".css")) {
+            return (200, "text/css", vec![], format!("#p{n} {{ width: 7{n}px; }}"));
+        }
+        let mut page = String::new();
+        for n in 1..=6 {
+            page.push_str(&format!("<link rel=stylesheet href=/c{n}.css>"));
+        }
+        for n in 1..=20 {
+            page.push_str(&format!("<script defer src=/s{n}.js></script>"));
+        }
+        for n in 1..=6 {
+            page.push_str(&format!("<div id=p{n}>x</div>"));
+        }
+        (200, "text/html", vec![], page)
+    }
+    let server = serve(site);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
+    assert_eq!(text(&mut engine, view, "String(window.ran)"), r#"String("20")"#);
+    let most = MOST.load(Ordering::SeqCst);
+    assert!(most <= 8, "{most} parser script fetches were out at once");
+    for n in 1..=6 {
+        assert_eq!(
+            text(&mut engine, view, &format!("getComputedStyle(document.getElementById('p{n}')).width")),
+            format!(r#"String("7{n}px")"#),
+            "sheet {n} did not apply"
+        );
+    }
+}
+
 /// Navigating away while the chain is still fetching drops it. `load` does
 /// not fire for the old document, and it does not fire an extra time on
 /// the next one. The late script does not run there.

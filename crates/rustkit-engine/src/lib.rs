@@ -5707,12 +5707,13 @@ impl Engine {
                     let external = script_external_label(node, base);
                     let label = external.clone().unwrap_or(reserved);
                     page_trace::remember_script_label(node_id, label.clone());
-                    let status = if label.starts_with("inline#") {
-                        None
+                    // An external body has not arrived yet: its status is
+                    // recorded when it does.
+                    if label.starts_with("inline#") {
+                        page_trace::note_parser_script(&label, None);
                     } else {
-                        Some(200)
-                    };
-                    page_trace::note_parser_script(&label, status);
+                        page_trace::note_parser_script_fetching(&label);
+                    }
                     if external.is_some() {
                         page_trace::note_inline_slot(&label, slot);
                     }
@@ -5775,13 +5776,23 @@ impl Engine {
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
         let base_url = base.clone();
         use futures::FutureExt;
+        // Parser scripts are fetched at most this many at a time, modules
+        // and classic scripts together. Classic fetches do not go through
+        // the policy's slots, and until #733's R1 every one on the page
+        // started at once beside the stylesheets (microsoft's six sheets
+        // then timed out inside the subresource budget). The old fetch
+        // capped them with `.buffered(8)`.
+        const PARSER_SCRIPT_FETCHES: usize = 8;
+        let fetch_slots = Arc::new(tokio::sync::Semaphore::new(PARSER_SCRIPT_FETCHES));
 
         let fetch_module = |url: Url, label: String| {
             let policy = policy.clone();
             let loader = loader.clone();
             let base_url = base_url.clone();
             let inspector = inspector.clone();
+            let fetch_slots = fetch_slots.clone();
             async move {
+                let _slot = fetch_slots.acquire_owned().await;
                 let result = match &policy {
                     None => Err((
                         label.clone(),
@@ -5832,7 +5843,10 @@ impl Engine {
             let loader = loader.clone();
             let referrer = referrer.clone();
             let inspector = inspector.clone();
+            let fetch_slots = fetch_slots.clone();
             async move {
+                // Held until the body is read.
+                let _slot = fetch_slots.acquire_owned().await;
                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
                 let guard = inspector
                     .begin_request(&url, "GET", ResourceType::Script, Some("parser"))
@@ -6267,15 +6281,21 @@ impl Engine {
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
         // Every parser script is in the trace even when this loop returns
-        // before it runs. `fetched_scripts` then says why.
+        // before it runs. `fetched_scripts` then says why. Only a body that
+        // has arrived is recorded as a 200; one still in flight is recorded
+        // when the runner takes it.
         for slot in &plan.slots {
             if slot.timing.is_none() {
                 continue;
             }
-            if slot.label.starts_with("inline#") {
-                page_trace::note_parser_script(&slot.label, None);
-            } else {
-                page_trace::note_parser_script(&slot.label, Some(200));
+            match &slot.body {
+                SlotBody::Inline(_) => page_trace::note_parser_script(&slot.label, None),
+                SlotBody::Ready(Ok(_)) if slot.label.starts_with("inline#") => {
+                    page_trace::note_parser_script(&slot.label, None)
+                }
+                SlotBody::Ready(Ok(_)) => page_trace::note_parser_script(&slot.label, Some(200)),
+                SlotBody::Ready(Err(outcome)) => page_trace::note_observed(&slot.label, outcome),
+                SlotBody::Pending(_) => page_trace::note_parser_script_fetching(&slot.label),
             }
         }
         // `$slots` is one HTML list. Called for the parser-blocking and
@@ -6311,8 +6331,8 @@ impl Engine {
             let text = match source {
                 Ok(text) => text,
                 Err(outcome) => {
-                    // A module script that could not be fetched: logged, and
-                    // its element hears `error`.
+                    // A classic or module script that could not be fetched:
+                    // logged, and its element hears `error`.
                     let record = ScriptRecord {
                         source: label,
                         bytes: 0,
@@ -14847,6 +14867,7 @@ impl Engine {
     /// When a subresource phase starting now must be done by
     /// (`subresource_budget_ms`).
     fn subresource_deadline(&self) -> tokio::time::Instant {
+        load_phase("subresource budget");
         tokio::time::Instant::now() + std::time::Duration::from_millis(self.config.subresource_budget_ms)
     }
 
@@ -32385,14 +32406,40 @@ document.currentScript.remove();
             ("/", "text/html", page.to_string()),
             ("/fast.css", "text/css", "body { color: blue }".into()),
         ]);
+        let budget = std::time::Duration::from_millis(500);
         let config = EngineConfig {
-            subresource_budget_ms: 500,
+            subresource_budget_ms: budget.as_millis() as u64,
             ..EngineConfig::default()
         };
+        // Timed from the first subresource budget to the end of the load, so
+        // the debug build's DOM and binding setup (about 1.4 s on macOS) is
+        // not in the bound. Each phase starts its own budget, one after the
+        // other: the sheets, the web fonts (none here, so no wait), the
+        // images, then the SVG images. A stalled image and a stalled SVG
+        // therefore cost two budgets, not one.
+        let budgets: std::rc::Rc<std::cell::RefCell<Vec<std::time::Instant>>> = Default::default();
+        let marks = budgets.clone();
+        crate::nav_cancel::LOAD_PHASE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |phase: &str| {
+                if phase == "subresource budget" {
+                    marks.borrow_mut().push(std::time::Instant::now());
+                }
+            }))
+        });
         let (engine, view, took) = load_timed(config, port);
+        let ended = std::time::Instant::now();
+        crate::nav_cancel::LOAD_PHASE_HOOK.with(|hook| *hook.borrow_mut() = None);
+        let budgets = budgets.borrow();
+        let first = *budgets.first().expect("the load started no subresource budget");
+        let starts: Vec<_> = budgets.iter().map(|at| *at - first).collect();
+        let subresources = ended - first;
+        // Three budgets that wait (sheets, images, SVG), plus one allowance
+        // for the relayouts between and after them on a loaded machine.
+        let bound = budget * 3 + std::time::Duration::from_millis(1_000);
         assert!(
-            took < std::time::Duration::from_millis(2_500),
-            "waited for the stalled subresources: {took:?}"
+            subresources < bound,
+            "waited for the stalled subresources: {subresources:?} from the first budget \
+             (bound {bound:?}; budgets started at {starts:?}; whole load {took:?})"
         );
         let sheets = &engine.views[&view].external_stylesheets;
         assert_eq!(sheets.len(), 1);
@@ -32412,8 +32459,8 @@ document.currentScript.remove();
             "the fast sheet must be the survivor, not the stalled red one: {sheets:#?}"
         );
 
-        // Image and SVG lanes share the same budget: a hung image must not
-        // keep the load open past the deadline, and must not land in cache.
+        // A hung image or SVG must not keep the load open past its budget,
+        // and must not land in cache.
         let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let slow_png = base.join("/slow.png").unwrap();
         let slow_svg = base.join("/slow.svg").unwrap();

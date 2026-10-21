@@ -539,6 +539,12 @@ pub(crate) fn note_parser_script(url: &str, status: Option<u16>) {
     remember(url, true, status, false, false, None);
 }
 
+/// A parser script whose fetch is still in flight. It is in the trace, but
+/// not as fetched: the runner records its status if it takes the body.
+pub(crate) fn note_parser_script_fetching(url: &str) {
+    remember(url, false, None, false, false, None);
+}
+
 /// Record a script that already failed, without emitting an `execute` event.
 /// The runner calls [`note_record`] again if it reaches the script.
 pub(crate) fn note_observed(url: &str, outcome: &ScriptOutcome) {

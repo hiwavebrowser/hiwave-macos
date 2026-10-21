@@ -480,6 +480,49 @@ document.getElementById('p').setAttribute('data-step', 'loaded'); });</script>\
     assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
 }
 
+/// A parser script still fetching when the load is cancelled is in the
+/// trace, but not as a fetched 200: its body never arrived (#733 R1 N1).
+#[test]
+fn a_parser_script_still_fetching_at_a_cancel_is_not_traced_as_fetched() {
+    let trace_path = std::env::temp_dir().join(format!(
+        "hiwave-cancel-held-script-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let trace = page_trace::force_file_for_test(&trace_path);
+    let page = "<html><head><script defer src=/held/late.js></script></head>\
+<body><p>held</p><script>document.title = 'first';</script></body></html>";
+    let server = serve(vec![("/", page.to_string())]);
+    let (mut engine, view) = engine_and_view();
+    let rt = runtime();
+    let canceller = engine.nav_canceller(view).unwrap();
+    let hook = PhaseHook::set(move |phase| {
+        if phase == "script:0" {
+            assert!(canceller.cancel_current());
+        }
+    });
+    rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
+    drop(hook);
+    drop(trace);
+    assert_eq!(server.held_answered.load(Ordering::SeqCst), 0);
+
+    let body = std::fs::read_to_string(&trace_path).expect("trace");
+    let _ = std::fs::remove_file(&trace_path);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let fetched = value["fetched_scripts"].as_array().unwrap();
+    let late = server.url("/held/late.js").to_string();
+    let held = fetched
+        .iter()
+        .find(|item| item["url"] == late.as_str())
+        .unwrap_or_else(|| panic!("the held script is missing from the trace: {fetched:?}"));
+    assert!(held.get("status").is_none(), "{held}");
+    assert_eq!(held["fetched"], false, "{held}");
+    assert_eq!(held["executed"], false, "{held}");
+}
+
 /// Turn the live loop a while, as the app does after a load.
 fn turn_live(engine: &mut Engine, view: EngineViewId, rt: &tokio::runtime::Runtime) {
     for _ in 0..20 {
