@@ -19,8 +19,8 @@ pub(crate) struct Server {
     pub(crate) hits: Arc<AtomicUsize>,
 }
 
-/// `/echo` answers with the request body, `/slow*` after 300 ms, anything
-/// else with its own path as the body.
+/// `/echo` answers with the request body, `/slow*` after 300 ms, `/late*`
+/// after 2 s, anything else with its own path as the body.
 fn serve() -> Server {
     serve_routes(Vec::new())
 }
@@ -91,6 +91,9 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 } else {
                     if path.starts_with("/slow") {
                         std::thread::sleep(Duration::from_millis(300));
+                    }
+                    if path.starts_with("/late") {
+                        std::thread::sleep(Duration::from_secs(2));
                     }
                     path.clone().into_bytes()
                 };

@@ -372,6 +372,8 @@ mod script_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
+mod post_onload_requests_tests;
+#[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
@@ -1055,6 +1057,15 @@ pub struct EngineConfig {
     /// those scripts added: nobody will see that page. Off by default: a
     /// capture never follows the page, and shows it as it was.
     pub follows_script_navigation: bool,
+    /// What the page asks of the network once its `load` event has fired
+    /// (a load handler's `fetch`, an XHR, an `<img>` a beacon appends, and
+    /// the same from the load's timers) is left to the live loop
+    /// ([`Engine::pump_live`]): the load neither waits for it nor delays
+    /// `PageLoaded`. What was asked before `load` keeps the load waiting,
+    /// as it does today. The live app turns it on: those requests are
+    /// tracking pings that may never stop. Off by default: a capture shows
+    /// the page once what it asked for has arrived.
+    pub post_load_requests_live: bool,
     /// Whether views keep an Inspector buffer, and how URLs in its events
     /// are shown (see `inspector`). Off by default; a sink attached with
     /// [`Engine::add_inspector_sink`] turns recording on for its view.
@@ -1079,6 +1090,7 @@ impl Default for EngineConfig {
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
+            post_load_requests_live: false,
             inspector: InspectorConfig::default(),
         }
     }
@@ -16308,6 +16320,13 @@ impl EngineBuilder {
     /// (`EngineConfig::follows_script_navigation`).
     pub fn follows_script_navigation(mut self, follows: bool) -> Self {
         self.config.follows_script_navigation = follows;
+        self
+    }
+
+    /// Requests made after the `load` event go to the live loop
+    /// (`EngineConfig::post_load_requests_live`).
+    pub fn post_load_requests_live(mut self, live: bool) -> Self {
+        self.config.post_load_requests_live = live;
         self
     }
 
