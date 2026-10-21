@@ -58,6 +58,27 @@ mod webview_rustkit;
 mod shield_adapter;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+mod devtools_panel;
+
+/// Run `$body` with the RustKit content view bound to `$view` and give
+/// `true`; give `false` for WebKit content, whose Inspector is the injected
+/// script (`ui/inspector_inject.js`).
+macro_rules! with_rustkit_content {
+    ($content:expr, $view:ident => $body:expr) => {{
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        let handled = match *$content {
+            UnifiedContentWebView::RustKit(ref $view) => {
+                $body;
+                true
+            }
+            _ => false,
+        };
+        #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
+        let handled = false;
+        handled
+    }};
+}
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
@@ -285,6 +306,12 @@ enum UserEvent {
     InspectorStopPicker,
     InspectorScrollToElement { path: String },
     InspectElement { path: String },
+    /// The panel asks for the DOM tree again.
+    InspectorRefreshTree,
+    /// The panel selected a node (a tree row, a breadcrumb).
+    InspectorSelect { path: String },
+    /// The panel expanded a node whose children the tree left out.
+    InspectorExpand { path: String },
     // Console events
     InspectorConsoleMessage(String),
     InspectorConsoleClear,
@@ -1019,6 +1046,9 @@ fn main() {
                         let response = ipc::commands::handle_message(&chrome_state, msg);
                         info!("Toggle focus mode response: {:?}", response);
                         let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
+                    }
+                    IpcMessage::ToggleInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
                     }
                     IpcMessage::GetFocusModeStatus => {
                         let response = ipc::commands::handle_message(&chrome_state, msg);
@@ -1757,36 +1787,14 @@ fn main() {
                         IpcMessage::CloseInspector => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
                         }
-                        IpcMessage::InspectorGetDomTree => {
-                            // This will be handled by evaluating script on content webview
-                            // and sending result back to inspector
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            // Send event to evaluate on content
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
+                        IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
                         }
-                        IpcMessage::InspectorGetElementStyles { path } => {
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("'", "\\'").replace("\\", "\\\\"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
+                        IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
+                        }
+                        IpcMessage::InspectorExpandNode { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
                         }
                         IpcMessage::InspectorHighlightElement { path } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
@@ -1805,36 +1813,6 @@ fn main() {
                         }
                         IpcMessage::InspectorConsoleEval { code } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
-                        }
-                        IpcMessage::InspectorRefresh => {
-                            // Refresh DOM tree by evaluating script on content
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
-                        }
-                        IpcMessage::InspectorSelectElement { path } => {
-                            // Get styles for the selected element
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("\\", "\\\\").replace("'", "\\'"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
                         }
                         IpcMessage::InspectorClose => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
@@ -2027,6 +2005,10 @@ fn main() {
     // When the content page's next timer is due. The loop sleeps until
     // input otherwise, and a sleeping loop runs no timers.
     let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    // The Inspector's native path for RustKit content: picking, the
+    // selection and the console's place.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let mut devtools = devtools_panel::Devtools::default();
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2352,6 +2334,24 @@ fn main() {
                             // every script-driven control was dead (Z lane I0).
                             // Where the pointer is, and when it goes: what a
                             // hover menu or a drag listens for.
+                            // The Inspector's select-element mode takes the
+                            // pointer instead: hover outlines, release picks.
+                            if devtools.picking() {
+                                let at = (click.x as f32, click.y as f32);
+                                match click.input {
+                                    rustkit_viewhost::PointerInput::Move => {
+                                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                                    }
+                                    rustkit_viewhost::PointerInput::Leave => {
+                                        devtools.pick_hover(view, &inspector_for_events, None)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button if !click.down => {
+                                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button => {}
+                                }
+                                continue;
+                            }
                             match click.input {
                                 rustkit_viewhost::PointerInput::Move => {
                                     view.mouse_move_at_point(click.x as f32, click.y as f32);
@@ -2405,6 +2405,13 @@ fn main() {
                             rustkit_viewhost::InputKind::Key(key) => {
                             if key.cmd {
                                 continue; // menu shortcuts are not text
+                            }
+                            // Esc leaves select-element mode; the page does not hear it.
+                            if devtools.picking() && key.mac_keycode == 53 {
+                                if !key.up {
+                                    devtools.stop_picker(view, &inspector_for_events);
+                                }
+                                continue;
                             }
                             // macOS keyCodes -> the Win32 VK numbering the edit
                             // model speaks. Text keys carry their characters.
@@ -2474,6 +2481,8 @@ fn main() {
                             info!(%url, "Script navigation");
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
+                        // The page's console lines, and a new tree after it changed.
+                        devtools.poll_console(view, &inspector_for_events);
                         view.render();
                     }
                 }
@@ -4406,6 +4415,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.open(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Inject inspector script into content webview if not already injected
                         let inject_script = format!(
                             "if (!window.__hiwaveInspector) {{ {} }}",
@@ -4445,6 +4457,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.close(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Clear highlight in content
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
@@ -4490,6 +4505,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorHighlightElement { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, Some(&path))) {
+                            return;
+                        }
                         let script = format!(
                             "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
                             path.replace("'", "\\'")
@@ -4497,11 +4515,17 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorClearHighlight => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, None)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
                         );
                     }
                     UserEvent::InspectorStartPicker => {
+                        if with_rustkit_content!(content_for_events, _view => devtools.start_picker(&inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
@@ -4510,6 +4534,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorStopPicker => {
+                        if with_rustkit_content!(content_for_events, view => devtools.stop_picker(view, &inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
@@ -4523,6 +4550,44 @@ fn main() {
                             path.replace("'", "\\'")
                         );
                         let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorRefreshTree => {
+                        if with_rustkit_content!(content_for_events, view => devtools.send_tree(view, &inspector_for_events)) {
+                            return;
+                        }
+                        let _ = content_for_events.evaluate_script(r#"
+                            (function() {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({
+                                        cmd: 'inspector_dom_tree_result',
+                                        tree: tree
+                                    }));
+                                }
+                            })();
+                        "#);
+                    }
+                    UserEvent::InspectorSelect { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.select(view, &inspector_for_events, &path)) {
+                            return;
+                        }
+                        let script = format!(r#"
+                            (function() {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_styles_result',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }})();
+                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorExpand { path } => {
+                        // The injected-script tree is sent whole; only
+                        // RustKit's is cut and expanded on demand.
+                        with_rustkit_content!(content_for_events, view => devtools.expand(view, &inspector_for_events, &path));
                     }
                     UserEvent::InspectElement { path } => {
                         // Open inspector and select the element
@@ -4559,6 +4624,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorConsoleEval { code } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.eval(view, &inspector_for_events, &code)) {
+                            return;
+                        }
                         // Execute JavaScript in content webview
                         let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
                         let script = format!(r#"

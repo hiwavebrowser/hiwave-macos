@@ -307,6 +307,14 @@ pub use inspector_page::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod inspector_page_tests;
+mod devtools;
+pub use devtools::{
+    devtools_console_entries, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
+    DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
+    DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
+};
+#[cfg(all(test, feature = "headless"))]
+mod devtools_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
@@ -784,6 +792,9 @@ struct ViewState {
     /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
     display_list: Option<Arc<DisplayList>>,
+    /// The element the developer tools outline on this page
+    /// (`Engine::devtools_highlight`), drawn over the display list.
+    devtools_highlight: Option<usize>,
     /// The earliest input the view took since its last commit
     /// (`Engine::note_input`); rides the next commit for the W-gate's
     /// input-to-present log, or is dropped when the input changed no frame.
@@ -2241,6 +2252,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -2329,6 +2341,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -2416,6 +2429,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -15616,7 +15630,11 @@ impl Engine {
             let commit = FrameCommit {
                 generation: view.frame_generation,
                 nav_generation: view.nav_id,
-                list: view.display_list.clone(),
+                list: devtools::with_highlight(
+                    view.display_list.clone(),
+                    view.layout.as_deref(),
+                    view.devtools_highlight,
+                ),
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),

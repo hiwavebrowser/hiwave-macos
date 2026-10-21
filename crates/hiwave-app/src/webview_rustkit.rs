@@ -758,6 +758,51 @@ impl RustKitView {
             None
         }
     }
+
+    // The developer tools (`devtools_panel`): on-demand, bounded queries of
+    // the view's last committed DOM and layout. Each answers nothing while
+    // a load holds the engine.
+
+    pub fn devtools_attach(&self, on: bool) {
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return };
+        if let Some(view_id) = self.view_id {
+            let _ = engine.devtools_attach(view_id, on);
+        }
+    }
+
+    pub fn devtools_node_at(&self, x: f32, y: f32) -> Option<usize> {
+        let engine = self.engine.try_borrow().ok()?;
+        engine.devtools_node_at(self.view_id?, x, y).ok().flatten()
+    }
+
+    pub fn devtools_highlight(&self, node: Option<usize>) {
+        let Ok(mut engine) = self.engine.try_borrow_mut() else { return };
+        if let Some(view_id) = self.view_id {
+            let _ = engine.devtools_highlight(view_id, node);
+        }
+    }
+
+    pub fn devtools_dom_tree(&self, root: Option<usize>, reveal: Option<usize>) -> Option<rustkit_engine::DevtoolsNode> {
+        let engine = self.engine.try_borrow().ok()?;
+        engine.devtools_dom_tree(self.view_id?, root, reveal).ok().flatten()
+    }
+
+    pub fn devtools_element(&self, node: usize) -> Option<rustkit_engine::DevtoolsElement> {
+        let engine = self.engine.try_borrow().ok()?;
+        engine.devtools_element(self.view_id?, node).ok().flatten()
+    }
+
+    pub fn devtools_console(&self, since: u64) -> Option<rustkit_engine::DevtoolsConsole> {
+        let engine = self.engine.try_borrow().ok()?;
+        engine.devtools_console(self.view_id?, since).ok()
+    }
+
+    /// Run the console's `code` in the page: the value, or the error.
+    pub fn devtools_eval(&self, code: &str) -> Result<String, String> {
+        let mut engine = self.engine.try_borrow_mut().map_err(|_| "the page is loading".to_string())?;
+        let view_id = self.view_id.ok_or_else(|| "no page".to_string())?;
+        engine.execute_script(view_id, code).map_err(|e| e.to_string())
+    }
 }
 
 impl Drop for RustKitView {
