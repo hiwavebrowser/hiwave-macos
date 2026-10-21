@@ -283,6 +283,9 @@ use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
 mod relayout_cause;
+mod restyle_invalidation;
+#[cfg(test)]
+mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
 mod wgate;
@@ -856,6 +859,12 @@ struct ViewState {
     /// which elements a `:hover` or `:active` rule can match, so which
     /// changes of the two chains are a restyle.
     rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
+    /// What the script writes flushed for the next relayout could restyle
+    /// (incremental-restyle PR 1: logged, not acted on). Taken by
+    /// `relayout`, which keeps it in `last_dirty`.
+    pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// The set the last relayout logged.
+    last_dirty: Option<restyle_invalidation::DirtySet>,
     /// Whether `html` had a non-visible `overflow` at the last build. The
     /// viewport then takes html's, and a body with its own is a scroller
     /// that clips what it holds (see `scrollable_bottom`).
@@ -929,6 +938,16 @@ struct ViewState {
 }
 
 impl ViewState {
+    /// What `log`'s writes could restyle, against the rule index this view
+    /// was last built with (see `restyle_invalidation`).
+    fn dirty_set(&self, log: &rustkit_bindings::MutationLog) -> restyle_invalidation::DirtySet {
+        let Some(document) = self.document.as_deref() else {
+            return restyle_invalidation::DirtySet::full("no_document");
+        };
+        let index = self.rule_reads.borrow();
+        restyle_invalidation::DirtySet::compute(log, document, index.as_deref().map(|ix| &ix.reads.invalidation))
+    }
+
     /// Log the outgoing document's relayout totals and start counting
     /// afresh. Both load paths call this before they store the new URL.
     fn summarize_relayouts_for_navigation(&mut self) {
@@ -974,6 +993,8 @@ impl ViewState {
         self.hover_chain.clear();
         self.active_chain.clear();
         self.rule_reads.get_mut().take();
+        self.pending_dirty = None;
+        self.last_dirty = None;
         self.pointer_restyle = false;
         self.restyle_only = false;
         self.laid_with = None;
@@ -2271,6 +2292,8 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            pending_dirty: None,
+            last_dirty: None,
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
@@ -2359,6 +2382,8 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            pending_dirty: None,
+            last_dirty: None,
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
@@ -2446,6 +2471,8 @@ impl Engine {
             hover_chain: Vec::new(),
             active_chain: Vec::new(),
             rule_reads: std::cell::RefCell::new(None),
+            pending_dirty: None,
+            last_dirty: None,
             html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
@@ -5919,11 +5946,15 @@ impl Engine {
         let started = std::time::Instant::now();
 
         // A pending pointer restyle is covered by this build, whoever asked.
+        let mut pointer_restyle = None;
+        let mut dirty = None;
         let mut causes = match self.views.get_mut(&id) {
             Some(view) => {
                 view.restyle_only = restyle_repaint_enabled()
                     && view.pointer_restyle
                     && view.relayout_pending.is_empty();
+                pointer_restyle = view.pointer_restyle.then_some(view.restyle_only);
+                dirty = view.pending_dirty.take();
                 if view.pointer_restyle {
                     view.relayout_pending.note(RelayoutCause::HoverOrFocus);
                 }
@@ -5942,6 +5973,21 @@ impl Engine {
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
+        // What an incremental restyle would have done (PR 1: logged only).
+        let dirty = dirty.unwrap_or_else(|| restyle_invalidation::DirtySet::full("no_dom_record"));
+        let mut would = format!("dirty_nodes={} would_path={}", dirty.nodes.len(), dirty.would_path());
+        if let Some(reason) = dirty.full {
+            would.push_str(&format!(" full_reason={reason}"));
+        }
+        // Why a pending pointer restyle took the full path.
+        match pointer_restyle {
+            Some(true) if !layout_skipped => {
+                let why = LAST_RESTYLE_MISS.with(|why| why.borrow().clone());
+                would.push_str(&format!(" restyle_miss={why:?}"));
+            }
+            Some(false) => would.push_str(" restyle_miss=\"not tried\""),
+            _ => {}
+        }
         let cause = causes
             .first
             .as_ref()
@@ -5949,16 +5995,18 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={} {}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
             took_ms,
             stages,
-            layout_skipped
+            layout_skipped,
+            would
         );
         if let Some(view) = self.views.get_mut(&id) {
+            view.last_dirty = Some(dirty);
             view.relayout_stats.record(&causes, tree_reused, took_ms);
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
@@ -13209,6 +13257,7 @@ impl Engine {
                 let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
                 ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
                 ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
+                ix.reads.invalidation.note_selector(rule.selector.trim());
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
                 ix.prepared.push(prepared);
@@ -15768,8 +15817,12 @@ impl Engine {
             return Ok(false);
         };
         let dirty = bindings.take_dirty();
+        let log = bindings.take_mutation_log();
         Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+        if dirty != DomDirty::Clean {
+            view.pending_dirty = Some(view.dirty_set(&log));
+        }
         if dirty == DomDirty::Clean {
             // A scroll alone moves what is painted, not the layout.
             if scrolled {
@@ -15835,11 +15888,13 @@ impl Engine {
     fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
         let dirty = bindings.take_dirty();
         let writes = bindings.take_script_mutations();
+        let log = bindings.take_mutation_log();
         if let Some(view) = self.views.get_mut(&id) {
             Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
             Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
+                view.pending_dirty = Some(view.dirty_set(&log));
             }
         }
         if dirty == DomDirty::Clean {
@@ -31806,6 +31861,9 @@ struct SelectorReads {
     /// Where the sheets read `:hover` and `:active`.
     hover: PointerReads,
     active: PointerReads,
+    /// Where each class, id, attribute and pseudo-class is read, for the
+    /// script writes' dirty set (incremental restyle).
+    invalidation: restyle_invalidation::InvalidationIndex,
 }
 
 /// Which elements a pointer pseudo-class (`:hover`, `:active`) can change
