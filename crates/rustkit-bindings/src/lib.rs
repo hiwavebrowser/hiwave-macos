@@ -647,6 +647,59 @@ impl ScriptMutations {
     }
 }
 
+/// One script DOM write, per node (the incremental-restyle note's §3.1
+/// `MutationLog`). Recorded beside `DomDirty` and `ScriptMutations` by the
+/// same writes; the engine reads them to work out which nodes the writes can
+/// restyle. NodeIds are raw: a write to a node's data keeps its NodeId.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationRecord {
+    /// The node written to. For a [`MutationKind::ChildList`] record this is
+    /// the parent whose children changed.
+    pub node: usize,
+    pub kind: MutationKind,
+    /// The attribute set or removed (lowercased on an HTML element);
+    /// `checked` for a checkedness change.
+    pub attr: Option<String>,
+    /// The value before the write, kept for `class` and `id` only (`None`
+    /// also when the attribute was absent).
+    pub old: Option<String>,
+    /// [`MutationKind::ChildList`]: the node inserted, removed or moved
+    /// under `node`. `None` means all of `node`'s children were replaced
+    /// (`innerHTML`, `textContent`, `innerText` on an element).
+    pub child: Option<usize>,
+}
+
+/// The most records a [`MutationLog`] keeps between takes.
+pub const MUTATION_LOG_CAP: usize = 4096;
+
+/// The per-node script DOM writes since the last take, in write order.
+/// Past [`MUTATION_LOG_CAP`] records it gives up: `full` is set, the
+/// records are dropped, and the engine must treat the whole page as dirty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MutationLog {
+    pub records: Vec<MutationRecord>,
+    pub full: bool,
+}
+
+impl MutationLog {
+    /// Append one record, or overflow into `full`.
+    pub fn push(&mut self, record: MutationRecord) {
+        if self.full {
+            return;
+        }
+        if self.records.len() >= MUTATION_LOG_CAP {
+            self.full = true;
+            self.records = Vec::new();
+            return;
+        }
+        self.records.push(record);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty() && !self.full
+    }
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -661,6 +714,8 @@ pub struct DomBindings {
     dirty: Rc<Cell<DomDirty>>,
     /// What the writes behind `dirty` were (see `ScriptMutations`).
     mutations: Rc<RefCell<ScriptMutations>>,
+    /// The same writes per node (see `MutationLog`).
+    mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
 }
@@ -677,7 +732,8 @@ impl DomBindings {
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
-        dom::install(&mut runtime, &dom_host, &dirty, &mutations)?;
+        let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
+        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
@@ -724,6 +780,7 @@ impl DomBindings {
             _ipc_queue: RefCell::new(Vec::new()),
             dirty,
             mutations,
+            mutation_log,
             scroll,
         })
     }
@@ -745,6 +802,13 @@ impl DomBindings {
     /// only. A `mark_dirty` from the embedder records nothing here.
     pub fn take_script_mutations(&self) -> ScriptMutations {
         self.mutations.take()
+    }
+
+    /// The writes since the last call, per node and in order (see
+    /// `MutationLog`), which are reset. Taken with `take_dirty`; a
+    /// `mark_dirty` from the embedder records nothing here.
+    pub fn take_mutation_log(&self) -> MutationLog {
+        self.mutation_log.take()
     }
 
     /// The `<input>`/`<textarea>` values script set since the last call, as
@@ -1385,6 +1449,7 @@ impl DomBindings {
         self.window.borrow_mut().document = Some(document.clone());
         self.dirty.set(DomDirty::Clean);
         self.mutations.take();
+        self.mutation_log.take();
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
