@@ -632,7 +632,21 @@ fn main_thread_stack_size() -> usize {
     unsafe { pthread_get_stacksize_np(pthread_self()) }
 }
 
+/// The shipped app runs the page on the content thread (M4) unless
+/// `HIWAVE_CONTENT_THREAD` is set, to `0` for example, which keeps the page on
+/// the window thread. The engine's own default stays off, so parity-capture
+/// and the engine tests keep their board-comparable arm.
+#[cfg(target_os = "macos")]
+fn default_content_thread_on() {
+    if std::env::var_os("HIWAVE_CONTENT_THREAD").is_none() {
+        // main() has started no threads yet.
+        std::env::set_var("HIWAVE_CONTENT_THREAD", "1");
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "macos")]
+    default_content_thread_on();
     // Initialize logging with log compatibility. `RUST_LOG` selects the
     // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
@@ -646,6 +660,15 @@ fn main() {
     info!(
         "Main thread stack: {} MiB",
         main_thread_stack_size() / (1024 * 1024)
+    );
+    #[cfg(target_os = "macos")]
+    info!(
+        "Content thread: {}",
+        if rustkit_engine::content_thread_enabled() {
+            "on"
+        } else {
+            "off (HIWAVE_CONTENT_THREAD)"
+        }
     );
 
     // Initialize application state
