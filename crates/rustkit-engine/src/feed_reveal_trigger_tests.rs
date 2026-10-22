@@ -217,3 +217,85 @@ fn io_data_src_swap_rows() {
     assert_feed_painted(&mut engine, view, "IO data-src swap");
 }
 
+
+
+/// A windowed feed that mounts at `delay` ms (react-virtualized's
+/// `WindowScroller` pattern): it measures its offset in the document as its
+/// own top less the root element's (`getPositionOffset`), then on every
+/// `scroll` renders only the rows between `scrollY - offset` and one
+/// viewport below, after a spacer that holds the rows above. The feed's
+/// height is reserved from the start, so the footer is where it belongs
+/// whatever the list renders.
+fn windowed_feed(delay: u32) -> String {
+    let script = format!(
+        "var feed = document.getElementById('feed'), offset = 0; \
+         function render() {{ var from = Math.max(0, Math.floor((scrollY - offset) / 150)); \
+           var to = Math.min(30, Math.ceil((scrollY - offset + innerHeight) / 150)); \
+           var html = '<div style=\"height:' + (from * 150) + 'px\"></div>'; \
+           for (var i = from; i < to; i++) html += '<div class=\"row filled\"><h3>story ' + i + '</h3></div>'; \
+           feed.innerHTML = html; }} \
+         function mount() {{ offset = feed.getBoundingClientRect().top - document.documentElement.getBoundingClientRect().top; \
+           window.__offset = offset; render(); window.addEventListener('scroll', render); }} \
+         setTimeout(mount, {delay});"
+    );
+    feed("#feed{margin-top:100px}", false, &script)
+}
+
+/// The feed mounts before the user scrolls: the page as it was when script
+/// held the window and the flicks landed late.
+#[test]
+fn windowed_feed_mounted_before_the_flicks_paints() {
+    let (mut engine, view, _server) = load(&windowed_feed(100));
+    assert_eq!(read(&mut engine, view, "__offset"), "100");
+    flick(&mut engine, view);
+    flick(&mut engine, view);
+    assert_feed_painted(&mut engine, view, "windowed feed mounted at the top");
+}
+
+/// The user flicks twice, then the feed mounts (in a live turn, as after
+/// the load): its offset in the document must not depend on where the
+/// window is scrolled to.
+#[test]
+fn windowed_feed_mounted_after_the_flicks_paints() {
+    let (mut engine, view, _server) = load(&windowed_feed(6000));
+    flick(&mut engine, view);
+    flick(&mut engine, view);
+    pump(&mut engine, view, 6000, 100);
+    pump(&mut engine, view, 100, 16);
+    assert_feed_painted(&mut engine, view, "windowed feed mounted after the flicks");
+    assert_eq!(
+        read(&mut engine, view, "__offset"),
+        "100",
+        "the feed's offset in the document, measured while scrolled 600 px"
+    );
+}
+
+/// The root element's box, as script reads it: the document's, moving with
+/// the scroll like every other element's.
+#[test]
+fn the_root_element_rect_is_the_documents_and_moves_with_the_scroll() {
+    let (mut engine, view, _server) = load(&feed("", true, ""));
+    flick(&mut engine, view);
+    flick(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().top"), "-600");
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().width"), "400");
+    assert_eq!(
+        read(&mut engine, view, "document.documentElement.getBoundingClientRect().height"),
+        read(&mut engine, view, "document.body.getBoundingClientRect().height")
+    );
+    assert_eq!(
+        read(&mut engine, view, "document.documentElement.offsetHeight"),
+        read(&mut engine, view, "document.body.offsetHeight")
+    );
+}
+
+/// Body's margins are inside the root element's box (Chromium: html is as
+/// tall as body's margin box).
+#[test]
+fn the_root_element_rect_holds_the_body_margins() {
+    let (mut engine, view, _server) =
+        load("<html><head><style>body{margin:8px} #t{height:1000px}</style></head><body><div id=t></div></body></html>");
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().height"), "1016");
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().top"), "0");
+    assert_eq!(read(&mut engine, view, "document.documentElement.offsetHeight"), "1016");
+}
