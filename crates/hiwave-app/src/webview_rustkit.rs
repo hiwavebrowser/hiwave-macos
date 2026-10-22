@@ -299,6 +299,14 @@ impl RustKitView {
         )
     }
 
+    /// A content view on the content thread, with no window (tests). There
+    /// is no surface, so nothing is presented.
+    #[cfg(test)]
+    fn headless_content(bounds: Bounds) -> Self {
+        let thread = ContentThread::spawn(content_engine_builder(), bounds).expect("content thread");
+        Self::from_parts(None, None, Some(thread), None, None, None, 0)
+    }
+
     fn from_parts(
         handle: Option<PageHandle>,
         endpoint: Option<Rc<RefCell<PageEndpoint>>>,
@@ -1483,6 +1491,172 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(started.elapsed() < Duration::from_secs(5));
         let title = view.execute_script_sync("document.title").unwrap_or_default();
         assert!(title.contains("new"), "document.title = {title:?}");
+    }
+
+    /// Answers every request with `body` at once and logs its path and
+    /// when it arrived.
+    fn logging_server(body: &'static str) -> (String, Arc<std::sync::Mutex<Vec<(String, Instant)>>>) {
+        use std::io::{Read, Write};
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    seen.lock().unwrap().push((path, Instant::now()));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), log)
+    }
+
+    /// The event loop's wake, as `MainEventsCleared` does it: the load's
+    /// slice, or the live turn and a frame.
+    fn wake(view: &RustKitView) {
+        if !view.step_load() {
+            view.process_events();
+            view.render();
+        }
+    }
+
+    /// Wake the view until its load has ended (either path).
+    fn load_and_settle(view: &RustKitView, url: &str) {
+        view.wry_load_url(url).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            wake(view);
+            let loading = if view.content.is_some() { *view.loading.borrow() } else { view.is_loading() };
+            if !loading && (view.content.is_none() || view.latest_commit.borrow().is_some()) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the load never ended");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The page's answer to `script`, on either path.
+    fn read(view: &RustKitView, script: &str) -> String {
+        let Some(thread) = &view.content else {
+            return view.execute_script_sync(script).unwrap_or_default();
+        };
+        let mut rx = thread.eval(script);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(answer) = rx.try_recv() {
+                return answer.unwrap_or_default();
+            }
+            assert!(Instant::now() < deadline, "the page did not answer {script}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Wake the view every 2 ms, as the event loop does, from now until a
+    /// page timer has started spinning and the user acts at `at`. Returns
+    /// how late after `at` the window was free to take the input.
+    fn wake_until(view: &RustKitView, at: Instant) -> Duration {
+        while Instant::now() < at {
+            wake(view);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        at.elapsed()
+    }
+
+    const SPIN_PAGE: &str = "<body style='margin:0'><div style='width:300px;height:200px'></div>\
+<script>window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });</script></body>";
+
+    /// M4 acceptance (Atlas 22:05, 10-21): with a page script spinning, the
+    /// URL bar's navigation takes effect within 100 ms: the window is free
+    /// to take it, and the new page is requested.
+    fn a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins(view: RustKitView) {
+        let (base, log) = logging_server(SPIN_PAGE);
+        load_and_settle(&view, &base);
+        // A timer the page set spins until the turn budget stops it (5 s).
+        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let at = Instant::now() + Duration::from_millis(250);
+        let late = wake_until(&view, at);
+        view.wry_load_url(&format!("{base}next")).unwrap();
+        let taken = at.elapsed();
+        let deadline = at + Duration::from_secs(10);
+        let requested = loop {
+            if let Some(when) = log.lock().unwrap().iter().find(|(path, _)| path == "/next").map(|(_, when)| *when) {
+                break when.saturating_duration_since(at);
+            }
+            assert!(Instant::now() < deadline, "the new page was never requested");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            late < Duration::from_millis(100) && taken < Duration::from_millis(100) && requested < Duration::from_millis(100),
+            "window free {late:?} late, navigation taken at {taken:?}, page requested at {requested:?}"
+        );
+    }
+
+    /// M4 acceptance: with a page script spinning, a click is taken by the
+    /// window within 100 ms, and the page hears it once the spin is
+    /// stopped: queued, never dropped.
+    fn a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(view: RustKitView) {
+        let (base, _log) = logging_server(SPIN_PAGE);
+        load_and_settle(&view, &base);
+        let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
+        let at = Instant::now() + Duration::from_millis(250);
+        let late = wake_until(&view, at);
+        view.mouse_down_at_point(10.0, 10.0);
+        let _ = view.click_at_point(10.0, 10.0);
+        view.render();
+        let taken = at.elapsed();
+        assert!(
+            late < Duration::from_millis(100) && taken < Duration::from_millis(100),
+            "window free {late:?} late, click taken at {taken:?}"
+        );
+        // The turn budget (5 s) stops the spin; then the listener runs.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            wake(&view);
+            if read(&view, "String(window.clicks)").contains('1') {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the click was dropped");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Heard only once the budget stopped the spin: it was spinning.
+        let heard = at.elapsed();
+        assert!(heard > Duration::from_secs(1), "the page was not spinning: heard at {heard:?}");
+    }
+
+    #[test]
+    fn content_thread_a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins() {
+        a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins(content_view());
+    }
+
+    #[test]
+    fn content_thread_a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped() {
+        a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(content_view());
+    }
+
+    fn content_view() -> RustKitView {
+        RustKitView::headless_content(Bounds::new(0, 0, 400, 300))
     }
 
     #[test]
