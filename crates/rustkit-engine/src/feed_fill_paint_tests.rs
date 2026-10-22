@@ -250,3 +250,29 @@ fn lazy_images_an_observer_swaps_in_paint_after_a_scroll() {
         assert!(share > 0.5, "early={early}: the thumbnails paint at {offset:?}: {share:.3} inked");
     }
 }
+
+#[test]
+fn a_quiet_page_does_not_look_for_images_again() {
+    // The plan above runs on a layout the live loop did not make. A page
+    // that lays nothing out (a scroll alone does not) never asks again.
+    let feed = "<div class=row><img src='/t.jpg' style='display:block;width:400px;height:116px'></div>".repeat(5);
+    let routes = vec![
+        ("/", "text/html", shell(&feed, "").into_bytes()),
+        ("/t.jpg", "image/jpeg", JPEG.to_vec()),
+    ];
+    let server = crate::script_net_tests::serve_byte_routes(routes);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: W, height: H })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    runtime().block_on(engine.load_url(view, url)).expect("load_url");
+    let planned = |e: &Engine| (e.views[&view].images_planned_for, e.views[&view].frame_generation);
+    let (at, generation) = planned(&engine);
+    assert_eq!(at, generation, "the load's own layouts count as looked at");
+
+    settle(&mut engine, view, 200);
+    flick(&mut engine, view, 2, 200.0);
+    settle(&mut engine, view, 200);
+    assert_eq!(planned(&engine), (generation, generation), "nothing laid out, nothing planned again");
+}
