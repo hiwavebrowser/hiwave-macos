@@ -105,10 +105,9 @@ pub(crate) struct DomHost {
     /// Each with whether it replaces the current history entry.
     navigation_requests: Vec<(String, bool)>,
     /// Script elements script inserted with a `src` (HTML §4.12.1.1
-    /// "prepare the script element"), as (NodeId, absolute URL), oldest
-    /// first: the engine fetches and runs them
-    /// (`DomBindings::take_inserted_scripts`).
-    inserted_scripts: Vec<(usize, String)>,
+    /// "prepare the script element"), oldest first: the engine fetches and
+    /// runs them (`DomBindings::take_inserted_scripts`).
+    inserted_scripts: Vec<crate::InsertedScript>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -168,7 +167,7 @@ impl DomHost {
         std::mem::take(&mut self.navigation_requests)
     }
 
-    pub(crate) fn take_inserted_scripts(&mut self) -> Vec<(usize, String)> {
+    pub(crate) fn take_inserted_scripts(&mut self) -> Vec<crate::InsertedScript> {
         std::mem::take(&mut self.inserted_scripts)
     }
 
@@ -1326,18 +1325,25 @@ pub(crate) fn install(
         }),
     )?;
 
-    // `inserted_script(id, url)`: script inserted this element with this
-    // absolute `src`. Nothing is fetched here; the engine takes the queue.
+    // `inserted_script(id, url, in_order)`: script inserted this element
+    // with this absolute `src`; `in_order` when it is not async (it runs
+    // after the in-order scripts inserted before it). Nothing is fetched
+    // here; the engine takes the queue.
     let h = host.clone();
     runtime.register_host_function(
         "__rustkit_dom_inserted_script",
-        2,
+        3,
         Box::new(move |args| {
             if let (Some(JsValue::Number(id)), Some(JsValue::String(url))) = (args.first(), args.get(1)) {
+                let in_order = matches!(args.get(2), Some(JsValue::Boolean(true)));
                 let mut host = h.borrow_mut();
                 // Bounds what a page can park between two engine drains.
                 if host.inserted_scripts.len() < 256 {
-                    host.inserted_scripts.push((*id as usize, url.clone()));
+                    host.inserted_scripts.push(crate::InsertedScript {
+                        node: *id as usize,
+                        url: url.clone(),
+                        in_order,
+                    });
                 }
             }
             JsValue::Null
@@ -3044,9 +3050,9 @@ const WRAPPERS_JS: &str = r#"
     g.__rkNavInternals = { navigate: function (url, replace) { N.navigate(String(url), !!replace); } };
     // For web_scripts.js, which deletes it: a script element to fetch and run.
     g.__rkScriptInternals = {
-        fetch: function (el, url) {
+        fetch: function (el, url, inOrder) {
             var s = el[SLOT];
-            if (s && s.gen === gen) N.insertedScript(s.id, String(url));
+            if (s && s.gen === gen) N.insertedScript(s.id, String(url), !!inOrder);
         },
         // `document.currentScript` while an inserted inline script runs;
         // answers what it was.

@@ -82,7 +82,24 @@ pub(crate) struct Handler {
     pub(crate) start: Address,
     pub(crate) end: Address,
     pub(crate) environment_count: u32,
+    // HIWAVE PATCH (stop finally): the `finally` a stop unwinding through
+    // this handler's range runs (`Vm::stop_finally`). `None` for a `catch`
+    // without `finally` and for the engine's own handlers.
+    pub(crate) stop_finally: Option<StopFinally>,
+    // END HIWAVE PATCH
 }
+
+// HIWAVE PATCH (stop finally)
+/// Where a `try` statement's `finally` block is: its body runs from
+/// `entry` to `exit`, and the instructions from `exit` to `exit_end`
+/// rethrow what the block was entered with (a `Throw` or a `ReThrow`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StopFinally {
+    pub(crate) entry: u32,
+    pub(crate) exit: u32,
+    pub(crate) exit_end: u32,
+}
+// END HIWAVE PATCH
 
 impl Handler {
     /// Get the handler address.

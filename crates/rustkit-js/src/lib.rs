@@ -282,6 +282,12 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         context.strict(config.strict_mode);
+        // A stop runs the `finally` blocks it unwinds through, for the stop
+        // grace: a scheduler that posts its next task from a `finally` (as
+        // React's does) is otherwise left believing a task is still running,
+        // and the page never runs another (2026-10-22).
+        #[cfg(feature = "boa")]
+        context.set_stop_finally_grace(Some(control::STOP_GRACE));
         #[cfg(feature = "boa")]
         let diag = std::rc::Rc::new(diag::Diagnostics::default());
         #[cfg(feature = "boa")]
@@ -719,9 +725,16 @@ impl JsRuntime {
     /// that ran too long, and what the turn's finished script queued (an
     /// XHR's `send` registers its request in a promise reaction) still runs,
     /// as it did before the word existed. The watchdog stops the grace turn
-    /// too, and that stop is final. `take_deadline_hit` reports the stop.
+    /// too. That stop runs the `finally` blocks it unwinds through for a
+    /// stop grace of its own (the state of the first stop is cleared here),
+    /// so a turn runs at most its budget and three stop graces: the first
+    /// stop's `finally` blocks, the grace turn, and its stop's `finally`
+    /// blocks. `take_deadline_hit` reports the stop.
     #[cfg(feature = "boa")]
     pub(crate) fn consume_interrupt(&mut self) {
+        // The stop that ended in this script, `finally` blocks and all, is
+        // over: the next is a stop of its own.
+        self.context.end_stop_unwind();
         if !self.deadline.armed.get() || self.deadline.graced.get() {
             return;
         }
@@ -824,12 +837,15 @@ impl JsRuntime {
             // closure captures nothing the collector would need to trace.
             let deadline = self.deadline.clone();
             let native = unsafe {
-                NativeFunction::from_closure(move |_this, args, _context| {
-                    // No deadline (the default): the clock is not read.
+                NativeFunction::from_closure(move |_this, args, context| {
+                    // No deadline (the default): the clock is not read. A
+                    // `finally` the stop is running is answered: it was
+                    // entered past the deadline, and has a grace of its own.
                     let passed = deadline.at.get().and_then(|at| {
                         let now = std::time::Instant::now();
                         (now >= at).then(|| now - at)
                     });
+                    let passed = passed.filter(|_| !context.stop_finally_running());
                     if let Some(late) = passed {
                         // Logged here, at the first refusal, and not only
                         // by whoever started the script: if the stack then

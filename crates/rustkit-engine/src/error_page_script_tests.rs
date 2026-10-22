@@ -353,6 +353,15 @@ setTimeout(function () {
     rt.block_on(engine.load_url(view, server.url("/"))).expect("load");
     assert_eq!(text(&mut engine, view, "String(window.late)"), r#"String("undefined")"#);
     rt.block_on(engine.pump_live(view, 60_000));
+    // The turn that inserts it starts its fetch and does not wait for it: it
+    // runs on the turn its bytes are in.
+    let started = std::time::Instant::now();
+    while text(&mut engine, view, "String(window.late)") != r#"String("ran")"#
+        && started.elapsed() < std::time::Duration::from_secs(5)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        rt.block_on(engine.pump_live(view, 20));
+    }
     assert_eq!(text(&mut engine, view, "String(window.late)"), r#"String("ran")"#);
 }
 
