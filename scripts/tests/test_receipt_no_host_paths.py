@@ -260,6 +260,8 @@ class TestReceiptNoHostPaths(unittest.TestCase):
         # ABS_PATH's segment alphabet has no space, so the leading directories
         # up to the space are stripped and the rest of the path stays. Pin
         # the residual so a wider match cannot silently re-leak a home dir.
+        # These expected values are the known partial leak, not the goal:
+        # tighten them to the basename once ABS_PATH handles spaces.
         sys.path.insert(0, str(SCRIPTS))
         import receipt
         for t, want in [
