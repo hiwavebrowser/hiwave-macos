@@ -299,3 +299,19 @@ fn the_root_element_rect_holds_the_body_margins() {
     assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().top"), "0");
     assert_eq!(read(&mut engine, view, "document.documentElement.offsetHeight"), "1016");
 }
+
+/// An observer rooted at the root element sees the viewport, not the whole
+/// document now that the root element has a box.
+#[test]
+fn an_observer_rooted_at_the_root_element_sees_the_viewport() {
+    let script = format!(
+        "{FILL} var io = new IntersectionObserver(function (es) {{ es.forEach(function (e) {{ \
+         if (e.isIntersecting) fill(e.target); }}); }}, {{ root: document.documentElement }}); \
+         document.querySelectorAll('.row').forEach(function (r) {{ io.observe(r); }});"
+    );
+    let (mut engine, view, _server) = load(&feed("", true, &script));
+    assert_eq!(read(&mut engine, view, "document.querySelectorAll('.row.filled').length"), "2");
+    flick(&mut engine, view);
+    flick(&mut engine, view);
+    assert_feed_painted(&mut engine, view, "IO rooted at the root element");
+}
