@@ -370,6 +370,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inserted_script_live_tests;
+#[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
@@ -926,6 +928,9 @@ struct ViewState {
     /// Script requests the live loop has started for the current document
     /// and not yet delivered.
     live_requests: Vec<script_net::LiveRequest>,
+    /// Scripts the current document inserted that the live loop has taken
+    /// and not finished (see [`script_net::LiveScripts`]).
+    live_scripts: script_net::LiveScripts,
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
@@ -1007,6 +1012,7 @@ impl ViewState {
         self.script_policy = None;
         // The last document's requests are nobody's now.
         self.live_requests.clear();
+        self.live_scripts.clear();
         self.live_images.clear();
         // The last document's sheets, before the first layout of this one.
         // `load_subresources` assigns the new document's when they have
@@ -2315,6 +2321,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_scripts: script_net::LiveScripts::default(),
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
@@ -2405,6 +2412,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_scripts: script_net::LiveScripts::default(),
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
@@ -2494,6 +2502,7 @@ impl Engine {
             images_attempted: std::collections::HashSet::new(),
             script_policy: None,
             live_requests: Vec::new(),
+            live_scripts: script_net::LiveScripts::default(),
             live_images: Vec::new(),
             relayout_pending: PendingCauses::default(),
             relayout_stats: RelayoutStats::default(),
@@ -3806,28 +3815,33 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
             }
-            // So are the scripts the turn's callbacks inserted, and they run
-            // inside it, under its budget.
-            if !script_js_exhausted() {
-                let found = script_net::pump_inserted_scripts(
-                    bindings,
-                    &loader,
-                    &referrer,
-                    tokio::time::Instant::now() + LIVE_NETWORK_BUDGET,
-                    &inspector,
-                )
-                .await;
-                out.requests += found.requests;
-                threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-                if found.poisoned {
-                    threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
-                }
-                for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+            // The scripts the page inserted are started like its requests:
+            // a fetch stays out across turns until it answers or
+            // `LIVE_REQUEST_TIMEOUT` passes (the turn's slice is not its
+            // timeout), and a script runs on a turn that has its bytes and
+            // JavaScript budget left. What the scripts run here insert is
+            // started before the turn ends; no turn waits for it.
+            let live_scripts = &mut view.live_scripts;
+            for pass in 0..2 {
+                if pass == 1 {
+                    live_scripts.settle(LIVE_NETWORK_SLICE).await;
+                    let found = live_scripts.run(bindings, &inspector);
+                    threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+                    if found.poisoned {
+                        threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+                    }
+                    for record in found.records {
+                        if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                        }
                     }
                 }
+                match live_scripts.start(bindings, &loader, &referrer, LIVE_REQUEST_TIMEOUT, &inspector) {
+                    Ok(started) => out.requests += started,
+                    Err(()) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
+                }
             }
+            out.in_flight += live_scripts.len();
         }
         let stopped_in = if spent_by_timers { "timers" } else { "network" };
         // A turn that ran out of JavaScript budget held work back (answers,
@@ -4648,11 +4662,13 @@ impl Engine {
         self.run_page_scripts_with(id, fetched, budget, policy, &bindings, &mut log, watch)
             .await;
         let parked = script_net::take_parked_deliveries();
+        let parked_scripts = script_net::take_parked_scripts();
         if let Some(view) = self.views.get_mut(&id) {
             for delivery in parked {
                 view.live_requests
                     .push(Box::pin(std::future::ready(delivery)));
             }
+            view.live_scripts.adopt(parked_scripts);
         }
         if let Some(view) = self.views.get_mut(&id) {
             log.append(&mut view.script_log);
