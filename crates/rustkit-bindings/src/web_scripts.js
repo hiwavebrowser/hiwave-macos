@@ -25,32 +25,10 @@
     // Captured before page script can replace them.
     var indirectEval = g.eval, resolved = Promise.resolve(), URL_ = g.URL, Event_ = g.Event;
     var STATE = Symbol('rustkit.script');
-    // HTML "force async", initially true. The parser clears it on the
-    // scripts it inserts; those never come through here. Adding the `async`
-    // attribute, or the `async` setter, clears it. With the flag still set,
-    // the script runs as soon as it is fetched. With the flag clear and no
-    // `async` attribute (`async = false`), it waits for earlier in-order
-    // scripts.
-    var FORCE_ASYNC = Symbol('rustkit.forceAsync');
+    // HTML §4.12.1 "force async": an element script made is async until its
+    // `async` is set or its `async` attribute changes; the parser's are not.
+    var FORCE = Symbol('rustkit.forceAsync');
     var XHTML = 'http://www.w3.org/1999/xhtml';
-    var scriptProto = g.HTMLScriptElement && g.HTMLScriptElement.prototype;
-    if (scriptProto) {
-        Object.defineProperty(scriptProto, 'async', {
-            configurable: true, enumerable: true,
-            get: function () {
-                if (this[FORCE_ASYNC] === true) return true;
-                return this.hasAttribute('async');
-            },
-            set: function (v) {
-                this[FORCE_ASYNC] = false;
-                if (v) this.setAttribute('async', '');
-                else this.removeAttribute('async');
-            }
-        });
-    }
-    function keepsOrder(el) {
-        return el[FORCE_ASYNC] !== true && !el.hasAttribute('async');
-    }
     // Created and not yet started: inserts look for scripts only while
     // there is one.
     var fresh = 0;
@@ -90,7 +68,7 @@
                 import(url).then(function () { fire(el, 'load'); }, function () { fire(el, 'error'); });
                 return;
             }
-            internals.fetch(el, url, keepsOrder(el));
+            internals.fetch(el, url, !(el[FORCE] === true || el.hasAttribute('async')));
             return;
         }
         if (k === 'module') return;
@@ -104,11 +82,24 @@
         }
     }
 
+    // `async` reads true while the element is forced async, and setting it
+    // either way ends that (web_reflect.js defined the attribute's half).
+    var SP = g.HTMLScriptElement && g.HTMLScriptElement.prototype;
+    var asyncIdl = SP && Object.getOwnPropertyDescriptor(SP, 'async');
+    if (asyncIdl && asyncIdl.get && asyncIdl.set) {
+        Object.defineProperty(SP, 'async', {
+            get: function () { return this[FORCE] === true || asyncIdl.get.call(this); },
+            set: function (v) { if (this[FORCE] === true) this[FORCE] = false; asyncIdl.set.call(this, v); },
+            enumerable: asyncIdl.enumerable,
+            configurable: true
+        });
+    }
+
     HOOKS.scripts = {
         created: function (el) {
             if (!isScript(el) || (el.namespaceURI != null && el.namespaceURI !== XHTML)) return;
             Object.defineProperty(el, STATE, { value: 'fresh', writable: true, configurable: true });
-            el[FORCE_ASYNC] = true;
+            Object.defineProperty(el, FORCE, { value: true, writable: true, configurable: true });
             fresh++;
         },
         // HTML §4.12.1 cloning steps: a copy is started when its original
@@ -148,7 +139,7 @@
         },
         // A `src` set, or text written, on a script already in the document.
         changed: function (node, op, name) {
-            if (isScript(node) && op === 'setAttr' && String(name).toLowerCase() === 'async') node[FORCE_ASYNC] = false;
+            if (isScript(node) && op === 'setAttr' && String(name).toLowerCase() === 'async') node[FORCE] = false;
             if (fresh === 0 || !isScript(node)) return;
             if (op === 'setText' || (op === 'setAttr' && String(name).toLowerCase() === 'src')) prepare(node);
         }

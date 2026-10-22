@@ -148,6 +148,20 @@ pub enum BindingError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListenerId(u64);
 
+/// An external classic script that script inserted
+/// ([`DomBindings::take_inserted_scripts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertedScript {
+    /// The element's raw NodeId.
+    pub node: usize,
+    /// Its absolute `src`.
+    pub url: String,
+    /// Not async (HTML §4.12.1.1: `async = false` cleared the element's
+    /// "force async"): it runs after the in-order scripts inserted before
+    /// it, not as soon as it arrives.
+    pub in_order: bool,
+}
+
 impl ListenerId {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -951,13 +965,10 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_navigation_requests()
     }
 
-    /// The external classic scripts script inserted since the last call, as
-    /// (the element's raw NodeId, absolute URL, whether it is in the
-    /// in-order list), oldest first. In-order means `async` was set false.
-    /// Anything else runs when its fetch finishes. The engine fetches each
-    /// and runs it as that element's script
-    /// ([`Self::set_current_script`], then [`Self::fire_script_event`]).
-    pub fn take_inserted_scripts(&self) -> Vec<(usize, String, bool)> {
+    /// The external classic scripts script inserted since the last call,
+    /// oldest first. The engine fetches each and runs it as that element's
+    /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
+    pub fn take_inserted_scripts(&self) -> Vec<InsertedScript> {
         self.dom_host.borrow_mut().take_inserted_scripts()
     }
 

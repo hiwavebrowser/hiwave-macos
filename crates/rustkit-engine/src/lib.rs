@@ -378,12 +378,16 @@ mod render_on_change_tests;
 mod scroll_paints_first_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_after_yielded_load_tests;
+#[cfg(all(test, feature = "headless"))]
+mod feed_reveal_trigger_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
+#[cfg(all(test, feature = "headless"))]
+mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -434,6 +438,8 @@ mod shadow_tree_tests;
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
+#[cfg(all(test, feature = "headless"))]
+mod feed_fill_paint_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -942,6 +948,10 @@ struct ViewState {
     /// passes after it looked at, loaded or not. The post-script pass
     /// fetches only what is not in here.
     images_attempted: std::collections::HashSet<Url>,
+    /// The `frame_generation` the live loop last looked for script-added
+    /// images at. A layout a live turn did not make itself (a scroll's
+    /// observers and listeners, a click, a key) can show images too.
+    images_planned_for: u64,
     /// The current document's fetch policy: a URL-loaded page with
     /// JavaScript on has one, anything else has none. The load's script
     /// requests and the live loop's go through the same one, so its request
@@ -2495,6 +2505,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_modules: Vec::new(),
@@ -2597,6 +2608,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_modules: Vec::new(),
@@ -2716,6 +2728,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_modules: Vec::new(),
@@ -4682,8 +4695,20 @@ impl Engine {
         }
         // What the callbacks added may show images the load never saw. Their
         // fetch starts here and no turn waits for it (until 2026-10-05 this
-        // one did, for as long as the slowest image took).
-        if out.relaid_out {
+        // one did, for as long as the slowest image took). So may a layout
+        // since the last turn that this loop did not make: until 2026-10-22
+        // an image an IntersectionObserver gave its `src` while the user
+        // scrolled (`scroll_view` lays out what the page's observers write)
+        // was never fetched on a page whose timers had gone quiet, and the
+        // rows it filled stayed white.
+        let unplanned = self
+            .views
+            .get(&id)
+            .is_some_and(|v| v.images_planned_for != v.frame_generation);
+        if out.relaid_out || unplanned {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.images_planned_for = view.frame_generation;
+            }
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
@@ -4707,6 +4732,10 @@ impl Engine {
             match self.relayout_for(id, RelayoutCause::ImageLoaded { count: arrived }) {
                 Ok(()) => out.relaid_out = true,
                 Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
+            }
+            // An arrival shows no image the page did not already ask for.
+            if let Some(view) = self.views.get_mut(&id) {
+                view.images_planned_for = view.frame_generation;
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -5044,9 +5073,8 @@ impl Engine {
         }
         collect(form, self, id, submitter, &mut entries);
 
-        if entries.is_empty() {
-            return None;
-        }
+        // A form with no successful controls still submits (HTML form
+        // submission algorithm): a GET goes to `action?`.
         Some(state.create_submission(&base, &entries))
     }
 
@@ -6398,6 +6426,26 @@ impl Engine {
         yield_inserted: bool,
         preset_nav: Option<u64>,
     ) -> Result<LoadYield, EngineError> {
+        let result = self
+            .load_url_with_disposition_inner(id, url, replace, yield_inserted, preset_nav)
+            .await;
+        // The load's own layouts had their images looked for by the load,
+        // or were cancelled with it: not the live loop's to fetch. A yielded
+        // tail's later layouts happen on live turns, which plan their own.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.images_planned_for = view.frame_generation;
+        }
+        result
+    }
+
+    async fn load_url_with_disposition_inner(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        replace: bool,
+        yield_inserted: bool,
+        preset_nav: Option<u64>,
+    ) -> Result<LoadYield, EngineError> {
         let _turn = rustkit_js::DiagTurn::enter("load");
         if let Some(nav_id) = preset_nav {
             let newest = self.nav_seq.load(Ordering::Acquire);
@@ -7512,7 +7560,7 @@ impl Engine {
         // answer from this layout, measured on the first read.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout);
+            publish_geometry(bindings, layout, root_element_id(view));
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -7794,7 +7842,7 @@ impl Engine {
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout);
+            publish_geometry(bindings, layout, root_element_id(view));
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -12875,6 +12923,13 @@ impl Engine {
                 }
                 // Decodes out for this document are dropped either way (D1).
                 view.decode_epoch = view.decode_epoch.wrapping_add(1);
+                // So are the scripts it inserted that have not run, as a
+                // browser's Stop cancels the fetches still out: none of them
+                // runs or hears an event afterwards.
+                view.live_inserted.abandon();
+                if let Some(bindings) = view.bindings.as_ref() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_inserted_scripts()));
+                }
                 self.image_manager.begin_navigation(id.0, view.decode_epoch);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed
@@ -17345,7 +17400,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             if let Some(layout) = view.layout.as_ref() {
-                publish_geometry(bindings, layout);
+                publish_geometry(bindings, layout, root_element_id(view));
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
@@ -20183,12 +20238,13 @@ fn scrollable_bottom(root: &LayoutBox, html_clips: bool) -> f32 {
     bottom
 }
 
-/// The document element, the first box in the layout that names a node.
-fn root_element_id(layout: &LayoutBox) -> Option<usize> {
+/// The first box in the layout that names a node: what a hit inside the
+/// viewport that reaches no element answers.
+fn first_named_box_id(layout: &LayoutBox) -> Option<usize> {
     if layout.node_id.is_some() {
         return layout.node_id;
     }
-    layout.children.first().and_then(root_element_id)
+    layout.children.first().and_then(first_named_box_id)
 }
 
 /// Hand script the geometry of `layout` without measuring it: the snapshot
@@ -20196,7 +20252,10 @@ fn root_element_id(layout: &LayoutBox) -> Option<usize> {
 /// source holds the layout weakly, so it never keeps an old tree alive or
 /// makes `Rc::make_mut` copy one; a layout replaced or patched in place
 /// is republished before script runs again.
-fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
+///
+/// `root_element` is the document element's raw NodeId. It has no box of its
+/// own: the layout's anonymous root stands in for it, and reports as it.
+fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element: Option<usize>) {
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(std::rc::Rc::new(move |x, y, scroll| {
@@ -20207,7 +20266,7 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
         }
         let bounds = layout.dimensions.border_box();
         if x >= 0.0 && y >= 0.0 && x < bounds.width && y < bounds.height {
-            return root_element_id(&layout);
+            return first_named_box_id(&layout);
         }
         None
     })));
@@ -20217,7 +20276,10 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>) {
         };
         let _snapshot_time = time_stage(Stage::Snapshot);
         let started = std::time::Instant::now();
-        let snapshot = geometry_snapshot(&layout);
+        let mut snapshot = geometry_snapshot(&layout);
+        if let Some(root) = root_element {
+            snapshot.0.entry(root).or_insert_with(|| root_element_geometry(&layout));
+        }
         debug!(
             elements = snapshot.0.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -20312,6 +20374,54 @@ fn geometry_snapshot(
     let mut styles = HashMap::new();
     walk(root, &mut out, &mut styles);
     (out, styles)
+}
+
+/// The view's document element, by raw NodeId.
+fn root_element_id(view: &ViewState) -> Option<usize> {
+    Some(view.document.as_ref()?.document_element()?.id.raw())
+}
+
+/// The document element's geometry, from the anonymous root box that lays
+/// out in its place. Until 2026-10-22 the root element had none: its
+/// `getBoundingClientRect()` was an empty rectangle at the viewport origin
+/// however far the window was scrolled, and its `offsetHeight` was 0. Code
+/// that finds an element's place in the document as its top less the root
+/// element's (react-virtualized's `WindowScroller`, many lazy loaders)
+/// measured it short by the scroll offset, so a feed that mounted after the
+/// user scrolled rendered the rows of the wrong place and the viewport stayed
+/// white (yahoo.com after two flicks).
+fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
+    let bb = root.dimensions.border_box();
+    let pb = root.dimensions.padding_box();
+    // The root box is stretched to the viewport so the canvas background
+    // fills the window; html is not. With `height: auto` it is as tall as
+    // what it holds (body's margin box), shorter than the viewport on a
+    // short page. Only an explicit html height keeps the box's own.
+    let floor = match &root.root_element_height {
+        None | Some(rustkit_css::Length::Auto) => bb.y,
+        Some(_) => bb.y + bb.height,
+    };
+    let bottom = root
+        .children
+        .iter()
+        .map(|c| {
+            let m = c.dimensions.margin_box();
+            m.y + m.height
+        })
+        .fold(floor, f32::max);
+    rustkit_bindings::BoxGeometry {
+        x: bb.x,
+        y: bb.y,
+        width: bb.width,
+        height: bottom - bb.y,
+        border_left: root.dimensions.border.left,
+        border_top: root.dimensions.border.top,
+        client_width: pb.width,
+        client_height: pb.height,
+        scroll_width: pb.width,
+        scroll_height: (bottom - pb.y).max(pb.height),
+        position: 0,
+    }
 }
 
 /// A CSS keyword from a `Debug` variant name: `InlineBlock` -> `inline-block`.

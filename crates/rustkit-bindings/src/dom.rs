@@ -115,11 +115,9 @@ pub(crate) struct DomHost {
     /// Each with whether it replaces the current history entry.
     navigation_requests: Vec<(String, bool)>,
     /// Script elements script inserted with a `src` (HTML §4.12.1.1
-    /// "prepare the script element"), as (NodeId, absolute URL, in-order),
-    /// oldest first. In-order is `async = false` (force-async cleared and
-    /// no `async` attribute). The engine fetches and runs them
-    /// (`DomBindings::take_inserted_scripts`).
-    inserted_scripts: Vec<(usize, String, bool)>,
+    /// "prepare the script element"), oldest first: the engine fetches and
+    /// runs them (`DomBindings::take_inserted_scripts`).
+    inserted_scripts: Vec<crate::InsertedScript>,
     /// HTML §4.12.3 template contents: each `<template>`'s content
     /// fragment, by the template's NodeId (see `adopt_template_contents`).
     templates: RefCell<HashMap<usize, Rc<Node>>>,
@@ -187,7 +185,7 @@ impl DomHost {
         std::mem::take(&mut self.navigation_requests)
     }
 
-    pub(crate) fn take_inserted_scripts(&mut self) -> Vec<(usize, String, bool)> {
+    pub(crate) fn take_inserted_scripts(&mut self) -> Vec<crate::InsertedScript> {
         std::mem::take(&mut self.inserted_scripts)
     }
 
@@ -1440,9 +1438,10 @@ pub(crate) fn install(
         }),
     )?;
 
-    // `inserted_script(id, url, inOrder)`: script inserted this element with
-    // this absolute `src`. `inOrder` is the HTML in-order list (`async` set
-    // false). Nothing is fetched here; the engine takes the queue.
+    // `inserted_script(id, url, in_order)`: script inserted this element
+    // with this absolute `src`; `in_order` when it is not async (it runs
+    // after the in-order scripts inserted before it). Nothing is fetched
+    // here; the engine takes the queue.
     let h = host.clone();
     runtime.register_host_function(
         "__rustkit_dom_inserted_script",
@@ -1453,7 +1452,11 @@ pub(crate) fn install(
                 let mut host = h.borrow_mut();
                 // Bounds what a page can park between two engine drains.
                 if host.inserted_scripts.len() < 256 {
-                    host.inserted_scripts.push((*id as usize, url.clone(), in_order));
+                    host.inserted_scripts.push(crate::InsertedScript {
+                        node: *id as usize,
+                        url: url.clone(),
+                        in_order,
+                    });
                 }
             }
             JsValue::Null

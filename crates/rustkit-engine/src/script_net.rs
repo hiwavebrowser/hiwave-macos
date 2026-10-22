@@ -1015,7 +1015,7 @@ fn enqueue_inserted(
     let mut started = Vec::new();
     {
         let mut board = lock_board(&scripts.board);
-        for (node, url, in_order) in queued {
+        for rustkit_bindings::InsertedScript { node, url, in_order } in queued {
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
