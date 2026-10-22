@@ -1497,9 +1497,9 @@ L('readyState=' + document.readyState);
 }
 
 /// The yielding load returns while an inserted script is still on the
-/// network. A live turn during that wait does not run post-load timers
-/// and does not fire `load`. The event loop has the engine back, and a
-/// frame was presented for the interactive document.
+/// network. A live turn during that wait runs the timer that is due, as
+/// Chrome does, and does not fire `load`. The event loop has the engine
+/// back, and a frame was presented for the interactive document.
 #[test]
 fn a_yielding_load_returns_during_the_inserted_script_fetch() {
     // Set once /a.js is answered; the load returns before that.
@@ -1566,7 +1566,6 @@ L('/a.js inserted');
         "{during}"
     );
     let turn_started = std::time::Instant::now();
-    // Long enough that a post-load timer clock would run the 0ms timer.
     rt.block_on(engine.pump_live(view, 5_000));
     assert!(
         turn_started.elapsed() < std::time::Duration::from_millis(500),
@@ -1574,10 +1573,19 @@ L('/a.js inserted');
         turn_started.elapsed()
     );
     let mid = page_log(&mut engine, view);
+    // The 0 ms timer does not wait for `load` (#730: a scroll listener's
+    // debounce timer left the rows it fills white while the tail was open).
+    // `load` still waits for the script.
     assert_eq!(
         event_trace(&mid),
-        event_trace(&during),
-        "timers or load ran before the script: {mid}"
+        [
+            "readyState=loading",
+            "/a.js inserted",
+            "readystatechange readyState=interactive",
+            "DOMContentLoaded readyState=interactive",
+            "timer",
+        ],
+        "load ran before the script, or the due timer did not run: {mid}"
     );
     assert_eq!(
         text(&mut engine, view, "document.readyState"),
@@ -1591,11 +1599,11 @@ L('/a.js inserted');
             "/a.js inserted",
             "readystatechange readyState=interactive",
             "DOMContentLoaded readyState=interactive",
+            "timer",
             "/a.js ran",
             "/a.js load",
             "readystatechange readyState=complete",
             "window load readyState=complete",
-            "timer",
         ],
     );
 }
