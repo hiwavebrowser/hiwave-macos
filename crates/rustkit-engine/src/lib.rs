@@ -5242,6 +5242,21 @@ impl Engine {
         url: Url,
         replace: bool,
     ) -> Result<(), EngineError> {
+        let result = self.load_url_with_disposition_inner(id, url, replace).await;
+        // The load's own layouts had their images looked for by the load,
+        // or were cancelled with it: not the live loop's to fetch.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.images_planned_for = view.frame_generation;
+        }
+        result
+    }
+
+    async fn load_url_with_disposition_inner(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        replace: bool,
+    ) -> Result<(), EngineError> {
         let view = self
             .views
             .get_mut(&id)
