@@ -612,10 +612,13 @@ impl PageEndpoint {
             );
             match polled {
                 std::task::Poll::Ready(result) => {
-                    if let Err(e) = result {
+                    let failed = result.as_ref().err().map(|e| e.to_string());
+                    if let Some(e) = &failed {
                         tracing::error!(error = %e, "Failed to load URL");
                     }
                     forward_events(engine_events, tx, last_commit, nav_id, wake);
+                    drop(load);
+                    self.end_uncommitted_nav(nav_id, failed);
                     return;
                 }
                 std::task::Poll::Pending => {
@@ -623,6 +626,35 @@ impl PageEndpoint {
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
             }
+        }
+    }
+
+    /// A navigation that ended without committing a document: a refused
+    /// connection, a TLS or fetch error, an empty error body. The window's
+    /// `navigate` raised ALL on the interrupt word so the old document's
+    /// running script would stop, and only a commit lowers it. Unless a
+    /// newer navigation or a Stop cancelled this one (they lower it
+    /// themselves), lower it here, so the document still on screen keeps
+    /// its timers, clicks and keys. Tell the window the load failed, so it
+    /// stops showing the page as loading.
+    fn end_uncommitted_nav(&mut self, nav_id: u64, failed: Option<String>) {
+        if nav_id == 0 {
+            return;
+        }
+        let Some(control) = self.engine.view_control(self.view) else {
+            return;
+        };
+        if control.nav_committed(nav_id) || control.nav_cancelled(nav_id) {
+            return;
+        }
+        control.clear_all();
+        let error = failed.unwrap_or_else(|| "navigation did not commit".to_string());
+        let _ = self.events.send(PageEvent::LoadState {
+            state: LoadState::Failed { error },
+            nav_id,
+        });
+        if self.wake_window {
+            crate::script_net::poke_live_turn();
         }
     }
 

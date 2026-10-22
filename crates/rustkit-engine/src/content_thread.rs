@@ -432,6 +432,31 @@ mod tests {
     }
 
     #[test]
+    fn a_navigation_that_fails_leaves_the_page_on_screen_running() {
+        // Independent R1 on #730, BLOCKER: `navigate` raises ALL so the old
+        // document's script stops, and only a commit lowered it. A fetch
+        // that never commits (refused here) left the page on screen dead.
+        let page = page();
+        let mut loaded = page.load_html("<p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let nav_id = page.navigate(Url::parse("http://127.0.0.1:1/").unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut failed = false;
+        while Instant::now() < deadline && !failed {
+            failed = page.poll().into_iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id: n } if n == nav_id)
+            });
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(failed, "the window never heard that navigation {nav_id} failed");
+        let mut after = page.eval("document.getElementById('t').textContent + (1 + 1)");
+        let value = wait_recv(&mut after, Duration::from_secs(5))
+            .expect("eval reply")
+            .expect("the old document's script is still stopped after the failed navigation");
+        assert!(value.contains("x2"), "{value}");
+    }
+
+    #[test]
     fn a_superseded_navigation_drops_the_late_result() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
