@@ -376,6 +376,8 @@ mod flex_percent_basis_tests;
 mod render_on_change_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_paints_first_tests;
+#[cfg(all(test, feature = "headless"))]
+mod scroll_after_yielded_load_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -4356,19 +4358,24 @@ impl Engine {
             Err(e) => debug!(?id, error = %e, "layout after a resize failed"),
         }
         // A yielding load parked `window` `load` on this view. One arrived
-        // inserted script, then return, so the event loop can present. The
-        // live timer clock does not run until that `load` has fired.
-        let defer_post_load_timers = self
+        // inserted script, then return, so the event loop can present.
+        let tail_open = self
             .views
             .get(&id)
             .is_some_and(|view| view.load_tail.is_some());
-        if defer_post_load_timers {
+        if tail_open {
             let _tail_js = install_script_js(
                 std::time::Duration::from_millis(self.config.script_budget_ms),
                 self.config.interrupt_scripts_at_budget,
             );
             self.advance_load_tail(id).await;
         }
+        // The turn that fired `load` ran the load's timer horizon.
+        let defer_post_load_timers = tail_open
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.load_tail.is_none());
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
         let Some(view) = self.views.get_mut(&id) else {
@@ -4405,9 +4412,12 @@ impl Engine {
         let frame_yield = std::cell::Cell::new(false);
 
         // Timers first: what they ask of the network is answered this turn.
-        // Not while a load tail is open, and not on the turn that just
-        // fired `load`: that turn already ran the load's timer horizon, and
-        // `elapsed_ms` includes time from before `load`.
+        // Not on the turn that just fired `load`: that turn already ran the
+        // load's timer horizon, and `elapsed_ms` includes time from before
+        // `load`. While the tail is still open they run, as in Chrome, where
+        // a timer does not wait for `load`. Until #730's fix they waited for
+        // it: a `scroll` listener's debounce timer did not run while a news
+        // page's inserted scripts arrived, and the rows it fills stayed white.
         //
         // Due timers are not drained for the whole turn. After about 16 ms
         // of wall time the turn returns so a frame can be published, and
