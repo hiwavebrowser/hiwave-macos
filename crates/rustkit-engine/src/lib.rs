@@ -18698,6 +18698,65 @@ pub(crate) fn scrolled_commands(
     scrolled
 }
 
+#[cfg(test)]
+mod scrolled_commands_tests {
+    use super::scrolled_commands;
+    use rustkit_css::Color;
+    use rustkit_layout::{DisplayCommand, Rect};
+
+    fn paint() -> DisplayCommand {
+        DisplayCommand::SolidColor(Color::BLACK, Rect::new(0.0, 0.0, 10.0, 10.0))
+    }
+
+    fn is_translate(command: &DisplayCommand, x: f32, y: f32) -> bool {
+        matches!(
+            command,
+            DisplayCommand::PushTransform {
+                matrix: [1.0, 0.0, 0.0, 1.0, mx, my],
+                origin: (0.0, 0.0),
+            } if *mx == x && *my == y
+        )
+    }
+
+    #[test]
+    fn a_zero_offset_still_wraps_the_list_and_rewrites_fixed_markers() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+        ];
+        let out = scrolled_commands(&list, (0.0, 0.0));
+        assert_eq!(out.len(), 6);
+        assert!(is_translate(&out[0], 0.0, 0.0));
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 0.0, 0.0), "fixed → +offset translate");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::PopTransform));
+    }
+
+    #[test]
+    fn a_scroll_offset_wraps_the_page_and_counters_fixed_runs() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+            paint(),
+        ];
+        let out = scrolled_commands(&list, (12.0, 34.0));
+        assert_eq!(out.len(), 7);
+        assert!(is_translate(&out[0], -12.0, -34.0), "outer −offset");
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 12.0, 34.0), "fixed → +offset");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[6], DisplayCommand::PopTransform));
+    }
+}
+
 /// The page-space affine this box's own `transform` contributes, or `None`
 /// when it has none.
 ///
@@ -24318,6 +24377,30 @@ mod web_font_tests {
         ));
     }
 
+    /// Fetch serializes a data: URL without its fragment, so the fragment is
+    /// not part of the payload — the rule `rustkit_net::decode_data_url`
+    /// already follows (#712).
+    #[test]
+    #[ignore = "bug: engine decode_data_url keeps a data: URL's #fragment in the payload"]
+    fn a_data_uri_fragment_is_not_part_of_the_payload() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x#tail").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert_eq!(
+            decode_data_url("data:text/plain,a%23b#c").as_deref(),
+            Some(b"a#b".as_slice())
+        );
+        assert!(matches!(
+            resolve_font_source(None, "data:font/ttf;base64,AAEC#frag"),
+            FontSource::Data(b) if b.as_ref() == [0u8, 1, 2]
+        ));
+    }
+
     /// The laid-out advance of the probe text run "XXXX".
     fn widest_inline_block(b: &LayoutBox, out: &mut f32) {
         if matches!(&b.box_type, BoxType::Text(t) if t.trim() == "XXXX") {
@@ -28186,6 +28269,85 @@ mod selector_is_escape_tests {
             ),
             "plain .sm must not be poisoned by a failed :is(.sm\\:flex) parse"
         );
+    }
+}
+
+/// Portable pins for `pseudo_list_base` (#684). Headless
+/// `box_sizing_inherit_tests` cover the full cascade; these prove the
+/// selector-list half without a GPU.
+#[cfg(test)]
+mod pseudo_list_base_tests {
+    use super::*;
+
+    #[test]
+    fn a_pseudo_member_anywhere_in_a_selector_list_is_collected() {
+        // Indexed path: pseudo="::before", single_colon=":before" (the
+        // single-colon form covers the double-colon one).
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::before", ":before").expect("before");
+        assert_eq!(base, "*");
+        assert!(bare, "`:before` alone is bare");
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::after", ":after").expect("after");
+        assert_eq!(base, "*");
+        assert!(bare);
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::before", ":before").expect("a::before");
+        assert_eq!(base, "a");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, 0);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::after", ":after").expect("b::after");
+        assert_eq!(base, "b");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[test]
+    fn a_bare_pseudo_rule_is_universal_and_a_list_without_it_is_none() {
+        let (base, bare, _) =
+            pseudo_list_base("::before", "::before", ":before").expect("bare ::before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        let (base, bare, _) =
+            pseudo_list_base(":before", "::before", ":before").expect("bare :before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        assert!(pseudo_list_base("div, span", "::before", ":before").is_none());
+        assert!(pseudo_list_base("a::after", "::before", ":before").is_none());
+    }
+
+    #[test]
+    fn each_pseudo_member_keeps_its_own_specificity_most_specific_first() {
+        // `div::before, #id::before` must cascade with the id member's
+        // specificity when that member matches — never the list's max
+        // taken from a non-pseudo sibling (the #684 failure mode).
+        let (base, bare, specs) =
+            pseudo_list_base("div::before, #id::before", "::before", ":before")
+                .expect("two before members");
+        assert_eq!(base, "div, #id");
+        assert!(!bare);
+        assert_eq!(specs.len(), 2);
+        // Most specific first: #id::before ahead of div::before.
+        assert_eq!(specs[0].0, 1);
+        assert_eq!(
+            specs[0].1,
+            SelectorMatcher.selector_specificity("#id::before")
+        );
+        assert_eq!(specs[1].0, 0);
+        assert_eq!(
+            specs[1].1,
+            SelectorMatcher.selector_specificity("div::before")
+        );
+        assert!(specs[0].1 > specs[1].1);
     }
 }
 
