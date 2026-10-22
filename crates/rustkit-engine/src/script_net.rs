@@ -632,7 +632,10 @@ async fn fetch_inserted(
 /// and log it in `out`. Answers the event the element is owed: `load` once
 /// it ran (thrown, or stopped by the budget, alike), `error` when it could
 /// not be fetched or is too large to run, none when it was never a request.
-/// A JS engine panic poisons `out` instead.
+/// Too large is not a network failure: the body arrived and the engine
+/// refuses to run it. `error` is still the one event that element gets, so
+/// a loader waiting on it hears that it will not run instead of waiting
+/// forever. A JS engine panic poisons `out` instead.
 fn run_fetched(
     bindings: &DomBindings,
     inspector: &Arc<Inspector>,
@@ -731,11 +734,34 @@ fn fire_inserted_event(bindings: &DomBindings, node: usize, event: &'static str,
 /// second to arrive, all failed at once, and the page reloaded itself. A
 /// fetch here stays out across turns until it answers or its own network
 /// timeout passes, and each element hears exactly one `load` or `error`.
-#[derive(Default)]
+///
+/// Its fetches go straight to the loader, as a parser-inserted script's do,
+/// not through the page's `FetchPolicy`, so they are bounded here: at most
+/// [`MAX_LIVE_INSERTED_FETCHES`] are out at once and the rest wait, in
+/// insertion order, for a slot. A page that inserts more than
+/// [`MAX_LIVE_INSERTED_PENDING`] that have not arrived yet gets `error` for
+/// each one over, at once, rather than the engine holding them.
 pub(crate) struct LiveScripts {
     scripts: Vec<LiveScript>,
     /// Arrivals so far: the order async scripts run in.
     arrivals: u64,
+    /// Most fetches out at once.
+    max_fetches: usize,
+    /// Most scripts waiting for a slot or out.
+    max_pending: usize,
+}
+
+/// Most inserted-script fetches the live loop has out for one view at once:
+/// the page's `FetchPolicy` allows the same number of its own requests.
+pub(crate) const MAX_LIVE_INSERTED_FETCHES: usize = 24;
+
+/// Most inserted scripts one view may have waiting for a fetch slot or out.
+pub(crate) const MAX_LIVE_INSERTED_PENDING: usize = 512;
+
+impl Default for LiveScripts {
+    fn default() -> Self {
+        Self::with_limits(MAX_LIVE_INSERTED_FETCHES, MAX_LIVE_INSERTED_PENDING)
+    }
 }
 
 /// One inserted script in [`LiveScripts`] (or parked by the load).
@@ -747,6 +773,8 @@ pub(crate) struct LiveScript {
 }
 
 enum Stage {
+    /// Waiting for a fetch slot.
+    Queued(rustkit_net::Request),
     Fetching(LiveFuture<Fetched>),
     /// With its place in the arrival order.
     Arrived(u64, Fetched),
@@ -761,9 +789,18 @@ impl LiveScript {
 }
 
 impl LiveScripts {
+    pub(crate) fn with_limits(max_fetches: usize, max_pending: usize) -> Self {
+        LiveScripts { scripts: Vec::new(), arrivals: 0, max_fetches, max_pending }
+    }
+
     /// Scripts not finished.
     pub(crate) fn len(&self) -> usize {
         self.scripts.len()
+    }
+
+    /// Fetches out now.
+    pub(crate) fn fetching(&self) -> usize {
+        self.scripts.iter().filter(|s| matches!(s.stage, Stage::Fetching(_))).count()
     }
 
     /// The document they belonged to is gone.
@@ -783,10 +820,11 @@ impl LiveScripts {
         }
     }
 
-    /// Start fetching what the page inserted since the last call; each
-    /// fails as a network error `timeout` from now. Nothing runs until
-    /// [`Self::settle`] polls it. Answers how many were taken; `Err` when
-    /// the JS engine panicked.
+    /// Take what the page inserted since the last call, and start fetching
+    /// what waits for a slot, in insertion order, while one is free; each
+    /// fails as a network error `timeout` after it starts. Nothing runs
+    /// until [`Self::settle`] polls it. Answers how many were taken; `Err`
+    /// when the JS engine panicked.
     pub(crate) fn start(
         &mut self,
         bindings: &DomBindings,
@@ -796,23 +834,42 @@ impl LiveScripts {
         inspector: &Arc<Inspector>,
     ) -> Result<usize, ()> {
         let scripts = catch_unwind(AssertUnwindSafe(|| bindings.take_inserted_scripts())).map_err(|_| ())?;
-        let deadline = tokio::time::Instant::now() + timeout;
         let taken = scripts.len();
+        let mut pending =
+            self.scripts.iter().filter(|s| matches!(s.stage, Stage::Queued(_) | Stage::Fetching(_))).count();
         for script in scripts {
-            let stage = match Url::parse(&script.url) {
+            let fetched = match Url::parse(&script.url) {
+                Ok(_) if pending >= self.max_pending => Err(crate::ScriptOutcome::FetchFailed(
+                    crate::FetchFailure::Transport("too many inserted scripts waiting".into()),
+                )),
                 Ok(url) => {
+                    pending += 1;
                     let request = referrer.get_for(url, RequestDestination::Script);
-                    let (loader, inspector) = (loader.clone(), inspector.clone());
-                    Stage::Fetching(Box::pin(async move {
-                        fetch_inserted(&loader, request, deadline, &inspector).await
-                    }))
+                    self.scripts.push(LiveScript::new(script, Stage::Queued(request)));
+                    continue;
                 }
-                Err(_) => {
-                    self.arrivals += 1;
-                    Stage::Arrived(self.arrivals - 1, Err(crate::ScriptOutcome::Skipped("unparseable src")))
-                }
+                Err(_) => Err(crate::ScriptOutcome::Skipped("unparseable src")),
             };
-            self.scripts.push(LiveScript::new(script, stage));
+            self.arrivals += 1;
+            self.scripts.push(LiveScript::new(script, Stage::Arrived(self.arrivals - 1, fetched)));
+        }
+        let mut free = self.max_fetches.saturating_sub(self.fetching());
+        for script in self.scripts.iter_mut() {
+            if free == 0 {
+                break;
+            }
+            if !matches!(script.stage, Stage::Queued(_)) {
+                continue;
+            }
+            let Stage::Queued(request) = std::mem::replace(&mut script.stage, Stage::Owed("error")) else {
+                unreachable!("matched above");
+            };
+            let deadline = tokio::time::Instant::now() + timeout;
+            let (loader, inspector) = (loader.clone(), inspector.clone());
+            script.stage = Stage::Fetching(Box::pin(async move {
+                fetch_inserted(&loader, request, deadline, &inspector).await
+            }));
+            free -= 1;
         }
         Ok(taken)
     }
@@ -876,7 +933,7 @@ impl LiveScripts {
                     }
                     event
                 }
-                Stage::Fetching(_) => unreachable!("only owed or arrived scripts are picked"),
+                Stage::Queued(_) | Stage::Fetching(_) => unreachable!("only owed or arrived scripts are picked"),
             };
             let Some(event) = event else {
                 continue;

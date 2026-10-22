@@ -11622,6 +11622,13 @@ impl Engine {
                 }
                 // Decodes out for this document are dropped either way (D1).
                 view.decode_epoch = view.decode_epoch.wrapping_add(1);
+                // So are the scripts it inserted that have not run, as a
+                // browser's Stop cancels the fetches still out: none of them
+                // runs or hears an event afterwards.
+                view.live_scripts.clear();
+                if let Some(bindings) = view.bindings.as_ref() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_inserted_scripts()));
+                }
                 self.image_manager.begin_navigation(id.0, view.decode_epoch);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed

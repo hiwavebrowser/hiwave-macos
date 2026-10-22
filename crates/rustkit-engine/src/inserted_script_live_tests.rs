@@ -311,3 +311,103 @@ setTimeout(function () {{
         page.log()
     );
 }
+
+/// A timer inserts a script that answers in 600 ms.
+const SLOW_INSERT: &str = "<html><body><p id=p>x</p><script>
+window.heard = [];
+setTimeout(function () {
+  var s = document.createElement('script');
+  s.src = '/late.js?delay=600';
+  s.onload = function () { heard.push('load'); };
+  s.onerror = function () { heard.push('error'); };
+  document.head.appendChild(s);
+}, 60000);
+</script></body></html>";
+
+fn slow_insert_routes() -> Vec<(&'static str, &'static str, String)> {
+    vec![
+        ("/", "text/html", SLOW_INSERT.to_string()),
+        ("/late.js?delay=600", "text/javascript", "window.ran = (window.ran || 0) + 1;".to_string()),
+        ("/next", "text/html", "<html><body><p id=p>next</p></body></html>".to_string()),
+    ]
+}
+
+/// Stop cancels what is still out: the script never runs and its element
+/// hears nothing.
+#[test]
+fn stop_drops_an_inserted_script_still_being_fetched() {
+    let mut page = Page::load(EngineConfig::default(), slow_insert_routes());
+    page.turn(60_000);
+    assert_eq!(page.engine.views[&page.view].live_scripts.len(), 1, "the fetch is out");
+    page.engine.stop(page.view);
+    page.turns_until("false", Duration::from_millis(1500), 0);
+    assert_eq!(
+        page.js("String(window.ran) + ' ' + window.heard.join()"),
+        r#"String("undefined ")"#,
+        "{}",
+        page.log()
+    );
+}
+
+/// A navigation drops it too: the old document's script never runs in the
+/// new one.
+#[test]
+fn a_navigation_drops_an_inserted_script_still_being_fetched() {
+    let mut page = Page::load(EngineConfig::default(), slow_insert_routes());
+    page.turn(60_000);
+    assert_eq!(page.engine.views[&page.view].live_scripts.len(), 1, "the fetch is out");
+    let next = Url::parse(&format!("http://127.0.0.1:{}/next", page._server.port)).unwrap();
+    page.rt.block_on(page.engine.load_url(page.view, next)).expect("load_url");
+    page.turns_until("false", Duration::from_millis(1500), 0);
+    assert_eq!(
+        page.js("String(window.ran) + ' ' + document.getElementById('p').textContent"),
+        r#"String("undefined next")"#,
+        "{}",
+        page.log()
+    );
+}
+
+/// The fetches the live loop has out are bounded: the rest wait for a slot,
+/// and what is over the waiting bound hears `error` at once. Every element
+/// still hears exactly one event.
+#[test]
+fn inserted_script_fetches_are_bounded() {
+    let page = "<html><body><p id=p>x</p><script>
+window.heard = { load: 0, error: 0 };
+window.ran = 0;
+setTimeout(function () {
+  for (var i = 0; i < 12; i++) {
+    var s = document.createElement('script');
+    s.src = '/chunk.js?delay=300&n=' + i;
+    s.onload = function () { heard.load++; };
+    s.onerror = function () { heard.error++; };
+    document.head.appendChild(s);
+  }
+}, 60000);
+</script></body></html>";
+    let mut routes = vec![("/", "text/html", page.to_string())];
+    for i in 0..12 {
+        routes.push((leak(format!("/chunk.js?delay=300&n={i}")), "text/javascript", "window.ran++;".to_string()));
+    }
+    let mut page = Page::load(EngineConfig::default(), routes);
+    page.engine.views.get_mut(&page.view).unwrap().live_scripts = script_net::LiveScripts::with_limits(4, 8);
+    let started = Instant::now();
+    let mut most = 0;
+    page.turn(60_000);
+    while started.elapsed() < Duration::from_secs(8) {
+        most = most.max(page.engine.views[&page.view].live_scripts.fetching());
+        if page.js("window.heard.load + window.heard.error === 12") == "Boolean(true)" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        page.turn(20);
+    }
+    page.turns_until("false", Duration::from_millis(200), 0);
+    assert_eq!(
+        page.js("'load=' + heard.load + ' error=' + heard.error + ' ran=' + ran"),
+        r#"String("load=8 error=4 ran=8")"#,
+        "{}",
+        page.log()
+    );
+    assert!(most <= 4 && most > 0, "fetches out at once: {most}");
+}
