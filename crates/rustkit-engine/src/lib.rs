@@ -3822,26 +3822,26 @@ impl Engine {
             // JavaScript budget left. What the scripts run here insert is
             // started before the turn ends; no turn waits for it.
             let live_scripts = &mut view.live_scripts;
-            for pass in 0..2 {
-                if pass == 1 {
-                    live_scripts.settle(LIVE_NETWORK_SLICE).await;
-                    let found = live_scripts.run(bindings, &inspector);
-                    threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
-                    if found.poisoned {
-                        threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
-                    }
-                    for record in found.records {
-                        if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
-                        }
-                    }
-                }
-                match live_scripts.start(bindings, &loader, &referrer, LIVE_REQUEST_TIMEOUT, &inspector) {
+            let inserted = live_scripts.start(bindings, &loader, &referrer, LIVE_REQUEST_TIMEOUT, &inspector);
+            live_scripts.settle(LIVE_NETWORK_SLICE).await;
+            let found = live_scripts.run(bindings, &inspector);
+            let inserted_by_them = live_scripts.start(bindings, &loader, &referrer, LIVE_REQUEST_TIMEOUT, &inspector);
+            out.in_flight += live_scripts.len();
+            for started in [inserted, inserted_by_them] {
+                match started {
                     Ok(started) => out.requests += started,
                     Err(()) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
                 }
             }
-            out.in_flight += live_scripts.len();
+            threw.extend(found.threw.into_iter().map(|message| ("network", ScriptOutcome::Threw(message))));
+            if found.poisoned {
+                threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
+            }
+            for record in found.records {
+                if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                }
+            }
         }
         let stopped_in = if spent_by_timers { "timers" } else { "network" };
         // A turn that ran out of JavaScript budget held work back (answers,
