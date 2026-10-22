@@ -419,6 +419,8 @@ mod shadow_tree_tests;
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
+#[cfg(all(test, feature = "headless"))]
+mod feed_fill_paint_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -918,6 +920,10 @@ struct ViewState {
     /// passes after it looked at, loaded or not. The post-script pass
     /// fetches only what is not in here.
     images_attempted: std::collections::HashSet<Url>,
+    /// The `frame_generation` the live loop last looked for script-added
+    /// images at. A layout a live turn did not make itself (a scroll's
+    /// observers and listeners, a click, a key) can show images too.
+    images_planned_for: u64,
     /// The current document's fetch policy: a URL-loaded page with
     /// JavaScript on has one, anything else has none. The load's script
     /// requests and the live loop's go through the same one, so its request
@@ -2313,6 +2319,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
@@ -2403,6 +2410,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
@@ -2492,6 +2500,7 @@ impl Engine {
             script_log: Vec::new(),
             header_referrer_policy: None,
             images_attempted: std::collections::HashSet::new(),
+            images_planned_for: 0,
             script_policy: None,
             live_requests: Vec::new(),
             live_images: Vec::new(),
@@ -3879,8 +3888,20 @@ impl Engine {
         }
         // What the callbacks added may show images the load never saw. Their
         // fetch starts here and no turn waits for it (until 2026-10-05 this
-        // one did, for as long as the slowest image took).
-        if out.relaid_out {
+        // one did, for as long as the slowest image took). So may a layout
+        // since the last turn that this loop did not make: until 2026-10-22
+        // an image an IntersectionObserver gave its `src` while the user
+        // scrolled (`scroll_view` lays out what the page's observers write)
+        // was never fetched on a page whose timers had gone quiet, and the
+        // rows it filled stayed white.
+        let unplanned = self
+            .views
+            .get(&id)
+            .is_some_and(|v| v.images_planned_for != v.frame_generation);
+        if out.relaid_out || unplanned {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.images_planned_for = view.frame_generation;
+            }
             match self.plan_image_loads(id, true) {
                 Ok(Some(plan)) if !plan.is_empty() => {
                     if let Some(view) = self.views.get_mut(&id) {
@@ -3904,6 +3925,10 @@ impl Engine {
             match self.relayout_for(id, RelayoutCause::ImageLoaded { count: arrived }) {
                 Ok(()) => out.relaid_out = true,
                 Err(e) => debug!(?id, error = %e, "relayout after live images failed"),
+            }
+            // An arrival shows no image the page did not already ask for.
+            if let Some(view) = self.views.get_mut(&id) {
+                view.images_planned_for = view.frame_generation;
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -5211,6 +5236,21 @@ impl Engine {
     /// must never come through the pushing path: pushing would truncate the
     /// forward stack the user is trying to walk.
     async fn load_url_with_disposition(
+        &mut self,
+        id: EngineViewId,
+        url: Url,
+        replace: bool,
+    ) -> Result<(), EngineError> {
+        let result = self.load_url_with_disposition_inner(id, url, replace).await;
+        // The load's own layouts had their images looked for by the load,
+        // or were cancelled with it: not the live loop's to fetch.
+        if let Some(view) = self.views.get_mut(&id) {
+            view.images_planned_for = view.frame_generation;
+        }
+        result
+    }
+
+    async fn load_url_with_disposition_inner(
         &mut self,
         id: EngineViewId,
         url: Url,
