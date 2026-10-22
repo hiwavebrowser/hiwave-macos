@@ -21,7 +21,7 @@
 //! (attributes, text) go through `Document::replace_node_data`, which keeps
 //! the NodeId, so wrappers and the identity cache are untouched by them.
 
-use crate::{inner_text, DomDirty, MutationKind, ScriptMutations};
+use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
 use std::cell::{Cell, RefCell};
@@ -575,6 +575,73 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
     }
 }
 
+/// The per-node record a `write` op makes (the `MutationLog`), read before
+/// the write so `class` and `id` keep their old value. `None` for an op
+/// that writes no connected data (creation, clone) or an unknown node.
+fn write_record(host: &DomHost, args: &[JsValue]) -> Option<MutationRecord> {
+    let node = host.node_at(args, 2)?;
+    let record = |kind, attr: Option<String>, old: Option<String>| MutationRecord {
+        node: node.id.raw(),
+        kind,
+        attr,
+        old,
+        child: None,
+    };
+    match (string_arg(args, 1)?, &node.node_type) {
+        ("setAttr" | "removeAttr", NodeType::Element { .. }) => {
+            let name = string_arg(args, 3)?;
+            let name = if is_html_element(&node) {
+                name.to_ascii_lowercase()
+            } else {
+                name.to_string()
+            };
+            let old = matches!(name.as_str(), "class" | "id")
+                .then(|| node.get_attribute(&name).map(str::to_string))
+                .flatten();
+            let kind = match name.as_str() {
+                "style" => MutationKind::Style,
+                _ => MutationKind::Attribute,
+            };
+            Some(record(kind, Some(name), old))
+        }
+        ("setText", NodeType::Text(_) | NodeType::Comment(_)) => Some(record(MutationKind::Text, None, None)),
+        // The element's children are replaced.
+        ("setText" | "setHTML" | "setInnerText", _) => Some(record(MutationKind::ChildList, None, None)),
+        _ => None,
+    }
+}
+
+/// The per-node records a `mutate` op makes: the parent with the node it
+/// gained or lost. A move also records the parent it left; a fragment
+/// inserts its children, not itself.
+fn mutate_records(host: &DomHost, args: &[JsValue]) -> Vec<MutationRecord> {
+    let (Some(parent), Some(node)) = (host.node_at(args, 2), host.node_at(args, 3)) else {
+        return Vec::new();
+    };
+    let record = |parent: usize, child: usize| MutationRecord {
+        node: parent,
+        kind: MutationKind::ChildList,
+        attr: None,
+        old: None,
+        child: Some(child),
+    };
+    match string_arg(args, 1) {
+        Some("insert") if matches!(node.node_type, NodeType::DocumentFragment) => node
+            .children()
+            .iter()
+            .map(|c| record(parent.id.raw(), c.id.raw()))
+            .collect(),
+        Some("insert") => node
+            .parent()
+            .map(|old| record(old.id.raw(), node.id.raw()))
+            .into_iter()
+            .chain([record(parent.id.raw(), node.id.raw())])
+            .collect(),
+        Some("remove") => vec![record(parent.id.raw(), node.id.raw())],
+        _ => Vec::new(),
+    }
+}
+
 /// Diagnostic (`RUST_LOG=rustkit_bindings::dom=trace`): the write that
 /// dirtied the page, and whether its node (the parent, for a tree write) is
 /// in the document at all.
@@ -655,6 +722,18 @@ fn note_mutation(
 ) {
     if bucket != DomDirty::Clean {
         mutations.borrow_mut().record(kind, label);
+    }
+}
+
+/// The `MutationLog` record of a control value (`attr` `None`) or
+/// checkedness (`checked`) write.
+fn control_record(node: usize, attr: Option<&str>) -> MutationRecord {
+    MutationRecord {
+        node,
+        kind: MutationKind::FormValue,
+        attr: attr.map(str::to_string),
+        old: None,
+        child: None,
     }
 }
 
@@ -1005,6 +1084,7 @@ pub(crate) fn install(
     host: &SharedDomHost,
     dirty: &Rc<Cell<DomDirty>>,
     mutations: &Rc<RefCell<ScriptMutations>>,
+    log: &Rc<RefCell<MutationLog>>,
 ) -> Result<(), JsError> {
     // `__rustkit_dom_resolve(base, relative)`: the absolute URL `relative`
     // names against `base`, or null when either does not parse. Backs the
@@ -1230,11 +1310,19 @@ pub(crate) fn install(
     let h = host.clone();
     let d = dirty.clone();
     let m = mutations.clone();
+    let l = log.clone();
     runtime.register_host_function(
         "__rustkit_dom_mutate",
         5,
-        Box::new(move |args| match mutate(&h.borrow(), args) {
+        Box::new(move |args| {
+            let records = mutate_records(&h.borrow(), args);
+            match mutate(&h.borrow(), args) {
             Ok(()) => {
+                let mut log = l.borrow_mut();
+                for record in records {
+                    log.push(record);
+                }
+                drop(log);
                 trace_dirty(&h.borrow(), args, DomDirty::Style);
                 note_mutation(&m, DomDirty::Style, MutationKind::ChildList, || {
                     node_label(&h.borrow(), args, 2)
@@ -1244,6 +1332,7 @@ pub(crate) fn install(
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
+            }
         }),
     )?;
 
@@ -1252,11 +1341,17 @@ pub(crate) fn install(
     let h = host.clone();
     let d = dirty.clone();
     let m = mutations.clone();
+    let l = log.clone();
     runtime.register_host_function(
         "__rustkit_dom_write",
         5,
-        Box::new(move |args| match write(&h.borrow(), args) {
+        Box::new(move |args| {
+            let record = write_record(&h.borrow(), args);
+            match write(&h.borrow(), args) {
             Ok((result, bucket)) => {
+                if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
+                    l.borrow_mut().push(record);
+                }
                 trace_dirty(&h.borrow(), args, bucket);
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
@@ -1265,6 +1360,7 @@ pub(crate) fn install(
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
+            }
         }),
     )?;
 
@@ -1280,11 +1376,15 @@ pub(crate) fn install(
     let h = host.clone();
     let d = dirty.clone();
     let m = mutations.clone();
+    let l = log.clone();
     runtime.register_host_function(
         "__rustkit_dom_value",
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
+                l.borrow_mut().push(control_record(node.id.raw(), None));
+            }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
@@ -1296,11 +1396,15 @@ pub(crate) fn install(
     let h = host.clone();
     let d = dirty.clone();
     let m = mutations.clone();
+    let l = log.clone();
     runtime.register_host_function(
         "__rustkit_dom_checked",
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
+                l.borrow_mut().push(control_record(node.id.raw(), Some("checked")));
+            }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
@@ -2133,7 +2237,9 @@ const WRAPPERS_JS: &str = r#"
     };
     // Navigation from script is not wired; submission stays engine-side.
     HTMLFormElement.prototype.submit = function () {};
-    [['name', 'name'], ['action', 'action'], ['target', 'target']].forEach(function (p) {
+    // `action` is web_reflect.js's: the attribute resolved against the
+    // document's base URL.
+    [['name', 'name'], ['target', 'target']].forEach(function (p) {
         accessor(HTMLFormElement.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
             function (v) { this.setAttribute(p[1], v); });
     });
@@ -3703,5 +3809,89 @@ mod tests {
         assert!(label.starts_with("div#x?INFO forged aaa"), "{label:?}");
         assert!(label.ends_with('…'), "{label:?}");
         assert_eq!(label.chars().count(), "div#".len() + 48 + 1);
+    }
+
+    // The incremental-restyle mutation log: one record per dirtying write,
+    // naming its node, the attribute, and the old class or id.
+    #[test]
+    fn mutation_log_records_each_write_per_node() {
+        let (b, doc) = bound(&PAGE.replace("<body>", "<body><input id=\"in\" type=\"checkbox\">"));
+        let raw = |id: &str| doc.get_element_by_id(id).unwrap().id.raw();
+        let (main, outside, input) = (raw("main"), raw("outside"), raw("in"));
+        assert!(b.take_mutation_log().is_empty());
+        b.evaluate(
+            "var m = document.getElementById('main'); \
+             m.className = 'box'; \
+             m.className = 'box wide'; \
+             m.id = 'main2'; \
+             m.setAttribute('data-x', '1'); \
+             m.style.color = 'red'; \
+             var o = document.getElementById('outside'); \
+             o.firstChild.data = 'Bye'; \
+             m.appendChild(o); \
+             m.removeChild(o); \
+             m.innerHTML = '<i>x</i>'; \
+             var f = document.createDocumentFragment(); \
+             f.appendChild(document.createElement('a')); \
+             f.appendChild(document.createElement('b')); \
+             document.body.appendChild(f); \
+             document.getElementById('in').checked = true;",
+        )
+        .unwrap();
+        let log = b.take_mutation_log();
+        assert!(!log.full);
+        type Row<'a> = (usize, MutationKind, Option<&'a str>, Option<&'a str>, bool);
+        let summary: Vec<Row> = log
+            .records
+            .iter()
+            .map(|r| (r.node, r.kind, r.attr.as_deref(), r.old.as_deref(), r.child.is_some()))
+            .collect();
+        let body = doc.body().unwrap().id.raw();
+        let fragment = log.records[9].node;
+        assert_ne!(fragment, body);
+        let text = doc.get_element_by_id("outside").unwrap().first_child().unwrap().id.raw();
+        assert_eq!(
+            summary,
+            vec![
+                // Setting `class` to its value is no write.
+                (main, MutationKind::Attribute, Some("class"), Some("box"), false),
+                (main, MutationKind::Attribute, Some("id"), Some("main"), false),
+                (main, MutationKind::Attribute, Some("data-x"), None, false),
+                (main, MutationKind::Style, Some("style"), None, false),
+                (text, MutationKind::Text, None, None, false),
+                // A move records the parent it left and the one it joined.
+                (body, MutationKind::ChildList, None, None, true),
+                (main, MutationKind::ChildList, None, None, true),
+                (main, MutationKind::ChildList, None, None, true),
+                // innerHTML replaces every child.
+                (main, MutationKind::ChildList, None, None, false),
+                // Filling a detached fragment is recorded too (the engine
+                // skips what is not connected); inserting it records its
+                // children.
+                (fragment, MutationKind::ChildList, None, None, true),
+                (fragment, MutationKind::ChildList, None, None, true),
+                (body, MutationKind::ChildList, None, None, true),
+                (body, MutationKind::ChildList, None, None, true),
+                (input, MutationKind::FormValue, Some("checked"), None, false),
+            ]
+        );
+        assert_eq!(log.records[5].child, Some(outside));
+        assert!(b.take_mutation_log().is_empty(), "taking resets it");
+        assert_eq!(b.take_dirty(), DomDirty::Style, "the bucket is unchanged by the log");
+    }
+
+    #[test]
+    fn mutation_log_overflows_into_full() {
+        let (b, _doc) = bound(PAGE);
+        b.evaluate(&format!(
+            "var m = document.getElementById('main'); \
+             for (var i = 0; i < {}; i++) m.setAttribute('data-n', String(i));",
+            crate::MUTATION_LOG_CAP + 1
+        ))
+        .unwrap();
+        let log = b.take_mutation_log();
+        assert!(log.full && log.records.is_empty());
+        assert!(!log.is_empty());
+        assert!(b.take_mutation_log().is_empty());
     }
 }

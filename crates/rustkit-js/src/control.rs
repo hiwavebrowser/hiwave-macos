@@ -22,8 +22,8 @@
 //! never need to clear a turn-targeted word: every writer uses `fetch_max`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 /// The interrupt word's "every turn": this view runs no more script until
@@ -318,19 +318,14 @@ impl ThreadStamp {
         self.turn_started_us.store(started, Ordering::Relaxed);
         self.turn_budget_us.store(budget_us, Ordering::Relaxed);
         self.turn.store(id, Ordering::Release);
-        // Pairs with the watchdog's fence between publishing when it will
-        // next wake and its last look: either it sees this turn or this sees
-        // when it wakes, and wakes it if that is after this turn's budget
-        // (it may be sleeping a whole tick after stopping another turn).
-        fence(Ordering::SeqCst);
+        // Wake the watchdog if it would sleep past this turn's budget (it
+        // may be sleeping a whole tick after stopping another turn), or is
+        // awake and may have looked before this turn was published. The
+        // lock orders the publish above before the watchdog's next look.
         if let Some(watchdog) = self.watchdog.upgrade() {
-            let parked = watchdog.parked.swap(false, Ordering::Relaxed);
-            let wakes = watchdog.wake_at_us.load(Ordering::Relaxed);
-            if parked || started.saturating_add(budget_us) < wakes {
-                if let Some(thread) = watchdog.thread.get() {
-                    thread.unpark();
-                }
-            }
+            watchdog
+                .sleep
+                .turn_opened(started.saturating_add(budget_us));
         }
         id
     }
@@ -394,17 +389,9 @@ struct Shared {
     tick: Duration,
     stamps: Mutex<Vec<Weak<ThreadStamp>>>,
     views: Mutex<HashMap<u64, Weak<ViewControl>>>,
-    /// Set by the watchdog before it parks with no turn open.
-    parked: AtomicBool,
-    /// Set by the watchdog from just before it parks (a tick, or for good)
-    /// until it is running again. A diagnostic: the timing tests wait for
-    /// it so that the turn they open finds the watchdog asleep, not
-    /// between its two looks.
-    sleeping: AtomicBool,
-    /// When the watchdog next wakes on its own (`now_us`); `u64::MAX`
-    /// while parked with no turn open.
-    wake_at_us: AtomicU64,
-    thread: OnceLock<std::thread::Thread>,
+    /// The watchdog's sleep. The thread holds it strongly and `Shared`
+    /// only weakly, so it can sleep without keeping the watchdog alive.
+    sleep: Arc<Sleep>,
     /// Turns the watchdog has stopped (a diagnostic).
     stopped: AtomicU64,
 }
@@ -412,9 +399,103 @@ struct Shared {
 impl Drop for Shared {
     fn drop(&mut self) {
         // The thread holds only a `Weak`: woken, it finds it dead and ends.
-        if let Some(thread) = self.thread.get() {
-            thread.unpark();
+        self.sleep.wake();
+    }
+}
+
+/// The watchdog's sleep and the wake a newly opened turn sends it.
+///
+/// One lock for the watchdog's decision to sleep and for a turn's check of
+/// that decision, so no wake is lost between them: a turn opened before the
+/// watchdog takes the lock to sleep makes it look again, and a turn opened
+/// after reads the time it will wake. A turn takes this lock once, when it
+/// opens; the watchdog takes it about once a tick.
+#[derive(Default)]
+struct Sleep {
+    state: Mutex<SleepState>,
+    woken: Condvar,
+}
+
+#[derive(Debug)]
+struct SleepState {
+    /// When the sleeping watchdog wakes on its own (`now_us`). `u64::MAX`
+    /// while it sleeps with no turn open, and while it is awake: a turn
+    /// opened then always reaches it.
+    wake_at_us: u64,
+    /// A turn opened, or the watchdog was dropped, since the watchdog last
+    /// woke: it looks again before it sleeps.
+    kicked: bool,
+    /// The watchdog is waiting on [`Sleep::woken`]. A diagnostic: the
+    /// timing tests wait for it so that the turn they open finds the
+    /// watchdog asleep.
+    sleeping: bool,
+}
+
+impl Default for SleepState {
+    fn default() -> Self {
+        Self {
+            wake_at_us: u64::MAX,
+            kicked: false,
+            sleeping: false,
         }
+    }
+}
+
+impl Sleep {
+    fn lock(&self) -> MutexGuard<'_, SleepState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A turn whose budget ends at `ends_us` has been published: wake the
+    /// watchdog unless it already wakes by then.
+    fn turn_opened(&self, ends_us: u64) {
+        let mut state = self.lock();
+        if ends_us < state.wake_at_us {
+            state.kicked = true;
+            drop(state);
+            self.woken.notify_one();
+        }
+    }
+
+    /// Wake the watchdog whatever it is waiting for.
+    fn wake(&self) {
+        self.lock().kicked = true;
+        self.woken.notify_one();
+    }
+
+    /// Called by the watchdog after a look that found the next budget ends
+    /// in `wait` (`None`: no turn open). Sleeps until then, or until a turn
+    /// that ends sooner opens. Returns at once if a turn opened during the
+    /// look, which may have missed it.
+    fn sleep(&self, wait: Option<Duration>) {
+        let mut state = self.lock();
+        if !state.kicked {
+            // The time published is the time slept to, from the same look.
+            let wake_at = wait.map_or(u64::MAX, |wait| {
+                now_us().saturating_add(wait.as_micros() as u64)
+            });
+            state.wake_at_us = wake_at;
+            state.sleeping = true;
+            while !state.kicked {
+                if wake_at == u64::MAX {
+                    state = self.woken.wait(state).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
+                let now = now_us();
+                if now >= wake_at {
+                    break;
+                }
+                state = self
+                    .woken
+                    .wait_timeout(state, Duration::from_micros(wake_at - now))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        }
+        // Awake: every turn opened from here on kicks, until the next sleep.
+        state.kicked = false;
+        state.sleeping = false;
+        state.wake_at_us = u64::MAX;
     }
 }
 
@@ -491,18 +572,15 @@ impl Watchdog {
             tick,
             stamps: Mutex::default(),
             views: Mutex::default(),
-            parked: AtomicBool::new(false),
-            sleeping: AtomicBool::new(false),
-            wake_at_us: AtomicU64::new(0),
-            thread: OnceLock::new(),
+            sleep: Arc::default(),
             stopped: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&shared);
-        let handle = std::thread::Builder::new()
+        let sleep = Arc::clone(&shared.sleep);
+        std::thread::Builder::new()
             .name("watchdog".into())
-            .spawn(move || run(weak))
+            .spawn(move || run(weak, sleep))
             .expect("spawn the watchdog thread");
-        let _ = shared.thread.set(handle.thread().clone());
         Self { shared }
     }
 
@@ -547,33 +625,14 @@ impl Watchdog {
     }
 }
 
-fn run(shared: Weak<Shared>) {
+fn run(shared: Weak<Shared>, sleep: Arc<Sleep>) {
     loop {
         let Some(live) = shared.upgrade() else {
             return;
         };
-        live.sleeping.store(false, Ordering::Relaxed);
-        let first = live.scan();
-        // Say when this thread wakes next (never, with nothing open), then
-        // look once more: a turn published after that look sees it and
-        // unparks this thread if its budget ends sooner.
-        let wake_at = first.map_or(u64::MAX, |wait| {
-            now_us().saturating_add(wait.as_micros() as u64)
-        });
-        live.wake_at_us.store(wake_at, Ordering::Relaxed);
-        live.parked.store(first.is_none(), Ordering::Relaxed);
-        fence(Ordering::SeqCst);
         let wait = live.scan();
-        if wait.is_none() != first.is_none() {
-            // A turn opened or closed between the looks: look again.
-            continue;
-        }
-        live.sleeping.store(true, Ordering::Relaxed);
         drop(live);
-        match wait {
-            Some(wait) => std::thread::park_timeout(wait),
-            None => std::thread::park(),
-        }
+        sleep.sleep(wait);
     }
 }
 
@@ -801,13 +860,13 @@ mod tests {
             std::thread::yield_now();
         }
         // With the stopped turn still open (the script is unwinding), wait
-        // for the watchdog to be in its tick-long sleep: both its looks saw
-        // that turn, so it is not parked, and only the short turn's own
-        // wake can bring it back before the tick ends. Ending the turn
-        // first would let the watchdog park with nothing open, and the
-        // short turn would then wake it by the other path.
+        // for the watchdog to be in its tick-long sleep: its last look saw
+        // that turn, so it sleeps a tick, not until woken, and only the
+        // short turn's own wake can bring it back before the tick ends.
+        // Ending the turn first would let the watchdog sleep with nothing
+        // open, until any turn wakes it, which tests nothing.
         let started = Instant::now();
-        while !watchdog.shared.sleeping.load(Ordering::Relaxed) {
+        while !watchdog.shared.sleep.lock().sleeping {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "the watchdog never went to sleep after the first stop"

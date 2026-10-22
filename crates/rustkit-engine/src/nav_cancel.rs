@@ -167,7 +167,7 @@ pub(crate) type PhaseHook = Box<dyn FnMut(&str)>;
 
 #[cfg(test)]
 thread_local! {
-    /// Called at named points of a load (`parse`, `script:N`), so a test can
+    /// Called at named points of a load (`parse`, `script:N`, the lifecycle steps), so a test can
     /// cancel exactly there.
     pub(crate) static LOAD_PHASE_HOOK: std::cell::RefCell<Option<PhaseHook>> =
         const { std::cell::RefCell::new(None) };

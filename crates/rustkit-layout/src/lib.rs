@@ -6604,6 +6604,18 @@ impl LayoutBox {
                 ) {
                     self.dimensions.content.height = h;
                 }
+                // `-webkit-line-clamp: N` on an auto height: the box ends
+                // at its Nth line box; the rest is overflow.
+                if self.style.height == Length::Auto {
+                    if let Some(bottom) = self
+                        .style
+                        .line_clamp()
+                        .and_then(|n| self.line_clamp_bottom(n))
+                    {
+                        self.dimensions.content.height =
+                            (bottom - self.dimensions.content.y).max(0.0);
+                    }
+                }
             }
         }
 
@@ -6673,6 +6685,51 @@ impl LayoutBox {
         if let Some(rows) = table_rows_height {
             self.dimensions.content.height = self.dimensions.content.height.max(rows);
         }
+    }
+
+    /// css-overflow-4 §4.2 (legacy `-webkit-line-clamp`): the bottom of
+    /// this block's `n`th line box, counting the line boxes of its in-flow
+    /// descendants in block order; `None` when it has `n` or fewer. There
+    /// is no line box model, so the lines are recovered from what sits on
+    /// them: text fragments and atomic inlines. Those on one line overlap
+    /// vertically; consecutive lines only touch.
+    fn line_clamp_bottom(&self, n: u32) -> Option<f32> {
+        fn collect(b: &LayoutBox, bands: &mut Vec<(f32, f32)>) {
+            for c in &b.children {
+                if matches!(c.position, Position::Absolute | Position::Fixed)
+                    || c.float != Float::None
+                {
+                    continue;
+                }
+                match &c.box_type {
+                    BoxType::Text(_) => match c.text_line_fragments() {
+                        Some(f) => bands.extend(f.iter().map(|r| (r.y, r.y + r.height))),
+                        None => {
+                            let r = c.dimensions.content;
+                            bands.push((r.y, r.y + r.height));
+                        }
+                    },
+                    BoxType::LineBreak => {}
+                    _ if c.is_atomic_line_member() => {
+                        let r = c.dimensions.margin_box();
+                        bands.push((r.y, r.y + r.height));
+                    }
+                    _ => collect(c, bands),
+                }
+            }
+        }
+        let mut bands = Vec::new();
+        collect(self, &mut bands);
+        bands.retain(|(top, bottom)| bottom > top);
+        bands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut lines: Vec<(f32, f32)> = Vec::new();
+        for (top, bottom) in bands {
+            match lines.last_mut() {
+                Some(line) if top < line.1 - 0.5 => line.1 = line.1.max(bottom),
+                _ => lines.push((top, bottom)),
+            }
+        }
+        (n >= 1 && lines.len() > n as usize).then(|| lines[n as usize - 1].1)
     }
 
     /// Convert a Length to pixels.
