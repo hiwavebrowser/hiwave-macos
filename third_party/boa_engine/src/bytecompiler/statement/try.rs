@@ -1,6 +1,6 @@
 use crate::{
     bytecompiler::{ByteCompiler, Register, ToJsString, jump_control::JumpControlInfoFlags},
-    vm::{CallFrame, opcode::BindingOpcode},
+    vm::{CallFrame, StopFinally, opcode::BindingOpcode},
 };
 use boa_ast::{
     Statement, StatementListItem,
@@ -101,9 +101,16 @@ impl ByteCompiler<'_> {
                     .flags |= JumpControlInfoFlags::IN_FINALLY;
                 self.compile_finally_stmt(f);
                 self.register_allocator.dealloc(error);
+                let exit = self.next_opcode_location(); // HIWAVE PATCH (stop finally)
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
                 self.bytecode.emit_re_throw();
                 self.patch_jump(do_not_throw_exit);
+                // HIWAVE PATCH (stop finally): a stop in the try block or in
+                // the catch block runs the finally block, never the catch.
+                let finally = self.stop_finally(finally_start, exit);
+                self.mark_stop_finally(try_handler, finally);
+                self.mark_stop_finally(catch_handler, finally);
+                // END HIWAVE PATCH
                 self.pop_try_with_finally_control_info(finally_start);
                 self.register_allocator.dealloc(finally_re_throw);
                 self.register_allocator.dealloc(finally_jump_index);
@@ -139,6 +146,7 @@ impl ByteCompiler<'_> {
                     .expect("there should be a try block")
                     .flags |= JumpControlInfoFlags::IN_FINALLY;
                 self.compile_finally_stmt(f);
+                let exit = self.next_opcode_location(); // HIWAVE PATCH (stop finally)
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
                 let is_generator_exit = self.jump_if_true(&re_throw_generator);
                 self.bytecode.emit_throw(error.variable());
@@ -146,6 +154,10 @@ impl ByteCompiler<'_> {
                 self.patch_jump(is_generator_exit);
                 self.bytecode.emit_re_throw();
                 self.patch_jump(do_not_throw_exit);
+                // HIWAVE PATCH (stop finally)
+                let finally = self.stop_finally(finally_start, exit);
+                self.mark_stop_finally(try_handler, finally);
+                // END HIWAVE PATCH
                 self.register_allocator.dealloc(re_throw_generator);
                 self.pop_try_with_finally_control_info(finally_start);
                 self.register_allocator.dealloc(finally_re_throw);
@@ -169,16 +181,40 @@ impl ByteCompiler<'_> {
                     .expect("there should be a try block")
                     .flags |= JumpControlInfoFlags::IN_FINALLY;
                 self.compile_finally_stmt(f);
+                let exit = self.next_opcode_location(); // HIWAVE PATCH (stop finally)
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
                 self.bytecode.emit_throw(error.variable());
                 self.register_allocator.dealloc(error);
                 self.patch_jump(do_not_throw_exit);
+                // HIWAVE PATCH (stop finally)
+                let finally = self.stop_finally(finally_start, exit);
+                self.mark_stop_finally(try_handler, finally);
+                // END HIWAVE PATCH
                 self.pop_try_with_finally_control_info(finally_start);
                 self.register_allocator.dealloc(finally_re_throw);
                 self.register_allocator.dealloc(finally_jump_index);
             }
         }
     }
+
+    // HIWAVE PATCH (stop finally)
+    /// The `finally` block from `entry` to `exit`; its rethrow ends here.
+    fn stop_finally(
+        &mut self,
+        entry: crate::vm::opcode::Address,
+        exit: crate::vm::opcode::Address,
+    ) -> StopFinally {
+        StopFinally {
+            entry: entry.as_u32(),
+            exit: exit.as_u32(),
+            exit_end: self.next_opcode_location().as_u32(),
+        }
+    }
+
+    fn mark_stop_finally(&mut self, handler_index: u32, finally: StopFinally) {
+        self.handlers[handler_index as usize].stop_finally = Some(finally);
+    }
+    // END HIWAVE PATCH
 
     pub(crate) fn compile_catch_stmt(&mut self, catch: &Catch, error: &Register, use_expr: bool) {
         let outer_scope = self.push_declarative_scope(Some(catch.scope()));

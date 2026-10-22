@@ -408,6 +408,7 @@ impl ByteCompiler<'_> {
             start: start_address,
             end: Self::DUMMY_ADDRESS,
             environment_count,
+            stop_finally: None, // HIWAVE PATCH (stop finally)
         });
 
         handler_index
