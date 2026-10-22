@@ -648,7 +648,20 @@ struct InsertedBoard {
     /// the order they finished.
     ready_seq: u64,
     jobs: Vec<InsertedJob>,
+    /// Events a script has earned and could not hear yet because the turn's
+    /// JavaScript budget was spent, oldest first. A turn with budget fires
+    /// them before it runs another script, so each element hears exactly one
+    /// `load` or `error` (#775: a loader waiting on a dropped one waited
+    /// forever).
+    owed: Vec<OwedEvent>,
     notify: Arc<tokio::sync::Notify>,
+}
+
+struct OwedEvent {
+    node: usize,
+    event: &'static str,
+    /// The script's URL, for the log.
+    source: String,
 }
 
 struct InsertedJob {
@@ -668,8 +681,10 @@ struct InsertedJob {
     cancel: Arc<FetchCancel>,
 }
 
-/// How many inserted-script fetches may be on the wire at once.
-const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 8;
+/// How many inserted-script fetches may be on the wire at once: the number
+/// of its own requests the page's `FetchPolicy` allows (#775). Fewer made a
+/// loader's short chunks wait behind its long ones, out of arrival order.
+pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 24;
 /// How many may be waiting behind those. Past this the script hears
 /// `error` instead of the queue growing without a bound.
 const MAX_INSERTED_FETCH_QUEUE: usize = 64;
@@ -724,6 +739,7 @@ fn cancel_inserted_jobs(board: &mut InsertedBoard) {
             guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
         }
     }
+    board.owed.clear();
     board.notify.notify_waiters();
 }
 
@@ -774,6 +790,7 @@ impl InsertedScripts {
                 next_id: 1,
                 ready_seq: 0,
                 jobs: Vec::new(),
+                owed: Vec::new(),
                 notify: Arc::new(tokio::sync::Notify::new()),
             })),
         }
@@ -797,16 +814,28 @@ impl InsertedScripts {
     }
 
     fn has_jobs(&self) -> bool {
-        !lock_board(&self.board).jobs.is_empty()
+        let board = lock_board(&self.board);
+        !board.jobs.is_empty() || !board.owed.is_empty()
     }
 
-    /// A script is queued or its fetch is still out.
+    /// A script is queued, its fetch is still out, or its element is still
+    /// owed its event.
     pub(crate) fn pending(&self) -> bool {
         self.has_jobs()
     }
 
     fn has_ready(&self) -> bool {
-        next_ready_index(&lock_board(&self.board).jobs).is_some()
+        let board = lock_board(&self.board);
+        !board.owed.is_empty() || next_ready_index(&board.jobs).is_some()
+    }
+
+    fn take_owed(&self) -> Option<OwedEvent> {
+        let mut board = lock_board(&self.board);
+        (!board.owed.is_empty()).then(|| board.owed.remove(0))
+    }
+
+    fn owe(&self, owed: OwedEvent) {
+        lock_board(&self.board).owed.push(owed);
     }
 
     fn take_ready(&self) -> Option<InsertedJob> {
@@ -904,7 +933,7 @@ pub(crate) fn drive_at_most_one(
         scripts.abandon();
         return out;
     }
-    if !execute || !scripts.has_ready() {
+    if !execute || super::script_js_exhausted() || !scripts.has_ready() {
         return out;
     }
     out.rounds += 1;
@@ -954,7 +983,9 @@ pub(crate) async fn drive_inserted_scripts(
         if !scripts.has_jobs() {
             return out;
         }
-        if !execute {
+        // A script whose budget is spent stays queued for a turn that has
+        // some; it is never run over budget or dropped.
+        if !execute || super::script_js_exhausted() {
             return out;
         }
         if scripts.has_ready() {
@@ -1248,8 +1279,10 @@ fn response_mime(response: &rustkit_net::Response) -> Option<String> {
         })
 }
 
-/// Run the oldest inserted script, whose body has arrived. `true`: the JS
-/// engine panicked and nothing further on this page may run.
+/// Fire the oldest owed event, or else run the next inserted script whose
+/// body has arrived. Does nothing once the turn's JavaScript budget is
+/// spent: the script stays queued for a later turn. `true`: the JS engine
+/// panicked and nothing further on this page may run.
 fn run_inserted(
     bindings: &DomBindings,
     inspector: &Arc<Inspector>,
@@ -1257,6 +1290,13 @@ fn run_inserted(
     out: &mut Pump,
 ) -> bool {
     use crate::{EngineFailure, FetchFailure, ScriptOutcome, ScriptRecord};
+    if super::script_js_exhausted() {
+        return false;
+    }
+    if let Some(owed) = scripts.take_owed() {
+        fire_inserted_event(bindings, owed, out);
+        return false;
+    }
     let Some(mut job) = scripts.take_ready() else {
         return false;
     };
@@ -1266,10 +1306,6 @@ fn run_inserted(
     finish_inserted_guard(job.guard.take(), &fetched);
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
-        FetchedInserted::Source(source) if super::script_js_exhausted() => {
-            record.bytes = source.text.len();
-            Err(ScriptOutcome::OverBudget)
-        }
         FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
             record.bytes = source.text.len();
             Err(ScriptOutcome::Skipped("too large to run inside the script budget"))
@@ -1281,7 +1317,14 @@ fn run_inserted(
     };
     let event = match text {
         Err(outcome) => {
-            let event = matches!(outcome, ScriptOutcome::FetchFailed(_)).then_some("error");
+            // Too large is not a network failure, but `error` is still the
+            // one event that element gets: a loader waiting on it hears that
+            // it will not run. An unparseable `src` was never a request.
+            let event = match outcome {
+                ScriptOutcome::FetchFailed(_) => Some("error"),
+                ScriptOutcome::Skipped(reason) if reason.starts_with("too large") => Some("error"),
+                _ => None,
+            };
             record.outcome = outcome;
             event
         }
@@ -1318,14 +1361,16 @@ fn run_inserted(
                     }
                 }
             };
-            // Run, thrown or not, the element hears `load`.
-            matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_)).then_some("load")
+            // Run, thrown, or stopped by the budget, the element hears `load`.
+            matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_) | ScriptOutcome::OverBudget)
+                .then_some("load")
         }
     };
     if let Some(event) = event {
         crate::console_log::inserted_script(&record.source, event);
     }
     let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
+    let source = record.source.clone();
     out.records.push(record);
     out.requests += 1;
     if poisoned {
@@ -1333,23 +1378,37 @@ fn run_inserted(
         return true;
     }
     if let Some(event) = event {
-        if !super::script_js_exhausted() {
-            let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(job.node, event));
-            if stopped {
-                crate::log_script_stopped(
-                    &out.records.last().map(|r| r.source.clone()).unwrap_or_default(),
-                    crate::script_js_stopped_ms(),
-                    crate::take_script_js_overrun(),
-                );
-                if let Some(record) = out.records.last_mut() {
-                    record.outcome = ScriptOutcome::OverBudget;
-                }
-            } else if let Err(e) = fired {
-                out.threw.push(e.to_string());
-            }
+        let owed = OwedEvent { node: job.node, event, source };
+        // A spent budget (the script itself may have spent it) owes the
+        // event to the next turn that has some, ahead of any other script.
+        if super::script_js_exhausted() {
+            scripts.owe(owed);
+        } else {
+            fire_inserted_event(bindings, owed, out);
         }
     }
     false
+}
+
+/// Fire an inserted script's `load` or `error`. A listener the budget
+/// stopped is that script's stop in the log; what one threw goes to
+/// `out.threw`.
+fn fire_inserted_event(bindings: &DomBindings, owed: OwedEvent, out: &mut Pump) {
+    let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(owed.node, owed.event));
+    if stopped {
+        crate::log_script_stopped(&owed.source, crate::script_js_stopped_ms(), crate::take_script_js_overrun());
+        match out.records.last_mut().filter(|record| record.source == owed.source) {
+            Some(record) => record.outcome = crate::ScriptOutcome::OverBudget,
+            None => out.records.push(crate::ScriptRecord {
+                source: owed.source,
+                bytes: 0,
+                elapsed_ms: 0,
+                outcome: crate::ScriptOutcome::OverBudget,
+            }),
+        }
+    } else if let Err(e) = fired {
+        out.threw.push(e.to_string());
+    }
 }
 
 fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched: &FetchedInserted) {
