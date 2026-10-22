@@ -6205,6 +6205,27 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
+                // A slice the budget stopped is one over-budget record, as a
+                // lifecycle step's is (`run` above), not the interrupt's
+                // RuntimeLimitError. The timers it did not reach stay due.
+                if stopped && !matches!(caught, Err(_)) {
+                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
+                    inspector_glue::log_script(
+                        log,
+                        &inspector,
+                        ScriptRecord {
+                            source: "timers".into(),
+                            bytes: 0,
+                            elapsed_ms,
+                            outcome: ScriptOutcome::OverBudget,
+                        },
+                    );
+                    if let Ok(Ok((ran, _))) = caught {
+                        timers_ran.set(timers_ran.get() + ran);
+                    }
+                    break;
+                }
                 let (ran, frame_yield) = match caught {
                     Ok(Ok(ran)) => ran,
                     Ok(Err(e)) => {
@@ -6235,9 +6256,6 @@ impl Engine {
                         return;
                     }
                 };
-                if stopped {
-                    log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
-                }
                 timers_ran.set(timers_ran.get() + ran);
                 remaining = remaining.saturating_sub(ran);
                 info!(
