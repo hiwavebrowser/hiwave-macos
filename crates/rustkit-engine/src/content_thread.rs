@@ -251,6 +251,13 @@ impl ContentThread {
         rx
     }
 
+    /// The newest navigation id this handle allocated (by `navigate`,
+    /// `load_html` or a reload). Only the window allocates ids, so right
+    /// after one of those calls this is the id it used.
+    pub fn last_nav_id(&self) -> u64 {
+        self.nav_seq.load(Ordering::Acquire)
+    }
+
     pub fn load_html(&self, html: &str) -> oneshot::Receiver<Result<(), String>> {
         let (reply, rx) = oneshot::channel();
         // Allocated here, not when the page later runs the command. A

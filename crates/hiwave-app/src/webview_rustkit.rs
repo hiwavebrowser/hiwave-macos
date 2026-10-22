@@ -739,6 +739,9 @@ impl RustKitView {
         self.cancel_load();
         if let Some(thread) = &self.content {
             let _rx = thread.load_html(html);
+            // Events the old page sent before this (a script navigation just
+            // before New Tab) are stale from here, as after `navigate`.
+            self.accepted_nav.set(thread.last_nav_id());
             self.live_clock.set(Instant::now());
             return Ok(());
         }
@@ -1711,6 +1714,27 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
             assert!(Instant::now() < deadline, "the page never scrolled");
             wake(&view);
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Independent R1 on #730, NIT 4: a script navigation the old page
+    /// sent just before New Tab replaced it must not pull the new tab page
+    /// away.
+    #[test]
+    fn content_thread_a_script_navigation_from_the_page_a_new_tab_replaced_is_dropped() {
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p>old</p></body>");
+        load_and_settle(&view, &base);
+        let _ = view.content.as_ref().unwrap().eval(&format!("location.href = '{base}elsewhere'; 'sent'"));
+        view.load_html_internal("<body><p>new tab</p></body>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            wake(&view);
+            assert!(
+                view.take_script_navigation().is_none(),
+                "the replaced page's navigation pulled the new tab away"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
