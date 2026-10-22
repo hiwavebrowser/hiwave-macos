@@ -681,10 +681,10 @@ struct InsertedJob {
     cancel: Arc<FetchCancel>,
 }
 
-/// How many inserted-script fetches may be on the wire at once: the number
-/// of its own requests the page's `FetchPolicy` allows (#775). Fewer made a
-/// loader's short chunks wait behind its long ones, out of arrival order.
-pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 24;
+/// How many inserted-script fetches may be on the wire at once. Script
+/// fetches that crowd the wire starve a page's stylesheets (#733's
+/// microsoft gate); Chrome holds an HTTP/1.1 host to six connections.
+pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 8;
 /// How many may be waiting behind those. Past this the script hears
 /// `error` instead of the queue growing without a bound.
 const MAX_INSERTED_FETCH_QUEUE: usize = 64;

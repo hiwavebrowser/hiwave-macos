@@ -192,11 +192,13 @@ setTimeout(function () {
         "{}",
         page.log()
     );
-    // Each chunk ran once; async ones as they arrived (the last asked for
-    // answers a second before the first).
+    // Each chunk ran once; async ones as they arrived. The fetch slots
+    // (`MAX_INSERTED_FETCHES_IN_FLIGHT`, 8) hold chunks 8-14 until the first
+    // ones answer, so compare two that are out together: chunk 7 answers
+    // half a second before chunk 0.
     assert_eq!(page.js("window.ranChunks.length"), "Number(15.0)");
     assert_eq!(
-        page.js("window.ranChunks.indexOf(14) < window.ranChunks.indexOf(0)"),
+        page.js("window.ranChunks.indexOf(7) < window.ranChunks.indexOf(0)"),
         "Boolean(true)",
         "{}",
         page.js("window.ranChunks.join()")
@@ -368,8 +370,8 @@ fn a_navigation_drops_an_inserted_script_still_being_fetched() {
 }
 
 /// The fetches the live loop has out are bounded: at most
-/// `MAX_INSERTED_FETCHES_IN_FLIGHT` (24) are on the wire at once and the rest
-/// wait for a slot, so thirty 300 ms chunks take two waves. Every element
+/// `MAX_INSERTED_FETCHES_IN_FLIGHT` (8) are on the wire at once and the rest
+/// wait for a slot, so twelve 300 ms chunks take two waves. Every element
 /// still hears exactly one event. (#775 bounded per view; the merge into
 /// #730 keeps #730's fetch thread, whose bound is this one.)
 #[test]
@@ -378,7 +380,7 @@ fn inserted_script_fetches_are_bounded() {
 window.heard = { load: 0, error: 0 };
 window.ran = 0;
 setTimeout(function () {
-  for (var i = 0; i < 30; i++) {
+  for (var i = 0; i < 12; i++) {
     var s = document.createElement('script');
     s.src = '/chunk.js?delay=300&n=' + i;
     s.onload = function () { heard.load++; };
@@ -388,7 +390,7 @@ setTimeout(function () {
 }, 60000);
 </script></body></html>";
     let mut routes = vec![("/", "text/html", page.to_string())];
-    for i in 0..30 {
+    for i in 0..12 {
         routes.push((leak(format!("/chunk.js?delay=300&n={i}")), "text/javascript", "window.ran++;".to_string()));
     }
     let mut page = Page::load(EngineConfig::default(), routes);
@@ -396,7 +398,7 @@ setTimeout(function () {
     page.turn(60_000);
     let mut all_heard = None;
     while started.elapsed() < Duration::from_secs(8) {
-        if page.js("window.heard.load + window.heard.error === 30") == "Boolean(true)" {
+        if page.js("window.heard.load + window.heard.error === 12") == "Boolean(true)" {
             all_heard = Some(started.elapsed());
             break;
         }
@@ -406,13 +408,13 @@ setTimeout(function () {
     page.turns_until("false", Duration::from_millis(200), 0);
     assert_eq!(
         page.js("'load=' + heard.load + ' error=' + heard.error + ' ran=' + ran"),
-        r#"String("load=30 error=0 ran=30")"#,
+        r#"String("load=12 error=0 ran=12")"#,
         "{}",
         page.log()
     );
     let all_heard = all_heard.expect("every element heard its event");
     assert!(
         all_heard >= Duration::from_millis(550),
-        "thirty 300 ms fetches finished in {all_heard:?}: more than 24 were out at once"
+        "twelve 300 ms fetches finished in {all_heard:?}: more than 8 were out at once"
     );
 }
