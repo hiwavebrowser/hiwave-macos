@@ -590,6 +590,18 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+/// Stack size of the calling thread, as the OS reports it. Logged at startup
+/// so a hand-test log shows the linker's main-thread stack took effect.
+#[cfg(target_os = "macos")]
+fn main_thread_stack_size() -> usize {
+    extern "C" {
+        fn pthread_self() -> *mut std::ffi::c_void;
+        fn pthread_get_stacksize_np(thread: *mut std::ffi::c_void) -> usize;
+    }
+    // SAFETY: both calls only read the calling thread's own attributes.
+    unsafe { pthread_get_stacksize_np(pthread_self()) }
+}
+
 fn main() {
     // Initialize logging with log compatibility
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
@@ -599,6 +611,11 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
     info!("Starting HiWave...");
+    #[cfg(target_os = "macos")]
+    info!(
+        "Main thread stack: {} MiB",
+        main_thread_stack_size() / (1024 * 1024)
+    );
 
     // Initialize application state
     let state = match AppState::with_defaults() {
