@@ -315,3 +315,25 @@ fn an_observer_rooted_at_the_root_element_sees_the_viewport() {
     flick(&mut engine, view);
     assert_feed_painted(&mut engine, view, "IO rooted at the root element");
 }
+
+/// On a page shorter than the viewport the root element is as short as its
+/// content (Chromium: 66 for a 50 px body with 8 px margins), not stretched
+/// to the window as the canvas is: feeds that load until
+/// `documentElement.offsetHeight >= innerHeight` depend on it.
+#[test]
+fn the_root_element_is_as_short_as_a_short_page() {
+    let (mut engine, view, _server) =
+        load("<html><head><style>body{margin:8px} #t{height:50px}</style></head><body><div id=t></div></body></html>");
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().height"), "66");
+    assert_eq!(read(&mut engine, view, "document.documentElement.offsetHeight"), "66");
+    assert_eq!(read(&mut engine, view, "document.documentElement.clientHeight"), "200", "the viewport's, as before");
+}
+
+/// An explicit html height is the root element's.
+#[test]
+fn an_explicit_root_height_is_kept() {
+    let (mut engine, view, _server) = load(
+        "<html style=\"height:100%\"><head><style>body{margin:8px} #t{height:50px}</style></head><body><div id=t></div></body></html>",
+    );
+    assert_eq!(read(&mut engine, view, "document.documentElement.getBoundingClientRect().height"), "200");
+}

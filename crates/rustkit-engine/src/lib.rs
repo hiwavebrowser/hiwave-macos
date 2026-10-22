@@ -18830,8 +18830,14 @@ fn root_element_id(view: &ViewState) -> Option<usize> {
 fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
     let bb = root.dimensions.border_box();
     let pb = root.dimensions.padding_box();
-    // At least as tall as what it holds: the root's own height can be the
-    // viewport's while the page runs on below it.
+    // The root box is stretched to the viewport so the canvas background
+    // fills the window; html is not. With `height: auto` it is as tall as
+    // what it holds (body's margin box), shorter than the viewport on a
+    // short page. Only an explicit html height keeps the box's own.
+    let floor = match &root.root_element_height {
+        None | Some(rustkit_css::Length::Auto) => bb.y,
+        Some(_) => bb.y + bb.height,
+    };
     let bottom = root
         .children
         .iter()
@@ -18839,7 +18845,7 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
             let m = c.dimensions.margin_box();
             m.y + m.height
         })
-        .fold(bb.y + bb.height, f32::max);
+        .fold(floor, f32::max);
     rustkit_bindings::BoxGeometry {
         x: bb.x,
         y: bb.y,
