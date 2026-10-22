@@ -4239,9 +4239,8 @@ impl Engine {
         }
         collect(form, self, id, submitter, &mut entries);
 
-        if entries.is_empty() {
-            return None;
-        }
+        // A form with no successful controls still submits (HTML form
+        // submission algorithm): a GET goes to `action?`.
         Some(state.create_submission(&base, &entries))
     }
 
