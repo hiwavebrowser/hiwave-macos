@@ -13,6 +13,7 @@ use rustkit_engine::{
 };
 use rustkit_viewhost::Bounds;
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,7 +49,10 @@ pub struct RustKitView {
     handle: Option<PageHandle>,
     /// Owns the engine and applies the handle's commands. `None` on the
     /// content-thread path: that engine is constructed on the other thread.
-    endpoint: Option<RefCell<PageEndpoint>>,
+    /// Shared with the load in progress ([`PendingLoad`]), which holds it
+    /// mutably until the load ends; every other call finds it busy and
+    /// does nothing meanwhile.
+    endpoint: Option<Rc<RefCell<PageEndpoint>>>,
     /// The page, when `HIWAVE_CONTENT_THREAD` is set. The window does not
     /// join it.
     content: Option<ContentThread>,
@@ -89,6 +93,9 @@ pub struct RustKitView {
     /// The page clock: the instant the live loop has run the page's timers
     /// up to. Reset when a page finishes loading.
     live_clock: Cell<Instant>,
+    /// The earliest the next live turn may start: the last one's end plus as
+    /// long as it took, so the window gets its turn in between.
+    next_turn_at: Cell<Option<Instant>>,
     /// Runtime the live loop's network turns block on. `None` if it could
     /// not be built: the page then gets no timers or late fetches, as before.
     live_runtime: Option<tokio::runtime::Runtime>,
@@ -97,7 +104,41 @@ pub struct RustKitView {
     host_view: isize,
     /// Set once Close has been asked. Later commands are dropped.
     closed: Cell<bool>,
+    /// The load in progress, polled a slice at a time by the event loop
+    /// ([`RustKitView::step_load`]).
+    pending_load: RefCell<Option<PendingLoad>>,
+    /// Bounds set while a load held the engine, applied when it ends.
+    pending_bounds: Cell<Option<Bounds>>,
+    /// Events the flag-off page published, kept for the tests.
+    #[cfg(test)]
+    seen_events: RefCell<Vec<PageEvent>>,
 }
+
+/// A content load the event loop drives: `Engine::load_url` as a future on
+/// the live runtime, polled for at most [`LOAD_SLICE`] per wake.
+///
+/// Until 2026-10-19 the load ran to its end inside tao's event handler
+/// (`block_on`), and the window took no click, key or chrome message for
+/// as long as the page's network and scripts took (20 s on ebay). A nested
+/// run loop pumped from inside the load (#739 as split from #720) re-enters
+/// tao's handler lock from `drawRect:` and still dispatches no `NSEvent`.
+/// Returning to tao between slices does neither. M4 (#730) replaces this
+/// with the page's own thread.
+struct PendingLoad {
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+    /// Cancels the load without the engine (M3b): Stop, or a new load.
+    canceller: Option<rustkit_engine::NavCanceller>,
+    started: Instant,
+}
+
+/// The longest one poll of a pending load may wait on the network before
+/// the event loop takes its next event. Script that runs inside the poll
+/// is not cut by it; the script budgets bound that.
+const LOAD_SLICE: Duration = Duration::from_millis(8);
+
+/// How long a load that was cancelled may take to unwind before it is
+/// dropped where it stands.
+const CANCEL_UNWIND: Duration = Duration::from_secs(2);
 
 /// Script budget for pages in the live app. The engine default (5 s) is
 /// what parity-capture and the board keep; a person waits longer than a
@@ -110,49 +151,6 @@ pub struct RustKitView {
 /// new module graph held the window for the full minute. Nothing loaded in
 /// the hand tests of 2026-10-08 needed more than about 8 s.
 const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
-
-thread_local! {
-    /// Set while the content load is pumping the run loop so the chrome
-    /// WebView can paint. The event loop must not re-enter the load: the
-    /// engine is already borrowed on this thread.
-    static CHROME_PUMP: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Whether the window thread is inside a chrome paint turned from a content
-/// load. Event-loop handlers use it to avoid borrowing the engine again.
-pub(crate) fn chrome_pump_active() -> bool {
-    CHROME_PUMP.with(|flag| flag.get())
-}
-
-/// Give WebKit one short turn of the main run loop so the toolbar and
-/// sidebar composite while a content load is waiting on the network.
-fn pump_chrome_run_loop() {
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
-        fn CFRunLoopRunInMode(
-            mode: *const std::ffi::c_void,
-            seconds: f64,
-            return_after_source_handled: u8,
-        ) -> i32;
-    }
-    unsafe {
-        // A few milliseconds, and keep going through the sources already
-        // queued (WebKit's paint among them). `returnAfterSourceHandled`
-        // would stop at the first source, which can be this process's own.
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 0);
-    }
-}
-
-fn install_chrome_ui_turn() {
-    rustkit_engine::set_chrome_ui_turn(Some(Box::new(|| {
-        if CHROME_PUMP.with(|flag| flag.replace(true)) {
-            return;
-        }
-        pump_chrome_run_loop();
-        CHROME_PUMP.with(|flag| flag.set(false));
-    })));
-}
 
 /// The longest the script of one turn after the load may run: the timer
 /// callbacks and response handlers of one pass of the live loop, or the
@@ -257,15 +255,10 @@ impl RustKitView {
             let host_view = engine.host_view_raw(view_id);
             let (handle, endpoint) = connect(engine, view_id);
             rustkit_viewhost::clip_raw_view(host_view);
-            // The chrome WebView is WebKit on this same thread. A content load
-            // blocks the thread through its network waits. The hook gives that
-            // WebView a run-loop turn during each wait. The content thread
-            // does not install it: the window thread is not inside the load.
-            install_chrome_ui_turn();
             info!(?view_id, "RustKit view created");
             (
                 Some(handle),
-                Some(RefCell::new(endpoint)),
+                Some(Rc::new(RefCell::new(endpoint))),
                 None,
                 None,
                 host_view,
@@ -273,7 +266,44 @@ impl RustKitView {
             )
         };
 
-        Ok(Self {
+        Ok(Self::from_parts(
+            handle,
+            endpoint,
+            content,
+            surface,
+            view_id,
+            counter_clone,
+            host_view,
+        ))
+    }
+
+    /// A flag-off content view with no window (tests).
+    #[cfg(test)]
+    fn headless(bounds: Bounds) -> Self {
+        let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
+        let view_id = engine.create_headless_view(bounds).expect("headless view");
+        let (handle, endpoint) = connect(engine, view_id);
+        Self::from_parts(
+            Some(handle),
+            Some(Rc::new(RefCell::new(endpoint))),
+            None,
+            None,
+            Some(view_id),
+            None,
+            0,
+        )
+    }
+
+    fn from_parts(
+        handle: Option<PageHandle>,
+        endpoint: Option<Rc<RefCell<PageEndpoint>>>,
+        content: Option<ContentThread>,
+        surface: Option<RefCell<WindowSurface>>,
+        view_id: Option<EngineViewId>,
+        counter_clone: Option<Arc<AtomicU64>>,
+        host_view: isize,
+    ) -> Self {
+        Self {
             handle,
             endpoint,
             content,
@@ -292,6 +322,7 @@ impl RustKitView {
             history_index: RefCell::new(0),
             replace_next: Cell::new(false),
             live_clock: Cell::new(Instant::now()),
+            next_turn_at: Cell::new(None),
             live_runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -299,7 +330,11 @@ impl RustKitView {
                 .ok(),
             host_view,
             closed: Cell::new(false),
-        })
+            pending_load: RefCell::new(None),
+            pending_bounds: Cell::new(None),
+            #[cfg(test)]
+            seen_events: RefCell::new(Vec::new()),
+        }
     }
 
     fn is_open(&self) -> bool {
@@ -309,6 +344,10 @@ impl RustKitView {
     /// Queue `cmd` and apply it on this thread. Events are taken and
     /// dropped: `current_title` and `loading` stay as they were when the
     /// view held the engine and never read its events.
+    ///
+    /// While a load holds the endpoint ([`PendingLoad`]) the command is
+    /// dropped, as the engine calls were before the protocol (#743): a
+    /// command queued behind the load would run against the new page.
     fn submit(&self, cmd: PageCmd) {
         if !self.is_open() {
             return;
@@ -317,14 +356,29 @@ impl RustKitView {
             thread.enqueue(cmd);
             return;
         }
-        let handle = self.handle.as_ref().expect("inline page handle");
-        handle.send(cmd);
-        self.endpoint
+        let Ok(mut endpoint) = self
+            .endpoint
             .as_ref()
             .expect("inline page endpoint")
-            .borrow_mut()
-            .drain(self.live_runtime.as_ref());
-        let _ = handle.drain_events();
+            .try_borrow_mut()
+        else {
+            return;
+        };
+        let handle = self.handle.as_ref().expect("inline page handle");
+        handle.send(cmd);
+        endpoint.drain(self.live_runtime.as_ref());
+        drop(endpoint);
+        self.drop_events();
+    }
+
+    /// Take what the flag-off page published since the last call.
+    fn drop_events(&self) {
+        let Some(handle) = self.handle.as_ref() else { return };
+        let events = handle.drain_events();
+        #[cfg(test)]
+        self.seen_events.borrow_mut().extend(events);
+        #[cfg(not(test))]
+        drop(events);
     }
 
     /// Send a command that answers on a oneshot. The answer is ready when
@@ -333,13 +387,6 @@ impl RustKitView {
         let (tx, mut rx) = oneshot::channel();
         self.submit(make(tx));
         rx.try_recv().ok()
-    }
-
-    /// Move the content view's frame without borrowing the engine. The GPU
-    /// surface and the page layout still follow `set_bounds_internal` once
-    /// the load has returned the engine.
-    pub fn place_host_frame(&self, bounds: Bounds) {
-        rustkit_viewhost::place_raw_view(self.host_view, bounds);
     }
 
     /// One turn of the live loop for the page (call this in the event
@@ -364,6 +411,12 @@ impl RustKitView {
         }
         self.live_runtime.as_ref()?;
         let started = Instant::now();
+        // Too soon after the last turn: the event loop asks for one before
+        // and one after the input of each wake, and until #727's second
+        // hold both ran, back to back, with no window turn between them.
+        if let Some(at) = self.next_turn_at.get().filter(|at| *at > started) {
+            return Some(at - started);
+        }
         // Whole milliseconds only; the remainder stays on the clock for the
         // next turn, so frequent turns do not slow the page's time.
         let elapsed_ms = started.duration_since(self.live_clock.get()).as_millis() as u64;
@@ -376,6 +429,8 @@ impl RustKitView {
         if turn.timers_ran > 0 || turn.requests > 0 {
             debug!(?turn, "Live turn");
         }
+        let took = started.elapsed();
+        self.next_turn_at.set(Some(Instant::now() + took));
         // A page that keeps the loop busy gets at most half of it: the next
         // turn waits at least as long as this one took.
         let timer = turn.next_timer_ms.map(Duration::from_millis);
@@ -636,6 +691,7 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
+        self.cancel_load();
         if let Some(thread) = &self.content {
             let _rx = thread.load_html(html);
             self.live_clock.set(Instant::now());
@@ -683,6 +739,11 @@ impl RustKitView {
             // commit is drawn at the new size: top-left, canvas colour in
             // the area the old layout does not cover.
             self.present_latest();
+            return Ok(());
+        }
+        if self.is_loading() {
+            // A load holds the engine: the size waits for its end.
+            self.pending_bounds.set(Some(bounds));
             return Ok(());
         }
         match self.ask(|reply| PageCmd::Resize {
@@ -765,7 +826,10 @@ impl RustKitView {
         self.view_id
     }
 
-    /// Load a URL using a blocking runtime.
+    /// Start loading a URL. On the content thread the command is queued and
+    /// this returns at once. Flag off, the event loop drives the load
+    /// ([`Self::step_load`]); a load already in progress is cancelled first.
+    /// Without a live runtime the load runs to its end here, as before.
     fn load_url_blocking(&self, url: &str) {
         let parsed = match Url::parse(url) {
             Ok(u) => u,
@@ -774,6 +838,7 @@ impl RustKitView {
                 return;
             }
         };
+        self.cancel_load();
 
         if let Some(thread) = &self.content {
             // Signal cancel and the interrupt before the command is queued.
@@ -783,30 +848,142 @@ impl RustKitView {
             self.live_clock.set(Instant::now());
             return;
         }
-        // Returns after DOMContentLoaded when an inserted script is still
-        // arriving. Live turns (`process_events`) run the chain one script
-        // at a time and send PageLoaded at the end. A page with no inserted
-        // script still finishes inside this call. `nav_id` 0 lets the engine
-        // allocate the id its cancel path reads.
-        self.submit(PageCmd::Navigate {
-            url: parsed,
-            nav_id: 0,
-        });
-        // The new page's clock starts now: the time the load took is not
-        // time its timers have waited.
-        self.live_clock.set(Instant::now());
-    }
+        let Some(endpoint) = self.endpoint.as_ref().filter(|_| self.is_open()) else { return };
 
-    /// Stop the load and any script it is running. On the content thread
-    /// the interrupt is stored before this returns, including while the
-    /// page is not reading commands.
-    pub fn stop(&self) {
-        if let Some(thread) = &self.content {
-            thread.stop();
-            *self.loading.borrow_mut() = false;
+        if self.live_runtime.is_none() {
+            // Returns after DOMContentLoaded when an inserted script is still
+            // arriving. Live turns (`process_events`) run the chain one script
+            // at a time and send PageLoaded at the end. A page with no inserted
+            // script still finishes inside this call. `nav_id` 0 lets the engine
+            // allocate the id its cancel path reads.
+            self.submit(PageCmd::Navigate {
+                url: parsed,
+                nav_id: 0,
+            });
+            // The new page's clock starts now: the time the load took is not
+            // time its timers have waited.
+            self.live_clock.set(Instant::now());
             return;
         }
+
+        let canceller = endpoint
+            .try_borrow()
+            .ok()
+            .and_then(|endpoint| endpoint.nav_canceller());
+        let endpoint = Rc::clone(endpoint);
+        let future = Box::pin(async move {
+            let Ok(mut endpoint) = endpoint.try_borrow_mut() else {
+                warn!("Load not started: the engine is busy");
+                return;
+            };
+            // `nav_id` 0 lets the engine allocate the id its cancel path
+            // reads.
+            endpoint.navigate(parsed, 0).await;
+        });
+        *self.pending_load.borrow_mut() = Some(PendingLoad {
+            future,
+            canceller,
+            started: Instant::now(),
+        });
+        // The first slice runs now: a page that answers at once loads in
+        // the same wake, as it did when the load blocked.
+        self.step_load();
+    }
+
+    /// Whether a load is in progress on this thread (flag off).
+    pub fn is_loading(&self) -> bool {
+        self.pending_load.borrow().is_some()
+    }
+
+    /// Poll the load in progress for at most [`LOAD_SLICE`] (call this in
+    /// the event loop). Returns true while the load goes on: the caller
+    /// returns to tao and wakes again soon. Always false on the content
+    /// thread, which loads on its own.
+    pub fn step_load(&self) -> bool {
+        let Some(runtime) = self.live_runtime.as_ref() else { return false };
+        let done = {
+            let mut slot = self.pending_load.borrow_mut();
+            let Some(load) = slot.as_mut() else { return false };
+            runtime
+                .block_on(async { tokio::time::timeout(LOAD_SLICE, load.future.as_mut()).await })
+                .is_ok()
+        };
+        if !done {
+            return true;
+        }
+        if let Some(load) = self.pending_load.borrow_mut().take() {
+            debug!(ms = load.started.elapsed().as_millis() as u64, "Load finished");
+        }
+        self.load_ended();
+        false
+    }
+
+    /// Stop the load in progress (the user's Stop). Returns whether there
+    /// was one.
+    ///
+    /// On the content thread the interrupt is stored before this returns,
+    /// including while the page is not reading commands.
+    ///
+    /// Flag off, a load that yielded after `DOMContentLoaded` has no future
+    /// here any more, but the engine still finishes it from the live turns:
+    /// that one is stopped in the engine, and its `load` never fires (#727
+    /// R1 H2).
+    pub fn stop_load(&self) -> bool {
+        if let Some(thread) = &self.content {
+            thread.stop();
+            return self.loading.replace(false);
+        }
+        if self.is_loading() {
+            self.cancel_load();
+            return true;
+        }
+        if !self.load_tail_open() {
+            return false;
+        }
         let _ = self.ask(|reply| PageCmd::Stop { reply });
+        true
+    }
+
+    /// Whether a flag-off load yielded after `DOMContentLoaded` and its
+    /// tail is still open.
+    fn load_tail_open(&self) -> bool {
+        self.endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.try_borrow().ok().map(|e| e.load_tail_open()))
+            .unwrap_or(false)
+    }
+
+    /// Cancel the load in progress, if any, and let it unwind: a cancelled
+    /// load ends at its next wait. One that has not ended within
+    /// [`CANCEL_UNWIND`] is dropped where it stands.
+    fn cancel_load(&self) {
+        let Some(mut load) = self.pending_load.borrow_mut().take() else { return };
+        if let Some(canceller) = load.canceller.as_ref() {
+            canceller.cancel_current();
+        }
+        if let Some(runtime) = self.live_runtime.as_ref() {
+            if runtime
+                .block_on(async { tokio::time::timeout(CANCEL_UNWIND, load.future.as_mut()).await })
+                .is_err()
+            {
+                warn!("A cancelled load did not end; dropped");
+            }
+        }
+        drop(load);
+        self.load_ended();
+    }
+
+    /// After a load, finished or cancelled: the size set meanwhile, and a
+    /// page clock that starts now (the time the load took is not time its
+    /// timers have waited).
+    fn load_ended(&self) {
+        if let Some(bounds) = self.pending_bounds.take() {
+            if let Err(e) = self.set_bounds_internal(bounds) {
+                debug!(error = %e, "bounds after the load failed");
+            }
+        }
+        self.drop_events();
+        self.live_clock.set(Instant::now());
     }
 
     /// Execute JavaScript synchronously on the flag-off path. The content
@@ -832,6 +1009,7 @@ impl RustKitView {
 
 impl Drop for RustKitView {
     fn drop(&mut self) {
+        self.cancel_load();
         if self.closed.replace(true) {
             return;
         }
@@ -1044,6 +1222,256 @@ mod tests {
     fn content_views_follow_a_page_s_own_navigation() {
         assert!(content_engine_builder().config().follows_script_navigation);
         assert!(!rustkit_engine::EngineConfig::default().follows_script_navigation);
+    }
+
+    /// A server that answers every request with `body` after `delay`.
+    fn slow_server(delay: Duration, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    fn view() -> RustKitView {
+        RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// #739 / Pete's item 4: the window took no click while a page loaded,
+    /// because the load ran to its end inside the event handler.
+    #[test]
+    fn a_slow_load_gives_the_event_loop_back_at_once() {
+        let url = slow_server(Duration::from_millis(2_000), "<title>slow</title><p>late</p>");
+        let view = view();
+        let started = Instant::now();
+        view.wry_load_url(&url).unwrap();
+        let held = started.elapsed();
+        assert!(held < Duration::from_millis(500), "the load held its caller for {held:?}");
+    }
+
+    #[test]
+    fn a_load_driven_a_slice_at_a_time_finishes() {
+        let url = slow_server(Duration::from_millis(300), "<title>slow</title><p>late</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut slices = 0;
+        while view.step_load() {
+            slices += 1;
+            assert!(Instant::now() < deadline, "the load never finished");
+        }
+        assert!(slices > 1, "the 300 ms wait was not split into slices");
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("slow"), "document.title = {title:?}");
+    }
+
+    #[test]
+    fn engine_calls_during_a_load_do_nothing_and_do_not_panic() {
+        let url = slow_server(Duration::from_millis(1_000), "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        assert!(!view.scroll_by(0.0, -40.0));
+        view.render();
+        assert_eq!(view.process_events(), None);
+        let _ = view.click_at_point(10.0, 10.0);
+        assert_eq!(view.execute_script_sync("1"), None);
+        // A size set meanwhile waits for the load's end.
+        view.set_bounds_internal(Bounds::new(0, 0, 500, 300)).unwrap();
+        assert!(view.pending_bounds.get().is_some());
+        while view.step_load() {}
+        assert!(view.pending_bounds.get().is_none());
+    }
+
+    #[test]
+    fn stop_cancels_a_slow_load_without_waiting_for_it() {
+        let url = slow_server(Duration::from_secs(10), "<p>never</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let started = Instant::now();
+        assert!(view.stop_load());
+        assert!(!view.is_loading());
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "stop took {took:?}");
+        assert!(!view.stop_load(), "nothing left to stop");
+    }
+
+    /// A page whose inserted `/a.js` is answered after `delay`; the page
+    /// itself at once. `load` marks `window.loadFired`.
+    fn yielding_server(delay: Duration) -> String {
+        use std::io::{Read, Write};
+        const PAGE: &str = "<script>window.addEventListener('load', function () { window.loadFired = true; });\
+var s = document.createElement('script'); s.src = '/a.js'; document.head.appendChild(s);</script>";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let (kind, body) = if request.starts_with(b"GET /a.js") {
+                        std::thread::sleep(delay);
+                        ("text/javascript", "window.aRan = true;")
+                    } else {
+                        ("text/html", PAGE)
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// #727 R1 H2: a load that yielded after `DOMContentLoaded` is finished
+    /// by the live turns. Stop used to find no `pending_load`, log "nothing
+    /// loading" and let the tail run its script, fire `load` and send
+    /// `PageLoaded`.
+    #[test]
+    fn stop_ends_a_load_that_yielded_while_an_inserted_script_fetches() {
+        let url = yielding_server(Duration::from_millis(1_500));
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while view.step_load() {
+            assert!(Instant::now() < deadline, "the load never yielded");
+        }
+        assert!(!view.is_loading());
+        assert!(view.load_tail_open(), "the load did not yield: it waited out /a.js");
+        assert!(view.stop_load(), "Stop found nothing to stop");
+        assert!(!view.load_tail_open());
+        // Past the time /a.js is answered.
+        let until = Instant::now() + Duration::from_millis(2_500);
+        while Instant::now() < until {
+            view.process_events();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let fired = view
+            .execute_script_sync("String(window.loadFired) + ',' + String(window.aRan)")
+            .unwrap_or_default();
+        assert!(!fired.contains("true"), "the stopped load went on: {fired}");
+        view.drop_events();
+        let events = view.seen_events.borrow();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "a stopped load sent PageLoaded"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PageEvent::LoadState { state: LoadState::Failed { error }, .. } if error == "stopped"
+            )),
+            "the navigation was not ended as stopped"
+        );
+        drop(events);
+        assert!(!view.stop_load(), "nothing left to stop");
+    }
+
+    /// #727 Atlas hold, item 2: a live turn is followed by a window turn.
+    /// The event loop asks for a turn twice per wake (before and after the
+    /// input it drains), so a page whose interval spins ran two turns back
+    /// to back and the window took no event between them.
+    #[test]
+    fn a_slow_live_turn_is_not_followed_at_once_by_another() {
+        let url = slow_server(Duration::ZERO, "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        while view.step_load() {}
+        view.execute_script_sync(
+            "window.n = 0; setInterval(function () { window.n++; var t = Date.now(); while (Date.now() - t < 200) {} }, 100);",
+        );
+        std::thread::sleep(Duration::from_millis(105));
+        let first = Instant::now();
+        view.process_events();
+        assert!(first.elapsed() >= Duration::from_millis(200), "the interval did not run");
+        let runs = || view.execute_script_sync("String(window.n)").unwrap_or_default();
+        let after_first = runs();
+        // The first turn's 200 ms put the interval due again.
+        let second = Instant::now();
+        let wait = view.process_events();
+        let took = second.elapsed();
+        let after_second = runs();
+        assert_eq!(after_second, after_first, "two turns ran back to back");
+        assert!(took < Duration::from_millis(50), "the second call took {took:?}");
+        assert!(
+            wait.is_some_and(|w| w >= Duration::from_millis(100)),
+            "the loop was not told to give the window a turn first: {wait:?}"
+        );
+    }
+
+    /// #727 Atlas hold, item 3: a click that comes after a live turn the
+    /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
+    /// listener.
+    #[test]
+    fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
+        let url = slow_server(
+            Duration::ZERO,
+            "<body style='margin:0'><div style='width:300px;height:200px'></div></body>",
+        );
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        while view.step_load() {}
+        view.execute_script_sync(
+            "window.clicks = 0; document.addEventListener('click', function () { window.clicks++; });\
+             setTimeout(function () { while (true) {} }, 1);",
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        let turn = Instant::now();
+        view.process_events();
+        assert!(turn.elapsed() >= Duration::from_secs(1), "the spin did not run");
+        view.mouse_down_at_point(10.0, 10.0);
+        let _ = view.click_at_point(10.0, 10.0);
+        let clicks = view.execute_script_sync("String(window.clicks)").unwrap_or_default();
+        assert!(clicks.contains('1'), "the click was lost: clicks = {clicks}");
+    }
+
+    #[test]
+    fn a_new_load_replaces_the_one_in_progress() {
+        let slow = slow_server(Duration::from_secs(10), "<title>old</title>");
+        let fast = slow_server(Duration::ZERO, "<title>new</title>");
+        let view = view();
+        view.wry_load_url(&slow).unwrap();
+        let started = Instant::now();
+        view.wry_load_url(&fast).unwrap();
+        while view.step_load() {}
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("new"), "document.title = {title:?}");
     }
 
     #[test]

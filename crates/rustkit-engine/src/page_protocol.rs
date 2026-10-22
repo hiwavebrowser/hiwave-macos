@@ -626,6 +626,25 @@ impl PageEndpoint {
         }
     }
 
+    /// Load `url` as [`PageCmd::Navigate`] does, as a future the window
+    /// thread polls a slice at a time (#743). It holds the endpoint until
+    /// the load ends or yields after `DOMContentLoaded`.
+    pub async fn navigate(&mut self, url: Url, nav_id: u64) {
+        self.load_yielding(url, nav_id).await;
+        self.after_page_change();
+    }
+
+    /// Cancels this view's navigations without the endpoint (M3b).
+    pub fn nav_canceller(&self) -> Option<crate::NavCanceller> {
+        self.engine.nav_canceller(self.view)
+    }
+
+    /// Whether a yielded load is parked on the view; see
+    /// [`Engine::load_tail_open`].
+    pub fn load_tail_open(&self) -> bool {
+        self.engine.load_tail_open(self.view)
+    }
+
     fn after_page_change(&mut self) {
         self.translate_engine_events();
         self.publish_commit();
