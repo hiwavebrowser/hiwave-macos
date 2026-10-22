@@ -213,3 +213,28 @@ fn a_generator_and_an_async_function_run_their_finally() {
     assert!(is_interrupt(&err), "{err}");
     assert_eq!(read(&mut context, 5, "log.join()"), "gen,async");
 }
+
+/// An `await` in a `finally` the stop runs suspends the function, and the
+/// script around it ends normally (R1 on #776). The stop is over then: the
+/// next script, in a new turn, runs even when nobody calls
+/// `end_stop_unwind`.
+#[test]
+fn a_script_that_ends_normally_after_a_stop_leaves_no_stop_behind() {
+    let (mut context, word) = context_with_word(3);
+    let setter = {
+        let word = word.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            word.fetch_max(3, Ordering::Relaxed);
+        })
+    };
+    let ended = context.eval(Source::from_bytes(
+        "async function g() { try { while (true) {} } finally { await 0; } } g(); 'done'",
+    ));
+    setter.join().unwrap();
+    let ended = ended.expect("the await suspends g, and the script ends");
+    assert_eq!(ended.to_string(&mut context).unwrap().to_std_string_escaped(), "done");
+    // Past the grace, in a new turn: not stopped.
+    std::thread::sleep(GRACE + Duration::from_millis(20));
+    assert_eq!(read(&mut context, 4, "var n = 0; for (var i = 0; i < 1000; i++) n++; String(n)"), "1000");
+}

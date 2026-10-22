@@ -725,7 +725,11 @@ impl JsRuntime {
     /// that ran too long, and what the turn's finished script queued (an
     /// XHR's `send` registers its request in a promise reaction) still runs,
     /// as it did before the word existed. The watchdog stops the grace turn
-    /// too, and that stop is final. `take_deadline_hit` reports the stop.
+    /// too. That stop runs the `finally` blocks it unwinds through for a
+    /// stop grace of its own (the state of the first stop is cleared here),
+    /// so a turn runs at most its budget and three stop graces: the first
+    /// stop's `finally` blocks, the grace turn, and its stop's `finally`
+    /// blocks. `take_deadline_hit` reports the stop.
     #[cfg(feature = "boa")]
     pub(crate) fn consume_interrupt(&mut self) {
         // The stop that ended in this script, `finally` blocks and all, is

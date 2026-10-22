@@ -495,7 +495,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             // A timer a cut-short live turn owed runs after the clock has
             // moved on; the clock does not go back for it.
             if (timer.due > now) now = timer.due;
-            if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
+            // An interval that fell behind (a live turn held it back) is not
+            // caught up: its next run counts from now, as in a browser.
+            if (timer.every) {
+                timer.due += timer.every;
+                if (timer.due <= now) timer.due = now + timer.every;
+                timer.seq = nextId++;
+            }
             else timers.splice(best, 1);
             ran++;
             call(timer);
@@ -2743,9 +2749,10 @@ mod tests {
         // What the cap held back is due now: the loop must not sleep on it.
         assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
         assert_eq!(bindings.next_timer_delay(), Some(0));
-        // The clock moved on to 100: what the cap held back (50 to 100)
-        // runs on the next turn, however little time it is given itself.
-        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 6);
+        // The clock moved on to 100: the interval the cap held back runs once
+        // on the next turn, however little time it is given, and is not
+        // caught up (50 to 100 would be 6 runs): its next is 10 from now.
+        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 1);
         assert_eq!(bindings.next_timer_delay(), Some(10));
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
     }

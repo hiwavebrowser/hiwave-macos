@@ -406,7 +406,10 @@ Marked `HIWAVE PATCH (stop finally)`.
 | `src/context/mod.rs` | `Context::set_stop_finally_grace`, `Context::stop_finally_running` (the host answers the block's calls), `Context::end_stop_unwind` |
 
 **Not covered.** A `yield` or `await` in the block suspends it as usual; the
-grace's end stops what runs after it in the turn.
+grace's end stops what runs after it in the turn. If the script the Rust
+caller started then ends normally (`handle_return`/`handle_yield` at the
+outermost frame), the stop's state is cleared, so the next script is not
+stopped by what is left of the grace.
 
 **Tests.** `crates/rustkit-js/tests/vm_stop_finally.rs` (innermost first and
 no `catch`; a `finally` that schedules the next task; Stop runs none; no

@@ -995,6 +995,14 @@ impl Context {
         }
         // END HIWAVE PATCH
         let exit_early = self.vm.frame().exit_early();
+        // HIWAVE PATCH (stop finally): the script the Rust caller started
+        // ended normally (an `await` or `yield` in a `finally` the stop ran
+        // suspended it): the stop is over, and the next script is not
+        // stopped by what is left of its grace.
+        if exit_early && self.vm.frames.len() <= 2 {
+            self.vm.stop_unwind = None;
+        }
+        // END HIWAVE PATCH
         let frame = self.vm.frames.last().expect("frame must exist");
         self.vm.stack.truncate_to_frame(frame);
 
@@ -1010,6 +1018,11 @@ impl Context {
 
     fn handle_yield(&mut self) -> ControlFlow<CompletionRecord> {
         let result = self.vm.take_return_value();
+        // HIWAVE PATCH (stop finally): as `handle_return`.
+        if self.vm.frame().exit_early() && self.vm.frames.len() <= 2 {
+            self.vm.stop_unwind = None;
+        }
+        // END HIWAVE PATCH
         if self.vm.frame().exit_early() {
             return ControlFlow::Break(CompletionRecord::Normal(result));
         }
