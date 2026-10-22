@@ -8826,7 +8826,9 @@ impl Engine {
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
         let inline_sheets = self.inline_sheets(document, self.building_view.get());
-        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport);
+        let adopted = document.root().adopted_styles();
+        let fingerprint =
+            self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport, dpr);
         // Copies: the steps below filter and rank the rules in place, and
         // must not reach the cached sheets.
         let mut stylesheets: Vec<Stylesheet> =
@@ -8840,11 +8842,11 @@ impl Engine {
         stylesheets.extend(external_stylesheets.iter().cloned());
         // `document.adoptedStyleSheets` follows the document's `<style>`
         // and `<link>` sheets. The document node holds the text.
-        for text in document.root().adopted_styles() {
+        for text in &adopted {
             if text.is_empty() {
                 continue;
             }
-            match Stylesheet::parse(&text) {
+            match Stylesheet::parse(text) {
                 Ok(stylesheet) => stylesheets.push(stylesheet),
                 Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
             }
@@ -15602,15 +15604,17 @@ impl Engine {
 
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
-    /// and the view's external list (likewise), plus the viewport the
-    /// `@media` filter will use. `None` when the external sheets are not
-    /// the building view's own list or the cache is off; the rule index
-    /// then compares selectors.
+    /// and the view's external list (likewise), the adopted sheets' text,
+    /// plus the viewport and scale the `@media` filter will use. `None`
+    /// when the external sheets are not the building view's own list or
+    /// the cache is off; the rule index then compares selectors.
     fn sheets_fingerprint(
         &self,
         inline: &[Rc<Stylesheet>],
         external: &[Stylesheet],
+        adopted: &[String],
         viewport: Option<(f32, f32)>,
+        dpr: f32,
     ) -> Option<SheetsFingerprint> {
         if !sheet_cache_enabled() {
             return None;
@@ -15627,8 +15631,10 @@ impl Engine {
         };
         Some(SheetsFingerprint {
             viewport,
+            dpr,
             inline: inline.to_vec(),
             external,
+            adopted: adopted.to_vec(),
         })
     }
 
@@ -33938,10 +33944,11 @@ struct LastRuleIndex {
 }
 
 /// What a layout build's sheet list is made of, by identity: the `<style>`
-/// sheets as the sheet cache holds them, the view's external list, and
-/// the viewport that decides which `@media` rules stay. The build's sheets
-/// are a pure function of these (copies, filtered by the viewport), so two
-/// equal fingerprints mean the same selectors in the same places.
+/// sheets as the sheet cache holds them, the view's external list, the
+/// text of `document.adoptedStyleSheets`, and the viewport and scale that
+/// decide which `@media` rules stay. The build's sheets are a pure function
+/// of these (copies, filtered by the viewport), so two equal fingerprints
+/// mean the same selectors in the same places.
 ///
 /// Holding the `Rc`s is what makes a pointer compare sound: an address
 /// cannot be reused for other sheets while this keeps the old ones alive,
@@ -33949,14 +33956,20 @@ struct LastRuleIndex {
 #[derive(Clone)]
 struct SheetsFingerprint {
     viewport: Option<(f32, f32)>,
+    /// `resolution` queries read it (`min-resolution: 2dppx`).
+    dpr: f32,
     inline: Vec<Rc<Stylesheet>>,
     /// `None` when the build has no external sheets.
     external: Option<Rc<Vec<Stylesheet>>>,
+    /// Parsed afresh each build, so compared by text, not by pointer.
+    adopted: Vec<String>,
 }
 
 impl SheetsFingerprint {
     fn same_as(&self, other: &SheetsFingerprint) -> bool {
         self.viewport == other.viewport
+            && self.dpr == other.dpr
+            && self.adopted == other.adopted
             && self.inline.len() == other.inline.len()
             && self.inline.iter().zip(&other.inline).all(|(a, b)| Rc::ptr_eq(a, b))
             && match (&self.external, &other.external) {
