@@ -370,6 +370,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod live_timer_slice_tests;
+#[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_budget_tests;
@@ -1136,6 +1138,15 @@ const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// A page that owes more keeps them for the next turn, so input and paint
 /// get a turn in between.
 const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
+
+/// Longest one turn of the live loop keeps running timer callbacks: once
+/// one ends past it, the rest wait for the next turn, as past
+/// [`MAX_LIVE_TIMER_CALLBACKS`]. A browser runs one task and then lets the
+/// window have its turn. The count alone let a page that chains
+/// `setTimeout(0)` work hold one turn for seconds, until the watchdog
+/// stopped a callback part-way and a scheduler whose bookkeeping was in
+/// that callback's `finally` never ran again (2026-10-22).
+const LIVE_TIMER_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Longest one turn of the live loop waits for the modules a dynamic
 /// `import()` asked for, which are still fetched inside the turn. The loop is
@@ -3710,7 +3721,7 @@ impl Engine {
         // Timers first: what they ask of the network is answered this turn.
         let (timers, timer_stopped) = with_script_js(bindings, || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bindings.advance_timers(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS)
+                bindings.advance_timers_for(elapsed_ms, MAX_LIVE_TIMER_CALLBACKS, Some(LIVE_TIMER_SLICE))
             }))
         });
         match timers {

@@ -424,6 +424,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(document);
 
     var now = 0, nextId = 1, timers = [];
+    // The live loop's clock had callbacks owed up to here when its last turn
+    // was cut short (by `max` or by its time slice): they are due now.
+    var owedUntil = -1;
+    // Real time, for the live turn's slice. Taken now, before page script
+    // can replace `Date.now`.
+    var realNow = Date.now;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
@@ -474,9 +480,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // would pass `horizon` ms or `max` callbacks have run. The load's clock
     // has no frames, so an animation frame there is a 16 ms timer; the live
     // loop keeps them for its one round a turn (`timersOnly`).
-    function runTimers(horizon, max, timersOnly) {
+    //
+    // `until` (live loop only) is a time on the real clock: once a callback
+    // ends past it, the rest wait for the next turn, as when `max` is hit.
+    function runTimers(horizon, max, timersOnly, until) {
         var ran = 0;
-        while (ran < max) {
+        while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
                 var t = timers[i];
@@ -500,17 +509,28 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // The live loop's clock: `delta` ms of real time have passed. Run what
     // came due and leave the clock there, so a timer set next (by a click,
     // say) counts from now and not from the last callback. With callbacks
-    // still owed (the cap), the clock stays behind and the next turn
-    // catches up.
+    // still owed (the cap, or the slice below), the clock stays behind and
+    // the next turn catches up to the time this one was given.
     //
     // A turn is one frame however long it took: after its timers, the
     // animation frame callbacks that are due run once, at the turn's time.
     // One asked for during the round is due a frame later. (As 16 ms timers
     // a turn of 3 s ran 187 of them back to back.)
-    window.__rustkit_advance_timers = function (delta, max) {
-        var target = now + delta;
-        var ran = runTimers(target, max, true);
-        if (ran >= max) return ran;
+    //
+    // `slice` ms of real time (0: no limit) bounds the turn, as `max` does:
+    // a page that chains `setTimeout(0)` gets the window back between its
+    // callbacks, rather than once 1000 of them have run (seconds of them,
+    // until the watchdog stopped one part-way; 2026-10-22). The frame
+    // round waits too.
+    window.__rustkit_advance_timers = function (delta, max, slice) {
+        var target = Math.max(now + delta, owedUntil);
+        var until = slice > 0 ? realNow() + slice : 0;
+        var ran = runTimers(target, max, true, until);
+        if (ran >= max || (until && realNow() >= until)) {
+            owedUntil = Math.max(owedUntil, target);
+            return ran;
+        }
+        owedUntil = -1;
         if (now < target) now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
@@ -527,12 +547,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    // A timer the last live turn owed (it was due by that turn's clock)
+    // is overdue, however far behind the clock was left.
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
         }
-        return due < 0 ? -1 : Math.max(0, due - now);
+        if (due < 0) return -1;
+        return due <= owedUntil ? 0 : Math.max(0, due - now);
     };
 })();
 "#;
@@ -1839,9 +1862,22 @@ impl DomBindings {
     /// time) and run the timers that came due, at most `max_callbacks` of
     /// them. Returns how many ran.
     pub fn advance_timers(&self, delta_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
+        self.advance_timers_for(delta_ms, max_callbacks, None)
+    }
+
+    /// [`Self::advance_timers`], and once a callback ends `slice` after the
+    /// call began, no more run: the rest wait for the next call, and
+    /// [`Self::next_timer_delay`] says they are due.
+    pub fn advance_timers_for(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        slice: Option<std::time::Duration>,
+    ) -> Result<u32, BindingError> {
+        let slice_ms = slice.map_or(0, |slice| slice.as_millis().max(1) as u64);
         let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers({}, {})",
-            delta_ms, max_callbacks
+            "window.__rustkit_advance_timers({}, {}, {})",
+            delta_ms, max_callbacks, slice_ms
         ))?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
@@ -2707,9 +2743,13 @@ mod tests {
         bindings
             .evaluate("var n = 0; var t = setInterval(function () { n++; }, 10);")
             .unwrap();
+        // What the cap held back is due now: the loop must not sleep on it.
         assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
+        assert_eq!(bindings.next_timer_delay(), Some(0));
+        // The next turn catches up to the time the cut-short one reached
+        // (50 to 100), however little time it is given itself.
+        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 6);
         assert_eq!(bindings.next_timer_delay(), Some(10));
-        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
     }
 
