@@ -630,21 +630,26 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the time already spent, so the next interval waits a full extra
     // period after Stop. Timers still due are at or before `target` and
     // run on the next turn.
+    //
+    // A turn that yields still has its frame (#776): its animation-frame
+    // round runs before it returns. Returning first, a `setTimeout(0)`
+    // chain that outlasted every frame starved `requestAnimationFrame`.
     window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
         var target = now + delta;
         var start = Date.now();
         var ran = 0;
+        var yielded = false;
         while (ran < max) {
             var n = runTimers(target, 1, true);
             if (n === 0) break;
             ran += n;
             if (frameMs > 0 && (Date.now() - start) >= frameMs) {
-                if (now < target) now = target;
-                return -ran;
+                yielded = true;
+                break;
             }
         }
-        if (ran >= max) return ran;
         if (now < target) now = target;
+        if (ran >= max) return yielded ? -ran : ran;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
             if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
@@ -656,7 +661,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             ran++;
             call(round[j]);
         }
-        return ran;
+        return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     window.__rustkit_next_timer = function () {
