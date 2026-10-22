@@ -20,7 +20,8 @@ pub(crate) struct Server {
 }
 
 /// `/echo` answers with the request body, `/slow*` after 300 ms, `/beacon*`
-/// after 2 s, anything else with its own path as the body.
+/// after 2 s, anything with `delay=<ms>` in its query after that long,
+/// anything else with its own path as the body.
 fn serve() -> Server {
     serve_routes(Vec::new())
 }
@@ -82,6 +83,14 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 // A fixed route can be slow too: `/held...`.
                 if path.starts_with("/held") {
                     std::thread::sleep(Duration::from_millis(300));
+                }
+                // Any path with `delay=<ms>` in its query answers that late.
+                if let Some(ms) = path
+                    .split_once('?')
+                    .and_then(|(_, query)| query.split('&').find_map(|kv| kv.strip_prefix("delay=")))
+                    .and_then(|ms| ms.parse::<u64>().ok())
+                {
+                    std::thread::sleep(Duration::from_millis(ms));
                 }
                 let content_type = fixed.map(|(_, ct, _)| *ct).unwrap_or("text/plain");
                 let body = if let Some((_, _, body)) = fixed {
