@@ -424,9 +424,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(document);
 
     var now = 0, nextId = 1, timers = [];
-    // The live loop's clock had callbacks owed up to here when its last turn
-    // was cut short (by `max` or by its time slice): they are due now.
-    var owedUntil = -1;
     // Real time, for the live turn's slice. Taken now, before page script
     // can replace `Date.now`.
     var realNow = Date.now;
@@ -495,7 +492,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             }
             if (best < 0 || timers[best].due > horizon) break;
             var timer = timers[best];
-            now = timer.due;
+            // A timer a cut-short live turn owed runs after the clock has
+            // moved on; the clock does not go back for it.
+            if (timer.due > now) now = timer.due;
             if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
             else timers.splice(best, 1);
             ran++;
@@ -509,28 +508,29 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // The live loop's clock: `delta` ms of real time have passed. Run what
     // came due and leave the clock there, so a timer set next (by a click,
     // say) counts from now and not from the last callback. With callbacks
-    // still owed (the cap, or the slice below), the clock stays behind and
-    // the next turn catches up to the time this one was given.
+    // still owed (the cap, or the slice below), the clock moves on all the
+    // same: what is owed is overdue, and runs first on the next turn. (Left
+    // behind, the clock stood still under a `setTimeout(0)` chain, each new
+    // link due before every later timer and frame, which never ran.)
     //
     // A turn is one frame however long it took: after its timers, the
     // animation frame callbacks that are due run once, at the turn's time.
     // One asked for during the round is due a frame later. (As 16 ms timers
     // a turn of 3 s ran 187 of them back to back.)
     //
-    // `slice` ms of real time (0: no limit) bounds the turn, as `max` does:
-    // a page that chains `setTimeout(0)` gets the window back between its
-    // callbacks, rather than once 1000 of them have run (seconds of them,
-    // until the watchdog stopped one part-way; 2026-10-22). The frame
-    // round waits too.
+    // `slice` ms of real time (0: no limit) bounds the turn's timers, as
+    // `max` does: a page that chains `setTimeout(0)` gets the window back
+    // between its callbacks, rather than once 1000 of them have run
+    // (seconds of them, until the watchdog stopped one part-way;
+    // 2026-10-22). The turn's frame still comes.
     window.__rustkit_advance_timers = function (delta, max, slice) {
-        var target = Math.max(now + delta, owedUntil);
+        var target = now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
-        if (ran >= max || (until && realNow() >= until)) {
-            owedUntil = Math.max(owedUntil, target);
+        if (ran >= max) {
+            if (now < target) now = target;
             return ran;
         }
-        owedUntil = -1;
         if (now < target) now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
@@ -547,15 +547,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
-    // A timer the last live turn owed (it was due by that turn's clock)
-    // is overdue, however far behind the clock was left.
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
             if (due < 0 || timers[i].due < due) due = timers[i].due;
         }
-        if (due < 0) return -1;
-        return due <= owedUntil ? 0 : Math.max(0, due - now);
+        return due < 0 ? -1 : Math.max(0, due - now);
     };
 })();
 "#;
@@ -2739,18 +2736,45 @@ mod tests {
             JsValue::String(s) if s == "b,a"
         ));
 
-        // The cap leaves the clock behind; the next turn catches up.
+        // The cap holds callbacks back; the clock moves on, so they are due.
         bindings
             .evaluate("var n = 0; var t = setInterval(function () { n++; }, 10);")
             .unwrap();
         // What the cap held back is due now: the loop must not sleep on it.
         assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
         assert_eq!(bindings.next_timer_delay(), Some(0));
-        // The next turn catches up to the time the cut-short one reached
-        // (50 to 100), however little time it is given itself.
+        // The clock moved on to 100: what the cap held back (50 to 100)
+        // runs on the next turn, however little time it is given itself.
         assert_eq!(bindings.advance_timers(0, 100).unwrap(), 6);
         assert_eq!(bindings.next_timer_delay(), Some(10));
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// A turn cut short by its slice still moves the clock and has its
+    /// frame, so a `setTimeout(0)` chain that outlasts every slice does not
+    /// hold back a later timer or an animation frame.
+    #[test]
+    fn a_zero_delay_chain_cut_by_the_slice_lets_later_timers_and_frames_run() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var log = [], links = 0;
+                 function chain() { var t = Date.now(); while (Date.now() - t < 3) {} links++; setTimeout(chain, 0); }
+                 setTimeout(chain, 0);
+                 setTimeout(function () { log.push('later'); }, 30);
+                 requestAnimationFrame(function () { log.push('frame'); });",
+            )
+            .unwrap();
+        let slice = Some(std::time::Duration::from_millis(10));
+        for _ in 0..4 {
+            assert!(bindings.advance_timers_for(20, 1000, slice).unwrap() < 10);
+            // The chain is always owed.
+            assert_eq!(bindings.next_timer_delay(), Some(0));
+        }
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "frame,later"
+        ));
     }
 
     /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
