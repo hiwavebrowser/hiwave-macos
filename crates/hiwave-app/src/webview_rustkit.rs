@@ -79,6 +79,10 @@ pub struct RustKitView {
     visible: RefCell<bool>,
     /// Loading state.
     loading: RefCell<bool>,
+    /// Whether a page element held focus, as the content thread last
+    /// reported it (`PageEvent::Focused`). With the page on its own thread,
+    /// the window cannot ask and wait for the answer.
+    page_focused: std::cell::Cell<bool>,
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
@@ -330,6 +334,7 @@ impl RustKitView {
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
+            page_focused: std::cell::Cell::new(false),
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
@@ -628,6 +633,15 @@ impl RustKitView {
 
     /// Whether a content element currently holds focus.
     pub fn has_focused_element(&self) -> bool {
+        if self.content.is_some() {
+            // The reply would come too late for this key. Answer from the
+            // page's last report, and ask again so focus that a script moved
+            // is known by the next key.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::HasFocus { reply }));
+            self.harvest();
+            return self.page_focused.get();
+        }
         self.ask(|reply| PageCmd::Input(PageInput::HasFocus { reply }))
             .unwrap_or(false)
     }
@@ -641,6 +655,13 @@ impl RustKitView {
     /// clearing focus when nothing focusable is there. Returns the focused
     /// element's tag name.
     pub fn focus_at_point(&self, x: f32, y: f32) -> Option<String> {
+        if self.content.is_some() {
+            // The page reports what it focused as PageEvent::Focused, which
+            // has_focused_element reads. The tag is only logged.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::FocusAt { x, y, reply }));
+            return None;
+        }
         self.ask(|reply| PageCmd::Input(PageInput::FocusAt { x, y, reply }))
             .flatten()
     }
@@ -692,6 +713,17 @@ impl RustKitView {
     /// Wheel events that reach the tao window loop are exactly the ones the
     /// UI-frame WebView did not consume, i.e. the pointer was over content.
     pub fn scroll_by(&self, delta_x: f32, delta_y: f32) -> bool {
+        if self.content.is_some() {
+            // The page scrolls on its own thread and publishes the moved
+            // frame as a commit. Report a change so the caller presents it.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::Scroll {
+                dx: delta_x,
+                dy: delta_y,
+                reply,
+            }));
+            return true;
+        }
         self.ask(|reply| {
             PageCmd::Input(PageInput::Scroll {
                 dx: delta_x,
@@ -1076,10 +1108,8 @@ impl RustKitView {
                 } => {
                     *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
-                PageEvent::Focused(_)
-                | PageEvent::Cursor(_)
-                | PageEvent::Unresponsive
-                | PageEvent::Closed => {}
+                PageEvent::Focused(focused) => self.page_focused.set(focused),
+                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
     }
@@ -1653,6 +1683,35 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     #[test]
     fn content_thread_a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped() {
         a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(content_view());
+    }
+
+    /// Independent R1 on #730, SHOULD-FIX 3: with the page on its own
+    /// thread, the window's focus and scroll questions used to be asked
+    /// and read back at once, so they always missed. A focused field then
+    /// looked unfocused and Backspace or the arrows were dropped.
+    #[test]
+    fn content_thread_the_window_learns_a_click_focused_a_field_and_a_scroll_reports_a_change() {
+        let view = content_view();
+        let (base, _log) = logging_server(
+            "<body style='margin:0'><input id=f style='width:200px;height:40px'>\
+<div style='height:3000px'></div></body>",
+        );
+        load_and_settle(&view, &base);
+        let _ = view.focus_at_point(20.0, 20.0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !view.has_focused_element() {
+            assert!(Instant::now() < deadline, "the window never learned the field was focused");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(read(&view, "document.activeElement.id").contains('f'));
+        assert!(view.scroll_by(0.0, -200.0), "a scroll reported no change");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !read(&view, "String(window.scrollY > 0)").contains("true") {
+            assert!(Instant::now() < deadline, "the page never scrolled");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn content_view() -> RustKitView {
