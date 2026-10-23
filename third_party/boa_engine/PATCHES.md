@@ -369,3 +369,71 @@ recursion that does not fit if a stop kept a frame or a host count),
 `a_deep_setter_chain_and_call_fit_the_default_recursion_limit` (400
 setters, a call of 1000). The existing `recursion_runtime_limit` and
 setter tests still fail through the frame check at the limit they set.
+
+## Host-stack names
+
+`host_call_depth` counted re-entries and did not say which function was
+entered. While `set_host_stack_armed` is set, `call` and `construct` push
+that function's name. The first time a climb crosses 256, 512, and 1000,
+`host_stack` calls the installed hook with a histogram and the innermost
+20 names. The console log arms it. A disarmed process does not allocate
+the names.
+
+**What.** Marked `HIWAVE PATCH (host stack)`.
+
+| file | change |
+|---|---|
+| `src/vm/host_stack.rs` | the stack, the thresholds, the hook |
+| `src/vm/mod.rs` | `host_frames`, `host_stack_logged` |
+| `src/object/operations.rs` | `call` and `construct` push and pop around `Context::run` |
+
+## Patch, continued: a stop runs the `finally` blocks it unwinds through
+
+**Why.** A stop never reached a `catch` or a `finally` (M1, above). A
+scheduler that posts its next task from a `finally` (React's
+`performWorkUntilDeadline`: `try { flushWork() } finally { if (more)
+post(); else running = false; }`) was then left with its "running" flag
+set once the watchdog stopped one task: it never posted again, and the page
+ran no more timers or requests (2026-10-22). The stop must still end the
+script; the page's cleanup needs a moment.
+
+**Rule.** With `Context::set_stop_finally_grace(Some(grace))` (off by
+default; `rustkit-js` sets the 50 ms stop grace), a stop by the interrupt
+word or the loop limit (`rustkit-js` reports its host-call deadline as the
+loop limit) that unwinds through a `try` with a `finally` runs that
+`finally` block, innermost first, in the stopped frame and its callers up to
+the frame the Rust caller entered. No `catch` runs. Each block ends by
+rethrowing the stop, so the next one out runs, and then the stop reaches
+the Rust caller as before. For the grace, counted from the first block, the
+word naming the stopped turn does not stop script; past it, the stop is
+final as upstream's, and so is `u64::MAX` (Stop), which runs no `finally`
+at all. The block cannot end the stop: a `return` in it, a throw out of it
+(caught around the `try` or by a caller), and a `break` or `continue` out of
+it each go on with the stop instead. A `catch` inside the block, or in a
+function it calls, is the page's own. A body the run entry check stops
+before it starts (a job resumed in a stopped turn) runs no `finally`.
+Marked `HIWAVE PATCH (stop finally)`.
+
+| file | change |
+|---|---|
+| `src/vm/code_block.rs` | `Handler::stop_finally`: where the `finally` of the `try` the handler belongs to is (`StopFinally`: body from `entry` to `exit`, rethrow up to `exit_end`) |
+| `src/bytecompiler/jump_control.rs`, `src/bytecompiler/statement/try.rs` | the try block's handler (and a `catch` block's, with a `finally`) records it; the engine's own handlers record none |
+| `src/vm/mod.rs` | `Vm::stop_finally_grace`, `Vm::stop_unwind` (`StopUnwind`: the stop, its grace's end, the blocks running); `handle_error` enters the innermost `finally` around the stop (`enter_stop_finally`) and claims a catchable throw that would leave the running block (`stop_claims_throw`); `handle_return` goes on with the stop from the block's frame; `check_interrupt` lets the block run through the grace and stops code that left it by `break`; the run entry check enters no `finally`; the state ends when a stop leaves the outermost frame |
+| `src/vm/opcode/control_flow/throw.rs` | `Throw` and `ReThrow` at the end of the running block, or out of it, go on with the stop (`resume_stop`) |
+| `src/context/mod.rs` | `Context::set_stop_finally_grace`, `Context::stop_finally_running` (the host answers the block's calls), `Context::end_stop_unwind` |
+
+**Not covered.** A `yield` or `await` in the block suspends it as usual; the
+grace's end stops what runs after it in the turn. If the script the Rust
+caller started then ends normally (`handle_return`/`handle_yield` at the
+outermost frame), the stop's state is cleared, so the next script is not
+stopped by what is left of the grace.
+
+**Tests.** `crates/rustkit-js/tests/vm_stop_finally.rs` (innermost first and
+no `catch`; a `finally` that schedules the next task; Stop runs none; no
+grace, none; `return`, a throw caught around it, and `break` do not end the
+stop; a `catch` inside the block is the page's; a block that spins is
+stopped at the grace and the next turn runs; the loop limit; a generator and
+an async function), `watchdog_turns::try_catch_around_the_spin_cannot_swallow_the_stop`
+(now: the `finally` runs once, the `catch` never), and in `rustkit-engine`
+`live_timer_slice_tests` (a MessageChannel scheduler that re-arms in
+`finally` runs its next task after a stop; a spinning `finally` is stopped).

@@ -307,8 +307,8 @@ impl std::io::Write for Captured {
     }
 }
 
-/// The `relayout cause=` lines logged while `run` ran on this thread.
-pub(crate) fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
+/// Log lines that contain `needle` while `run` ran on this thread.
+fn capture_lines(needle: &str, run: impl FnOnce()) -> Vec<String> {
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -319,9 +319,14 @@ pub(crate) fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
     tracing::subscriber::with_default(subscriber, run);
     let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     log.lines()
-        .filter(|line| line.contains("relayout cause="))
+        .filter(|line| line.contains(needle))
         .map(str::to_string)
         .collect()
+}
+
+/// The `relayout cause=` lines logged while `run` ran on this thread.
+pub(crate) fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
+    capture_lines("relayout cause=", run)
 }
 
 /// The number after `name=` in a log line.
@@ -357,5 +362,39 @@ fn every_relayout_line_carries_the_five_stage_times() {
         // Each is rounded to 0.1 ms: five roundings, and the stages run
         // inside the relayout that took_ms times.
         assert!(sum <= took + 0.3, "stages sum past took_ms: {line}");
+    }
+}
+
+/// #655: navigation summaries must go through `summary_url`, not the raw
+/// document URL — query/tokens and userinfo must not land in the log.
+#[test]
+fn a_navigation_summary_scrubs_the_outgoing_url() {
+    let (mut engine, view) = engine_and_view();
+    engine
+        .load_html(view, "<div id=a></div>")
+        .expect("load_html");
+    // A URL a real navigation would store: credentials and a token in the
+    // query. The summary path must scrub both before logging.
+    engine.views.get_mut(&view).expect("view").url = Some(
+        Url::parse("https://user:pass@example.com/secret?token=leak-me#frag").unwrap(),
+    );
+    engine
+        .execute_script(view, "document.getElementById('a').textContent = 'x';")
+        .expect("script");
+
+    let lines = capture_lines("relayout summary url=", || {
+        engine.load_html(view, "<p>next</p>").expect("navigate away");
+    });
+    assert_eq!(lines.len(), 1, "one summary for the outgoing document: {lines:#?}");
+    let line = &lines[0];
+    assert!(
+        line.contains("relayout summary url=https://example.com/secret "),
+        "origin+path only: {line}"
+    );
+    for leak in ["token=", "leak-me", "user:", "pass@", "#frag"] {
+        assert!(
+            !line.contains(leak),
+            "summary must not contain {leak:?}: {line}"
+        );
     }
 }

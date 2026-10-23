@@ -78,8 +78,10 @@ fn try_catch_around_the_spin_cannot_swallow_the_stop() {
     );
     assert!(result.is_err() && stopped, "{result:?}");
     assert!(took < BUDGET + SLACK, "{took:?}");
+    // The `finally` runs (the stop's grace; a scheduler re-arms there), and
+    // the `catch` and what follows the statement do not.
     let (flags, stopped, _) = page.turn("caught + ',' + finished", BUDGET);
-    assert_eq!(flags.unwrap(), r#"String("0,0")"#);
+    assert_eq!(flags.unwrap(), r#"String("0,1")"#);
     assert!(!stopped);
 }
 
