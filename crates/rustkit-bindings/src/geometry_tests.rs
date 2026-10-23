@@ -254,7 +254,7 @@ fn getcomputedstyle_reads_the_published_style() {
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.display, c.getPropertyValue('color'), c.fontSize, c['margin-top'], c.marginTop, c.cssFloat, c.getPropertyValue('nope') === ''].join()"),
         "flex,rgb(1, 2, 3),20px,4px,4px,left,true"
     );
-    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "5,color,function");
+    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "10,border-bottom-left-radius,function");
     assert_eq!(
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); try { c.setProperty('color', 'red'); 'no throw' } catch (e) { e.name }"),
         "NoModificationAllowedError"
@@ -286,8 +286,38 @@ fn an_element_with_no_box_after_a_layout_is_display_none() {
     m.insert(id(&doc, "outer"), geom(0.0, 0.0, 10.0, 10.0));
         b.set_geometry(m);
     assert_eq!(
-        ev(&b, "var c = getComputedStyle(document.getElementById('gone')); [c.display, c.visibility].join()"),
-        "none,visible"
+        ev(&b, "var c = getComputedStyle(document.getElementById('gone')); [c.display, c.visibility, c.borderRadius].join()"),
+        "none,visible,0px"
+    );
+}
+
+#[test]
+fn an_unset_border_radius_is_zero_px_and_a_non_finite_box_stays_finite() {
+    let (b, doc) = bound();
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "outer"), geom(f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 40.0));
+    m.insert(id(&doc, "inner"), geom(10.0, 20.0, 40.0, 20.0));
+    b.set_geometry(m);
+    assert_eq!(
+        ev(&b, "var c = getComputedStyle(document.getElementById('inner')); [c.borderRadius, c.borderTopLeftRadius, c.borderTopRightRadius, c.borderBottomRightRadius, c.borderBottomLeftRadius, Number.parseInt(c.borderRadius)].join()"),
+        "0px,0px,0px,0px,0px,0"
+    );
+    assert_eq!(
+        ev(&b, "var r = document.getElementById('outer').getBoundingClientRect(); [r.x, r.y, r.width, r.height, r.top, r.left, r.right, r.bottom].every(Number.isFinite)"),
+        "true"
+    );
+    assert_eq!(
+        ev(&b, "var r = document.getElementById('outer').getBoundingClientRect(); [r.x, r.y, r.width, r.height].join()"),
+        "0,0,0,40"
+    );
+    // The radius is a finite offset, so the point query does not throw.
+    assert_eq!(
+        ev(&b, "var e = document.elementFromPoint(20, 30); var half = Number.parseInt(getComputedStyle(e).borderRadius) / 2; document.elementFromPoint(20, 30 + half).id"),
+        "inner"
+    );
+    assert_eq!(
+        ev(&b, "var name = ''; try { document.elementFromPoint(NaN, 0); } catch (e) { name = e.name; } name"),
+        "TypeError"
     );
 }
 

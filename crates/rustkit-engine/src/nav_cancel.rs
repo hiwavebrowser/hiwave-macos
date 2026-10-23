@@ -139,11 +139,26 @@ pub(crate) async fn unless_cancelled<F: Future>(
 pub(crate) struct LoadInProgress {
     pub control: Arc<ViewControl>,
     pub nav_id: u64,
+    /// The post-`DOMContentLoaded` tail still owns the load. Drop does not
+    /// end it; the tail does, when it fires `load` or is abandoned.
+    pub handed_off: bool,
+}
+
+impl LoadInProgress {
+    pub(crate) fn begin(control: Arc<ViewControl>, nav_id: u64) -> Self {
+        Self {
+            control,
+            nav_id,
+            handed_off: false,
+        }
+    }
 }
 
 impl Drop for LoadInProgress {
     fn drop(&mut self) {
-        self.control.end_load(self.nav_id);
+        if !self.handed_off {
+            self.control.end_load(self.nav_id);
+        }
     }
 }
 

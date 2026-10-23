@@ -1,5 +1,5 @@
 //! A live turn runs timer callbacks for one time slice, not for 1000 of
-//! them (`LIVE_TIMER_SLICE`), and a page whose task the watchdog stopped
+//! them (`LIVE_FRAME_MS`, the frame budget #730 slices a turn by), and a page whose task the watchdog stopped
 //! can still schedule its next one.
 //!
 //! Real window, 2026-10-22: a page that chains `setTimeout(0)` work held
@@ -96,7 +96,7 @@ fn a_page_that_chains_zero_delay_timers_gets_turns_of_one_slice() {
     // The slice and one callback past it, with room for a debug build's
     // layout and bookkeeping; the cap alone made this ~1000 ms (stopped).
     assert!(
-        longest < LIVE_TIMER_SLICE + std::time::Duration::from_millis(150),
+        longest < std::time::Duration::from_millis(LIVE_FRAME_MS) + std::time::Duration::from_millis(150),
         "longest turn {longest:?} over {turns} turns"
     );
     assert!(turns > 50, "{turns} turns: the slice cut none of them");

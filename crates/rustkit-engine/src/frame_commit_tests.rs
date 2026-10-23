@@ -114,25 +114,25 @@ fn a_scroll_commits_the_offset_and_shares_the_list() {
 #[test]
 fn an_input_is_measured_by_the_frame_that_shows_it_and_a_fruitless_one_is_dropped() {
     let (mut engine, view, _server, _rt) = load();
-    assert_eq!(engine.presenter.latency_samples(), 0, "the load is not an input");
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").latency_samples(), 0, "the load is not an input");
 
     // A wheel: the scroll's own present measures it.
     engine.note_input(view, mark(1));
     assert!(engine.scroll_view(view, 0.0, -50.0).unwrap());
-    assert_eq!(engine.presenter.latency_samples(), 1);
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").latency_samples(), 1);
     assert_eq!(engine.latest_commit(view).unwrap().input, None, "measured once");
     assert_eq!(engine.views[&view].input_pending, None);
 
     // Drawn again for another reason: not measured a second time.
     engine.render_all_views();
-    assert_eq!(engine.presenter.latency_samples(), 1);
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").latency_samples(), 1);
 
     // A move over nothing: no frame moves; the drain ends with a
     // changed-views pass that drops the mark.
     engine.note_input(view, mark(2));
     engine.mouse_move_at_point(view, 10.0, 10.0);
     assert_eq!(engine.render_changed_views(), 0);
-    assert_eq!(engine.presenter.latency_samples(), 1, "nothing to measure");
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").latency_samples(), 1, "nothing to measure");
     assert_eq!(engine.views[&view].input_pending, None, "dropped, not kept for a later frame");
 
     // Two inputs in one drain, the frame moves on the second: the
@@ -143,7 +143,7 @@ fn an_input_is_measured_by_the_frame_that_shows_it_and_a_fruitless_one_is_droppe
     engine
         .execute_script(view, "document.getElementById('tall').style.background = 'blue'")
         .unwrap();
-    assert_eq!(engine.presenter.latency_samples(), 2);
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").latency_samples(), 2);
     assert_eq!(engine.views[&view].input_pending, None);
 }
 

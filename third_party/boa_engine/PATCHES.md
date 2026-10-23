@@ -370,6 +370,23 @@ recursion that does not fit if a stop kept a frame or a host count),
 setters, a call of 1000). The existing `recursion_runtime_limit` and
 setter tests still fail through the frame check at the limit they set.
 
+## Host-stack names
+
+`host_call_depth` counted re-entries and did not say which function was
+entered. While `set_host_stack_armed` is set, `call` and `construct` push
+that function's name. The first time a climb crosses 256, 512, and 1000,
+`host_stack` calls the installed hook with a histogram and the innermost
+20 names. The console log arms it. A disarmed process does not allocate
+the names.
+
+**What.** Marked `HIWAVE PATCH (host stack)`.
+
+| file | change |
+|---|---|
+| `src/vm/host_stack.rs` | the stack, the thresholds, the hook |
+| `src/vm/mod.rs` | `host_frames`, `host_stack_logged` |
+| `src/object/operations.rs` | `call` and `construct` push and pop around `Context::run` |
+
 ## Patch, continued: a stop runs the `finally` blocks it unwinds through
 
 **Why.** A stop never reached a `catch` or a `finally` (M1, above). A

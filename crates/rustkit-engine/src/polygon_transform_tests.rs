@@ -25,6 +25,8 @@ fn capture(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand],
     let path = std::env::temp_dir().join(format!("rustkit-polygon-{tag}-{}.ppm", std::process::id()));
     engine
         .presenter
+        .as_mut()
+        .expect("window presenter")
         .capture_commands(viewhost_id, (200, 100), path.to_str().unwrap(), commands)
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");

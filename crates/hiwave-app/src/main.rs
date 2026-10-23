@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -226,6 +226,9 @@ enum UserEvent {
     DecayTick,
     // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
     WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -590,6 +593,33 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 /// Stack size of the calling thread, as the OS reports it. Logged at startup
 /// so a hand-test log shows the linker's main-thread stack took effect.
 #[cfg(target_os = "macos")]
@@ -602,11 +632,26 @@ fn main_thread_stack_size() -> usize {
     unsafe { pthread_get_stacksize_np(pthread_self()) }
 }
 
+/// The shipped app runs the page on the content thread (M4) unless
+/// `HIWAVE_CONTENT_THREAD` is set, to `0` for example, which keeps the page on
+/// the window thread. The engine's own default stays off, so parity-capture
+/// and the engine tests keep their board-comparable arm.
+#[cfg(target_os = "macos")]
+fn default_content_thread_on() {
+    if std::env::var_os("HIWAVE_CONTENT_THREAD").is_none() {
+        // main() has started no threads yet.
+        std::env::set_var("HIWAVE_CONTENT_THREAD", "1");
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    #[cfg(target_os = "macos")]
+    default_content_thread_on();
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
@@ -615,6 +660,15 @@ fn main() {
     info!(
         "Main thread stack: {} MiB",
         main_thread_stack_size() / (1024 * 1024)
+    );
+    #[cfg(target_os = "macos")]
+    info!(
+        "Content thread: {}",
+        if rustkit_engine::content_thread_enabled() {
+            "on"
+        } else {
+            "off (HIWAVE_CONTENT_THREAD)"
+        }
     );
 
     // Initialize application state
@@ -706,7 +760,13 @@ fn main() {
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
-    // Sidebar width: 0.0 = closed, >0 = open with that width
+    // Sidebar width: 0.0 = closed, >0 = open with that width.
+    // The content view starts at the full window. A page with no inserted
+    // scripts reads that width, then hears one `resize` when chrome opens
+    // the sidebar. Creating it already inset made that first read the
+    // narrowed width, and chrome's initial width of 0 then dispatched a
+    // stale full-window resize. Bounds set while a load holds the engine
+    // are applied when it ends.
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
@@ -1230,8 +1290,25 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
-        rustkit_view.load_html_internal(ABOUT_HTML)
-            .expect("Failed to load initial HTML");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
+        // A restored tab is queued below as `UserEvent::Navigate`. With the
+        // content thread both loads return immediately, and a new-tab
+        // document queued first used to be applied after the restore had
+        // already taken the newer navigation id (10/26 launches). The
+        // restore is the first command; a late default document carries an
+        // older id and is dropped.
+        if is_new_tab_url(&initial_url) {
+            rustkit_view.load_html_internal(ABOUT_HTML)
+                .expect("Failed to load initial HTML");
+        }
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
     };
@@ -2145,9 +2222,17 @@ fn main() {
                         if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
                             info!(%tag, "Focused content element");
                         }
-                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
-                            info!(%url, "Link clicked");
-                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        // The content view already recorded this click when
+                        // the page runs on its own thread. Asking here races
+                        // that thread, and a miss is logged as a script
+                        // navigation. The click comes back as
+                        // NavigateRequested with the user as its origin.
+                        if !rustkit_engine::content_thread_enabled() {
+                            if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
+                            {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
                         }
                     }
                 }
@@ -2487,8 +2572,12 @@ fn main() {
                         // a submit from a timer. Until 2026-10-06 these were
                         // dropped: only the user's own click on a link or a
                         // submit button went anywhere (hand tests H14, H16).
-                        if let Some(url) = view.take_script_navigation() {
-                            info!(%url, "Script navigation");
+                        if let Some((url, from_user)) = view.take_script_navigation() {
+                            if from_user {
+                                info!(%url, "Link clicked");
+                            } else {
+                                info!(%url, "Script navigation");
+                            }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
                         view.render();
@@ -4192,6 +4281,9 @@ fn main() {
                         if let Some((answered, clock)) = stall_log.as_ref() {
                             answered.now(clock);
                         }
+                    }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
                     }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs

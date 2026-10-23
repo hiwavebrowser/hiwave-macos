@@ -104,6 +104,13 @@
         },
         enumerable: true, configurable: true
     });
+    // Location's stringifier is its href (HTML §7.3). `new URL(path, location)`
+    // and `String(location)` use it; without it the base is "[object Object]"
+    // and the URL constructor throws Invalid URL.
+    function locationString() { return hrefValue; }
+    loc.toString = locationString;
+    loc.valueOf = locationString;
+    if (typeof Symbol === 'function') loc[Symbol.toPrimitive] = locationString;
     function setLocation(href) {
         var u = new URL(href);
         syncing = true;

@@ -1,0 +1,1186 @@
+//! The content thread (threads plan M4, second PR).
+//!
+//! `HIWAVE_CONTENT_THREAD=1` runs the page on one dedicated thread. The
+//! window sends [`PageCmd`] and presents [`PageEvent`]s; it does not wait
+//! for a load, a script or a fetch. The flag is off unless that variable
+//! is set, so the same-thread drain stays the default until a Mac has
+//! accepted the threaded window.
+//!
+//! The engine is constructed on the content thread. The presenter is not:
+//! a page engine publishes [`crate::FrameCommit`]s and the window draws
+//! them. Per-tab threads are M6; this is the one shared content thread.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use rustkit_image::ImageManager;
+use rustkit_js::ViewControl;
+use rustkit_viewhost::Bounds;
+use tokio::sync::oneshot;
+use url::Url;
+
+use crate::nav_cancel::NavCanceller;
+use crate::page_protocol::{adopt, coalesce};
+use crate::{EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
+
+/// `HIWAVE_CONTENT_THREAD=1` (or true/on/yes). Anything else, including an
+/// unset variable, leaves the page on the window thread.
+pub fn content_thread_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("HIWAVE_CONTENT_THREAD").ok().as_deref(),
+            Some("1" | "true" | "on" | "yes")
+        )
+    })
+}
+
+/// Native stack requested for the content thread.
+///
+/// `HIWAVE_CONTENT_STACK_MB`, default 64, clamped to 8..=512. A requested
+/// size is not a measurement of how deep a host re-entry can go.
+///
+/// A 4,000-deep `__rk_reenter` climb on this stack used 25,864,544 bytes in
+/// a debug build (6,466 bytes/frame, 38.5% of 64 MiB) and 4,355,104 bytes in
+/// release (1,089 bytes/frame, 6.5%). The host re-entry cap stays 1,024.
+/// That cap also binds the flag-off page, which still runs on the window
+/// thread's stack, and 1,024 debug frames are already about 6.6 MiB.
+pub fn content_stack_bytes() -> usize {
+    let mb = std::env::var("HIWAVE_CONTENT_STACK_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(64);
+    (mb.clamp(8, 512) as usize).saturating_mul(1024 * 1024)
+}
+
+#[derive(Debug)]
+pub enum ContentThreadError {
+    Spawn(String),
+    Engine(String),
+}
+
+#[derive(Clone)]
+struct Boot {
+    control: Arc<ViewControl>,
+    canceller: NavCanceller,
+    images: Arc<ImageManager>,
+    #[allow(dead_code)]
+    view: EngineViewId,
+    thread: std::thread::ThreadId,
+}
+
+/// The window's handle on the content thread.
+///
+/// Dropping it signals Stop and Close and returns. It does not join the
+/// thread: a caller that is the window must not wait out page work.
+pub struct ContentThread {
+    cmd: Sender<PageCmd>,
+    events: Receiver<PageEvent>,
+    boot_rx: Mutex<Option<Receiver<Result<Boot, String>>>>,
+    boot: Mutex<Option<Result<Boot, String>>>,
+    nav_seq: Arc<AtomicU64>,
+    join: Mutex<Option<JoinHandle<()>>>,
+    exited: Arc<AtomicBool>,
+    stack_bytes: usize,
+}
+
+impl ContentThread {
+    pub fn spawn(builder: EngineBuilder, bounds: Bounds) -> Result<Self, ContentThreadError> {
+        Self::spawn_with_stack(builder, bounds, content_stack_bytes())
+    }
+
+    pub fn spawn_with_stack(
+        builder: EngineBuilder,
+        bounds: Bounds,
+        stack_bytes: usize,
+    ) -> Result<Self, ContentThreadError> {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let (boot_tx, boot_rx) = mpsc::channel();
+        let nav_seq = Arc::new(AtomicU64::new(0));
+        let nav_for_thread = Arc::clone(&nav_seq);
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_for_thread = Arc::clone(&exited);
+        // pthread on Linux accepts a 1-byte request and the thread then
+        // aborts the process. Refuse anything under the usual minimum
+        // before spawn, and still surface a real spawn error.
+        if stack_bytes < 16 * 1024 {
+            return Err(ContentThreadError::Spawn(format!(
+                "stack of {stack_bytes} bytes is below the 16 KiB minimum"
+            )));
+        }
+        let join = std::thread::Builder::new()
+            .name("page".into())
+            .stack_size(stack_bytes)
+            .spawn(move || {
+                let built = (|| -> Result<(), String> {
+                    let mut engine = builder
+                        .build_page(nav_for_thread)
+                        .map_err(|e| e.to_string())?;
+                    let view = engine.create_page_view(bounds).map_err(|e| e.to_string())?;
+                    let images = engine.image_manager();
+                    let control = engine
+                        .view_control(view)
+                        .ok_or_else(|| "view has no control".to_string())?;
+                    let canceller = engine
+                        .nav_canceller(view)
+                        .ok_or_else(|| "view has no canceller".to_string())?;
+                    let mut endpoint = adopt(engine, view, cmd_rx, ev_tx);
+                    endpoint.set_settle_keys(true);
+                    endpoint.set_wake_window(true);
+                    let _ = boot_tx.send(Ok(Boot {
+                        control,
+                        canceller,
+                        images,
+                        view,
+                        thread: std::thread::current().id(),
+                    }));
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    runtime.block_on(endpoint.run());
+                    Ok(())
+                })();
+                if let Err(error) = built {
+                    let _ = boot_tx.send(Err(error));
+                }
+                exited_for_thread.store(true, Ordering::Release);
+            })
+            .map_err(|e| ContentThreadError::Spawn(e.to_string()))?;
+        Ok(Self {
+            cmd: cmd_tx,
+            events: ev_rx,
+            boot_rx: Mutex::new(Some(boot_rx)),
+            boot: Mutex::new(None),
+            nav_seq,
+            join: Mutex::new(Some(join)),
+            exited,
+            stack_bytes,
+        })
+    }
+
+    pub fn stack_bytes(&self) -> usize {
+        self.stack_bytes
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    /// The thread the page was constructed on, once that construction has
+    /// finished. Never blocks.
+    pub fn page_thread(&self) -> Option<std::thread::ThreadId> {
+        self.boot()
+            .and_then(|boot| boot.ok())
+            .map(|boot| boot.thread)
+    }
+
+    pub fn images(&self) -> Option<Arc<ImageManager>> {
+        self.boot()
+            .and_then(|boot| boot.ok())
+            .map(|boot| boot.images)
+    }
+
+    fn boot(&self) -> Option<Result<Boot, String>> {
+        let mut cached = self.boot.lock().unwrap_or_else(|e| e.into_inner());
+        if cached.is_none() {
+            let rx = self.boot_rx.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(rx) = rx.as_ref() {
+                if let Ok(message) = rx.try_recv() {
+                    *cached = Some(message);
+                }
+            }
+        }
+        cached.clone()
+    }
+
+    fn signal_stop(&self) {
+        if let Some(Ok(boot)) = self.boot() {
+            boot.control.stop_all();
+            boot.canceller.cancel_current();
+        }
+    }
+
+    /// Allocate the next navigation id, cancel the one before it, and stop
+    /// a script that is running now. The command is queued after those
+    /// signals. Returns without waiting for the load.
+    pub fn navigate(&self, url: Url) -> u64 {
+        let nav_id = self.nav_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(Ok(boot)) = self.boot() {
+            if nav_id > 1 {
+                boot.canceller.cancel_nav(nav_id - 1);
+            }
+            boot.control.stop_all();
+        }
+        let _ = self.cmd.send(PageCmd::Navigate { url, nav_id });
+        nav_id
+    }
+
+    /// Interrupt a running script and cancel the load, then queue Stop.
+    /// Returns without waiting for the page to drain the command.
+    pub fn stop(&self) {
+        self.signal_stop();
+        let (reply, _rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::Stop { reply });
+    }
+
+    /// Signal interrupt and cancel, queue Close, and return. Does not join.
+    pub fn shutdown(&self) {
+        self.signal_stop();
+        let _ = self.cmd.send(PageCmd::Close);
+    }
+
+    pub fn poll(&self) -> Vec<PageEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    pub fn eval(&self, script: &str) -> oneshot::Receiver<Result<String, String>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::Eval {
+            script: script.to_string(),
+            reply,
+        });
+        rx
+    }
+
+    /// The newest navigation id this handle allocated (by `navigate`,
+    /// `load_html` or a reload). Only the window allocates ids, so right
+    /// after one of those calls this is the id it used.
+    pub fn last_nav_id(&self) -> u64 {
+        self.nav_seq.load(Ordering::Acquire)
+    }
+
+    pub fn load_html(&self, html: &str) -> oneshot::Receiver<Result<(), String>> {
+        let (reply, rx) = oneshot::channel();
+        // Allocated here, not when the page later runs the command. A
+        // navigation queued behind this one then has the newer id, and a
+        // default document that lost the race does not replace it.
+        let nav_id = self.nav_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let newest = self.nav_seq.load(Ordering::Acquire);
+        if newest == nav_id {
+            if let Some(Ok(boot)) = self.boot() {
+                if nav_id > 1 {
+                    boot.canceller.cancel_nav(nav_id - 1);
+                }
+            }
+        }
+        let _ = self.cmd.send(PageCmd::LoadHtml {
+            html: html.to_string(),
+            nav_id,
+            reply,
+        });
+        rx
+    }
+
+    pub fn resize(&self, bounds: Bounds, scale: f64) {
+        let (reply, _rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::Resize {
+            bounds,
+            scale,
+            reply,
+        });
+    }
+
+    pub fn input(&self, input: PageInput) {
+        let _ = self.cmd.send(PageCmd::Input(input));
+    }
+
+    pub fn set_host_reentry(&self, limit: usize) {
+        let _ = self.cmd.send(PageCmd::SetHostReentry { limit });
+    }
+
+    pub fn install_probe(&self) -> oneshot::Receiver<Result<(), String>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::InstallReentryProbe { reply });
+        rx
+    }
+
+    pub fn scroll(&self, dx: f32, dy: f32) {
+        let (reply, _rx) = oneshot::channel();
+        self.input(PageInput::Scroll { dx, dy, reply });
+    }
+
+    /// Queue a command. Does not signal cancel and does not wait.
+    pub fn enqueue(&self, cmd: PageCmd) {
+        let _ = self.cmd.send(cmd);
+    }
+}
+
+impl Drop for ContentThread {
+    fn drop(&mut self) {
+        self.shutdown();
+        // Detach. Joining here would wait out whatever the page is doing.
+        let _ = self.join.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+/// Events whose navigation is older than `accepted` are a late result.
+#[cfg(test)]
+pub fn reject_stale(events: Vec<PageEvent>, accepted: u64) -> Vec<PageEvent> {
+    events
+        .into_iter()
+        .filter(|event| match event {
+            PageEvent::Title { nav_id, .. }
+            | PageEvent::Url { nav_id, .. }
+            | PageEvent::LoadState { nav_id, .. }
+            | PageEvent::NavigateRequested { nav_id, .. } => *nav_id == 0 || *nav_id >= accepted,
+            PageEvent::Commit(commit) => {
+                commit.nav_generation == 0 || commit.nav_generation >= accepted
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn wait_recv<T>(rx: &mut oneshot::Receiver<T>, budget: Duration) -> Option<T> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match rx.try_recv() {
+            Ok(value) => return Some(value),
+            Err(oneshot::error::TryRecvError::Closed) => return None,
+            Err(oneshot::error::TryRecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reject_stale, wait_recv, *};
+    use crate::{EngineBuilder, LoadState, PageCmd, PageInput};
+
+    fn page() -> ContentThread {
+        ContentThread::spawn(
+            EngineBuilder::new()
+                .script_budget_ms(5_000)
+                .interrupt_scripts_at_budget(true),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+        .expect("content thread spawns")
+    }
+
+    #[test]
+    fn a_too_small_stack_fails_the_spawn() {
+        let error = ContentThread::spawn_with_stack(
+            EngineBuilder::new(),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            1,
+        );
+        assert!(error.is_err(), "spawn reported success for a 1-byte stack");
+    }
+
+    #[test]
+    fn the_page_is_built_on_the_content_thread_and_events_stay_ordered() {
+        let page = page();
+        let caller = std::thread::current().id();
+        let started = Instant::now();
+        let mut loaded = page.load_html("<p id=\"t\">hi</p>");
+        let mut text = page.eval("document.getElementById('t').textContent");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "queueing the load and the eval waited on the page"
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let text = wait_recv(&mut text, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(text.contains("hi"), "{text}");
+        let owner = page.page_thread().expect("boot");
+        assert_ne!(owner, caller, "the page ran on the caller");
+        let _ = page.poll();
+    }
+
+    #[test]
+    fn stop_during_a_script_returns_and_a_later_eval_runs() {
+        let page = page();
+        let mut loaded = page.load_html("<p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        let mut spinning = page.eval("while (true) { document.getElementById('t'); }");
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        page.stop();
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "stop waited for the script"
+        );
+        let stopped = wait_recv(&mut spinning, Duration::from_secs(5));
+        assert!(stopped.is_some(), "the spin never unwound");
+        let mut after = page.eval("1 + 1");
+        let value = wait_recv(&mut after, Duration::from_secs(5))
+            .expect("runtime recovered")
+            .expect("eval");
+        assert!(value.contains('2'), "{value}");
+    }
+
+    #[test]
+    fn a_navigation_that_fails_leaves_the_page_on_screen_running() {
+        // Independent R1 on #730, BLOCKER: `navigate` raises ALL so the old
+        // document's script stops, and only a commit lowered it. A fetch
+        // that never commits (refused here) left the page on screen dead.
+        let page = page();
+        let mut loaded = page.load_html("<p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let nav_id = page.navigate(Url::parse("http://127.0.0.1:1/").unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut failed = false;
+        while Instant::now() < deadline && !failed {
+            failed = page.poll().into_iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id: n } if n == nav_id)
+            });
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(failed, "the window never heard that navigation {nav_id} failed");
+        let mut after = page.eval("document.getElementById('t').textContent + (1 + 1)");
+        let value = wait_recv(&mut after, Duration::from_secs(5))
+            .expect("eval reply")
+            .expect("the old document's script is still stopped after the failed navigation");
+        assert!(value.contains("x2"), "{value}");
+    }
+
+    #[test]
+    fn a_superseded_navigation_drops_the_late_result() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Ok((sock, _)) = listener.accept() {
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                drop(sock);
+            }
+        });
+        let page = page();
+        let first = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let second = page.navigate(Url::parse("data:text/html,<title>second</title>").unwrap());
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "the second navigate waited"
+        );
+        assert!(second > first);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut saw_second = false;
+        let mut events = Vec::new();
+        while Instant::now() < deadline && !saw_second {
+            events.extend(page.poll());
+            saw_second = reject_stale(events.clone(), second).iter().any(
+                |event| matches!(event, PageEvent::Title { text, .. } if text.contains("second")),
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = release_tx.send(());
+        assert!(
+            saw_second,
+            "the second document never committed: {events:?}"
+        );
+        let kept = reject_stale(events, second);
+        assert!(
+            kept.iter().all(|event| match event {
+                PageEvent::LoadState {
+                    state: LoadState::Complete,
+                    nav_id,
+                } => *nav_id == second,
+                PageEvent::Title { text, .. } => text.contains("second"),
+                _ => true,
+            }),
+            "a stale result survived: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn timers_run_while_the_page_is_idle() {
+        let page = page();
+        let mut loaded = page.load_html("<p id=\"t\"></p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        let mut arm = page.eval("setTimeout(function () { document.getElementById('t').textContent = 'tick'; }, 20); 'armed'");
+        assert!(wait_recv(&mut arm, Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .contains("armed"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut text = String::new();
+        while Instant::now() < deadline {
+            let mut probe = page.eval("document.getElementById('t').textContent");
+            if let Some(Ok(value)) = wait_recv(&mut probe, Duration::from_millis(200)) {
+                text = value;
+                if text.contains("tick") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            text.contains("tick"),
+            "the idle loop did not run the timer: {text}"
+        );
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_a_spinning_script() {
+        let page = page();
+        let mut loaded = page.load_html("<p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        let _spinning = page.eval("while (true) { document.getElementById('t'); }");
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        page.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "shutdown joined the page"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !page.exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(page.exited(), "the page ignored the interrupt");
+    }
+
+    #[test]
+    fn a_scroll_commit_is_delivered() {
+        let page = page();
+        let mut loaded = page.load_html("<div style=\"height:4000px\">tall</div>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        // Let the first layout commit land, then scroll.
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = page.poll();
+        page.scroll(0.0, -200.0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut scrolled = false;
+        while Instant::now() < deadline && !scrolled {
+            for event in page.poll() {
+                if let PageEvent::Commit(commit) = event {
+                    if commit.scroll_offset.1 > 0.0 {
+                        scrolled = true;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(scrolled, "no scroll commit arrived");
+    }
+
+    #[test]
+    fn four_thousand_host_reentries_fit_the_configured_stack_and_the_limit_recovers() {
+        let page = ContentThread::spawn_with_stack(
+            EngineBuilder::new(),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            content_stack_bytes(),
+        )
+        .expect("spawn");
+        page.set_host_reentry(8_000);
+        let mut loaded = page.load_html("<p id=\"t\"></p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        let mut probe = page.install_probe();
+        assert!(wait_recv(&mut probe, Duration::from_secs(5))
+            .unwrap()
+            .is_ok());
+        let script = "function __rk_step(n) { if (n <= 0) return 0; return __rk_reenter(n - 1); } String(__rk_reenter(4000))";
+        let mut climbed = page.eval(script);
+        let value = wait_recv(&mut climbed, Duration::from_secs(30))
+            .expect("climb reply")
+            .expect("climb");
+        assert!(value.contains('0'), "{value}");
+        let used = rustkit_js::reentry_stack_used();
+        let stack = page.stack_bytes();
+        eprintln!(
+            "host re-entry: {used} bytes for 4000 frames on a {stack} byte stack ({:.1} bytes/frame, {:.1}% of the stack)",
+            used as f64 / 4000.0,
+            (used as f64 / stack as f64) * 100.0
+        );
+        assert!(used > 0, "the probe did not record a stack");
+        assert!(used < stack, "4000 frames used {used} of {stack}");
+
+        page.set_host_reentry(8);
+        let mut reloaded = page.load_html("<p id=\"t\"></p>");
+        assert!(wait_recv(&mut reloaded, Duration::from_secs(10))
+            .unwrap()
+            .is_ok());
+        let mut probe = page.install_probe();
+        assert!(wait_recv(&mut probe, Duration::from_secs(5))
+            .unwrap()
+            .is_ok());
+        let mut over = page.eval(script);
+        let over = wait_recv(&mut over, Duration::from_secs(10)).expect("over-limit reply");
+        assert!(
+            over.is_err(),
+            "a 4000 climb under a cap of 8 succeeded: {over:?}"
+        );
+        let mut recovered = page.eval("1 + 1");
+        let recovered = wait_recv(&mut recovered, Duration::from_secs(5))
+            .expect("recovery")
+            .expect("eval");
+        assert!(recovered.contains('2'), "{recovered}");
+    }
+
+    #[test]
+    fn coalesce_collapses_adjacent_resizes_and_keeps_the_click() {
+        let (a, _) = oneshot::channel();
+        let (b, _) = oneshot::channel();
+        let (c, _) = oneshot::channel();
+        let bounds = |height| Bounds {
+            x: 0,
+            y: 0,
+            width: 100,
+            height,
+        };
+        let batch = vec![
+            PageCmd::Resize {
+                bounds: bounds(10),
+                scale: 1.0,
+                reply: a,
+            },
+            PageCmd::Resize {
+                bounds: bounds(20),
+                scale: 1.0,
+                reply: b,
+            },
+            PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 2.0 }),
+            PageCmd::Resize {
+                bounds: bounds(30),
+                scale: 2.0,
+                reply: c,
+            },
+        ];
+        let out = coalesce(batch);
+        assert_eq!(out.len(), 3, "the click was reordered or a resize survived");
+        assert!(matches!(out[0], PageCmd::Resize { bounds, .. } if bounds.height == 20));
+        assert!(matches!(
+            out[1],
+            PageCmd::Input(PageInput::MouseDown { .. })
+        ));
+        assert!(
+            matches!(out[2], PageCmd::Resize { bounds, scale, .. } if bounds.height == 30 && scale == 2.0)
+        );
+    }
+
+    fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll());
+            if done(&events) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events.extend(page.poll());
+        events
+    }
+
+    fn solid_colors(commit: &crate::FrameCommit) -> Vec<(u8, u8, u8)> {
+        let Some(list) = commit.list.as_ref() else {
+            return Vec::new();
+        };
+        list.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                rustkit_layout::DisplayCommand::SolidColor(color, _) => Some((color.r, color.g, color.b)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_color(commit: &crate::FrameCommit, r: u8, g: u8, b: u8) -> bool {
+        solid_colors(commit).contains(&(r, g, b))
+    }
+
+    /// One loopback server. `release` is the flag a held response waits on.
+    /// Every request path is appended to the returned log.
+    fn serve(
+        handler: impl Fn(&str, &AtomicBool) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
+    ) -> (u16, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let release = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let release_for_server = Arc::clone(&release);
+        let seen_for_server = Arc::clone(&seen);
+        let handler = Arc::new(handler);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let release_for_server = Arc::clone(&release_for_server);
+                let seen_for_server = Arc::clone(&seen_for_server);
+                let handler = Arc::clone(&handler);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    let header_end = loop {
+                        if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..header_end]);
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    seen_for_server.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
+                    let (status, content_type, body) = handler(&path, &release_for_server);
+                    let status_text = if status == 200 { "200 OK" } else { "404 Not Found" };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        (port, release, seen)
+    }
+
+    #[test]
+    fn script_navigation_is_reported_with_the_documents_nav_id() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<a id="l" href="https://example.com/clicked">go</a><p id="t">x</p>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(commit) if commit.nav_generation > 0))
+        });
+        let nav = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) if commit.nav_generation > 0 => Some(commit.nav_generation),
+            _ => None,
+        }).expect("document nav");
+
+        let cases = [
+            ("location.href = 'https://example.com/assigned'", "assigned", false),
+            ("location.replace('https://example.com/replaced')", "replaced", true),
+            ("document.getElementById('l').click()", "clicked", false),
+        ];
+        for (script, needle, replace) in cases {
+            let _ = page.poll();
+            let mut eval = page.eval(&format!("{script}; 'set'"));
+            assert!(
+                wait_recv(&mut eval, Duration::from_secs(5)).unwrap().unwrap().contains("set"),
+                "{script}"
+            );
+            let events = poll_until(&page, Duration::from_secs(3), |events| {
+                events.iter().any(|event| matches!(event, PageEvent::NavigateRequested { url, .. } if url.contains(needle)))
+            });
+            let found = events.iter().find_map(|event| match event {
+                PageEvent::NavigateRequested {
+                    url,
+                    replace: flag,
+                    nav_id,
+                    from_user,
+                } if url.contains(needle) => Some((url.clone(), *flag, *nav_id, *from_user)),
+                _ => None,
+            });
+            let Some((url, flag, nav_id, from_user)) = found else {
+                panic!("{script} produced no navigation: {events:?}");
+            };
+            assert_eq!(flag, replace, "{url}");
+            assert!(!from_user, "{url} was the user's click");
+            assert_eq!(nav_id, nav, "{url} was not tagged with the document");
+            // Id 0 is untagged and is kept. A request from this document is
+            // stale once a newer navigation has been accepted.
+            let dropped = reject_stale(
+                vec![PageEvent::NavigateRequested {
+                    url: url.clone(),
+                    replace: flag,
+                    nav_id: nav,
+                    from_user: false,
+                }],
+                nav + 1,
+            );
+            assert!(dropped.is_empty(), "an older navigation request would be followed");
+        }
+    }
+
+    #[test]
+    fn a_queued_default_document_does_not_replace_a_newer_navigation() {
+        let page = page();
+        let mut loaded = page.load_html("<title>base</title><p id=\"t\">x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut spinning = page.eval("while (true) { document.getElementById('t'); }");
+        std::thread::sleep(Duration::from_millis(40));
+        let mut default_load = page.load_html("<title>default</title><p>new tab</p>");
+        let restored = page.navigate(Url::parse("data:text/html,<title>restored</title>").unwrap());
+        let _ = wait_recv(&mut spinning, Duration::from_secs(5));
+        let _ = wait_recv(&mut default_load, Duration::from_secs(5));
+        let events = poll_until(&page, Duration::from_secs(10), |events| {
+            reject_stale(events.to_vec(), restored).iter().any(|event| {
+                matches!(event, PageEvent::Title { text, .. } if text == "restored")
+            })
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let mut events = events;
+        events.extend(page.poll());
+        let kept = reject_stale(events, restored);
+        assert!(
+            kept.iter().any(|event| matches!(event, PageEvent::Title { text, .. } if text == "restored")),
+            "the restore never committed: {kept:?}"
+        );
+        assert!(
+            kept.iter().all(|event| match event {
+                PageEvent::Title { text, .. } => text == "restored" || text == "base",
+                _ => true,
+            }),
+            "the default document replaced the restore: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_commit_is_the_laid_out_frame() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<html><body style="margin:0"><div style="height:30px;margin:6px 20px;background:#ff0000"></div></body></html>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let commits: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PageEvent::Commit(commit) => Some(commit),
+                _ => None,
+            })
+            .collect();
+        assert!(!commits.is_empty(), "no frame was published: {events:?}");
+        let first = commits[0];
+        assert!(first.generation > 0, "generation {}", first.generation);
+        assert!(first.nav_generation > 0, "nav {}", first.nav_generation);
+        assert!(
+            first.list.as_ref().is_some_and(|list| !list.commands.is_empty()),
+            "the first frame had no display list"
+        );
+        assert!(
+            has_color(first, 255, 0, 0),
+            "the red band was not in the first frame: {:?}",
+            solid_colors(first)
+        );
+    }
+
+    #[test]
+    fn a_frame_is_published_between_timer_tasks() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<div id="t" style="width:80px;height:40px;background:#cccccc"></div>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let _ = page.poll();
+        let mut arm = page.eval(
+            r#"setTimeout(function () {
+                document.getElementById('t').style.background = '#00ff00';
+                var end = Date.now() + 40;
+                while (Date.now() < end) {}
+            }, 0);
+            setTimeout(function () {
+                document.getElementById('t').style.background = '#0000ff';
+            }, 0);
+            'armed'"#,
+        );
+        assert!(wait_recv(&mut arm, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        let mut saw_green = false;
+        let mut blue_first = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !saw_green {
+            for event in page.poll() {
+                let PageEvent::Commit(commit) = event else { continue };
+                let green = has_color(&commit, 0, 255, 0);
+                let blue = has_color(&commit, 0, 0, 255);
+                if blue && !saw_green {
+                    blue_first = true;
+                }
+                if green {
+                    saw_green = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(saw_green, "no frame was published between the timer tasks");
+        assert!(!blue_first, "the later timer was painted before that frame");
+    }
+
+    /// The laid-out frame is published while the load is still waiting on a
+    /// script, not only when the load returns.
+    #[test]
+    fn a_commit_is_published_while_the_load_is_still_waiting() {
+        let (port, release, _seen) = serve(|path, release_flag| {
+            if path == "/hold.js" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(8) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return (200, "text/javascript", b"/* held */".to_vec());
+            }
+            (
+                200,
+                "text/html",
+                br#"<html><body style="margin:0"><div style="height:30px;margin:6px 20px;background:#ff0000"></div><script src="/hold.js"></script></body></html>"#.to_vec(),
+            )
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let events = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(commit) if has_color(commit, 255, 0, 0)))
+        });
+        let commit = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) if has_color(commit, 255, 0, 0) => Some(commit),
+            _ => None,
+        });
+        let Some(commit) = commit else {
+            release.store(true, Ordering::Release);
+            panic!("no laid-out frame while the load was waiting: {events:?}");
+        };
+        assert!(
+            commit.list.as_ref().is_some_and(|list| !list.commands.is_empty()),
+            "the frame during the load had no display list"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the frame arrived only when the load finished: {events:?}"
+        );
+        release.store(true, Ordering::Release);
+        let finished = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            })
+        });
+        assert!(
+            finished.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the load never finished after the script was released"
+        );
+    }
+
+    #[test]
+    fn the_commit_carries_the_canvas_colour() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<html><body style="margin:0;background:#112233"><p>x</p></body></html>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let commit = events.iter().find_map(|event| match event {
+            PageEvent::Commit(commit) => Some(commit),
+            _ => None,
+        });
+        let Some(commit) = commit else {
+            panic!("no frame: {events:?}");
+        };
+        let canvas = commit.canvas;
+        assert!((canvas[0] - 17.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[1] - 34.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[2] - 51.0 / 255.0).abs() < 0.02, "{canvas:?}");
+        assert!((canvas[3] - 1.0).abs() < 0.02, "{canvas:?}");
+    }
+
+    /// A plain `fetch` queued while a response is delivered, in the same
+    /// turn as `location.href`, is handed to the network before the
+    /// document can be replaced. That is h16's start beacon: not
+    /// `sendBeacon` and not `keepalive`.
+    #[test]
+    fn a_fetch_queued_with_a_navigation_is_started_before_the_document_is_replaced() {
+        let (port, _release, seen) = serve(|path, _release| {
+            if path.starts_with("/tick") {
+                return (200, "text/plain", b"go".to_vec());
+            }
+            if path.starts_with("/start") {
+                return (200, "text/plain", b"started".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            })
+        });
+        assert!(
+            loaded.iter().any(|event| {
+                matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })
+            }),
+            "the page never finished loading"
+        );
+        let _ = page.poll();
+        let mut armed = page.eval(
+            "fetch('/tick').then(function (r) { return r.text(); }).then(function (reply) { \
+                if (reply !== 'go') return; \
+                fetch('/start'); \
+                location.href = '/next.html'; \
+             }); 'armed'",
+        );
+        assert!(wait_recv(&mut armed, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut asked = false;
+        while Instant::now() < deadline && !asked {
+            for event in page.poll() {
+                if let PageEvent::NavigateRequested { url, from_user, .. } = event {
+                    if url.contains("next.html") {
+                        assert!(!from_user, "a script navigation was the user's");
+                        // Replace the document now, as the window does. A
+                        // fetch that is still only queued dies with it.
+                        let _ = page.navigate(
+                            Url::parse(&format!("http://127.0.0.1:{port}/left.html")).unwrap(),
+                        );
+                        asked = true;
+                        break;
+                    }
+                }
+            }
+            if !asked {
+                std::thread::yield_now();
+            }
+        }
+        assert!(asked, "the page never asked to navigate");
+        std::thread::sleep(Duration::from_millis(100));
+        let paths = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            paths.iter().any(|path| path.starts_with("/start")),
+            "the start fetch was not on the wire before the document was replaced: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_user_click_keeps_its_origin() {
+        let page = page();
+        let mut loaded = page.load_html(
+            r#"<a id="l" href="https://example.com/clicked" style="display:block;position:absolute;left:0;top:0;width:800px;height:600px">go</a>"#,
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        page.input(PageInput::Click {
+            x: 20.0,
+            y: 20.0,
+            reply,
+        });
+        let events = poll_until(&page, Duration::from_secs(5), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, PageEvent::NavigateRequested { url, .. } if url.contains("clicked")))
+        });
+        let found = events.iter().find_map(|event| match event {
+            PageEvent::NavigateRequested { url, from_user, .. } if url.contains("clicked") => {
+                Some(*from_user)
+            }
+            _ => None,
+        });
+        assert_eq!(found, Some(true), "the click was not the user's: {events:?}");
+    }
+
+    #[test]
+    fn a_resize_during_a_timer_task_is_applied_at_the_next_yield() {
+        let page = page();
+        let mut loaded = page.load_html(r#"<div id="t" style="width:40px;height:40px;background:#cccccc"></div>"#);
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::Commit(_)))
+        });
+        let mut arm = page.eval(
+            r#"setTimeout(function () {
+                var end = Date.now() + 40;
+                while (Date.now() < end) {}
+            }, 0);
+            'armed'"#,
+        );
+        assert!(wait_recv(&mut arm, Duration::from_secs(5)).unwrap().unwrap().contains("armed"));
+        std::thread::sleep(Duration::from_millis(10));
+        page.resize(
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            1.0,
+        );
+        let events = poll_until(&page, Duration::from_secs(3), |events| {
+            events.iter().any(|event| {
+                matches!(event, PageEvent::Commit(commit) if commit.laid_out_for.0 == 640)
+            })
+        });
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, PageEvent::Commit(commit) if commit.laid_out_for.0 == 640)
+            }),
+            "the resize was not laid out after the timer task yielded: {events:?}"
+        );
+    }
+
+    #[test]
+    fn native_stack_overflow_aborts_the_child_and_leaves_this_process() {
+        if std::env::var_os("HIWAVE_OVERFLOW_CHILD").is_some() {
+            let joined = std::thread::Builder::new()
+                .name("overflow".into())
+                .stack_size(128 * 1024)
+                .spawn(|| smash(0))
+                .expect("child thread")
+                .join();
+            // A caught panic is not the overflow we are looking for.
+            let _ = joined;
+            std::process::exit(0);
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .arg("content_thread::tests::native_stack_overflow_aborts_the_child_and_leaves_this_process")
+            .arg("--exact")
+            .env("HIWAVE_OVERFLOW_CHILD", "1")
+            .env("RUST_BACKTRACE", "0")
+            .status()
+            .expect("child");
+        assert!(!status.success(), "the overflowing child exited cleanly");
+    }
+
+    fn smash(depth: usize) -> usize {
+        let frame = [0u8; 4096];
+        let next = smash(depth + 1);
+        next + frame[depth % frame.len()] as usize
+    }
+}

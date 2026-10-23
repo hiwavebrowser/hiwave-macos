@@ -471,7 +471,10 @@ impl JsObject {
         }
 
         context.vm.host_call_depth += 1;
+        // HIWAVE PATCH (host stack): name this re-entry before the nested run.
+        let host_frame = crate::vm::host_stack::enter(context, self);
         let result = context.run().consume();
+        crate::vm::host_stack::leave(context, host_frame);
         context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
 
         context.vm.pop_frame().js_expect("frame must exist")?;
@@ -539,7 +542,10 @@ impl JsObject {
         }
 
         context.vm.host_call_depth += 1;
+        // HIWAVE PATCH (host stack): name this re-entry before the nested run.
+        let host_frame = crate::vm::host_stack::enter(context, self);
         let result = context.run().consume();
+        crate::vm::host_stack::leave(context, host_frame);
         context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
 
         context.vm.pop_frame().js_expect("frame must exist")?;

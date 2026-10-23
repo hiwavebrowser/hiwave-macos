@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -649,6 +649,18 @@ impl ResourceLoader {
         client: &HttpClient,
         use_cache: bool,
     ) -> Result<Response, NetError> {
+        let mut trace = FetchTrace::begin(&request);
+        let result = self.fetch_with_inner(request, client, use_cache).await;
+        trace.finish(&result);
+        result
+    }
+
+    async fn fetch_with_inner(
+        &self,
+        request: Request,
+        client: &HttpClient,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
 
         // data: URLs (RFC 2397) carry their own body — answer them here instead
@@ -957,6 +969,89 @@ pub struct FetchOptions {
     pub mode: Option<String>,
     pub cache: Option<String>,
     pub redirect: Option<String>,
+}
+
+/// `method`, `url`, `status` (`-` when unknown), `disposition`
+/// (`issued`, `response`, `blocked`, `timeout`, `error`, `cancelled`).
+pub type FetchDiag = fn(&str, &str, &str, &str);
+
+static FETCH_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static FETCH_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The engine installs this once. A null hook, or [`set_fetch_diag_armed`]
+/// left false, means [`ResourceLoader::fetch`] does no extra work.
+pub fn set_fetch_diag(hook: Option<FetchDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    FETCH_HOOK.store(ptr, Ordering::Relaxed);
+}
+
+/// Arm the fetch log. Off by default, so a fetch allocates nothing for it.
+pub fn set_fetch_diag_armed(on: bool) {
+    FETCH_ARMED.store(on, Ordering::Relaxed);
+}
+
+fn note_fetch(method: &str, url: &str, status: &str, disposition: &str) {
+    let ptr = FETCH_HOOK.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `FetchDiag` function pointer, or null (returned
+    // above). The engine installs one static function for the process.
+    let hook: FetchDiag = unsafe { std::mem::transmute(ptr) };
+    hook(method, url, status, disposition);
+}
+
+struct FetchTrace {
+    method: String,
+    url: String,
+    finished: bool,
+}
+
+impl FetchTrace {
+    fn begin(request: &Request) -> Self {
+        if !FETCH_ARMED.load(Ordering::Relaxed) || FETCH_HOOK.load(Ordering::Relaxed).is_null() {
+            return Self {
+                method: String::new(),
+                url: String::new(),
+                finished: true,
+            };
+        }
+        let method = request.method.as_str().to_string();
+        let url = request.url.to_string();
+        note_fetch(&method, &url, "-", "issued");
+        Self {
+            method,
+            url,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, result: &Result<Response, NetError>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let (status, disposition) = match result {
+            Ok(response) => (response.status.as_u16().to_string(), "response"),
+            Err(NetError::Blocked) => ("-".to_string(), "blocked"),
+            Err(NetError::Timeout(_)) => ("-".to_string(), "timeout"),
+            Err(NetError::Cancelled) => ("-".to_string(), "cancelled"),
+            Err(_) => ("-".to_string(), "error"),
+        };
+        note_fetch(&self.method, &self.url, &status, disposition);
+    }
+}
+
+impl Drop for FetchTrace {
+    fn drop(&mut self) {
+        if self.finished || self.method.is_empty() {
+            return;
+        }
+        note_fetch(&self.method, &self.url, "-", "cancelled");
+    }
 }
 
 #[cfg(test)]

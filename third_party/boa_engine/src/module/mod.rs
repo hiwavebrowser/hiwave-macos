@@ -22,7 +22,7 @@
 //! [module]: https://tc39.es/ecma262/#sec-abstract-module-records
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -810,6 +810,63 @@ impl<T: IntoIterator<Item = (JsString, NativeFunction)> + Clone> IntoJsModule fo
             context,
         )
     }
+}
+
+/// A dynamic `import()` whose promise rejected. The embedder drains these
+/// for its console mirror. Boa does not print them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicImportFailure {
+    /// The specifier the script passed to `import()`.
+    pub specifier: String,
+    /// Resolved module URL, or empty when the specifier did not resolve.
+    pub url: String,
+    /// Why the promise rejected.
+    pub reason: String,
+}
+
+thread_local! {
+    static DYNAMIC_IMPORT_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static DYNAMIC_IMPORT_FAILURES: RefCell<VecDeque<DynamicImportFailure>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+const DYNAMIC_IMPORT_FAILURE_CAP: usize = 256;
+
+/// Marks the loader call that belongs to a dynamic `import()`, so a nested
+/// static dependency requested after the module is in hand is not one.
+pub fn enter_dynamic_import() {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+/// Leaves the dynamic-import loader scope opened by [`enter_dynamic_import`].
+pub fn exit_dynamic_import() {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
+/// Whether the module loader is inside a dynamic `import()` load.
+#[must_use]
+pub fn in_dynamic_import() -> bool {
+    DYNAMIC_IMPORT_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// Records one rejected dynamic `import()` for [`take_dynamic_import_failures`].
+pub fn record_dynamic_import_failure(specifier: &str, url: &str, reason: &str) {
+    DYNAMIC_IMPORT_FAILURES.with(|slot| {
+        let mut failures = slot.borrow_mut();
+        if failures.len() >= DYNAMIC_IMPORT_FAILURE_CAP {
+            failures.pop_front();
+        }
+        failures.push_back(DynamicImportFailure {
+            specifier: specifier.to_string(),
+            url: url.to_string(),
+            reason: reason.to_string(),
+        });
+    });
+}
+
+/// Drains dynamic `import()` failures recorded since the last call.
+pub fn take_dynamic_import_failures() -> Vec<DynamicImportFailure> {
+    DYNAMIC_IMPORT_FAILURES.with(|slot| slot.borrow_mut().drain(..).collect())
 }
 
 #[test]

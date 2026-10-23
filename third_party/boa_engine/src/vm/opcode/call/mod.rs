@@ -341,6 +341,38 @@ fn parse_import_attributes(
 /// [load]: https://tc39.es/ecma262/#sec-HostLoadImportedModule
 /// [finish]: https://tc39.es/ecma262/#sec-FinishLoadingImportedModule
 /// [continue]: https://tc39.es/ecma262/#sec-ContinueDynamicImport
+struct DynamicImportScope;
+
+impl DynamicImportScope {
+    fn enter() -> Self {
+        crate::module::enter_dynamic_import();
+        Self
+    }
+}
+
+impl Drop for DynamicImportScope {
+    fn drop(&mut self) {
+        crate::module::exit_dynamic_import();
+    }
+}
+
+fn module_path(module: &crate::module::Module) -> String {
+    module
+        .path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn rejection_text(value: Option<&JsValue>, context: &mut Context) -> String {
+    let Some(value) = value else {
+        return "unknown".to_string();
+    };
+    match value.to_string(context) {
+        Ok(text) => text.to_std_string_escaped(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
 async fn load_dyn_import(
     referrer: Referrer,
     request: ModuleRequest,
@@ -348,11 +380,17 @@ async fn load_dyn_import(
     phase: u32,
     context: &RefCell<&mut Context>,
 ) -> JsResult<()> {
+    let specifier = request.specifier().to_std_string_escaped();
     let loader = context.borrow().module_loader();
     let fut = loader.load_imported_module(referrer.clone(), request.clone(), context);
     let mut stack = [MaybeUninit::<u8>::uninit(); 16];
     let mut heap = Vec::<MaybeUninit<u8>>::new();
-    let completion = fut.init2(&mut stack, &mut heap).await;
+    // The flag covers this load only. Nested static imports happen after it
+    // returns, once the guard has dropped.
+    let completion = {
+        let _dynamic = DynamicImportScope::enter();
+        fut.init2(&mut stack, &mut heap).await
+    };
 
     // `ContinueDynamicImport ( promiseCapability, moduleCompletion )`
     // https://tc39.es/ecma262/#sec-ContinueDynamicImport
@@ -448,13 +486,20 @@ async fn load_dyn_import(
 
     // 4. Let rejectedClosure be a new Abstract Closure with parameters (reason) that captures promiseCapability and performs the following steps when called:
     // 5. Let onRejected be CreateBuiltinFunction(rejectedClosure, 1, "", « »).
+    let url = module_path(&module);
     let on_rejected = FunctionObjectBuilder::new(
         context.borrow().realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, args, cap, context| {
+            |_, args, (cap, specifier, url), context| {
                 // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
                 // `new_promise_reaction_job`, which lets engine reactions in).
                 context.check_interrupt()?;
+                // HIWAVE PATCH (console): a caught import() still rejected.
+                crate::module::record_dynamic_import_failure(
+                    specifier,
+                    url,
+                    &rejection_text(args.first(), context),
+                );
                 //     a. Perform ! Call(promiseCapability.[[Reject]], undefined, « reason »).
                 // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
                 cap.reject()
@@ -463,7 +508,7 @@ async fn load_dyn_import(
                 //     b. Return unused.
                 Ok(JsValue::undefined())
             },
-            cap.clone(),
+            (cap.clone(), specifier.clone(), url.clone()),
         ),
     )
     .build();
@@ -473,13 +518,15 @@ async fn load_dyn_import(
     let link_evaluate = FunctionObjectBuilder::new(
         context.borrow().realm(),
         NativeFunction::from_copy_closure_with_captures(
-            |_, _, (module, cap, on_rejected), context| {
+            |_, _, (module, cap, on_rejected, specifier, url), context| {
                 // HIWAVE PATCH (interrupt): not entered in a stopped turn (see
                 // `new_promise_reaction_job`, which lets engine reactions in).
                 context.check_interrupt()?;
                 // a. Let link be Completion(module.Link()).
                 // b. If link is an abrupt completion, then
                 if let Err(e) = module.link(context) {
+                    // HIWAVE PATCH (console): the import() promise is about to reject.
+                    crate::module::record_dynamic_import_failure(specifier, url, &e.to_string());
                     // i. Perform ! Call(promiseCapability.[[Reject]], undefined, « link.[[Value]] »).
                     let e = e.into_opaque(context)?;
                     // HIWAVE PATCH (interrupt): `?`, not `.expect`: the interrupt can stop it.
@@ -529,7 +576,7 @@ async fn load_dyn_import(
                 // g. Return unused.
                 Ok(JsValue::undefined())
             },
-            (module.clone(), cap.clone(), on_rejected.clone()),
+            (module.clone(), cap.clone(), on_rejected.clone(), specifier, url),
         ),
     )
     .build();
@@ -590,6 +637,7 @@ impl ImportCall {
             Ok(s) => s,
             // 7. IfAbruptRejectPromise(specifierString, promiseCapability).
             Err(err) => {
+                crate::module::record_dynamic_import_failure("(invalid specifier)", "", &err.to_string());
                 let err = err.into_opaque(context)?;
                 cap.reject().call(&JsValue::undefined(), &[err], context)?;
                 context.vm.set_register(specifier_op.into(), promise.into());
@@ -597,9 +645,11 @@ impl ImportCall {
             }
         };
 
+        let specifier_text = specifier_str.to_std_string_escaped();
         let request = match parse_import_attributes(specifier_str, &options, context) {
             Ok(req) => req,
             Err(err) => {
+                crate::module::record_dynamic_import_failure(&specifier_text, "", &err.to_string());
                 let err = err.into_opaque(context)?;
                 cap.reject().call(&JsValue::undefined(), &[err], context)?;
                 context.vm.set_register(specifier_op.into(), promise.into());

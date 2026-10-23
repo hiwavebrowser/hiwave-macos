@@ -33,8 +33,51 @@ pub use shadow::{is_valid_custom_element_name, ShadowRootInit, ShadowRootMode};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use thiserror::Error;
 use tracing::debug;
+
+thread_local! {
+    static REMOVAL_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+static REMOVAL_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// `parent tag`, `parent id` (empty when the element has none), subtree size.
+pub type RemovalDiag = fn(&str, &str, usize);
+
+/// The walk in [`Node::remove_from_parent`] runs only while this is set.
+pub fn set_removal_armed(on: bool) {
+    REMOVAL_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn removal_armed() -> bool {
+    REMOVAL_ARMED.with(Cell::get)
+}
+
+pub fn set_removal_hook(hook: Option<RemovalDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    REMOVAL_HOOK.store(ptr, Ordering::Relaxed);
+}
+
+/// A parent lost `nodes` descendants at once (innerHTML, textContent) or one
+/// child whose own subtree is that large. No-op unless armed and `nodes` > 50.
+pub fn note_large_clear(tag: &str, id: &str, nodes: usize) {
+    if nodes <= 50 || !removal_armed() {
+        return;
+    }
+    let ptr = REMOVAL_HOOK.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `RemovalDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: RemovalDiag = unsafe { std::mem::transmute(ptr) };
+    hook(tag, id, nodes);
+}
 
 /// Errors that can occur in DOM operations.
 #[derive(Error, Debug)]
@@ -223,8 +266,28 @@ impl Node {
         self.children.borrow_mut().push(child);
     }
 
+    /// This node plus every descendant.
+    pub fn subtree_len(&self) -> usize {
+        1 + self
+            .children
+            .borrow()
+            .iter()
+            .map(|child| child.subtree_len())
+            .sum::<usize>()
+    }
+
     /// Remove this node from its parent.
     pub fn remove_from_parent(self: &Rc<Self>) {
+        if removal_armed() {
+            let nodes = self.subtree_len();
+            if nodes > 50 {
+                if let Some(parent) = self.parent() {
+                    let tag = parent.tag_name().unwrap_or("-");
+                    let id = parent.get_attribute("id").unwrap_or("");
+                    note_large_clear(tag, id, nodes);
+                }
+            }
+        }
         if let Some(parent) = self.parent() {
             // Update sibling links
             if let Some(prev) = self.previous_sibling() {
