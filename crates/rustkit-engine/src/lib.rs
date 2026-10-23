@@ -38729,18 +38729,16 @@ mod referrer_tests {
         let (port, seen) = referers(TWO_SHEETS, "");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "same-origin: the full URL without its fragment; cross-origin: the origin only"
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "same-origin: the full URL without its fragment; the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 
     #[test]
     fn the_documents_referrer_policy_header_is_respected() {
         let (_, seen) = referers(TWO_SHEETS, "Referrer-Policy: no-referrer\r\n");
-        assert_eq!(seen.len(), 2, "{seen:?}");
+        // One sheet: the cross-origin loopback one is denied by the vet (#445).
+        assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen.iter().all(|(_, r)| r.is_none()), "{seen:?}");
     }
 
@@ -38753,10 +38751,8 @@ mod referrer_tests {
         let (port, seen) = referers(&html, "Referrer-Policy: unsafe-url\r\n");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), None),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ]
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 }
@@ -38850,11 +38846,10 @@ mod image_loader_routing_tests {
         seen.sort();
         assert_eq!(
             seen,
-            vec![
-                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+            vec![("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "one request per image the shield allows, with the policy's Referer; none for the blocked one, \
+             and none for the cross-origin loopback `localhost` image, which the subresource vet denies \
+             (#445, as in fbc6268f; the origin-only Referer is pinned in rustkit-net security.rs)"
         );
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
