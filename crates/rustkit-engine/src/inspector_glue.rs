@@ -28,41 +28,55 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
         return;
     }
     // Redaction is the Inspector's. The mirror logs the text the page wrote,
-    // so it is left off while the mirror is on.
+    // so while it is on the line stays text and the Inspector, unless it
+    // keeps console text, is handed each call's shape line instead.
     if listening && !mirror {
         bindings.set_console_redaction(!inspector.keeps_console_text());
     }
+    let shapes = mirror && !inspector.keeps_console_text();
     let sink = inspector.clone();
     bindings.set_console_handler(Box::new(move |level, message, at| {
         crate::console_log::console_message(level, message, at);
-        if !sink.is_active() {
-            return;
+        if !shapes {
+            console_record(&sink, level, message, at);
         }
-        let level = match level {
-            rustkit_js::LogLevel::Log => ConsoleLevel::Log,
-            rustkit_js::LogLevel::Info => ConsoleLevel::Info,
-            rustkit_js::LogLevel::Warn => ConsoleLevel::Warn,
-            rustkit_js::LogLevel::Error => ConsoleLevel::Error,
-            rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
-        };
-        // Boa places a call at its `(`; a browser places it at the method's
-        // name (`console.log(` is `log`), which is the name's length before.
-        let method_len = match level {
-            ConsoleLevel::Log => 3,
-            ConsoleLevel::Info | ConsoleLevel::Warn => 4,
-            ConsoleLevel::Error | ConsoleLevel::Debug => 5,
-        };
-        let location = at.and_then(|at| {
-            let column = if at.column > method_len { at.column - method_len } else { at.column };
-            sink.frame_location(&at.path, at.line, column)
-        });
-        sink.console(level, message, location);
     }));
+    if shapes {
+        let sink = inspector.clone();
+        bindings.set_console_shape_handler(Box::new(move |level, shape, at| console_record(&sink, level, shape, at)));
+    }
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
     // The mirror quotes the source around a throw. The Inspector does not,
     // so the text is kept only while the mirror is on.
     bindings.capture_script_sources(mirror);
+}
+
+/// One console call, as its line (text or shape) reached the handler, onto
+/// the Inspector, if anybody listens.
+fn console_record(sink: &Inspector, level: rustkit_js::LogLevel, message: &str, at: Option<&rustkit_js::ScriptPosition>) {
+    if !sink.is_active() {
+        return;
+    }
+    let level = match level {
+        rustkit_js::LogLevel::Log => ConsoleLevel::Log,
+        rustkit_js::LogLevel::Info => ConsoleLevel::Info,
+        rustkit_js::LogLevel::Warn => ConsoleLevel::Warn,
+        rustkit_js::LogLevel::Error => ConsoleLevel::Error,
+        rustkit_js::LogLevel::Debug => ConsoleLevel::Debug,
+    };
+    // Boa places a call at its `(`; a browser places it at the method's
+    // name (`console.log(` is `log`), which is the name's length before.
+    let method_len = match level {
+        ConsoleLevel::Log => 3,
+        ConsoleLevel::Info | ConsoleLevel::Warn => 4,
+        ConsoleLevel::Error | ConsoleLevel::Debug => 5,
+    };
+    let location = at.and_then(|at| {
+        let column = if at.column > method_len { at.column - method_len } else { at.column };
+        sink.frame_location(&at.path, at.line, column)
+    });
+    sink.console(level, message, location);
 }
 
 /// Push `record` onto a script log. A page exception in it reaches the
