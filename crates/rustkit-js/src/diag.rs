@@ -26,11 +26,11 @@ use std::time::Instant;
 use boa_engine::builtins::error::Error;
 use boa_engine::{Context, JsObject, JsValue};
 
-use crate::{ErrorReport, LogLevel, ScriptFrame, ScriptPosition};
+use crate::{ConsoleStacks, ErrorReport, LogLevel, ScriptFrame, ScriptPosition};
 
-/// One console call: level, line, the caller's position, and the page's
-/// frames for an error-level call while reports are on.
-pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>, Vec<ScriptFrame>);
+/// One console call: level, line, the caller's position, and the stacks of
+/// an error-level call while reports are on.
+pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>, ConsoleStacks);
 
 /// An unimplemented member the embedder's scripts saw page script reach.
 struct Unsupported {
@@ -141,12 +141,16 @@ impl Diagnostics {
             false => crate::describe::join_line(args, |arg| crate::describe::text(arg, context)),
         };
         let at = caller_position(context, false);
-        // A stack only for `console.error` (and a failed `assert`), and
-        // only for an embedder that records page errors: one more walk of
-        // the frames the position walk already started.
+        // Stacks only for `console.error` (and a failed `assert`), and only
+        // for an embedder that records page errors: one more walk of the
+        // frames the position walk already started, and the first error
+        // argument's own frames through the realm's getter.
         let stack = match (level, self.on.get()) {
-            (LogLevel::Error, true) => page_stack(context, self.keep_text.get()),
-            _ => Vec::new(),
+            (LogLevel::Error, true) => ConsoleStacks {
+                caller: page_stack(context, self.keep_text.get()),
+                error: self.first_error_frames(args, context),
+            },
+            _ => ConsoleStacks::default(),
         };
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
@@ -234,6 +238,23 @@ impl Diagnostics {
             }
             _ => {}
         }
+    }
+
+    /// The first error object among `args`: its frames as a report's are
+    /// read (the realm's own `stack` getter, scripts the engine evaluated
+    /// only), names only with error text kept. Runs none of the page's code.
+    fn first_error_frames(&self, args: &[JsValue], context: &mut Context) -> Vec<ScriptFrame> {
+        let Some(error) = args.iter().find(|a| a.as_object().is_some_and(|o| o.is::<Error>())) else {
+            return Vec::new();
+        };
+        let Some(stack) = self.stack_of(error, context) else { return Vec::new() };
+        let (frames, functions, _) = self.frames(&stack);
+        let keep = self.keep_text.get();
+        frames
+            .into_iter()
+            .zip(functions)
+            .map(|(at, function)| ScriptFrame { function: function.filter(|_| keep), at })
+            .collect()
     }
 
     pub(crate) fn take_console(&self) -> Vec<ConsoleCall> {

@@ -56,7 +56,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             let column = if at.column > method_len { at.column - method_len } else { at.column };
             sink.frame_location(&at.path, at.line, column)
         });
-        sink.console_with_stack(level, message, location, stack);
+        sink.console_with_stacks(level, message, location, stack);
     }));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);

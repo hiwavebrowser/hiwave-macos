@@ -297,11 +297,21 @@ pub struct ScriptFrame {
     pub at: ScriptPosition,
 }
 
+/// The stacks of a `console.error` call (with error reports on; empty
+/// otherwise), innermost first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleStacks {
+    /// The page's frames that made the call.
+    pub caller: Vec<ScriptFrame>,
+    /// The first error argument's own frames: where it was made (a page
+    /// that catches an error and logs it, as frameworks do, logs this).
+    pub error: Vec<ScriptFrame>,
+}
+
 /// Console output handler: the level, the arguments formatted and joined,
 /// the calling script's position when the caller was in a named script,
-/// and, for `console.error` with error reports on, the page's frames
-/// (innermost first; empty otherwise).
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &[ScriptFrame]) + Send + Sync>;
+/// and a `console.error`'s stacks.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
 
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no

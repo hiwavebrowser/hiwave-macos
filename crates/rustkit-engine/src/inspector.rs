@@ -234,6 +234,10 @@ pub enum InspectorEvent {
         /// [`ScriptError`](Self::ScriptError)'s `stack` writes them.
         #[serde(default)]
         stack: Option<String>,
+        /// `console.error` with an error among its arguments: the first
+        /// one's own frames (where it was made), written as `stack` is.
+        #[serde(default)]
+        error_stack: Option<String>,
     },
     /// An exception no script caught, or a promise rejected with no handler.
     ScriptError {
@@ -883,23 +887,26 @@ impl Inspector {
 
     /// A console call (`message` is capped here, and URLs in it scrubbed).
     pub fn console(&self, level: ConsoleLevel, message: &str, location: Option<SourceLocation>) {
-        self.console_with_stack(level, message, location, &[]);
+        self.console_with_stacks(level, message, location, &rustkit_js::ConsoleStacks::default());
     }
 
-    /// [`console`](Self::console) with the caller's frames (`console.error`).
-    pub fn console_with_stack(
+    /// [`console`](Self::console) with a `console.error`'s stacks.
+    pub fn console_with_stacks(
         &self,
         level: ConsoleLevel,
         message: &str,
         location: Option<SourceLocation>,
-        frames: &[rustkit_js::ScriptFrame],
+        stacks: &rustkit_js::ConsoleStacks,
     ) {
         self.emit_with(|inspector| {
             let (message, truncated) = cap(message, MAX_MESSAGE_CHARS);
             let message = inspector.scrub_text(&message);
-            let named: Vec<_> = frames.iter().map(|f| (f.function.as_deref(), &f.at)).collect();
-            let stack = inspector.stack_text(&named);
-            InspectorEvent::Console { level, message, truncated, location, stack }
+            let text = |frames: &[rustkit_js::ScriptFrame]| {
+                let named: Vec<_> = frames.iter().map(|f| (f.function.as_deref(), &f.at)).collect();
+                inspector.stack_text(&named)
+            };
+            let (stack, error_stack) = (text(&stacks.caller), text(&stacks.error));
+            InspectorEvent::Console { level, message, truncated, location, stack, error_stack }
         });
     }
 

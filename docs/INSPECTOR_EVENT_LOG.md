@@ -46,8 +46,8 @@ field that is `null` today may hold a value later.
 | `navigation_commit` | `url`, `status` (HTTP status; `null` for `load_html`) |
 | `load_finished` | `url`, `scripts_over_budget` (scripts not run, or stopped, because the script budget was spent) |
 | `load_ended_early` | `url`, `reason` (`navigated_away`, `failed`), `detail` (`stopped`, `another navigation started`, `HTTP 404`, or a one-word network stage: `dns`, `connect`, `tls`, `timeout`, `policy`, `redirect`, `http`, `network`, `invalid_url`, `over_budget`, `cancelled`) |
-| `console` | `level` (`log`, `info`, `warn`, `error`, `debug`), `message`, `truncated`, `location` |
-| `script_error` | `name` (a standard name, else `Error`; empty for a thrown non-error), `message` (`null` unless kept, below), `location`, `stack`, `unhandled_rejection`, `script`, `value` (what was thrown: `error`, `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined`, `object`, `array`, `function`; `engine` for the engine's own failure), `message_len` (characters in an error's message or a thrown string, else `null`) |
+| `console` | `level` (`log`, `info`, `warn`, `error`, `debug`), `message`, `truncated`, `location`, `stack` (`console.error` and a failed `console.assert` only: the caller's page frames, written as `script_error`'s `stack`; else `null`) |
+| `script_error` | `name` (a standard name, else `Error`; empty for a thrown non-error), `message` (`null` unless kept, below), `location`, `stack`, `unhandled_rejection`, `script`, `value` (what was thrown: `error`, `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined`, `object`, `array`, `function`; `engine` for the engine's own failure), `message_len` (characters in an error's message or a thrown string, else `null`), `inserted_by` (when the innermost frame's script is a `<script src>` that page script inserted: the `location` of the insertion call, else `null`) |
 | `unsupported_api` | `interface`, `member`, `location` (first sighting on the page) |
 | `first_layout` | — |
 | `first_paint` | — |
@@ -120,8 +120,12 @@ trap):
   (`EngineFailure`, never by their text), have a message: `JS engine panic`
   or `import map rejected`, with `value` `engine`.
 - `stack` is the page's frames, innermost first, one `    at url:line:col`
-  line each, capped at 4096 characters: no function names (a page can name a
-  function anything), and only frames in a script the engine evaluated
+  line each, capped at 4096 characters: no function names unless error text
+  is kept (a page can name a function anything; with it a named function's
+  frame is `    at name (url:line:col)`, the name capped at 128 characters,
+  and top-level or unnamed code stays `    at url:line:col`). A call frame
+  is placed at its `(` (Boa's place; Chrome's is the callee's name). Only
+  frames in a script the engine evaluated
   (`inline#n`, or the script's URL as in Privacy). A frame that cannot be
   read (no position, an unknown script, a native or `eval` frame) is
   dropped, never copied. An error object's frames are the engine's record of

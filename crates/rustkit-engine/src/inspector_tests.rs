@@ -10,6 +10,7 @@ fn console(message: &str) -> InspectorEvent {
         truncated: false,
         location: None,
         stack: None,
+        error_stack: None,
     }
 }
 
@@ -164,7 +165,7 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
 fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let records: Vec<InspectorRecord> = [
         console("a"),
-        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None, stack: None },
+        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None, stack: None, error_stack: None },
         InspectorEvent::ScriptError {
             name: "Error".into(),
             message: None,

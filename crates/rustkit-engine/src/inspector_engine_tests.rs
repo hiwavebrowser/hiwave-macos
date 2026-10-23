@@ -1598,3 +1598,40 @@ a();
         ]
     );
 }
+
+/// Dev-tools T1 (#777's shape): a framework catches an error and hands it
+/// to `console.error`. The record carries the error's own frames (where it
+/// was thrown) as well as where `console.error` was called.
+#[test]
+fn a_caught_error_logged_with_console_error_keeps_where_it_was_thrown() {
+    let page = "<html><body><script>
+function three() { return Object.keys(null); }
+function two() { return three(); }
+function one() { return two(); }
+try { one(); } catch (e) { console.error('boundary', e); }
+console.error('no error argument');
+</script></body></html>";
+    let mut config = console_text();
+    config.inspector.keep_error_text = true;
+    let (engine, view, _server) = load_page(config, vec![Route::html("/", page)]);
+    let logged: Vec<(Option<String>, Option<String>)> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Console { stack, error_stack, .. } => Some((stack, error_stack)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![
+            (
+                Some("    at inline#1:5:41".to_string()),
+                Some(
+                    "    at three (inline#1:2:38)\n    at two (inline#1:3:30)\n    at one (inline#1:4:28)\n    at inline#1:5:10"
+                        .to_string()
+                ),
+            ),
+            (Some("    at inline#1:6:14".to_string()), None),
+        ]
+    );
+}
