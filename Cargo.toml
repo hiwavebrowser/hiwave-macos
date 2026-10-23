@@ -5,6 +5,7 @@ exclude = ["third_party/boa_engine"]
 members = [
     "crates/hiwave-core",
     "crates/hiwave-shield",
+    "crates/hiwave-shield-intercept",
     "crates/hiwave-vault",
     "crates/hiwave-shell",
     "crates/hiwave-analytics",
@@ -79,6 +80,7 @@ pollster = "0.4"
 # Internal dependencies
 hiwave-core = { path = "crates/hiwave-core" }
 hiwave-shield = { path = "crates/hiwave-shield" }
+hiwave-shield-intercept = { path = "crates/hiwave-shield-intercept" }
 hiwave-vault = { path = "crates/hiwave-vault" }
 hiwave-shell = { path = "crates/hiwave-shell" }
 hiwave-analytics = { path = "crates/hiwave-analytics" }

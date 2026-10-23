@@ -1,4 +1,7 @@
 //! Adapter to connect hiwave-shield to rustkit-net's request interception.
+//! Its own crate so a headless run (`parity-capture --shield`) installs the
+//! same interceptor as the app (dev-tools T2); it was `hiwave-app`'s
+//! `shield_adapter` module.
 //!
 //! This module bridges the gap between the ad blocking engine (hiwave-shield)
 //! and RustKit's network layer (rustkit-net), allowing sub-resource requests
@@ -306,11 +309,29 @@ struct ShieldQuery {
     reply: std::sync::mpsc::Sender<Option<hiwave_shield::BlockMatch>>,
 }
 
+/// The worker's engine is built (see [`shield_worker`]).
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Wait up to `timeout` for the filter engine to be built, starting its
+/// build if nothing has yet. True when it is ready: until then every
+/// request is judged by the pending floor (`list = "domain-floor"`), so a
+/// run that must measure EasyList waits here first.
+pub fn wait_until_ready(timeout: std::time::Duration) -> bool {
+    let _ = shield_worker();
+    let until = std::time::Instant::now() + timeout;
+    while !READY.load(Ordering::Acquire) {
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
 fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
     use std::sync::mpsc;
     static WORKER: std::sync::OnceLock<Option<std::sync::Mutex<mpsc::Sender<ShieldQuery>>>> =
         std::sync::OnceLock::new();
-    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let slot = WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<ShieldQuery>();
