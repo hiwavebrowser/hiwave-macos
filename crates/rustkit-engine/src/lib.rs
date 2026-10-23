@@ -1969,6 +1969,10 @@ fn absolutize_one(reference: &str, base: &Url) -> Option<String> {
 
 fn decode_data_url(src: &str) -> Option<Vec<u8>> {
     let rest = src.get(5..)?;
+    // Fetch serializes a data: URL without its fragment, so
+    // `data:font/ttf;base64,AAEC#x` is the three bytes `AAEC`, not a
+    // base64 error. Same rule as `rustkit_net::decode_data_url` (#712).
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest.split_once(',')?;
     if meta.to_ascii_lowercase().contains(";base64") {
         use base64::Engine as _;
@@ -24381,7 +24385,6 @@ mod web_font_tests {
     /// not part of the payload — the rule `rustkit_net::decode_data_url`
     /// already follows (#712).
     #[test]
-    #[ignore = "bug: engine decode_data_url keeps a data: URL's #fragment in the payload"]
     fn a_data_uri_fragment_is_not_part_of_the_payload() {
         assert_eq!(
             decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
