@@ -162,10 +162,11 @@ fn container_query_is_false_where_only_layout_knows_the_width() {
 
 /// What the allowlist still knows (#782 HOLD 3 regressions seen on the
 /// 2026-10-20 and HOLD 2 pages): an absolutely positioned or floated
-/// container with a length width (k2, k3), and a container after a float
-/// that cannot leave its fixed-height row (k1). Unknown: a percentage
-/// width on an absolute box (k4), and anything after a float taller than
-/// its row (k5), which comes last because it narrows everything after it.
+/// container with a length width (k2, k3). Unknown: a container after a
+/// float, even one that cannot leave its fixed-height row (k1; Chromium
+/// gives 10, but since HOLD 4 only layout decides where a float ends, so
+/// this is a fail-safe false), a percentage width on an absolute box (k4),
+/// and anything after a float taller than its row (k5).
 const OUT_OF_FLOW_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
 body { margin: 0 } .w { position: relative; width: 600px; height: 30px }
 @container (min-width: 250px) { .a { height: 10px } }
@@ -182,7 +183,7 @@ body { margin: 0 } .w { position: relative; width: 600px; height: 30px }
 #[test]
 fn container_query_knows_out_of_flow_lengths_and_contained_floats() {
     let heights = offset_heights(OUT_OF_FLOW_PAGE, 800, 600, 5);
-    assert_eq!(heights, ["10", "10", "10", "0", "0"]);
+    assert_eq!(heights, ["0", "10", "10", "0", "0"]);
 }
 
 /// #782 HOLD 4 (Atlas #848; reviews 5635034145 and 5635107389 at

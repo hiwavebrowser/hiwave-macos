@@ -1,5 +1,5 @@
 <!doctype html><!-- @container on boxes whose laid-out width is not their own `width` (#782 HOLD, Atlas #837): a shrunk flex item, a 100% main column beside a sidebar,
- a %-width absolute box, a %-width grid item; plus a flex-shrink:0 item that keeps its width. PASS: five 100x100 boxes green at (60,60) (60,170) (60,280) (60,390) (60,500). FAIL: any red. -->
+ a %-width absolute box, a %-width grid item; plus a flex-shrink:0 item that keeps its width. PASS: four 100x100 boxes green at (60,60) (60,170) (60,280) (60,390); #k5 at (60,500) is red by design since #782 HOLD 3 (a flex item's width is unknown, so the query is false; Chrome shows it green). FAIL: any other red. -->
 <html><head><style>
 body { margin: 0; } .row { height: 110px; } .k { width: 100px; height: 100px; background: green; } #k5 { background: red; }
 .f { display: flex; width: 300px; } .s { width: 500px; min-width: 0; container-type: inline-size; }

@@ -13,11 +13,15 @@
 //! borders and padding) or a length or percentage of its parent's width.
 //! A plain block here is `display: block` (which includes `list-item` and
 //! `flow-root`), horizontal-tb, not floated or absolutely positioned, not a
-//! `-webkit-box`, not a form control or replaced element, with no sizing
-//! keyword (`min-content`, `fit-content`, ...) in `width`, `min-width` or
-//! `max-width`, and not a child of a multi-column box. An auto-width box
-//! that starts a formatting context after a float anywhere earlier in the
-//! same formatting context is narrowed by it, so is unknown too.
+//! `-webkit-box`, not a form control, replaced element or `dialog`, with no
+//! sizing keyword (`min-content`, `fit-content`, ...) in `width`,
+//! `min-width` or `max-width`, no `aspect-ratio` on an auto width, and not
+//! a child of a multi-column box. After a float anywhere earlier in the
+//! same formatting context (#782 HOLD 4: however tall its ancestors are,
+//! since only layout knows where it ends), an auto-width box that starts a
+//! formatting context is narrowed by it, and so is one the walk cannot see
+//! (`flow-root`, `contain`, `overflow-y`), so any width, `min-width` or
+//! `max-width` there other than a length is unknown too.
 //!
 //! Everything else is unknown, and a query on an unknown container does not
 //! hold, which is how the engine treated every `@container` rule before:
@@ -65,12 +69,6 @@ struct Frame {
     /// A float has been entered in this box's formatting context, here or
     /// in an earlier descendant that does not start its own.
     floats: bool,
-    /// Definite content-box height, when `height` is a length.
-    height: Option<f32>,
-    /// Element children entered so far.
-    children: u32,
-    /// The element was its parent's first element child.
-    first: bool,
 }
 
 #[derive(Debug, Default)]
@@ -100,9 +98,6 @@ impl DocumentScope {
                 unknown_names: Vec::new(),
                 new_context: true,
                 floats: false,
-                height: Some(h),
-                children: 0,
-                first: true,
             }],
         });
         Self {
@@ -146,30 +141,19 @@ impl ElementScope {
                     break;
                 }
             }
-            let mut frame = frame_for(style, parent, tag, parent_width, state.viewport, float_seen);
-            if let Some(p) = state.frames.last_mut() {
-                frame.first = p.children == 0;
-                p.children += 1;
-            }
+            let frame = frame_for(style, parent, tag, parent_width, state.viewport, float_seen);
             // A float overhangs a wrapper (block or inline) that does not
             // start a formatting context, so it still narrows a later box
-            // there: record it up to the context's root. It stops short of
-            // that at an ancestor of definite height no shorter than the
-            // float when the float is that ancestor's leading content (it
-            // and every box between are first children), so it sits at the
-            // ancestor's top and cannot reach below it.
+            // there: record it up to the context's root. Whether it ends
+            // inside a definite-height ancestor depends on where layout puts
+            // it (text, padding, `::before`, `max-height`, negative margins
+            // all move it), so there is no exception for that (#782 HOLD 4).
             if style.float != Float::None && style.display != Display::None {
-                let float_h = margin_box_height(style, state.viewport);
-                let mut leading = frame.first;
                 for f in state.frames.iter_mut().rev() {
                     f.floats = true;
                     if f.new_context {
                         break;
                     }
-                    if leading && float_h.is_some_and(|fh| f.height.is_some_and(|h| fh <= h)) {
-                        break;
-                    }
-                    leading &= f.first;
                 }
             }
             state.frames.push(frame);
@@ -265,32 +249,7 @@ fn frame_for(
         unknown_names: style.container_name.clone(),
         new_context: starts_context(style),
         floats: false,
-        height: definite_height(style, viewport),
-        children: 0,
-        first: true,
     }
-}
-
-/// Definite margin-box height (`height` a length; vertical margins,
-/// padding and borders resolvable without a basis), else `None`.
-fn margin_box_height(style: &ComputedStyle, vp: (f32, f32)) -> Option<f32> {
-    let h = resolve(&style.height, style, None, vp)?;
-    let v = |l: &Length| match l {
-        Length::Auto => Some(0.0),
-        l => resolve(l, style, None, vp),
-    };
-    let border = |w: &Length, s: rustkit_css::BorderStyle| match s {
-        rustkit_css::BorderStyle::None => Some(0.0),
-        _ => resolve(w, style, None, vp).or(Some(0.0)),
-    };
-    let around = v(&style.margin_top)?
-        + v(&style.margin_bottom)?
-        + border(&style.border_top_width, style.border_top_style)?
-        + border(&style.border_bottom_width, style.border_bottom_style)?;
-    Some(match style.box_sizing {
-        BoxSizing::BorderBox => h.max(0.0) + v(&style.margin_top)? + v(&style.margin_bottom)?,
-        BoxSizing::ContentBox => h + around + v(&style.padding_top)? + v(&style.padding_bottom)?,
-    })
 }
 
 /// The box starts a block formatting context that floats do not leave (a
@@ -346,6 +305,8 @@ fn horizontal_extras(style: &ComputedStyle, basis: Option<f32>, vp: (f32, f32)) 
 const NOT_PLAIN_TAGS: &[&str] = &[
     "button", "input", "select", "textarea", "fieldset", "legend", "meter", "progress", "img",
     "video", "audio", "canvas", "iframe", "embed", "object", "svg", "math",
+    // Chromium's UA sheet makes an open dialog absolute and `fit-content`.
+    "dialog",
 ];
 
 /// Floated or absolutely positioned: out of flow, so the block rules give
@@ -382,6 +343,8 @@ fn plain_block(style: &ComputedStyle, tag: Option<&str>) -> bool {
         && style.writing_mode == WritingMode::HorizontalTb
         && !style.writing_mode_declared
         && style.width_keywords == 0
+        // An auto width with a definite height follows the height.
+        && (style.aspect_ratio.is_none() || !matches!(style.width, Length::Auto))
         && ![&style.width, &style.min_width, &style.max_width]
             .iter()
             .any(|l| matches!(l, Length::FitContent))
@@ -415,6 +378,16 @@ fn content_width(
     let parent_width = parent_width?;
     if !plain_block(style, tag)
         || parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared)
+    {
+        return None;
+    }
+    // Beside an earlier float, a box starting a context the walk does not
+    // see (`flow-root`, `contain`, `overflow-y` alone) is narrower than its
+    // parent, so a percentage of it is unknown (#782 HOLD 4).
+    if float_seen
+        && [&style.width, &style.min_width, &style.max_width]
+            .iter()
+            .any(|l| !matches!(l, Length::Auto) && !absolute_length(l))
     {
         return None;
     }
