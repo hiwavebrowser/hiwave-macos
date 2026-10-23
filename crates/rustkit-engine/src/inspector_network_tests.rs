@@ -176,6 +176,77 @@ fn a_request_the_shield_refuses_is_a_policy_failure() {
     assert_each_request_answered_once(&records);
     assert!(outcomes(&records, server.port).contains(&"image /tracker.png by=parser -> failed policy".to_string()));
     assert!(!server.requests.lock().unwrap().iter().any(|p| p.contains("tracker")), "refused before any byte");
+    let blocked_by: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Failure { blocked_by, .. } => Some(blocked_by.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocked_by, vec![None], "a rule that names no list records none");
+}
+
+/// Dev-tools T2: a shield that says which list and rule refused a request
+/// has them on the failure, `blocked_by`, for every kind of request the
+/// page makes: an image, a parser script, a script that script inserted,
+/// and a `fetch`.
+#[test]
+fn a_shield_block_records_its_list_and_rule() {
+    struct EasyListAds;
+    impl rustkit_net::InterceptHandler for EasyListAds {
+        fn intercept(&self, request: &rustkit_net::Request) -> rustkit_net::InterceptAction {
+            if request.url.path().starts_with("/ads/") {
+                rustkit_net::InterceptAction::BlockedBy(rustkit_net::BlockReason {
+                    list: "EasyList".into(),
+                    rule: Some("/ads/*".into()),
+                })
+            } else {
+                rustkit_net::InterceptAction::Allow
+            }
+        }
+    }
+    let page = r#"<html><body><img src="/ads/i.png"><script src="/ads/p.js"></script><script>
+var s = document.createElement('script'); s.src = '/ads/ins.js'; document.body.appendChild(s);
+fetch('/ads/f').catch(function () {});
+</script></body></html>"#;
+    let server = serve(vec![
+        Route::html("/", page),
+        png("/ads/i.png"),
+        Route::ok("/ads/p.js", "text/javascript", ""),
+        Route::ok("/ads/ins.js", "text/javascript", ""),
+        Route::ok("/ads/f", "text/plain", ""),
+    ]);
+    let mut shield = rustkit_net::RequestInterceptor::new();
+    shield.add_handler(Arc::new(EasyListAds));
+    let (mut engine, view) = engine(EngineConfig::default(), Some(shield));
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let records = records(&engine, view);
+    assert_each_request_answered_once(&records);
+    let local = |s: &str| s.replace(&format!("http://127.0.0.1:{}", server.port), "");
+    let mut urls = std::collections::BTreeMap::new();
+    let mut blocked = Vec::new();
+    for record in &records {
+        match &record.event {
+            InspectorEvent::Request { id, url, .. } => {
+                urls.insert(*id, local(url));
+            }
+            InspectorEvent::Failure { id, stage, blocked_by, .. } => {
+                let by = blocked_by.as_ref().map(|b| format!("{} {}", b.list, b.rule.as_deref().unwrap_or("-")));
+                blocked.push(format!("{} {} {}", urls[id], stage.as_str(), by.as_deref().unwrap_or("null")));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sorted(blocked),
+        sorted(vec![
+            "/ads/i.png policy EasyList /ads/*".to_string(),
+            "/ads/p.js policy EasyList /ads/*".to_string(),
+            "/ads/ins.js policy EasyList /ads/*".to_string(),
+            "/ads/f policy EasyList /ads/*".to_string(),
+        ])
+    );
+    assert!(server.requests.lock().unwrap().iter().all(|p| !p.starts_with("/ads/")), "refused before any byte");
 }
 
 /// Two script requests to another origin on the loopback: the policy's

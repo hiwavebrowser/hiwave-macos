@@ -331,7 +331,7 @@ async fn execute(
             log_denial(&method, &url, &denial);
             if let Some(guard) = guard {
                 let (stage, reason) = inspector::denial_stage(&denial);
-                guard.fail(stage, reason);
+                guard.blocked_by(inspector::denial_block_reason(&denial)).fail(stage, reason);
             }
             NetDelivery::Error(NETWORK_ERROR.into())
         }
@@ -735,6 +735,7 @@ fn cancelled_fetch() -> FetchedInserted {
         stage: FailureStage::Cancelled,
         inspector_reason: "abandoned (navigation or view closed)",
         detail: "cancelled".into(),
+        blocked_by: None,
     }
 }
 
@@ -759,6 +760,8 @@ enum FetchedInserted {
         stage: FailureStage,
         inspector_reason: &'static str,
         detail: String,
+        /// The shield's list and rule, when it refused the fetch and said.
+        blocked_by: Option<rustkit_net::BlockReason>,
     },
     /// Not fetched (`unparseable src`). No load or error event.
     Skipped(&'static str),
@@ -1119,6 +1122,7 @@ fn spawn_inserted_fetch(job: FetchJob) {
             stage: FailureStage::Policy,
             inspector_reason: "too many script requests",
             detail: "inserted-script fetch queue is full".into(),
+            blocked_by: None,
         };
         if store_inserted_result(&board, job_id, nav_id, failed) {
             poke_live_turn();
@@ -1221,13 +1225,15 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             let (stage, reason) = inspector::net_error_stage(&e);
-            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string() };
+            let blocked_by = inspector::net_block_reason(&e).cloned();
+            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string(), blocked_by };
         }
         Err(_) => {
             return FetchedInserted::Transport {
                 stage: FailureStage::Timeout,
                 inspector_reason: "timed out",
                 detail: "timed out".into(),
+                blocked_by: None,
             };
         }
     };
@@ -1262,11 +1268,13 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
             stage: FailureStage::Decode,
             inspector_reason: "body is not UTF-8",
             detail: e.to_string(),
+            blocked_by: None,
         },
         Err(_) => FetchedInserted::Transport {
             stage: FailureStage::Timeout,
             inspector_reason: "timed out",
             detail: "timed out".into(),
+            blocked_by: None,
         },
     }
 }
@@ -1439,7 +1447,9 @@ fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched:
         FetchedInserted::Http(http) => {
             guard.response(http.status, http.mime.as_deref(), http.encoded_size, None, http.from_cache);
         }
-        FetchedInserted::Transport { stage, inspector_reason, .. } => guard.fail(*stage, inspector_reason),
+        FetchedInserted::Transport { stage, inspector_reason, blocked_by, .. } => {
+            guard.blocked_by(blocked_by.as_ref()).fail(*stage, inspector_reason)
+        }
         FetchedInserted::Skipped(_) => drop(guard),
     }
 }
