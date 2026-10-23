@@ -421,6 +421,8 @@ mod grid_block_axis_align_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_abspos_tests;
 #[cfg(all(test, feature = "headless"))]
+mod positioned_form_control_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
@@ -6642,6 +6644,20 @@ impl Engine {
             .and_then(|v| v.to_str().ok())
             .and_then(ReferrerPolicy::parse_header);
 
+        // A 204 or 205 aborts the navigation (HTML, "process a navigate
+        // response"): the document on screen stays and keeps running. It
+        // is not a failure; the load just ends with nothing committed.
+        if matches!(status.as_u16(), 204 | 205) {
+            info!(?id, %url, %status, "Navigation answered with no content; the page stays");
+            if let Some(received) = received {
+                received.read(0);
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                let _ = view.navigation.fail_navigation(format!("HTTP {status}"));
+            }
+            return Ok(());
+        }
+
         // A server's error page is a page: the body of a 403 or a 404 is
         // shown like any other document. Only an error response with
         // nothing in it fails the navigation.
@@ -9321,6 +9337,11 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    // Form controls return before the general path's
+                    // positioning, so `position: absolute`/`fixed` and the
+                    // offsets were never copied: a positioned <input> stayed
+                    // in the flow, painted and hit there (#730 follow-up i).
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9369,6 +9390,7 @@ impl Engine {
                             }),
                             style,
                         );
+                        Self::transfer_own_positioning(&mut b);
                         Self::attach_identity(
                             &mut b,
                             selector_path,
@@ -9412,6 +9434,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9489,6 +9512,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,

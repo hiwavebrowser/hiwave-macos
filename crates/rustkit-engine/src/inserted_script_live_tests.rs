@@ -418,3 +418,45 @@ setTimeout(function () {
         "twelve 300 ms fetches finished in {all_heard:?}: more than 8 were out at once"
     );
 }
+
+/// #730 follow-up (d): the fetch queue behind the in-flight slots held 64
+/// jobs for the whole process, so a page that inserted more than about 73
+/// scripts at once (64 queued, 8 on the wire, one waiting for a slot) had
+/// the rest hear `error` without a request. Walmart inserts about 113.
+#[test]
+fn a_burst_of_a_hundred_inserted_scripts_all_load() {
+    let page = "<html><body><p id=p>x</p><script>
+window.heard = { load: 0, error: 0 };
+window.ran = 0;
+setTimeout(function () {
+  for (var i = 0; i < 100; i++) {
+    var s = document.createElement('script');
+    s.src = '/chunk.js?delay=20&n=' + i;
+    s.onload = function () { heard.load++; };
+    s.onerror = function () { heard.error++; };
+    document.head.appendChild(s);
+  }
+}, 60000);
+</script></body></html>";
+    let mut routes = vec![("/", "text/html", page.to_string())];
+    for i in 0..100 {
+        routes.push((leak(format!("/chunk.js?delay=20&n={i}")), "text/javascript", "window.ran++;".to_string()));
+    }
+    let mut page = Page::load(EngineConfig::default(), routes);
+    let started = Instant::now();
+    page.turn(60_000);
+    while started.elapsed() < Duration::from_secs(15) {
+        if page.js("window.heard.load + window.heard.error === 100") == "Boolean(true)" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        page.turn(20);
+    }
+    page.turns_until("false", Duration::from_millis(200), 0);
+    assert_eq!(
+        page.js("'load=' + heard.load + ' error=' + heard.error + ' ran=' + ran"),
+        r#"String("load=100 error=0 ran=100")"#,
+        "{}",
+        page.log()
+    );
+}

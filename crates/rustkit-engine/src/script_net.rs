@@ -653,7 +653,7 @@ struct InsertedBoard {
     /// them before it runs another script, so each element hears exactly one
     /// `load` or `error` (#775: a loader waiting on a dropped one waited
     /// forever).
-    owed: Vec<OwedEvent>,
+    owed: std::collections::VecDeque<OwedEvent>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -662,6 +662,10 @@ struct OwedEvent {
     event: &'static str,
     /// The script's URL, for the log.
     source: String,
+    /// The index of this element's own record in the pump that ran it,
+    /// when the event fires in that pump. `None` once it is owed to a
+    /// later turn, whose pump does not hold that record.
+    record: Option<usize>,
 }
 
 struct InsertedJob {
@@ -686,8 +690,10 @@ struct InsertedJob {
 /// microsoft gate); Chrome holds an HTTP/1.1 host to six connections.
 pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 8;
 /// How many may be waiting behind those. Past this the script hears
-/// `error` instead of the queue growing without a bound.
-const MAX_INSERTED_FETCH_QUEUE: usize = 64;
+/// `error` instead of the queue growing without a bound. The queue is the
+/// process's, not a view's: 64 failed a burst of about 73 (walmart inserts
+/// about 113 at once). Per-view bounds come with M6's tabs.
+const MAX_INSERTED_FETCH_QUEUE: usize = 512;
 
 struct FetchCancel {
     flag: std::sync::atomic::AtomicBool,
@@ -790,7 +796,7 @@ impl InsertedScripts {
                 next_id: 1,
                 ready_seq: 0,
                 jobs: Vec::new(),
-                owed: Vec::new(),
+                owed: std::collections::VecDeque::new(),
                 notify: Arc::new(tokio::sync::Notify::new()),
             })),
         }
@@ -831,11 +837,11 @@ impl InsertedScripts {
 
     fn take_owed(&self) -> Option<OwedEvent> {
         let mut board = lock_board(&self.board);
-        (!board.owed.is_empty()).then(|| board.owed.remove(0))
+        board.owed.pop_front()
     }
 
     fn owe(&self, owed: OwedEvent) {
-        lock_board(&self.board).owed.push(owed);
+        lock_board(&self.board).owed.push_back(owed);
     }
 
     fn take_ready(&self) -> Option<InsertedJob> {
@@ -1371,6 +1377,7 @@ fn run_inserted(
     }
     let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
     let source = record.source.clone();
+    let index = out.records.len();
     out.records.push(record);
     out.requests += 1;
     if poisoned {
@@ -1378,13 +1385,12 @@ fn run_inserted(
         return true;
     }
     if let Some(event) = event {
-        let owed = OwedEvent { node: job.node, event, source };
         // A spent budget (the script itself may have spent it) owes the
         // event to the next turn that has some, ahead of any other script.
         if super::script_js_exhausted() {
-            scripts.owe(owed);
+            scripts.owe(OwedEvent { node: job.node, event, source, record: None });
         } else {
-            fire_inserted_event(bindings, owed, out);
+            fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
         }
     }
     false
@@ -1397,17 +1403,24 @@ fn fire_inserted_event(bindings: &DomBindings, owed: OwedEvent, out: &mut Pump) 
     let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(owed.node, owed.event));
     if stopped {
         crate::log_script_stopped(&owed.source, crate::script_js_stopped_ms(), crate::take_script_js_overrun());
-        match out.records.last_mut().filter(|record| record.source == owed.source) {
-            Some(record) => record.outcome = crate::ScriptOutcome::OverBudget,
-            None => out.records.push(crate::ScriptRecord {
-                source: owed.source,
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: crate::ScriptOutcome::OverBudget,
-            }),
-        }
+        mark_listener_stopped(out, owed.record, owed.source);
     } else if let Err(e) = fired {
         out.threw.push(e.to_string());
+    }
+}
+
+/// The budget stopped a `load`/`error` listener: that is its script's
+/// stop in the log. `record` is the index of the script's own record in
+/// this pump; `None` (the event was owed to a later turn) adds one.
+pub(crate) fn mark_listener_stopped(out: &mut Pump, record: Option<usize>, source: String) {
+    match record.and_then(|index| out.records.get_mut(index)) {
+        Some(record) => record.outcome = crate::ScriptOutcome::OverBudget,
+        None => out.records.push(crate::ScriptRecord {
+            source,
+            bytes: 0,
+            elapsed_ms: 0,
+            outcome: crate::ScriptOutcome::OverBudget,
+        }),
     }
 }
 

@@ -463,6 +463,182 @@ mod tests {
         assert!(value.contains("x2"), "{value}");
     }
 
+    /// Events until `nav_id` fails or `budget` runs out.
+    fn events_until_failed(page: &ContentThread, nav_id: u64, budget: Duration) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll());
+            let failed = events.iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id: n } if *n == nav_id)
+            });
+            if failed {
+                std::thread::sleep(Duration::from_millis(100));
+                events.extend(page.poll());
+                return events;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        events
+    }
+
+    fn wait_complete(page: &ContentThread, nav_id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let done = page.poll().into_iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Complete, nav_id: n } if n == nav_id)
+            });
+            if done {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("navigation {nav_id} never completed");
+    }
+
+    #[test]
+    fn a_failed_navigation_puts_the_shown_documents_url_back() {
+        // #730 follow-up (c): the address bar showed the URL that failed
+        // over the document still on screen.
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse("http://127.0.0.1:1/").unwrap());
+        let events = events_until_failed(&page, nav_id, Duration::from_secs(20));
+        let last_url = events.iter().rev().find_map(|e| match e {
+            PageEvent::Url { url, nav_id: n } if *n == nav_id => Some(url.to_string()),
+            _ => None,
+        });
+        let shown_url = Url::parse(shown).unwrap().to_string();
+        assert_eq!(
+            last_url.as_deref(),
+            Some(shown_url.as_str()),
+            "the window was left showing the failed URL: {events:?}"
+        );
+    }
+
+    /// A local server answering every request with `head` and an empty body.
+    fn serve_empty(head: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    format!("{head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        port
+    }
+
+    fn events_for(page: &ContentThread, nav_id: u64, budget: Duration) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll().into_iter().filter(|e| match e {
+                PageEvent::LoadState { nav_id: n, .. } | PageEvent::Url { nav_id: n, .. } => *n == nav_id,
+                _ => false,
+            }));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        events
+    }
+
+    fn failed_count(events: &[PageEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_204_navigation_leaves_the_page_as_it_is_and_reports_no_failure() {
+        // #730 follow-up (e), Prometheus R1 NIT: an Ok load that commits
+        // nothing was reported Failed. HTML aborts a 204/205 navigation; the
+        // document on screen stays, running, and the load just ends.
+        let port = serve_empty("HTTP/1.1 204 No Content");
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/ping")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 0, "a 204 was reported as a failure: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the window was never told the 204 navigation ended: {events:?}"
+        );
+        let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
+        let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
+        assert!(text.contains("shown"), "the 204 replaced the document on screen: {text}");
+    }
+
+    #[test]
+    fn a_failed_navigation_is_reported_failed_once() {
+        // #730 follow-up (e): an empty error response failed in the engine
+        // (one Failed) and again in end_uncommitted_nav (a second).
+        let port = serve_empty("HTTP/1.1 500 Internal Server Error");
+        let page = page();
+        let first = page.navigate(Url::parse("data:text/html,<p>shown</p>").unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+    }
+
+    /// The newest `Focused` report among the events seen within `budget`.
+    fn last_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::Focused(focused) = event {
+                    last = Some(focused);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn the_window_hears_focus_a_script_moved_and_a_new_document_has_none() {
+        // #730 delta R1 NIT: the window answers "is a field focused" from
+        // the page's last Focused report. A script's `focus()` sent none, so
+        // the first key after it went to the window, and a new document
+        // kept the old document's answer.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(300)),
+            Some(true),
+            "a script focused the field and the window was not told"
+        );
+        let mut timer = page.eval("document.getElementById('i').blur(); setTimeout(function () { document.getElementById('i').focus(); }, 20); 1");
+        assert!(wait_recv(&mut timer, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(500)),
+            Some(true),
+            "a timer focused the field and the window was not told"
+        );
+        let mut next = page.load_html("<p>next</p>");
+        assert!(wait_recv(&mut next, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(300)),
+            Some(false),
+            "the new document has no focused field and the window was not told"
+        );
+    }
+
     #[test]
     fn a_superseded_navigation_drops_the_late_result() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");

@@ -250,6 +250,22 @@ impl ViewControl {
         hit
     }
 
+    /// Navigation `nav_id` ended without committing a document (a refused
+    /// connection, a fetch error, a 204). The document still on screen gets
+    /// its script back: lift [`ALL`], which the window raised when it
+    /// started `nav_id`. Not when a newer navigation or a Stop cancelled
+    /// it; that one raised ALL for its own reason. Whether ALL was lifted
+    /// for this navigation. Held under the nav lock, as `cancel_nav`, so a
+    /// cancel cannot land between the check and the lift.
+    pub fn end_uncommitted(&self, nav_id: u64) -> bool {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if nav_id == 0 || self.nav_committed(nav_id) || self.nav_cancelled(nav_id) {
+            return false;
+        }
+        self.clear_all();
+        true
+    }
+
     /// Whether `nav_id` has been cancelled.
     pub fn nav_cancelled(&self, nav_id: u64) -> bool {
         nav_id != 0 && self.cancel_nav.load(Ordering::SeqCst) >= nav_id
@@ -639,6 +655,47 @@ fn run(shared: Weak<Shared>, sleep: Arc<Sleep>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_racing_the_end_of_an_uncommitted_navigation_keeps_its_stop() {
+        // #730 follow-up (b): the page lowered ALL for a navigation that
+        // never committed after reading "not cancelled", unlocked. A newer
+        // navigation's cancel and stop landing between the two was undone,
+        // and the old document's script ran on under the new load.
+        let control = Arc::new(ViewControl::new());
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        let held = control.nav_lock.lock().unwrap();
+        let ending = {
+            let control = Arc::clone(&control);
+            std::thread::spawn(move || control.end_uncommitted(2))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // A newer navigation, as `ContentThread::navigate`: cancel, then stop.
+        control.cancel_nav.fetch_max(2, Ordering::SeqCst);
+        control.stop_all();
+        drop(held);
+        let lifted = ending.join().unwrap();
+        assert!(!lifted, "ALL was lifted for a navigation already cancelled");
+        assert!(control.stops(42), "the newer navigation's stop was undone");
+    }
+
+    #[test]
+    fn an_uncommitted_navigation_gives_the_shown_document_its_script_back() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        assert!(control.end_load(2));
+        assert!(control.end_uncommitted(2));
+        assert!(!control.stops(42));
+        assert!(!control.end_uncommitted(1), "a committed navigation is not ended again");
+    }
 
     #[test]
     fn a_cancel_stops_the_running_load_and_every_earlier_one() {
