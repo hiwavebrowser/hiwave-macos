@@ -293,7 +293,8 @@ pub use presenter::FrameCommit;
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
-    connect, LoadState, PageCmd, PageEndpoint, PageEvent, PageHandle, PageInput,
+    connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
+    PageHandle, PageInput,
 };
 mod content_thread;
 pub use content_thread::{
@@ -321,6 +322,16 @@ pub use inspector_page::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod inspector_page_tests;
+mod devtools;
+pub use devtools::{
+    devtools_console_entries, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
+    DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
+    DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
+};
+#[cfg(all(test, feature = "headless"))]
+mod devtools_tests;
+#[cfg(test)]
+mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
@@ -821,6 +832,9 @@ struct ViewState {
     /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
     display_list: Option<Arc<DisplayList>>,
+    /// The element the developer tools outline on this page
+    /// (`Engine::devtools_highlight`), drawn over the display list.
+    devtools_highlight: Option<usize>,
     /// The earliest input the view took since its last commit
     /// (`Engine::note_input`); rides the next commit for the W-gate's
     /// input-to-present log, or is dropped when the input changed no frame.
@@ -2515,6 +2529,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -2618,6 +2633,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -2738,6 +2754,7 @@ impl Engine {
             layout: None,
             held_fixed: None,
             display_list: None,
+            devtools_highlight: None,
             input_pending: None,
             frame_generation: 0,
             presented: None,
@@ -13142,6 +13159,9 @@ impl Engine {
         self.nav_seq.fetch_max(nav_id, Ordering::AcqRel);
         canceller.cancel_nav(view.control.loading_nav());
         view.nav_id = nav_id;
+        // The Inspector's outline names a node of the document going away;
+        // node ids do not survive a navigation (#785 R1).
+        view.devtools_highlight = None;
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
         self.image_manager.begin_navigation(id.0, view.decode_epoch);
@@ -17306,7 +17326,11 @@ impl Engine {
             let commit = FrameCommit {
                 generation: view.frame_generation,
                 nav_generation: view.nav_id,
-                list: view.display_list.clone(),
+                list: devtools::with_highlight(
+                    view.display_list.clone(),
+                    view.layout.as_deref(),
+                    view.devtools_highlight,
+                ),
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
@@ -31637,7 +31661,7 @@ mod cascade_wire_tests {
             ("border", "1px solid lab(50% 40 59)"),
             ("border", "1px solid hwb(0 0% 0%)"),
             ("border", "1px solid color(display-p3 1 0 0)"),
-            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+            ("border", "1px solid color-mix(in lab, red 50%, blue)"),
         ] {
             let mut s = ComputedStyle::default();
             e.apply_style_property(&mut s, property, "4px dashed red");
@@ -31657,6 +31681,23 @@ mod cascade_wire_tests {
         assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
     }
 
+    // `color-mix()` resolves (css-color-5 §2): the reduced page's
+    // `background: red; background: color-mix(...)` painted nothing.
+    #[test]
+    fn a_color_mix_colour_is_painted() {
+        let e = engine();
+        let half_green = rustkit_css::Color::new(0, 128, 0, 0.5);
+        for property in ["background", "background-color"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "red");
+            e.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
+            assert_eq!(s.background_color, half_green, "{property}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
+        assert_eq!(s.border_top_color, rustkit_css::Color::new(128, 0, 128, 1.0));
+    }
+
     #[test]
     fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
         let e = engine();
@@ -31665,7 +31706,7 @@ mod cascade_wire_tests {
             "url(a.png) no-repeat currentcolor",
             "url(a.png) rgb(229 231 235 / 1)",
             "url(a.png) oklch(0.7 0.1 200)",
-            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) color-mix(in lab, red 50%, blue)",
             "url(a.png) light-dark(#fff, #000)",
         ] {
             let mut s = ComputedStyle::default();
