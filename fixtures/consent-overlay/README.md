@@ -5,7 +5,9 @@ full-viewport overlay with a high `z-index` over an article, and an
 "Agree" button inside it. Each page sets `window.__agree` to the element a
 user would click and logs the events its own listeners hear in
 `window.__heard`. `consent_click_tests.rs` (rustkit-engine) loads each one,
-clicks the centre of `__agree.getBoundingClientRect()` through
+clicks the centre of `__agree` where it is painted (its layout box under
+its ancestors' transforms, computed from the layout tree; not
+`getBoundingClientRect()`, which leaves transforms out) through
 `mouse_down_at_point` + `click_at_point` (the path the app's window click
 takes) and checks the listener ran.
 

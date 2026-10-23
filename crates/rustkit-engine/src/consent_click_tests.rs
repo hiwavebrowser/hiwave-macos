@@ -4,9 +4,10 @@
 //! should be, a click on "Agree" logged no `pointerdown`, `mousedown` or
 //! `click` and the dialog stayed. The pages in `fixtures/consent-overlay`
 //! are the shapes consent managers draw that dialog in. Each is clicked at
-//! the centre of its button as the page reports it
-//! (`getBoundingClientRect()`, where the button is painted) through the
-//! press and release the app's window click goes through.
+//! the centre of its button where it is painted (`agree_centre`: its
+//! layout box under its ancestors' transforms, not
+//! `getBoundingClientRect()`) through the press and release the app's
+//! window click goes through.
 
 use super::*;
 
