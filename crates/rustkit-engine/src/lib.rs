@@ -41685,3 +41685,77 @@ mod sheet_cache_tests {
         assert_eq!(held(&e), ["p { color: blue }"]);
     }
 }
+
+#[cfg(test)]
+mod filter_pins {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn dl(html: &str) -> Vec<String> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        // Height 0 puts the page at y = 0.
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    fn page(style: &str) -> Vec<String> {
+        dl(&format!(
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="position:relative;width:100px;height:100px;background:#f0f;{style}"><i style="position:absolute;left:25px;top:25px;width:50px;height:50px;background:#f0f"></i></div></body></html>"#
+        ))
+    }
+
+    #[test]
+    fn filter_colour_functions_paint_the_box_and_its_descendants_as_one_filtered_group() {
+        let lines = page("filter:invert(1)");
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushFilter"))
+            .unwrap_or_else(|| panic!("`filter:invert(1)` opened no filter group:\n{all}"));
+        let pop = lines
+            .iter()
+            .position(|c| c.starts_with("PopFilter"))
+            .unwrap_or_else(|| panic!("filter group never closed:\n{all}"));
+        // invert(1): r' = 1 - r.
+        assert!(
+            lines[push].starts_with("PushFilter([-1.0, 0.0, 0.0, 0.0, 1.0,"),
+            "invert(1) matrix: {}",
+            lines[push]
+        );
+        let fills: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("SolidColor") && c.contains("r: 255, g: 0, b: 255"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(fills.len(), 2, "the box and its child each fill once:\n{all}");
+        assert!(
+            fills.iter().all(|&i| push < i && i < pop),
+            "both fills sit in the filter group:\n{all}"
+        );
+
+        // Applied before opacity: the filter group sits inside the fade.
+        let lines = page("filter:grayscale(1);opacity:.5");
+        let at = |p: &str| lines.iter().position(|c| c.starts_with(p));
+        let (o, f) = (at("PushOpacity"), at("PushFilter"));
+        assert!(o.is_some() && f.is_some() && o < f, "{}", lines.join("\n"));
+
+        // Nothing to apply: no group.
+        for style in ["filter:none", "filter:blur(2px)", "filter:grayscale(-1)", ""] {
+            let lines = page(style);
+            assert!(
+                !lines.iter().any(|c| c.starts_with("PushFilter")),
+                "`{style}` opened a filter group:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+}
