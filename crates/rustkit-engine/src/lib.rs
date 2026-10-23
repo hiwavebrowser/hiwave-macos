@@ -41702,7 +41702,9 @@ mod clip_path_pins {
         let d = Document::parse_html(html).expect("parse");
         let mut root = e.build_layout_from_document(&d, &[]);
         let mut cb = Dimensions::default();
-        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        // Height 0: a block is placed below its containing block's
+        // content, so this puts the page at y = 0.
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
         root.layout(&cb);
         DisplayList::build(&root)
             .commands
@@ -41753,14 +41755,20 @@ mod clip_path_pins {
             if let Some(corner) = corner {
                 assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
             }
-            // The box's own background and border paint inside the clip.
+            // The box's own background and border paint inside the clip
+            // (only the page's canvas fill comes before it).
             let painted: Vec<usize> = lines
                 .iter()
                 .enumerate()
+                .skip(push)
                 .filter(|(_, c)| !c.starts_with("PushClip") && !c.starts_with("PopClip"))
                 .map(|(i, _)| i)
                 .collect();
-            assert!(!painted.is_empty(), "{all}");
+            assert!(painted.len() >= 2, "background and border:\n{all}");
+            assert!(
+                lines[push + 1..].iter().any(|c| c.contains("r: 255, g: 0, b: 0")),
+                "`{style}`: the red border is painted inside the clip:\n{all}"
+            );
             for i in painted {
                 assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{}` unclipped:\n{all}", lines[i]);
             }
