@@ -9337,6 +9337,11 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    // Form controls return before the general path's
+                    // positioning, so `position: absolute`/`fixed` and the
+                    // offsets were never copied: a positioned <input> stayed
+                    // in the flow, painted and hit there (#730 follow-up i).
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9385,6 +9390,7 @@ impl Engine {
                             }),
                             style,
                         );
+                        Self::transfer_own_positioning(&mut b);
                         Self::attach_identity(
                             &mut b,
                             selector_path,
@@ -9428,6 +9434,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9505,6 +9512,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,

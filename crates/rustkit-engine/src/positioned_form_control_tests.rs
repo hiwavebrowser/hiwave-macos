@@ -24,7 +24,12 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 
 /// Shapes that do not match Chrome yet, each with its reason. A shape listed
 /// here that starts to match fails the test, so the list cannot go stale.
-const GAPS: &[&str] = &[];
+///
+/// `an-absolute-checkbox`: the UA sheet has no margin for checkbox and radio
+/// (Chrome: `margin: 3px 3px 3px 4px`), so the box is 4,3 short of Chrome's
+/// with or without positioning. The same page with `margin: 0`
+/// (`an-absolute-checkbox-with-no-margin`) matches.
+const GAPS: &[&str] = &["an-absolute-checkbox"];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
@@ -62,4 +67,38 @@ fn positioned_form_controls_are_placed_as_in_chrome() {
         gaps_that_pass.is_empty(),
         "listed as a gap but matches Chrome now, take it off the list: {gaps_that_pass:?}"
     );
+}
+
+/// A click where the page put a positioned field focuses that field (the k7
+/// report: the field was neither drawn nor focused there, while keys still
+/// went to the page).
+///
+/// The body is as tall as the view here. GAP, not this PR's: the hit test
+/// stops at any box whose border box does not hold the point
+/// (`LayoutBox::hit_test_internal`), so an absolute box that sits outside
+/// all of its ancestors' boxes (under a 20px body) is drawn but not hit.
+/// Fixed boxes are collected apart and are hit either way.
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn a_click_on_a_positioned_field_focuses_it() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds::new(0, 0, 800, 600)).expect("headless view");
+    engine
+        .load_html(
+            view,
+            concat!(
+                "<!doctype html><body style='margin:0;min-height:600px'><p style=margin:0>flow text</p>",
+                "<input id=abs style='position:absolute;top:200px;left:300px;width:160px'>",
+                "<input id=fix style='position:fixed;top:400px;left:100px;width:160px'></body>",
+            ),
+        )
+        .expect("load_html");
+    assert_eq!(engine.focus_at_point(view, 320.0, 210.0).as_deref(), Some("input"), "the absolute field");
+    let active = engine.execute_script(view, "document.activeElement.id").expect("script");
+    assert!(active.contains("abs"), "focused {active}");
+    assert_eq!(engine.focus_at_point(view, 120.0, 410.0).as_deref(), Some("input"), "the fixed field");
+    let active = engine.execute_script(view, "document.activeElement.id").expect("script");
+    assert!(active.contains("fix"), "focused {active}");
+    // Where the fields sat in the flow before the fix: nothing focusable.
+    assert_eq!(engine.focus_at_point(view, 5.0, 30.0), None, "the old in-flow place");
 }

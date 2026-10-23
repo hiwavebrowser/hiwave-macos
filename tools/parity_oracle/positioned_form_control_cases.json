@@ -47,6 +47,11 @@
    "chrome_boxes": "k:94:73 after:0:0"
   },
   {
+   "name": "an-absolute-checkbox-with-no-margin",
+   "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px Arial}</style></head><body><input id=k type=checkbox style=\"position:absolute;top:70px;left:90px;margin:0\"><div id=after>x</div></body></html>",
+   "chrome_boxes": "k:90:70 after:0:0"
+  },
+  {
    "name": "an-absolute-input-in-rem",
    "html": "<!doctype html><html><head><style>body{margin:0;font:16px/20px Arial}</style></head><body><input id=i style=\"position:absolute;top:2rem;left:3rem\"><div id=after>x</div></body></html>",
    "chrome_boxes": "i:48:32 after:0:0"
