@@ -463,6 +463,61 @@ mod tests {
         assert!(value.contains("x2"), "{value}");
     }
 
+    /// Events until `nav_id` fails or `budget` runs out.
+    fn events_until_failed(page: &ContentThread, nav_id: u64, budget: Duration) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll());
+            let failed = events.iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id: n } if *n == nav_id)
+            });
+            if failed {
+                std::thread::sleep(Duration::from_millis(100));
+                events.extend(page.poll());
+                return events;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        events
+    }
+
+    fn wait_complete(page: &ContentThread, nav_id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let done = page.poll().into_iter().any(|e| {
+                matches!(e, PageEvent::LoadState { state: LoadState::Complete, nav_id: n } if n == nav_id)
+            });
+            if done {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("navigation {nav_id} never completed");
+    }
+
+    #[test]
+    fn a_failed_navigation_puts_the_shown_documents_url_back() {
+        // #730 follow-up (c): the address bar showed the URL that failed
+        // over the document still on screen.
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse("http://127.0.0.1:1/").unwrap());
+        let events = events_until_failed(&page, nav_id, Duration::from_secs(20));
+        let last_url = events.iter().rev().find_map(|e| match e {
+            PageEvent::Url { url, nav_id: n } if *n == nav_id => Some(url.to_string()),
+            _ => None,
+        });
+        let shown_url = Url::parse(shown).unwrap().to_string();
+        assert_eq!(
+            last_url.as_deref(),
+            Some(shown_url.as_str()),
+            "the window was left showing the failed URL: {events:?}"
+        );
+    }
+
     /// The newest `Focused` report among the events seen within `budget`.
     fn last_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
         let deadline = Instant::now() + budget;

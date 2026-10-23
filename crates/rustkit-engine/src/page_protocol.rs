@@ -657,6 +657,11 @@ impl PageEndpoint {
         if !control.end_uncommitted(nav_id) {
             return;
         }
+        // The address bar went to the URL that failed. The document on
+        // screen is still the committed one; show its URL again.
+        if let Some(url) = self.engine.get_url(self.view) {
+            let _ = self.events.send(PageEvent::Url { url, nav_id });
+        }
         let error = failed.unwrap_or_else(|| "navigation did not commit".to_string());
         let _ = self.events.send(PageEvent::LoadState {
             state: LoadState::Failed { error },
