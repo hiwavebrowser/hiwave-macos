@@ -8118,7 +8118,10 @@ impl Engine {
         {
             return;
         }
-        if Self::has_visible_styling(&child.style) || Self::has_content_children(child) {
+        // Line content (text, an inline image, an atomic inline) is found by
+        // the walk below. `has_content_children` is not used: it counts every
+        // image as line content, block-level ones included.
+        if Self::has_visible_styling(&child.style) {
             return;
         }
         let mut saw_block = false;
@@ -8130,8 +8133,17 @@ impl Engine {
             if out_of_flow {
                 continue;
             }
-            let block = matches!(grand.box_type, BoxType::Block | BoxType::AnonymousBlock)
-                && !grand.style.display.is_atomic_inline();
+            // A replaced box or form control with a block-level display
+            // (`<picture><img style="display:block">`) is a block here too.
+            let block = match grand.box_type {
+                BoxType::Block | BoxType::AnonymousBlock => {
+                    !grand.style.display.is_atomic_inline()
+                }
+                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                    !grand.style.display.is_inline_level()
+                }
+                BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak => false,
+            };
             if !block {
                 // A text run, an atomic inline, or another inline: this one
                 // still has line content (or nothing we can promote).

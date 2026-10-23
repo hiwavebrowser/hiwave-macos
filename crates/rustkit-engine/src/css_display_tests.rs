@@ -116,6 +116,35 @@ fn a_contents_wrapper_in_a_flex_row_makes_its_children_flex_items() {
     );
 }
 
+/// `<picture>` has no UA display, so it is an inline (it was a block while
+/// unknown elements started as block). With a `display: block` image in it,
+/// as on lyft.com's hero, the inline only wraps a block-level box: Chrome
+/// gives it no line box, so the picture is the image's height and the next
+/// block starts right under it. The image is a replaced box, not a `Block`
+/// box, and must still count as the block that culls the inline.
+#[test]
+fn a_picture_around_a_block_image_adds_no_line_box() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/1.4 sans-serif}"#,
+        r#"img{display:block;width:200px;height:100px}#after{height:10px}</style>"#,
+        r#"<body><div id="col"><picture id="p"><source srcset="a.webp" type="image/webp">"#,
+        r#"<img id="i" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></picture></div>"#,
+        r#"<div id="after"></div></body>"#,
+    ));
+    let mut js = |s: &str| eval(&mut engine, view, s);
+    assert_eq!(js("getComputedStyle(document.getElementById('p')).display"), "inline");
+    let placed = js(concat!(
+        "var c = document.getElementById('col').getBoundingClientRect();",
+        "var a = document.getElementById('after').getBoundingClientRect();",
+        "[c.height, a.y].join()",
+    ));
+    let nums = numbers(&placed);
+    assert!(
+        (nums[0] - 100.0).abs() < 0.5 && (nums[1] - 100.0).abs() < 0.5,
+        "the picture added a line box under its block image: {placed}"
+    );
+}
+
 fn numbers(text: &str) -> Vec<f64> {
     text.split(',')
         .map(|part| part.trim().parse().unwrap_or(f64::NAN))
