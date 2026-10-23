@@ -230,6 +230,9 @@ pub struct PageEndpoint {
     /// autofocus or a new document moves focus without any input from the
     /// window, and the window answers its keys from this report.
     last_focused: Option<bool>,
+    /// The newest navigation the window was told failed. A navigation is
+    /// reported failed at most once.
+    failed_nav: u64,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
@@ -251,6 +254,7 @@ pub(crate) fn adopt(
         settle_keys: false,
         wake_window: false,
         last_focused: None,
+        failed_nav: 0,
     }
 }
 
@@ -281,6 +285,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         settle_keys: false,
         wake_window: false,
         last_focused: None,
+        failed_nav: 0,
     };
     (handle, endpoint)
 }
@@ -603,6 +608,7 @@ impl PageEndpoint {
         let engine_events = &mut self.engine_events;
         let tx = &self.events;
         let last_commit = &mut self.last_commit;
+        let failed_nav = &mut self.failed_nav;
         let mut load = Box::pin(async move {
             if nav_id == 0 {
                 engine.load_url_yielding(view, url).await
@@ -626,13 +632,13 @@ impl PageEndpoint {
                     if let Some(e) = &failed {
                         tracing::error!(error = %e, "Failed to load URL");
                     }
-                    forward_events(engine_events, tx, last_commit, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, failed_nav, nav_id, wake);
                     drop(load);
                     self.end_uncommitted_nav(nav_id, failed);
                     return;
                 }
                 std::task::Poll::Pending => {
-                    forward_events(engine_events, tx, last_commit, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, failed_nav, nav_id, wake);
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
             }
@@ -645,8 +651,9 @@ impl PageEndpoint {
     /// running script would stop, and only a commit lowers it. Unless a
     /// newer navigation or a Stop cancelled this one (they lower it
     /// themselves), lower it here, so the document still on screen keeps
-    /// its timers, clicks and keys. Tell the window the load failed, so it
-    /// stops showing the page as loading.
+    /// its timers, clicks and keys. Tell the window the load is over, so
+    /// it stops showing the page as loading: Failed once for an error,
+    /// Complete for a load that ended Ok with nothing to commit (a 204).
     fn end_uncommitted_nav(&mut self, nav_id: u64, failed: Option<String>) {
         if nav_id == 0 {
             return;
@@ -662,11 +669,20 @@ impl PageEndpoint {
         if let Some(url) = self.engine.get_url(self.view) {
             let _ = self.events.send(PageEvent::Url { url, nav_id });
         }
-        let error = failed.unwrap_or_else(|| "navigation did not commit".to_string());
-        let _ = self.events.send(PageEvent::LoadState {
-            state: LoadState::Failed { error },
-            nav_id,
-        });
+        // A load that ended Ok without a commit (a 204) is not a failure:
+        // the page stays as it is and the load is over. A failure the
+        // engine already reported is not reported again.
+        let state = match failed {
+            None => Some(LoadState::Complete),
+            Some(_) if self.failed_nav == nav_id => None,
+            Some(error) => {
+                self.failed_nav = nav_id;
+                Some(LoadState::Failed { error })
+            }
+        };
+        if let Some(state) = state {
+            let _ = self.events.send(PageEvent::LoadState { state, nav_id });
+        }
         if self.wake_window {
             crate::script_net::poke_live_turn();
         }
@@ -742,6 +758,7 @@ impl PageEndpoint {
             &mut self.engine_events,
             &self.events,
             &mut self.last_commit,
+            &mut self.failed_nav,
             nav_id,
             wake,
         );
@@ -864,6 +881,7 @@ fn forward_events(
     engine_events: &mut Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
     tx: &Sender<PageEvent>,
     last_commit: &mut Option<(u64, u64, (f32, f32))>,
+    failed_nav: &mut u64,
     nav_id: u64,
     wake: bool,
 ) {
@@ -895,13 +913,20 @@ fn forward_events(
                 });
                 out
             }
-            EngineEvent::NavigationFailed { url, error, .. } => vec![
-                PageEvent::Url { url, nav_id },
-                PageEvent::LoadState {
-                    state: LoadState::Failed { error },
-                    nav_id,
-                },
-            ],
+            EngineEvent::NavigationFailed { url, error, .. } => {
+                if *failed_nav == nav_id && nav_id != 0 {
+                    Vec::new()
+                } else {
+                    *failed_nav = nav_id;
+                    vec![
+                        PageEvent::Url { url, nav_id },
+                        PageEvent::LoadState {
+                            state: LoadState::Failed { error },
+                            nav_id,
+                        },
+                    ]
+                }
+            }
             EngineEvent::TitleChanged { title, .. } => {
                 vec![PageEvent::Title {
                     text: title,

@@ -6600,6 +6600,20 @@ impl Engine {
             .and_then(|v| v.to_str().ok())
             .and_then(ReferrerPolicy::parse_header);
 
+        // A 204 or 205 aborts the navigation (HTML, "process a navigate
+        // response"): the document on screen stays and keeps running. It
+        // is not a failure; the load just ends with nothing committed.
+        if matches!(status.as_u16(), 204 | 205) {
+            info!(?id, %url, %status, "Navigation answered with no content; the page stays");
+            if let Some(received) = received {
+                received.read(0);
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                let _ = view.navigation.fail_navigation(format!("HTTP {status}"));
+            }
+            return Ok(());
+        }
+
         // A server's error page is a page: the body of a 403 or a 404 is
         // shown like any other document. Only an error response with
         // nothing in it fails the navigation.

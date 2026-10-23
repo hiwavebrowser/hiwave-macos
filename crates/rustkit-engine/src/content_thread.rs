@@ -518,6 +518,79 @@ mod tests {
         );
     }
 
+    /// A local server answering every request with `head` and an empty body.
+    fn serve_empty(head: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    format!("{head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        port
+    }
+
+    fn events_for(page: &ContentThread, nav_id: u64, budget: Duration) -> Vec<PageEvent> {
+        let deadline = Instant::now() + budget;
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(page.poll().into_iter().filter(|e| match e {
+                PageEvent::LoadState { nav_id: n, .. } | PageEvent::Url { nav_id: n, .. } => *n == nav_id,
+                _ => false,
+            }));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        events
+    }
+
+    fn failed_count(events: &[PageEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_204_navigation_leaves_the_page_as_it_is_and_reports_no_failure() {
+        // #730 follow-up (e), Prometheus R1 NIT: an Ok load that commits
+        // nothing was reported Failed. HTML aborts a 204/205 navigation; the
+        // document on screen stays, running, and the load just ends.
+        let port = serve_empty("HTTP/1.1 204 No Content");
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/ping")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 0, "a 204 was reported as a failure: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the window was never told the 204 navigation ended: {events:?}"
+        );
+        let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
+        let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
+        assert!(text.contains("shown"), "the 204 replaced the document on screen: {text}");
+    }
+
+    #[test]
+    fn a_failed_navigation_is_reported_failed_once() {
+        // #730 follow-up (e): an empty error response failed in the engine
+        // (one Failed) and again in end_uncommitted_nav (a second).
+        let port = serve_empty("HTTP/1.1 500 Internal Server Error");
+        let page = page();
+        let first = page.navigate(Url::parse("data:text/html,<p>shown</p>").unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+    }
+
     /// The newest `Focused` report among the events seen within `budget`.
     fn last_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
         let deadline = Instant::now() + budget;
