@@ -184,3 +184,56 @@ fn container_query_knows_out_of_flow_lengths_and_contained_floats() {
     let heights = offset_heights(OUT_OF_FLOW_PAGE, 800, 600, 5);
     assert_eq!(heights, ["10", "10", "10", "0", "0"]);
 }
+
+/// #782 HOLD 4 (Atlas #848; reviews 5635034145 and 5635107389 at
+/// 1d17810c): inputs where the walk still guessed wider than the laid-out
+/// box. Each row is its own block formatting context (`.r`), so a float in
+/// one row cannot reach the next. Chromium gives 0 to every probe but the
+/// control k1 (a plain 600px container). k2 a block with a definite height
+/// and `aspect-ratio` (100px wide); k3-k15 a container beside a float that
+/// overhangs its definite-height ancestor, or sits in a box starting a
+/// context the walk cannot see: k3 `max-height`, k4 text before the float,
+/// k5-k7 a `width: 100%` container in a `flow-root` / `contain: paint` /
+/// `overflow-y: hidden` box, k8 `max-height` again, k9 `padding-top` on a
+/// wrapper, k10 text in a narrow box, k11 a `::before` block, k12 a
+/// negative `margin-bottom`, k13 a float `min-height`, k14 a border-box
+/// float with padding, k15 `height` on an inline span; k16 and k17 an open
+/// `dialog` (absolute and `fit-content` in Chromium's UA sheet).
+const FLOAT_AND_DIALOG_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .r { overflow: hidden; width: 600px } .w { width: 600px }
+.fl { float: left; width: 300px; height: 50px }
+.d::before { content: ""; display: block; height: 30px }
+@container (min-width: 400px) { .a { height: 10px } }
+</style></head><body>
+<div class="r"><div class="w"><div style="container-type:inline-size"><div id="k1" class="a"></div></div></div></div>
+<div class="r"><div class="w"><div style="height:100px;aspect-ratio:1"><div style="container-type:inline-size"><div id="k2" class="a"></div></div></div></div></div>
+<div class="r"><div class="w" style="height:120px;max-height:10px"><div class="fl"></div></div><div class="w"><div style="container-type:inline-size"><div id="k3" class="a"></div></div></div></div>
+<div class="r"><div class="w"><div style="height:60px;font:10px/20px monospace;white-space:pre">a
+b
+<span style="float:left;width:300px;height:55px"></span></div><div style="container-type:inline-size"><div id="k4" class="a"></div></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="display:flow-root"><div style="container-type:inline-size;width:100%"><div id="k5" class="a"></div></div></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="contain:paint"><div style="container-type:inline-size;width:100%"><div id="k6" class="a"></div></div></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="overflow-y:hidden"><div style="container-type:inline-size;width:100%"><div id="k7" class="a"></div></div></div></div></div>
+<div class="r"><div style="height:100px;max-height:20px"><div class="fl"></div></div><div style="container-type:inline-size"><div id="k8" class="a"></div></div></div>
+<div class="r"><div style="height:60px"><div style="padding-top:30px"><div class="fl"></div></div></div><div style="container-type:inline-size"><div id="k9" class="a"></div></div></div>
+<div class="r"><div style="height:60px;width:300px">text<div class="fl"></div></div><div style="container-type:inline-size"><div id="k10" class="a"></div></div></div>
+<div class="r"><div class="d" style="height:60px"><div class="fl"></div></div><div style="container-type:inline-size"><div id="k11" class="a"></div></div></div>
+<div class="r"><div style="height:60px;margin-bottom:-60px"><div class="fl"></div></div><div style="container-type:inline-size"><div id="k12" class="a"></div></div></div>
+<div class="r"><div style="height:60px"><div class="fl" style="min-height:100px"></div></div><div style="container-type:inline-size"><div id="k13" class="a"></div></div></div>
+<div class="r"><div style="height:60px"><div class="fl" style="box-sizing:border-box;padding:40px 0"></div></div><div style="container-type:inline-size"><div id="k14" class="a"></div></div></div>
+<div class="r"><span style="height:100px"><b class="fl"></b></span><div style="container-type:inline-size"><div id="k15" class="a"></div></div></div>
+<div class="r"><dialog open style="container-type:inline-size;padding:0;margin:0"><div id="k16" class="a"></div></dialog></div>
+<div class="r"><dialog open style="padding:0;margin:0"><div style="container-type:inline-size"><div id="k17" class="a"></div></div></dialog></div>
+</body></html>"#;
+
+#[test]
+fn container_query_is_false_after_any_float_and_for_aspect_ratio_or_dialog() {
+    let heights = offset_heights(FLOAT_AND_DIALOG_PAGE, 800, 600, 17);
+    let fired: Vec<String> = heights
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h != "0")
+        .map(|(i, h)| format!("k{}={h}", i + 1))
+        .collect();
+    assert_eq!(fired, ["k1=10"]);
+}
