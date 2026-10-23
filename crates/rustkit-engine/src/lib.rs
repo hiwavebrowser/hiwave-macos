@@ -2230,7 +2230,37 @@ pub struct Engine {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
+    /// The SVG paint declarations (`fill`, `stroke`, `stop-color`, ...)
+    /// author rules give each element inside an inline `<svg>`, by raw
+    /// NodeId. Filled by `cache_svg_paint_styles` before the build; the
+    /// serializer writes them into the element's `style` so rustkit-svg,
+    /// which sees only the markup, paints with them.
+    svg_paint_styles: HashMap<usize, SvgPaintStyle>,
 }
+
+/// One element's author SVG paint declarations, as `style` text: `normal`
+/// goes before the element's own `style` attribute (which beats it),
+/// `important` after it.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SvgPaintStyle {
+    normal: String,
+    important: String,
+}
+
+/// The properties rustkit-svg paints with that an author sheet may set
+/// (SVG 2 §13 / §14: presentation attributes that are also CSS properties).
+const SVG_PAINT_PROPERTIES: &[&str] = &[
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-width",
+    "stroke-opacity",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stop-color",
+    "stop-opacity",
+];
 
 /// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
 /// between `!` and `important`) off a declaration value. Stylesheet rules get
@@ -2445,6 +2475,7 @@ impl Engine {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         })
@@ -7482,6 +7513,11 @@ impl Engine {
 
         // Inline <svg> subtrees parse into svg_cache before the tree build:
         // the build runs with &self and can only look the documents up.
+        self.cache_svg_paint_styles(
+            &document,
+            id,
+            Some((bounds.width as f32, bounds.height as f32)),
+        );
         self.cache_inline_svgs(&document);
 
         // Get external stylesheets from view state
@@ -9199,7 +9235,7 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
+                    let key = Self::inline_svg_key(&self.inline_svg_markup_styled(node));
                     let cached = self.svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
@@ -13480,7 +13516,17 @@ impl Engine {
     /// emitted verbatim except for `"` — rustkit-svg reads them literally
     /// and does not decode entities.
     fn serialize_svg_subtree(node: &Node) -> String {
-        fn walk(node: &Node, out: &mut String) {
+        Self::serialize_svg_subtree_with(node, &HashMap::new())
+    }
+
+    /// `serialize_svg_subtree`, with each element's author paint
+    /// declarations (`paint`, by raw NodeId) written into its `style`:
+    /// author CSS beats a presentation attribute and loses to the
+    /// element's own `style` unless `!important` (CSS Cascade 4 §6.1,
+    /// SVG 2 §6.8). An element with no entry serializes as before, so a
+    /// page without such rules keeps its cache keys.
+    fn serialize_svg_subtree_with(node: &Node, paint: &HashMap<usize, SvgPaintStyle>) -> String {
+        fn walk(node: &Node, paint: &HashMap<usize, SvgPaintStyle>, out: &mut String) {
             match &node.node_type {
                 NodeType::Element {
                     tag_name,
@@ -13489,6 +13535,18 @@ impl Engine {
                 } => {
                     out.push('<');
                     out.push_str(tag_name);
+                    let styled;
+                    let attributes = match paint.get(&node.id.raw()) {
+                        Some(p) => {
+                            let mut a = attributes.clone();
+                            let own = a.get("style").map(String::as_str).unwrap_or("");
+                            let style = format!("{}{};{}", p.normal, own, p.important);
+                            a.insert("style".to_string(), style);
+                            styled = a;
+                            &styled
+                        }
+                        None => attributes,
+                    };
                     let mut keys: Vec<&String> = attributes.keys().collect();
                     keys.sort();
                     for k in keys {
@@ -13500,7 +13558,7 @@ impl Engine {
                     }
                     out.push('>');
                     for child in node.children() {
-                        walk(&child, out);
+                        walk(&child, paint, out);
                     }
                     out.push_str("</");
                     out.push_str(tag_name);
@@ -13511,8 +13569,110 @@ impl Engine {
             }
         }
         let mut out = String::new();
-        walk(node, &mut out);
+        walk(node, paint, &mut out);
         out
+    }
+
+    /// `inline_svg_markup` with the author paint declarations of
+    /// `svg_paint_styles` written in: what the cache, the box build and the
+    /// shape index all key and parse, so the three agree.
+    fn inline_svg_markup_styled(&self, svg: &Rc<Node>) -> String {
+        Self::inline_svg_markup_with(svg, &self.svg_paint_styles)
+    }
+
+    /// Collect, for every element inside an inline `<svg>`, the SVG paint
+    /// declarations (`SVG_PAINT_PROPERTIES`) of the document's author rules
+    /// that match it, ranked as the cascade ranks them: specificity of the
+    /// matching selector, then order; `!important` apart. `var()` resolves
+    /// against the custom properties declared on the root. Before this, an
+    /// inline svg was painted from its markup alone, so `.icon { fill: red }`
+    /// (Census #8: 86 of 100 sites) painted the initial black.
+    ///
+    /// Not modelled: cascade layers (ranked as unlayered), element-scoped
+    /// custom properties, shadow-tree sheets, `inherit`/`initial` keywords
+    /// (dropped: the parse-time inheritance already gives the parent's
+    /// value).
+    fn cache_svg_paint_styles(&mut self, document: &Document, view: EngineViewId, viewport: Option<(f32, f32)>) {
+        self.svg_paint_styles.clear();
+        let inline = self.inline_sheets(document, Some(view));
+        let external = self.views.get(&view).map(|v| v.external_stylesheets.clone()).unwrap_or_default();
+        let rules: Vec<&rustkit_css::Rule> = inline
+            .iter()
+            .map(|s| &**s)
+            .chain(external.iter())
+            .flat_map(|sheet| sheet.rules.iter())
+            .filter(|rule| rule.media.is_empty() || viewport.is_some_and(|(w, h)| rule.applies_at(w, h)))
+            .collect();
+        let mut root_vars: HashMap<String, String> = HashMap::new();
+        let mut paint_rules: Vec<(usize, &rustkit_css::Rule)> = Vec::new();
+        for (order, rule) in rules.iter().enumerate() {
+            if rule.declarations.iter().any(|d| SVG_PAINT_PROPERTIES.contains(&d.property.as_str())) {
+                paint_rules.push((order, rule));
+            }
+            if selects_the_root(&rule.selector) {
+                for decl in &rule.declarations {
+                    if let (true, rustkit_css::PropertyValue::Specified(v)) =
+                        (decl.property.starts_with("--"), &decl.value)
+                    {
+                        root_vars.insert(decl.property.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        if paint_rules.is_empty() {
+            return;
+        }
+
+        fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
+            f(node);
+            for child in node.children() {
+                walk(&child, f);
+            }
+        }
+        let no_checked = HashMap::new();
+        let mut styles = HashMap::new();
+        for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
+            walk(&svg_el, &mut |n| {
+                if !matches!(n.node_type, NodeType::Element { .. }) || styles.contains_key(&n.id.raw()) {
+                    return;
+                }
+                // (important, specificity, order, property, value)
+                let mut won: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
+                for &(order, rule) in &paint_rules {
+                    let specificity = SelectorMatcher::split_top_level_commas(&rule.selector)
+                        .into_iter()
+                        .filter(|member| SelectorMatcher.node_matches(n, member, &no_checked) == Some(true))
+                        .map(|member| SelectorMatcher.selector_specificity(member))
+                        .max();
+                    let Some(specificity) = specificity else { continue };
+                    for decl in &rule.declarations {
+                        let rustkit_css::PropertyValue::Specified(value) = &decl.value else { continue };
+                        if !SVG_PAINT_PROPERTIES.contains(&decl.property.as_str()) {
+                            continue;
+                        }
+                        let value = self.resolve_css_variables(value, &root_vars);
+                        if value.trim().is_empty() || value.contains(';') {
+                            continue;
+                        }
+                        won.push((decl.important, specificity, order, decl.property.as_str(), value));
+                    }
+                }
+                if won.is_empty() {
+                    return;
+                }
+                won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                let mut style = SvgPaintStyle::default();
+                for (important, _, _, property, value) in won {
+                    let out = if important { &mut style.important } else { &mut style.normal };
+                    out.push_str(property);
+                    out.push(':');
+                    out.push_str(value.trim());
+                    out.push(';');
+                }
+                styles.insert(n.id.raw(), style);
+            });
+        }
+        self.svg_paint_styles = styles;
     }
 
     /// The markup rustkit-svg parses for one inline `<svg>`: its own subtree,
@@ -13523,6 +13683,12 @@ impl Engine {
     /// referenced content is part of the cache key: a sprite sheet inserted
     /// or changed later re-parses the icon.
     fn inline_svg_markup(svg: &Rc<Node>) -> String {
+        Self::inline_svg_markup_with(svg, &HashMap::new())
+    }
+
+    /// `inline_svg_markup`, with author paint declarations written into the
+    /// elements `paint` names (`serialize_svg_subtree_with`).
+    fn inline_svg_markup_with(svg: &Rc<Node>, paint: &HashMap<usize, SvgPaintStyle>) -> String {
         fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
             f(node);
             for child in node.children() {
@@ -13543,7 +13709,7 @@ impl Engine {
             });
         }
 
-        let mut out = Self::serialize_svg_subtree(svg);
+        let mut out = Self::serialize_svg_subtree_with(svg, paint);
         let mut defined = std::collections::HashSet::new();
         let mut wanted = Vec::new();
         references(svg, &mut defined, &mut wanted);
@@ -13579,7 +13745,7 @@ impl Engine {
                 continue;
             }
             if let Some(target) = by_id.get(&id) {
-                out.push_str(&Self::serialize_svg_subtree(target));
+                out.push_str(&Self::serialize_svg_subtree_with(target, paint));
                 let mut nested = Vec::new();
                 references(target, &mut defined, &mut nested);
                 wanted.extend(nested.into_iter().filter(|n| !defined.contains(n)));
@@ -13611,7 +13777,7 @@ impl Engine {
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&mut self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let xml = Self::inline_svg_markup(&svg_el);
+            let xml = self.inline_svg_markup_styled(&svg_el);
             let key = Self::inline_svg_key(&xml);
             if self.svg_cache.contains_key(&key) {
                 continue;
@@ -13637,7 +13803,7 @@ impl Engine {
     fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
         let mut index = HashMap::new();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
+            let key = Self::inline_svg_key(&self.inline_svg_markup_styled(&svg_el));
             if index.contains_key(&key) {
                 continue;
             }
@@ -21578,6 +21744,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         })
@@ -22323,6 +22490,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22397,6 +22565,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22486,6 +22655,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22675,6 +22845,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22772,6 +22943,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22889,6 +23061,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -22970,6 +23143,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23043,6 +23217,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23133,6 +23308,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23237,6 +23413,7 @@ mod tests {
                 event_rx: Some(event_rx),
                 style_trace: std::cell::RefCell::new(None),
                 svg_cache: std::collections::HashMap::new(),
+                svg_paint_styles: HashMap::new(),
                 building_focus: std::cell::Cell::new(None),
                 building_view: std::cell::Cell::new(None),
             };
@@ -23343,6 +23520,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23427,6 +23605,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23513,6 +23692,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23599,6 +23779,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23635,6 +23816,72 @@ mod tests {
         }
         let svg = svg_like(&layout).expect("svg box");
         assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
+    }
+
+    #[test]
+    fn test_author_css_paints_inline_svg_children() {
+        // Census 6e25ea3a #1 (86 sites): `.i{fill:#e00}` on an inline svg
+        // painted black because author CSS never reached SVG children (they
+        // get no boxes). Matched paint declarations now ride into the
+        // serialized markup's style attribute: inherited from the svg,
+        // specificity-ordered, below the element's own style="" and above it
+        // when !important.
+        let html = r##"<!DOCTYPE html><html><head><style>
+            .i { fill: green }
+            .i rect { fill: #e00 }
+            .i .r { fill: green }
+            .imp { fill: green !important }
+            </style></head><body>
+              <svg class="i" width="40" height="10"><path d="M0 0h10v10H0z"/><rect class="r" x="10" width="10" height="10" fill="red"/><rect x="20" width="10" height="10" style="fill:blue"/><rect class="imp" x="30" width="10" height="10" style="fill:red"/></svg>
+            </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+        let compositor = match crate::test_compositor() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+        engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
+        engine.cache_inline_svgs(&document);
+        assert_eq!(engine.svg_cache.len(), 1);
+        let doc = engine.svg_cache.values().next().unwrap();
+        let fills: Vec<(u8, u8, u8)> = doc
+            .render(0.0, 0.0, 40.0, 10.0)
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { color, .. }
+                | rustkit_layout::DisplayCommand::FillPolygon { color, .. } => {
+                    Some((color.r, color.g, color.b))
+                }
+                _ => None,
+            })
+            .collect();
+        let green = (0, 128, 0);
+        assert_eq!(
+            fills,
+            vec![green, green, (0, 0, 255), green],
+            "inherited .i fill, (0,2,0) beats (0,1,1), own style beats author normal, !important beats own style"
+        );
     }
 
     #[test]
@@ -23679,6 +23926,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -23761,6 +24009,7 @@ mod tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
@@ -26328,6 +26577,7 @@ mod web_font_tests {
             event_rx: Some(event_rx),
             style_trace: std::cell::RefCell::new(None),
             svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
             building_focus: std::cell::Cell::new(None),
             building_view: std::cell::Cell::new(None),
         };
