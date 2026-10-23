@@ -20744,19 +20744,11 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element
     }));
 }
 
-/// Computed style of an element that has no layout box: `display: contents`
-/// (hoisted out of the tree) and the root, which is styled but not walked.
-#[derive(Clone)]
-pub(crate) struct BoxlessStyle {
-    pub lines: String,
-    pub display: rustkit_css::Display,
-    pub position: rustkit_css::Position,
-    pub visibility: rustkit_css::Visibility,
-    pub font_size_px: f32,
-}
-
+/// Computed style lines (`computed_style_lines`) of elements that have no
+/// layout box: `display: contents` (hoisted out of the tree) and the root,
+/// which is styled but not walked. Keyed by DOM node.
 thread_local! {
-    static BOXLESS_STYLES: std::cell::RefCell<HashMap<usize, BoxlessStyle>> =
+    static BOXLESS_STYLES: std::cell::RefCell<HashMap<usize, String>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -20770,24 +20762,10 @@ fn note_boxless_style(box_: &LayoutBox) {
     let Some(node) = box_.node_id else {
         return;
     };
-    let font_size_px = match box_.style.font_size {
-        rustkit_css::Length::Px(px) => px,
-        _ => 16.0,
-    };
-    let recorded = BoxlessStyle {
-        lines: computed_style_lines(box_),
-        display: box_.style.display,
-        position: box_.style.position,
-        visibility: box_.style.visibility,
-        font_size_px,
-    };
+    let lines = computed_style_lines(box_);
     BOXLESS_STYLES.with(|slot| {
-        slot.borrow_mut().insert(node, recorded);
+        slot.borrow_mut().insert(node, lines);
     });
-}
-
-pub(crate) fn boxless_style(node: usize) -> Option<BoxlessStyle> {
-    BOXLESS_STYLES.with(|slot| slot.borrow().get(&node).cloned())
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -20877,8 +20855,8 @@ fn geometry_snapshot(
     // Boxless elements (display: contents, the root) have a computed style
     // and no geometry. A node that also produced a box keeps that box's style.
     BOXLESS_STYLES.with(|slot| {
-        for (node, recorded) in slot.borrow().iter() {
-            styles.entry(*node).or_insert_with(|| recorded.lines.clone());
+        for (node, lines) in slot.borrow().iter() {
+            styles.entry(*node).or_insert_with(|| lines.clone());
         }
     });
     (out, styles)

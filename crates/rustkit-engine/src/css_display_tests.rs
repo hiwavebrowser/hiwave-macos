@@ -86,6 +86,36 @@ fn display_contents_computes_to_contents_inside_a_shadow_tree_with_slots() {
     );
 }
 
+/// The census case (68 of the top sites): a light-tree `display: contents`
+/// wrapper in a flex row. Its children are flex items, side by side. With
+/// the wrapper boxed they stacked inside one 100px block item.
+/// Page: `docs/diagnostics/2026-10-20/css_display_contents.html`.
+#[test]
+fn a_contents_wrapper_in_a_flex_row_makes_its_children_flex_items() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"#f{display:flex;position:absolute;left:10px;top:10px;width:200px;height:100px}"#,
+        r#"#w{display:contents}.k{width:100px;height:100px;flex:none}</style>"#,
+        r#"<body><div id="f"><div id="w"><div class="k" id="k1"></div>"#,
+        r#"<div class="k" id="k2"></div></div></div></body>"#,
+    ));
+    let mut js = |s: &str| eval(&mut engine, view, s);
+    assert_eq!(js("getComputedStyle(document.getElementById('w')).display"), "contents");
+    let placed = js(concat!(
+        "var a = document.getElementById('k1').getBoundingClientRect();",
+        "var b = document.getElementById('k2').getBoundingClientRect();",
+        "[a.x, a.y, b.x, b.y].join()",
+    ));
+    let nums = numbers(&placed);
+    assert!(
+        (nums[0] - 10.0).abs() < 0.5
+            && (nums[1] - 10.0).abs() < 0.5
+            && (nums[2] - 110.0).abs() < 0.5
+            && (nums[3] - 10.0).abs() < 0.5,
+        "the contents wrapper's children are not flex items: {placed}"
+    );
+}
+
 fn numbers(text: &str) -> Vec<f64> {
     text.split(',')
         .map(|part| part.trim().parse().unwrap_or(f64::NAN))
