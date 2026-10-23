@@ -12308,6 +12308,10 @@ impl Engine {
                     style.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
+            "filter" | "-webkit-filter" => {
+                let value = value.trim().to_ascii_lowercase();
+                style.filter = if value == "none" { String::new() } else { value };
+            }
             "object-fit" => {
                 // Layout and paint already honour every keyword; only this
                 // arm was missing, so every `object-fit: cover` painted as
@@ -12986,6 +12990,7 @@ impl Engine {
                 style.webkit_box = None;
             }
             "opacity" => style.opacity = 1.0,
+            "filter" | "-webkit-filter" => style.filter.clear(),
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
                 style.object_position = (0.5, 0.5);
@@ -16967,6 +16972,8 @@ impl Engine {
                 Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
                 Cmd::PushOpacity(alpha) => serde_json::json!({ "op": "push_opacity", "opacity": alpha }),
                 Cmd::PopOpacity => serde_json::json!({ "op": "pop_opacity" }),
+                Cmd::PushFilter(matrix) => serde_json::json!({ "op": "push_filter", "color_matrix": matrix }),
+                Cmd::PopFilter => serde_json::json!({ "op": "pop_filter" }),
                 Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
                 Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
                 // Not yet modelled: form controls, carets, focus rings, and
