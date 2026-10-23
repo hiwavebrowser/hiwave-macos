@@ -1115,6 +1115,60 @@ mod tests {
         assert!(!config.user_agent.contains("Chrome"), "never Chrome's UA");
         assert!(config.cookies_enabled);
     }
+
+    /// #707: wrong gate either leaks cookies cross-origin or drops them on
+    /// navigations / same-origin challenge hops.
+    #[test]
+    fn sends_cookies_follows_credentials_mode_and_origin() {
+        let page = Url::parse("https://news.example/story").unwrap();
+        let same = Url::parse("https://news.example/api").unwrap();
+        let cross = Url::parse("https://tracker.example/pixel").unwrap();
+
+        let mut omit = Request::get(same.clone());
+        omit.credentials = CredentialsMode::Omit;
+        omit.destination = RequestDestination::Document;
+        omit.referrer = Some(page.clone());
+        assert!(!sends_cookies(&omit), "Omit never sends, even for a navigation");
+
+        let mut include = Request::get(cross.clone());
+        include.credentials = CredentialsMode::Include;
+        include.destination = RequestDestination::Image;
+        include.referrer = Some(page.clone());
+        assert!(sends_cookies(&include), "Include always sends");
+
+        let mut nav = Request::get(cross.clone());
+        nav.credentials = CredentialsMode::SameOrigin;
+        nav.destination = RequestDestination::Document;
+        nav.referrer = Some(page.clone());
+        assert!(
+            sends_cookies(&nav),
+            "a Document navigation sends cookies even when the next hop is cross-origin"
+        );
+
+        let mut same_origin = Request::get(same.clone());
+        same_origin.credentials = CredentialsMode::SameOrigin;
+        same_origin.destination = RequestDestination::Script;
+        same_origin.referrer = Some(page.clone());
+        assert!(sends_cookies(&same_origin), "SameOrigin + matching referrer");
+
+        let mut cross_sub = Request::get(cross);
+        cross_sub.credentials = CredentialsMode::SameOrigin;
+        cross_sub.destination = RequestDestination::Script;
+        cross_sub.referrer = Some(page);
+        assert!(
+            !sends_cookies(&cross_sub),
+            "SameOrigin must not leak cookies to a foreign origin"
+        );
+
+        let mut no_referrer = Request::get(same);
+        no_referrer.credentials = CredentialsMode::SameOrigin;
+        no_referrer.destination = RequestDestination::Other;
+        no_referrer.referrer = None;
+        assert!(
+            sends_cookies(&no_referrer),
+            "no document referrer is treated as the request's own origin"
+        );
+    }
 }
 
 /// Largest `data:` payload the loader will decode (bytes, after decoding).

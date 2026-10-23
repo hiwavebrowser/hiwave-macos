@@ -3770,6 +3770,46 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
     }
 
+    /// #655 FormValue path: `.value` / `.checked` writes must tally as
+    /// `form_value` with the control's label, or W7-C mis-attributes Input
+    /// vs script_mutation. Reads must not increment the tally.
+    #[test]
+    fn form_value_writes_are_tallied_with_the_control_label() {
+        let (b, _doc) = bound(FORM);
+        assert!(b.take_script_mutations().is_empty());
+        b.evaluate("var _ = document.getElementById('i').value;")
+            .unwrap();
+        assert!(
+            b.take_script_mutations().is_empty(),
+            "a value read is not a FormValue write"
+        );
+
+        b.evaluate("document.getElementById('i').value = 'typed';")
+            .unwrap();
+        let tally = b.take_script_mutations();
+        assert_eq!(
+            tally.first,
+            Some((MutationKind::FormValue, "input#i".to_string()))
+        );
+        assert_eq!(tally.count(MutationKind::FormValue), 1);
+        assert_eq!(tally.total(), 1);
+        assert_eq!(b.take_dirty(), DomDirty::Layout);
+
+        b.evaluate(
+            "document.getElementById('c').checked = true; \
+             document.getElementById('t').value = 'more';",
+        )
+        .unwrap();
+        let tally = b.take_script_mutations();
+        assert_eq!(
+            tally.first,
+            Some((MutationKind::FormValue, "input#c".to_string()))
+        );
+        assert_eq!(tally.count(MutationKind::FormValue), 2);
+        assert_eq!(tally.total(), 2);
+        assert!(b.take_script_mutations().is_empty(), "taking resets it");
+    }
+
     #[test]
     fn first_write_names_a_node_without_an_id_by_tag() {
         let (b, _doc) = bound(PAGE);
@@ -3896,5 +3936,28 @@ mod tests {
         assert!(log.full && log.records.is_empty());
         assert!(!log.is_empty());
         assert!(b.take_mutation_log().is_empty());
+    }
+
+    /// Exact `LABEL_PART_MAX` (48) keeps the id; one more character adds `…`.
+    #[test]
+    fn label_part_boundary_keeps_exactly_forty_eight_chars() {
+        let (b, _doc) = bound(PAGE);
+        let id48 = "a".repeat(48);
+        b.evaluate(&format!(
+            "var m = document.getElementById('main'); m.id = '{id48}';"
+        ))
+        .unwrap();
+        b.take_script_mutations();
+        b.evaluate("m.setAttribute('data-n', '1');").unwrap();
+        let (_, label) = b.take_script_mutations().first.expect("a write");
+        assert_eq!(label, format!("div#{id48}"));
+        assert!(!label.ends_with('…'), "{label:?}");
+
+        let id49 = "b".repeat(49);
+        b.evaluate(&format!("m.id = '{id49}';")).unwrap();
+        b.take_script_mutations();
+        b.evaluate("m.setAttribute('data-n', '2');").unwrap();
+        let (_, label) = b.take_script_mutations().first.expect("a write");
+        assert_eq!(label, format!("div#{}…", "b".repeat(48)));
     }
 }

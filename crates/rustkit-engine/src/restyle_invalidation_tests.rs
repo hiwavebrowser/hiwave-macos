@@ -339,6 +339,24 @@ fn writes_the_index_cannot_place_are_full() {
     assert_eq!(set.full, Some("sheet"));
 }
 
+/// `:has()` now matches, so the anchor's style really changes when a child
+/// is added under it or removed from it: the set (full, for a child-list
+/// write once a `:has()` rule exists, or for writing a class `:has()`
+/// names) must cover it, both ways.
+#[test]
+fn a_child_list_write_under_a_has_anchor_is_full() {
+    let has = PAGE.replace(".on{color:red}", ".on{color:red} .card:has(.hot){color:red}");
+    let add = "var e = document.createElement('b'); e.className = 'hot'; e.id = 'hot'; \
+               document.getElementById('p1').appendChild(e);";
+    let (set, _) = check(&has, add);
+    assert!(set.full.is_some(), "{set:?}");
+    let (set, _) = check_after(&has, add, "document.getElementById('hot').remove();");
+    assert_eq!(set.full, Some("has"));
+    // Without a `:has()` rule the same write stays a subtree restyle.
+    let (set, _) = check(PAGE, add);
+    assert_eq!(set.full, None);
+}
+
 #[test]
 fn many_writes_in_one_flush() {
     check(

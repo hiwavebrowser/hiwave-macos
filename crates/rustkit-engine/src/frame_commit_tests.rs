@@ -157,3 +157,35 @@ fn a_destroyed_view_drops_its_commit() {
     assert!(engine.latest_commit(view).is_none());
     assert_eq!(Arc::strong_count(&page_list), 1, "only this test");
 }
+
+/// #704: a re-present with the page side intact and no scroll / generation
+/// change keeps the held commit (surface size / max-age refresh path).
+#[test]
+fn a_noop_represent_keeps_the_held_commit() {
+    let (mut engine, view, _server, _rt) = load();
+    let list = Arc::clone(
+        engine
+            .latest_commit(view)
+            .expect("load commit")
+            .list
+            .as_ref()
+            .expect("list"),
+    );
+    let generation = engine.latest_commit(view).unwrap().generation;
+    let scroll_offset = engine.latest_commit(view).unwrap().scroll_offset;
+    let frames_before = engine.views[&view].frames_presented;
+
+    engine.render_view(view).expect("re-present");
+    let after = engine.latest_commit(view).expect("still committed");
+    assert_eq!(after.generation, generation, "no new frame");
+    assert_eq!(after.scroll_offset, scroll_offset);
+    assert!(
+        Arc::ptr_eq(after.list.as_ref().expect("list"), &list),
+        "same commit list, not a replacement"
+    );
+    assert_eq!(
+        engine.views[&view].frames_presented,
+        frames_before + 1,
+        "drawn again from the held commit"
+    );
+}
