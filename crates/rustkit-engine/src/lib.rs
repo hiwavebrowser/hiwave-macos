@@ -41685,3 +41685,107 @@ mod sheet_cache_tests {
         assert_eq!(held(&e), ["p { color: blue }"]);
     }
 }
+
+// `clip-path` basic shapes (CSS Masking 1 §5.1) were parsed by nothing and
+// painted by nothing: every clipped box painted whole. Reduced page:
+// docs/diagnostics/2026-10-23/css_clip_path.html.
+#[cfg(test)]
+mod clip_path_pins {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    fn dl(e: &Engine, html: &str) -> Vec<String> {
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 800.0, 600.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    /// Open clips at each command: +1 at a push, -1 at a pop.
+    fn depth_at(lines: &[String], at: usize) -> i32 {
+        lines[..at].iter().fold(0, |d, c| {
+            if c.starts_with("PushClip") {
+                d + 1
+            } else if c.starts_with("PopClip") {
+                d - 1
+            } else {
+                d
+            }
+        })
+    }
+
+    #[test]
+    fn clip_path_basic_shapes_clip_the_box_and_its_descendants() {
+        let e = engine();
+        // A 140px border box at the origin: 20px red border, green content.
+        let page = |style: &str, inner: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 5] = [
+            ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
+            ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
+            ("-webkit-clip-path:inset(20px round 10px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 10.0, v: 10.0 }")),
+            // closest-side from (90, 90) in the content box is 30px.
+            ("clip-path:circle(closest-side at 70px 70px) content-box", "PushClipRounded", "x: 60.0, y: 60.0, width: 60.0, height: 60.0", Some("CornerRadius { h: 30.0, v: 30.0 }")),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style, "");
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            // The box's own background and border paint inside the clip.
+            let painted: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.starts_with("PushClip") && !c.starts_with("PopClip"))
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!painted.is_empty(), "{all}");
+            for i in painted {
+                assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{}` unclipped:\n{all}", lines[i]);
+            }
+        }
+
+        // An absolutely positioned child is clipped too.
+        let lines = page(
+            "-webkit-clip-path:inset(20px round 10px);position:relative",
+            r#"<i style="position:absolute;left:-20px;top:-20px;width:140px;height:20px;background:red"></i>"#,
+        );
+        let all = lines.join("\n");
+        let child = lines
+            .iter()
+            .position(|c| c.contains("width: 140.0, height: 20.0"))
+            .unwrap_or_else(|| panic!("no child paint:\n{all}"));
+        assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
+
+        // `none`, and shapes that are not a rounded rect, paint as before.
+        for style in ["clip-path:none", "clip-path:polygon(0 0, 100% 0, 0 100%)", ""] {
+            let lines = page(style, "");
+            assert!(
+                !lines.iter().any(|c| c.starts_with("PushClip")),
+                "`{style}`:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+}
