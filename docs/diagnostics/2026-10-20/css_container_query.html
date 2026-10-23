@@ -1,0 +1,11 @@
+<!doctype html><!-- @container size queries, named and unnamed (youtube). Containers are 300px wide (inline-size).
+ PASS: three 100x100 boxes green at pixels (60,60) (170,60) (280,60). FAIL: any red. -->
+<html><head><style>
+body { margin: 0; } .c { position: absolute; top: 10px; width: 300px; height: 100px; container-type: inline-size; }
+.k { width: 100px; height: 100px; }
+#c1 { left: 10px; container-name: card; } #k1 { background: red; } @container card (width >= 200px) { #k1 { background: green; } }
+#c2 { left: 120px; } #k2 { background: red; } @container (min-width: 250px) { #k2 { background: green; } }
+#c3 { left: 230px; } #k3 { background: green; } @container (min-width: 400px) { #k3 { background: red; } }
+</style></head><body>
+<div class="c" id="c1"><div class="k" id="k1"></div></div><div class="c" id="c2"><div class="k" id="k2"></div></div><div class="c" id="c3"><div class="k" id="k3"></div></div>
+</body></html>
