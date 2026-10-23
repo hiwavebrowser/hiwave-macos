@@ -359,6 +359,8 @@ mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
+mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
