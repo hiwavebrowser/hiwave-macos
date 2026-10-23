@@ -17035,6 +17035,12 @@ fn parse_background_shorthand_layer(
         let digits = lower.strip_prefix(['-', '+']).unwrap_or(lower);
         digits.starts_with(|c: char| c.is_ascii_digit() || c == '.')
     };
+    // A math function: a position or size value, resolved or not.
+    let math = |lower: &str| {
+        ["calc(", "min(", "max(", "clamp("]
+            .iter()
+            .any(|f| lower.starts_with(f))
+    };
 
     let mut layer = rustkit_css::BackgroundLayer::default();
     let mut color = None;
@@ -17063,9 +17069,10 @@ fn parse_background_shorthand_layer(
                 size.push(token);
                 continue;
             }
-            // A `calc()` size is not resolved yet: it holds its place as
-            // `auto` rather than being read as a position.
-            if lower.starts_with("calc(") && size.len() < 2 {
+            // A `calc()` (or `min()`/`max()`/`clamp()`) size is not
+            // resolved yet: it holds its place as `auto` rather than being
+            // read as a position.
+            if math(&lower) && size.len() < 2 {
                 size.push("auto");
                 continue;
             }
@@ -17088,6 +17095,12 @@ fn parse_background_shorthand_layer(
                 };
                 boxes += 1;
             }
+            // backgrounds-4 `text` is a clip box only; it never sets the
+            // origin.
+            "text" => {
+                layer.clip = rustkit_css::BackgroundClip::Text;
+                boxes += 1;
+            }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
                 let url = token[4..token.len() - 1]
@@ -17095,7 +17108,7 @@ fn parse_background_shorthand_layer(
                     .trim_matches(|c| c == '"' || c == '\'');
                 layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
             }
-            _ if numeric(&lower) || lower.starts_with("calc(") => position.push(token),
+            _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {
                 if let Some(gradient) = parse_gradient(token) {
                     layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
@@ -29465,6 +29478,32 @@ mod cascade_wire_tests {
         // Every prefix keyword the grammar allows still parses.
         e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
         assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
+    }
+
+    // The `text` box (backgrounds-4) and min()/max()/clamp() positions and
+    // sizes are valid: the layer applies instead of being dropped.
+    #[test]
+    fn a_background_shorthand_keeps_text_clip_and_math_positions() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
+        assert_eq!(s.background_layers.len(), 1, "text clip");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        for value in [
+            "url(a.png) min(10px, 5%) 0 no-repeat",
+            "url(a.png) max(10px, 5%) center no-repeat",
+            "url(a.png) clamp(0px, 10%, 20px) 50% no-repeat",
+            "url(a.png) center / min(100px, 50%) no-repeat",
+            "url(a.png) center / clamp(10px, 50%, 100px) auto",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the layer applies");
+        }
     }
 
     // An angle is only valid right after `oblique`, in any angle unit.
