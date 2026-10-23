@@ -382,6 +382,8 @@ mod scroll_after_yielded_load_tests;
 mod feed_reveal_trigger_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
+#[cfg(test)]
+mod css_has_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1894,8 +1896,12 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
             _ => return None,
         })
     };
+    // A bare number is a weight (`font: 300 30px serif`), never a size:
+    // font-size takes no unitless value but `0`.
     let is_length = |t: &str| {
-        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+            && (t == "0" || t.parse::<f32>().is_err())
+            && parse_length(t).is_some()
     };
     let idx = tokens.iter().position(|t| {
         let (size, _) = t.split_once('/').unwrap_or((t, ""));
@@ -1922,6 +1928,42 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
     }
     let family = tokens.get(rest..)?.join(" ");
     if family.is_empty() {
+        return None;
+    }
+    // Every token before the size is a style, variant, weight or stretch
+    // keyword; anything else makes the shorthand invalid, so it is dropped
+    // rather than resetting style, weight and line-height.
+    // An angle is only an `oblique <angle>` argument, in any angle unit.
+    let is_angle = |t: &str| {
+        ["deg", "grad", "rad", "turn"]
+            .iter()
+            .find_map(|unit| t.strip_suffix(unit))
+            .is_some_and(|n| n.parse::<f32>().is_ok())
+    };
+    let prefix_ok = tokens[..idx].iter().enumerate().all(|(i, t)| {
+        let t = t.to_ascii_lowercase();
+        let after_oblique = i > 0 && tokens[i - 1].eq_ignore_ascii_case("oblique");
+        matches!(
+            t.as_str(),
+            "normal"
+                | "italic"
+                | "oblique"
+                | "small-caps"
+                | "bold"
+                | "bolder"
+                | "lighter"
+                | "ultra-condensed"
+                | "extra-condensed"
+                | "condensed"
+                | "semi-condensed"
+                | "semi-expanded"
+                | "expanded"
+                | "extra-expanded"
+                | "ultra-expanded"
+        ) || t.parse::<f32>().is_ok_and(|w| (1.0..=1000.0).contains(&w))
+            || (after_oblique && is_angle(&t))
+    });
+    if !prefix_ok {
         return None;
     }
     Some(FontShorthand {
@@ -8363,6 +8405,8 @@ impl Engine {
             true => StyleShareMode::Off,
             false => style_share_mode(),
         });
+        // `:has()` answers for this build's DOM.
+        let _has_memo = HasMemoScope::install();
 
         let walk_started = mark();
 
@@ -8399,6 +8443,7 @@ impl Engine {
                 ..
             } = &html.node_type
             {
+                let _relational = RelationalNodeScope::enter(Some(html.clone()));
                 Some(memoized_style(html.id, || {
                     self.compute_style_for_element(
                         tag_name,
@@ -8925,6 +8970,8 @@ impl Engine {
                 // elements under the pointer are styled as hovered.
                 let live = self.live_attributes(node.id.raw(), &tag_lower, attributes);
                 let attributes = &*live;
+                // `:has()` reads this element's subtree and siblings.
+                let _relational = RelationalNodeScope::enter(Some(node.clone()));
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
@@ -11450,6 +11497,44 @@ impl Engine {
                     return;
                 }
 
+                // Parse every layer before touching the style: a value
+                // that does not parse is dropped whole (css-syntax-3 §8),
+                // so `background: red; background: junk(1)` stays red. It
+                // used to clear the layers and the colour first, then skip
+                // the token it could not read.
+                let shorthand = property == "background";
+                let mut color = None;
+                let mut layers = Vec::new();
+                // Process layers in reverse order so index 0 is bottommost
+                for layer_str in layer_strs.iter().rev() {
+                    let layer_str = layer_str.trim();
+                    if layer_str.is_empty() {
+                        continue;
+                    }
+
+                    // Check for color (goes to background_color, not layers)
+                    if let Some(c) = parse_color(layer_str) {
+                        color = Some(c);
+                        continue;
+                    }
+                    // The shorthand's layer names its image, position, size,
+                    // repeat and boxes in any order, and a colour beside
+                    // them (`#fff url(a.png) no-repeat center / cover`).
+                    // `background-image` is the image alone.
+                    let layer = if shorthand {
+                        let Some((c, layer)) = parse_background_shorthand_layer(layer_str) else {
+                            return;
+                        };
+                        if c.is_some() {
+                            color = c;
+                        }
+                        layer
+                    } else {
+                        parse_background_layer(layer_str)
+                    };
+                    layers.extend(layer);
+                }
+
                 // Clear existing layers when setting new background
                 style.background_layers.clear();
                 // The legacy gradient goes with them: paint falls back to
@@ -11461,44 +11546,17 @@ impl Engine {
                 // ever SET a colour, so `background: none`, `0 0`, `unset`,
                 // `initial` or an image alone over an earlier colour left
                 // that colour painted.
-                let shorthand = property == "background";
-                if shorthand && !value.trim().eq_ignore_ascii_case("inherit") {
-                    style.background_color = rustkit_css::Color::TRANSPARENT;
+                if shorthand {
+                    style.background_color = color.unwrap_or(rustkit_css::Color::TRANSPARENT);
+                } else if let Some(color) = color {
+                    style.background_color = color;
                 }
-
-                // Process layers in reverse order so index 0 is bottommost
-                for layer_str in layer_strs.iter().rev() {
-                    let layer_str = layer_str.trim();
-                    if layer_str.is_empty() {
-                        continue;
+                for layer in layers {
+                    // Also set legacy field for backwards compatibility
+                    if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
+                        style.background_gradient = Some(gradient.clone());
                     }
-
-                    // Check for color (goes to background_color, not layers)
-                    if let Some(color) = parse_color(layer_str) {
-                        style.background_color = color;
-                        continue;
-                    }
-                    // The shorthand's layer names its image, position, size,
-                    // repeat and boxes in any order, and a colour beside
-                    // them (`#fff url(a.png) no-repeat center / cover`).
-                    // `background-image` is the image alone.
-                    let layer = if shorthand {
-                        let (color, layer) = parse_background_shorthand_layer(layer_str);
-                        if let Some(color) = color {
-                            style.background_color = color;
-                        }
-                        layer
-                    } else {
-                        parse_background_layer(layer_str)
-                    };
-
-                    if let Some(layer) = layer {
-                        style.background_layers.push(layer.clone());
-                        // Also set legacy field for backwards compatibility
-                        if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
-                            style.background_gradient = Some(gradient.clone());
-                        }
-                    }
+                    style.background_layers.push(layer);
                 }
             }
             // `mask-*` and the `-webkit-mask-*` aliases (css-masking-1 §6).
@@ -11877,7 +11935,33 @@ impl Engine {
                 // to content — and CSS allows `flex: <grow> <basis>`, so a
                 // second value that does NOT parse as a bare number is the
                 // basis, not a shrink of 200.
-                let parts: Vec<&str> = value.split_whitespace().collect();
+                // Split outside parentheses: `calc(50% - 10px)` is one basis,
+                // not three junk tokens.
+                let parts: Vec<&str> = split_top_level_whitespace(value);
+                // Validate before setting anything: `flex: 1 junk` is
+                // invalid and dropped whole (css-syntax-3 §8). It set the
+                // grow and reset the basis to auto from the junk.
+                let numbers = parts.iter().filter(|p| p.parse::<f32>().is_ok()).count();
+                let bases = parts
+                    .iter()
+                    .filter(|p| p.parse::<f32>().is_err())
+                    .filter(|p| is_flex_basis_value(p))
+                    .count();
+                // At most two numbers (grow, shrink). A third is a basis
+                // only when it is a unitless `0` (`flex: 1 1 0`); `1 2 3`
+                // is invalid.
+                let (numbers, bases) = if numbers == 3 && parts[2].parse::<f32>() == Ok(0.0) {
+                    (2, bases + 1)
+                } else {
+                    (numbers, bases)
+                };
+                if numbers > 2 {
+                    return;
+                }
+                if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
+                {
+                    return;
+                }
                 if let Some(first) = parts.first() {
                     if let Ok(grow) = first.parse::<f32>() {
                         style.flex_grow = grow;
@@ -15025,6 +15109,7 @@ impl SelectorMatcher {
         };
         let live_own = live(node.id.raw(), attributes);
         let attributes = live_own.as_ref().unwrap_or(attributes);
+        let _relational = RelationalNodeScope::enter(Some(node.clone()));
         // A selector that reads neither the ancestors nor the siblings (`.a`,
         // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
         // neither: building them walked every ancestor and every sibling of
@@ -15197,6 +15282,22 @@ impl SelectorMatcher {
         // Handle combinators by walking backwards through tokens
         // Track current position in ancestor chain
         let mut ancestor_idx = 0;
+        // A compound with `:has()` is decided against the DOM element its
+        // chain entry stands for, found from the subject's (still the one
+        // in `RELATIONAL_NODE`: each scope below ends with its test).
+        let subject_node = || RELATIONAL_NODE.with(|n| n.borrow().clone());
+        let at_ancestor = |compound: &AncestorCompound, idx: usize, anc: &AncestorKey| {
+            let _relational = compound.relational.then(|| {
+                RelationalNodeScope::enter(subject_node().and_then(|n| chain_ancestor_node(&n, idx, anc)))
+            });
+            compound.matches_ancestor(anc)
+        };
+        let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
+            let _relational = compound.relational.then(|| {
+                RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
+            });
+            compound.matches_sibling(prev)
+        };
 
         for i in (0..tokens.len() - 1).rev() {
             let combinator = &tokens[i].1;
@@ -15208,7 +15309,7 @@ impl SelectorMatcher {
                     let mut found = false;
                     let mut found_idx = ancestor_idx;
                     for (idx, anc) in ancestors.iter().enumerate().skip(ancestor_idx) {
-                        if compound.matches_ancestor(anc) {
+                        if at_ancestor(compound, idx, anc) {
                             found = true;
                             found_idx = idx + 1; // Next position after this ancestor
                             break;
@@ -15222,7 +15323,7 @@ impl SelectorMatcher {
                 ">" => {
                     // Child combinator: immediate parent (at current position) must match
                     if let Some(parent) = ancestors.get(ancestor_idx) {
-                        if !compound.matches_ancestor(parent) {
+                        if !at_ancestor(compound, ancestor_idx, parent) {
                             return false;
                         }
                         ancestor_idx += 1; // Move to next ancestor
@@ -15233,13 +15334,14 @@ impl SelectorMatcher {
                 "+" => {
                     // Adjacent sibling combinator: immediate previous sibling must match
                     // Note: sibling combinators only apply at the element level, not up the tree
-                    if !siblings_before.last().is_some_and(|prev| compound.matches_sibling(prev)) {
+                    let last = siblings_before.len().wrapping_sub(1);
+                    if !siblings_before.last().is_some_and(|prev| at_sibling(compound, last, prev)) {
                         return false;
                     }
                 }
                 "~" => {
                     // General sibling combinator: any previous sibling must match
-                    if !siblings_before.iter().any(|prev| compound.matches_sibling(prev)) {
+                    if !siblings_before.iter().enumerate().any(|(idx, prev)| at_sibling(compound, idx, prev)) {
                         return false;
                     }
                 }
@@ -15779,6 +15881,8 @@ impl SelectorMatcher {
         // where unknown names are ignored rather than fatal.
         let mut forgiving_depth = 0usize;
         let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
+        // Parallel to `paren_depth`: true = this paren is a `:has(`.
+        let mut has_parens: Vec<bool> = Vec::new();
         while i < chars.len() {
             let c = chars[i];
             if let Some(q) = quote {
@@ -15792,8 +15896,12 @@ impl SelectorMatcher {
                 '"' | '\'' => quote = Some(c),
                 '[' => in_brackets = true,
                 ']' => in_brackets = false,
-                '(' => paren_depth.push(false),
+                '(' => {
+                    paren_depth.push(false);
+                    has_parens.push(false);
+                }
                 ')' => {
+                    has_parens.pop();
                     if paren_depth.pop() == Some(true) {
                         forgiving_depth -= 1;
                     }
@@ -15832,7 +15940,17 @@ impl SelectorMatcher {
                         if forgiving {
                             forgiving_depth += 1;
                         }
+                        // Selectors 4 §4.5: `:has()` takes a non-empty
+                        // relative selector list and does not nest.
+                        let has = name_l == "has";
+                        if has && forgiving_depth == 0 {
+                            let empty = chars[end + 1..].iter().find(|c| !c.is_whitespace()) == Some(&')');
+                            if empty || has_parens.contains(&true) {
+                                return false;
+                            }
+                        }
                         paren_depth.push(forgiving);
+                        has_parens.push(has);
                         i = end + 1;
                         continue;
                     }
@@ -15970,9 +16088,10 @@ impl SelectorMatcher {
             "is" | "where" | "matches" | "-webkit-any" => arg.is_some_and(|a| {
                 SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
-            // Relational: needs the subtree; under-match rather than style
-            // every element. Ledgered.
-            "has" => false,
+            // Relational: searched from the element the compound is for
+            // (`RELATIONAL_NODE`), in its subtree or among its later
+            // siblings.
+            "has" => arg.is_some_and(relational_has),
             // User-action and target pseudo-classes: nothing is hovered,
             // focused, or targeted in the first static frame. `focus-within`
             // and `focus-visible` used to fall to the catch-all below and
@@ -16285,8 +16404,8 @@ impl SelectorMatcher {
 
                             if i < chars.len() && chars[i] == '(' {
                                 // Functional pseudo-class
-                                if name == "not" || name == "is" {
-                                    // :not() and :is() - add specificity of argument
+                                if name == "not" || name == "is" || name == "has" {
+                                    // :not(), :is() and :has() - add specificity of argument
                                     i += 1; // Skip (
                                     let mut paren_depth = 1;
                                     let arg_start = i;
@@ -18588,11 +18707,14 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
 /// order, and a colour beside them. Returns the colour the layer names and
 /// the layer itself when it has an image.
 ///
-/// A token that is none of these (`image-set()`, a `calc()` length) is
-/// skipped rather than failing the declaration.
+/// `None` when a token is none of these: the declaration is invalid and
+/// must be dropped whole, not applied as a reset. An image function Chrome
+/// paints but RustKit does not yet (`image-set()`, `cross-fade()`) is
+/// skipped rather than failing it.
+#[allow(clippy::type_complexity)]
 fn parse_background_shorthand_layer(
     value: &str,
-) -> (Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>) {
+) -> Option<(Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>)> {
     // `center/cover` is one whitespace token: give the slash its own.
     let mut spaced = String::with_capacity(value.len() + 2);
     let mut depth = 0usize;
@@ -18612,6 +18734,12 @@ fn parse_background_shorthand_layer(
     let numeric = |lower: &str| {
         let digits = lower.strip_prefix(['-', '+']).unwrap_or(lower);
         digits.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+    };
+    // A math function: a position or size value, resolved or not.
+    let math = |lower: &str| {
+        ["calc(", "min(", "max(", "clamp("]
+            .iter()
+            .any(|f| lower.starts_with(f))
     };
 
     let mut layer = rustkit_css::BackgroundLayer::default();
@@ -18641,9 +18769,10 @@ fn parse_background_shorthand_layer(
                 size.push(token);
                 continue;
             }
-            // A `calc()` size is not resolved yet: it holds its place as
-            // `auto` rather than being read as a position.
-            if lower.starts_with("calc(") && size.len() < 2 {
+            // A `calc()` (or `min()`/`max()`/`clamp()`) size is not
+            // resolved yet: it holds its place as `auto` rather than being
+            // read as a position.
+            if math(&lower) && size.len() < 2 {
                 size.push("auto");
                 continue;
             }
@@ -18666,6 +18795,12 @@ fn parse_background_shorthand_layer(
                 };
                 boxes += 1;
             }
+            // backgrounds-4 `text` is a clip box only; it never sets the
+            // origin.
+            "text" => {
+                layer.clip = rustkit_css::BackgroundClip::Text;
+                boxes += 1;
+            }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
                 let url = token[4..token.len() - 1]
@@ -18673,12 +18808,31 @@ fn parse_background_shorthand_layer(
                     .trim_matches(|c| c == '"' || c == '\'');
                 layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
             }
-            _ if numeric(&lower) || lower.starts_with("calc(") => position.push(token),
+            _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {
                 if let Some(gradient) = parse_gradient(token) {
                     layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
                 } else if let Some(c) = parse_color(token) {
                     color = Some(c);
+                } else if is_unresolved_color(token) {
+                    // A valid colour RustKit cannot resolve yet: the rest
+                    // of the layer (its image above all) still applies.
+                } else {
+                    const UNPAINTED: [&str; 10] = [
+                        "image-set(",
+                        "-webkit-image-set(",
+                        "cross-fade(",
+                        "-webkit-cross-fade(",
+                        "-webkit-gradient(",
+                        "element(",
+                        "paint(",
+                        "var(",
+                        "env(",
+                        "attr(",
+                    ];
+                    if !UNPAINTED.iter().any(|f| lower.starts_with(f)) {
+                        return None;
+                    }
                 }
             }
         }
@@ -18702,7 +18856,7 @@ fn parse_background_shorthand_layer(
     }
 
     let has_image = !matches!(layer.image, rustkit_css::BackgroundImage::None);
-    (color, has_image.then_some(layer))
+    Some((color, has_image.then_some(layer)))
 }
 
 /// Parse a position value (percentage, keyword, or length).
@@ -18937,7 +19091,9 @@ fn parse_border_shorthand(
     let mut saw_style = false;
     let mut color_parts: Vec<&str> = Vec::new();
 
-    for token in value.split_whitespace() {
+    // Split outside parentheses: `rgb(0 0 0 / 10%)` is one colour token,
+    // and its `0`s must not be read as a width.
+    for token in split_top_level_whitespace(value) {
         let lower = token.to_ascii_lowercase();
         if STYLE_KEYWORDS.contains(&lower.as_str()) {
             saw_style = true;
@@ -18964,12 +19120,42 @@ fn parse_border_shorthand(
     if style_none {
         resolved_width = rustkit_css::Length::Zero;
     }
-    let color = if color_parts.is_empty() {
-        None
-    } else {
-        parse_color(&color_parts.join(" "))
+    // A token that is neither width, style nor colour makes the whole
+    // declaration invalid: it is dropped, not applied as `medium none`.
+    // A colour RustKit cannot resolve yet (`currentcolor`, `oklch()`) is
+    // valid: width and style apply and the colour is left as it was.
+    let color = match color_parts.as_slice() {
+        [] => None,
+        [one] if is_unresolved_color(one) && parse_color(one).is_none() => None,
+        _ => Some(parse_color(&color_parts.join(" "))?),
     };
     Some((resolved_width, color))
+}
+
+/// A colour CSS accepts that `parse_color` cannot resolve yet: the
+/// `currentcolor` keyword or any colour function (space-syntax or percent
+/// `rgb()`/`hsl()`, `oklch()`, `color-mix()`, ...). A shorthand naming one
+/// is valid, so it must be kept with the colour left unpainted, not dropped
+/// whole as if the token were junk.
+fn is_unresolved_color(token: &str) -> bool {
+    const COLOR_FUNCTIONS: [&str; 13] = [
+        "rgb(",
+        "rgba(",
+        "hsl(",
+        "hsla(",
+        "hwb(",
+        "lab(",
+        "lch(",
+        "oklab(",
+        "oklch(",
+        "color(",
+        "color-mix(",
+        "light-dark(",
+        "contrast-color(",
+    ];
+    let lower = token.trim().to_ascii_lowercase();
+    lower == "currentcolor"
+        || (lower.ends_with(')') && COLOR_FUNCTIONS.iter().any(|f| lower.starts_with(f)))
 }
 
 fn parse_shorthand_4(
@@ -19338,6 +19524,22 @@ fn place_pair(value: &str) -> (&str, &str) {
 
 /// Parse a CSS timing function.
 /// `flex-basis` value: `auto`, `content`, a length, or a percentage.
+/// Whether a `flex` shorthand token is a valid `flex-basis`: `auto`, a
+/// `*-content` keyword, a length, or a math / `fit-content()` function.
+/// The ones `parse_flex_basis` cannot resolve yet still make the
+/// declaration valid, so its grow and shrink apply.
+fn is_flex_basis_value(token: &str) -> bool {
+    let lower = token.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "auto" | "content" | "min-content" | "max-content" | "fit-content"
+    ) || (lower.ends_with(')')
+        && ["calc(", "min(", "max(", "clamp(", "fit-content("]
+            .iter()
+            .any(|f| lower.starts_with(f)))
+        || parse_length(token).is_some()
+}
+
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     let v = value.trim();
     if v.eq_ignore_ascii_case("auto") {
@@ -20168,6 +20370,65 @@ pub(crate) fn scrolled_commands(
     }));
     scrolled.push(DisplayCommand::PopTransform);
     scrolled
+}
+
+#[cfg(test)]
+mod scrolled_commands_tests {
+    use super::scrolled_commands;
+    use rustkit_css::Color;
+    use rustkit_layout::{DisplayCommand, Rect};
+
+    fn paint() -> DisplayCommand {
+        DisplayCommand::SolidColor(Color::BLACK, Rect::new(0.0, 0.0, 10.0, 10.0))
+    }
+
+    fn is_translate(command: &DisplayCommand, x: f32, y: f32) -> bool {
+        matches!(
+            command,
+            DisplayCommand::PushTransform {
+                matrix: [1.0, 0.0, 0.0, 1.0, mx, my],
+                origin: (0.0, 0.0),
+            } if *mx == x && *my == y
+        )
+    }
+
+    #[test]
+    fn a_zero_offset_still_wraps_the_list_and_rewrites_fixed_markers() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+        ];
+        let out = scrolled_commands(&list, (0.0, 0.0));
+        assert_eq!(out.len(), 6);
+        assert!(is_translate(&out[0], 0.0, 0.0));
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 0.0, 0.0), "fixed → +offset translate");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::PopTransform));
+    }
+
+    #[test]
+    fn a_scroll_offset_wraps_the_page_and_counters_fixed_runs() {
+        let list = vec![
+            paint(),
+            DisplayCommand::PushViewportFixed,
+            paint(),
+            DisplayCommand::PopViewportFixed,
+            paint(),
+        ];
+        let out = scrolled_commands(&list, (12.0, 34.0));
+        assert_eq!(out.len(), 7);
+        assert!(is_translate(&out[0], -12.0, -34.0), "outer −offset");
+        assert!(matches!(&out[1], DisplayCommand::SolidColor(_, _)));
+        assert!(is_translate(&out[2], 12.0, 34.0), "fixed → +offset");
+        assert!(matches!(&out[3], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[4], DisplayCommand::PopTransform));
+        assert!(matches!(&out[5], DisplayCommand::SolidColor(_, _)));
+        assert!(matches!(&out[6], DisplayCommand::PopTransform));
+    }
 }
 
 /// The page-space affine this box's own `transform` contributes, or `None`
@@ -24452,11 +24713,13 @@ mod element_identity_tests {
 
         // The shorthand takes them as position tokens too.
         let (_, layer) =
-            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px");
+            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px")
+                .expect("valid");
         let p = layer.expect("layer").position;
         assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (195.0, 140.0));
         let (_, layer) =
-            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat");
+            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat")
+                .expect("valid");
         let layer = layer.expect("layer");
         let p = &layer.position;
         assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (180.0, 75.0));
@@ -24471,7 +24734,8 @@ mod element_identity_tests {
         // The url ended at the first `)`, which a data: url may contain.
         let (color, layer) = parse_background_shorthand_layer(
             "url(\"data:image/svg+xml,<svg fill='rgb(0,0,0)'/>\") no-repeat #eee",
-        );
+        )
+        .expect("valid");
         assert_eq!(color, Some(rustkit_css::Color::new(238, 238, 238, 1.0)));
         match layer.expect("layer").image {
             rustkit_css::BackgroundImage::Url(u) => {
@@ -24480,7 +24744,7 @@ mod element_identity_tests {
             other => panic!("{other:?}"),
         }
         // No image, no layer; the colour is still named.
-        let (color, layer) = parse_background_shorthand_layer("none repeat-x red");
+        let (color, layer) = parse_background_shorthand_layer("none repeat-x red").expect("valid");
         assert_eq!(color, Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
         assert!(layer.is_none());
     }
@@ -25943,6 +26207,30 @@ mod web_font_tests {
         assert!(matches!(
             resolve_font_source(None, &ahem_data_uri()),
             FontSource::Data(b) if b == AHEM
+        ));
+    }
+
+    /// Fetch serializes a data: URL without its fragment, so the fragment is
+    /// not part of the payload — the rule `rustkit_net::decode_data_url`
+    /// already follows (#712).
+    #[test]
+    #[ignore = "bug: engine decode_data_url keeps a data: URL's #fragment in the payload"]
+    fn a_data_uri_fragment_is_not_part_of_the_payload() {
+        assert_eq!(
+            decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
+            Some(&[0u8, 1, 2][..])
+        );
+        assert_eq!(
+            decode_data_url("data:,%00%01x#tail").as_deref(),
+            Some(&[0u8, 1, b'x'][..])
+        );
+        assert_eq!(
+            decode_data_url("data:text/plain,a%23b#c").as_deref(),
+            Some(b"a#b".as_slice())
+        );
+        assert!(matches!(
+            resolve_font_source(None, "data:font/ttf;base64,AAEC#frag"),
+            FontSource::Data(b) if b.as_ref() == [0u8, 1, 2]
         ));
     }
 
@@ -29820,6 +30108,85 @@ mod selector_is_escape_tests {
     }
 }
 
+/// Portable pins for `pseudo_list_base` (#684). Headless
+/// `box_sizing_inherit_tests` cover the full cascade; these prove the
+/// selector-list half without a GPU.
+#[cfg(test)]
+mod pseudo_list_base_tests {
+    use super::*;
+
+    #[test]
+    fn a_pseudo_member_anywhere_in_a_selector_list_is_collected() {
+        // Indexed path: pseudo="::before", single_colon=":before" (the
+        // single-colon form covers the double-colon one).
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::before", ":before").expect("before");
+        assert_eq!(base, "*");
+        assert!(bare, "`:before` alone is bare");
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("*, :before, :after", "::after", ":after").expect("after");
+        assert_eq!(base, "*");
+        assert!(bare);
+        assert_eq!(specs.len(), 1);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::before", ":before").expect("a::before");
+        assert_eq!(base, "a");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].0, 0);
+
+        let (base, bare, specs) =
+            pseudo_list_base("a::before, b::after", "::after", ":after").expect("b::after");
+        assert_eq!(base, "b");
+        assert!(!bare);
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[test]
+    fn a_bare_pseudo_rule_is_universal_and_a_list_without_it_is_none() {
+        let (base, bare, _) =
+            pseudo_list_base("::before", "::before", ":before").expect("bare ::before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        let (base, bare, _) =
+            pseudo_list_base(":before", "::before", ":before").expect("bare :before");
+        assert_eq!(base, "*");
+        assert!(bare);
+
+        assert!(pseudo_list_base("div, span", "::before", ":before").is_none());
+        assert!(pseudo_list_base("a::after", "::before", ":before").is_none());
+    }
+
+    #[test]
+    fn each_pseudo_member_keeps_its_own_specificity_most_specific_first() {
+        // `div::before, #id::before` must cascade with the id member's
+        // specificity when that member matches — never the list's max
+        // taken from a non-pseudo sibling (the #684 failure mode).
+        let (base, bare, specs) =
+            pseudo_list_base("div::before, #id::before", "::before", ":before")
+                .expect("two before members");
+        assert_eq!(base, "div, #id");
+        assert!(!bare);
+        assert_eq!(specs.len(), 2);
+        // Most specific first: #id::before ahead of div::before.
+        assert_eq!(specs[0].0, 1);
+        assert_eq!(
+            specs[0].1,
+            SelectorMatcher.selector_specificity("#id::before")
+        );
+        assert_eq!(specs[1].0, 0);
+        assert_eq!(
+            specs[1].1,
+            SelectorMatcher.selector_specificity("div::before")
+        );
+        assert!(specs[0].1 > specs[1].1);
+    }
+}
+
 // Real Engine (Compositor wants a device) — macOS only, like
 // element_identity_tests.
 #[cfg(all(test, target_os = "macos"))]
@@ -31075,6 +31442,228 @@ mod cascade_wire_tests {
             before,
             "invalid value must not clobber the computed transform"
         );
+    }
+
+    // An invalid declaration is dropped at parse time (css-syntax-3 §8,
+    // css-cascade-4 §4.2), so a shorthand that does not parse must leave
+    // every longhand an earlier declaration set. These shorthands reset
+    // their longhands (or applied the parts they could read) first.
+    #[test]
+    fn an_invalid_background_shorthand_keeps_the_earlier_background() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "red");
+        e.apply_style_property(&mut s, "background", "invalid-junk(1)");
+        assert_eq!(s.background_color, red, "the colour stays");
+
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
+        e.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
+        assert_eq!(s.background_color, red, "one bad layer drops the whole value");
+        assert_eq!(s.background_layers.len(), 1, "the image stays");
+        assert!(s.background_gradient.is_some());
+
+        // A valid value still resets what it does not name.
+        e.apply_style_property(&mut s, "background", "none");
+        assert_eq!(s.background_color, rustkit_css::Color::TRANSPARENT);
+        assert!(s.background_layers.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_background_color_keeps_the_earlier_colour() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background-color", "red");
+        e.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
+        assert_eq!(s.background_color, rustkit_css::Color::new(255, 0, 0, 1.0));
+    }
+
+    #[test]
+    fn an_invalid_border_shorthand_keeps_the_earlier_border() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for property in ["border", "border-top"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "2px solid red");
+            e.apply_style_property(&mut s, property, "invalid-junk(1)");
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: width");
+            assert_eq!(s.border_top_style, rustkit_css::BorderStyle::Solid, "{property}: style");
+            assert_eq!(s.border_top_color, red, "{property}: colour");
+            e.apply_style_property(&mut s, property, "4px dashed bogus");
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: bad colour");
+        }
+    }
+
+    #[test]
+    fn an_invalid_flex_shorthand_keeps_the_earlier_flex() {
+        let e = engine();
+        // Three bare numbers are invalid: the basis needs a unit unless it
+        // is `0` (`flex: 1 1 0` stays valid).
+        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "flex", "2 3 10px");
+            e.apply_style_property(&mut s, "flex", junk);
+            assert_eq!(s.flex_grow, 2.0, "flex: {junk}");
+            assert_eq!(s.flex_shrink, 3.0, "flex: {junk}");
+            assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(10.0), "flex: {junk}");
+        }
+    }
+
+    // A function or `*-content` basis is valid: the declaration applies
+    // (grow and shrink at least) rather than being dropped, which left
+    // the initial shrink of 1 on a `flex: 0 0 calc(...)` card.
+    #[test]
+    fn a_flex_shorthand_with_a_function_basis_keeps_grow_and_shrink() {
+        let e = engine();
+        for value in [
+            "0 0 calc(50% - 10px)",
+            "0 0 calc( 50% - 10px )",
+            "0 0 min(50%, 200px)",
+            "0 0 max(50%, 200px)",
+            "0 0 clamp(100px, 50%, 300px)",
+            "0 0 fit-content(200px)",
+            "0 0 min-content",
+            "0 0 max-content",
+            "0 0 fit-content",
+            "0 0 content",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "flex", "3 3 10px");
+            e.apply_style_property(&mut s, "flex", value);
+            assert_eq!(s.flex_grow, 0.0, "flex: {value}");
+            assert_eq!(s.flex_shrink, 0.0, "flex: {value}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "3 3 10px");
+        e.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
+        assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
+    }
+
+    #[test]
+    fn an_invalid_font_shorthand_keeps_the_earlier_font() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "font", "italic bold 20px serif");
+        let (size, weight, font_style) = (s.font_size.clone(), s.font_weight, s.font_style);
+        e.apply_style_property(&mut s, "font", "bogus 30px serif");
+        assert_eq!(s.font_size, size, "an unknown prefix token drops the value");
+        assert_eq!(s.font_weight, weight);
+        assert_eq!(s.font_style, font_style);
+        // Every prefix keyword the grammar allows still parses.
+        e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
+        assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
+    }
+
+    // The `text` box (backgrounds-4) and min()/max()/clamp() positions and
+    // sizes are valid: the layer applies instead of being dropped.
+    #[test]
+    fn a_background_shorthand_keeps_text_clip_and_math_positions() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
+        assert_eq!(s.background_layers.len(), 1, "text clip");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        for value in [
+            "url(a.png) min(10px, 5%) 0 no-repeat",
+            "url(a.png) max(10px, 5%) center no-repeat",
+            "url(a.png) clamp(0px, 10%, 20px) 50% no-repeat",
+            "url(a.png) center / min(100px, 50%) no-repeat",
+            "url(a.png) center / clamp(10px, 50%, 100px) auto",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the layer applies");
+        }
+    }
+
+    // An angle is only valid right after `oblique`, in any angle unit.
+    #[test]
+    fn a_font_shorthand_takes_an_angle_only_after_oblique() {
+        let e = engine();
+        for junk in ["10deg 30px serif", "bolddeg 30px serif", "oblique xdeg 30px serif"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", junk);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(20.0), "font: {junk}");
+        }
+        for valid in [
+            "oblique 10deg 30px serif",
+            "oblique -14deg 30px serif",
+            "oblique 0.2rad 30px serif",
+            "oblique 15grad 30px serif",
+            "oblique 0.05turn 30px serif",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", valid);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(30.0), "font: {valid}");
+        }
+    }
+
+    // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
+    // percent `rgb()`/`hsl()`, `oklch()`, `color-mix()` ...) is still a
+    // VALID colour: the shorthand is kept and its other parts apply, the
+    // colour itself is left unpainted.
+    #[test]
+    fn a_border_shorthand_with_an_unresolved_colour_keeps_width_and_style() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for (property, value) in [
+            ("border", "1px solid currentColor"),
+            ("border", "1px solid rgb(0 0 0 / 10%)"),
+            ("border-top", "1px solid rgb(229 231 235 / 1)"),
+            ("border", "1px solid rgba(0,0,0,10%)"),
+            ("border", "1px solid rgb(100%,0%,0%)"),
+            ("border", "1px solid hsl(210 40% 96%)"),
+            ("border", "1px solid oklch(0.7 0.1 200)"),
+            ("border", "1px solid lab(50% 40 59)"),
+            ("border", "1px solid hwb(0 0% 0%)"),
+            ("border", "1px solid color(display-p3 1 0 0)"),
+            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "4px dashed red");
+            e.apply_style_property(&mut s, property, value);
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
+            assert_eq!(
+                s.border_top_style,
+                rustkit_css::BorderStyle::Solid,
+                "{property}: {value}"
+            );
+            assert_eq!(s.border_top_color, red, "{property}: {value}: colour left as it was");
+        }
+        // A token that is not colour-shaped still drops the declaration.
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "2px solid red");
+        e.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
+        assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
+    }
+
+    #[test]
+    fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
+        let e = engine();
+        for value in [
+            "url(a.png) no-repeat rgb(0 0 0 / .5)",
+            "url(a.png) no-repeat currentcolor",
+            "url(a.png) rgb(229 231 235 / 1)",
+            "url(a.png) oklch(0.7 0.1 200)",
+            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) light-dark(#fff, #000)",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the image applies");
+            match &s.background_layers[0].image {
+                rustkit_css::BackgroundImage::Url(u) => assert_eq!(u, "a.png", "{value}"),
+                other => panic!("{value}: {other:?}"),
+            }
+        }
     }
 
     // animation (#50)
@@ -32403,6 +32992,262 @@ impl SubjectCompound {
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 
+thread_local! {
+    /// The DOM element the compound under test is matched against, for
+    /// `:has()`: the subject while the subject compound is tested, the
+    /// ancestor or sibling while the walk tests one. The rest of the matcher
+    /// reads key tuples; `:has()` needs the element's subtree and siblings.
+    static RELATIONAL_NODE: std::cell::RefCell<Option<Rc<Node>>> = const { std::cell::RefCell::new(None) };
+    /// `:has()` answers by (anchor node address, argument), for one build:
+    /// the DOM does not change inside a build, and `.a:has(.b) .c` asks the
+    /// same anchor once for every `.c` under it. The address, not the
+    /// NodeId: a frame's document built inside the build numbers its nodes
+    /// from 1 too, and every node outlives the build.
+    static HAS_MEMO: std::cell::RefCell<Option<HashMap<(usize, String), bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Compounds a `:has()` search tested, for the tests that bound it.
+    static HAS_COMPOUND_TESTS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Sets [`RELATIONAL_NODE`] for its lifetime and puts the previous one back.
+struct RelationalNodeScope(Option<Rc<Node>>);
+
+impl RelationalNodeScope {
+    fn enter(node: Option<Rc<Node>>) -> Self {
+        RelationalNodeScope(RELATIONAL_NODE.with(|n| n.replace(node)))
+    }
+}
+
+impl Drop for RelationalNodeScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        RELATIONAL_NODE.with(|n| *n.borrow_mut() = previous);
+    }
+}
+
+/// Keeps [`HAS_MEMO`] for one build. An inner scope joins the outer one.
+struct HasMemoScope(bool);
+
+impl HasMemoScope {
+    fn install() -> Self {
+        HasMemoScope(HAS_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            let fresh = m.is_none();
+            if fresh {
+                *m = Some(HashMap::new());
+            }
+            fresh
+        }))
+    }
+}
+
+impl Drop for HasMemoScope {
+    fn drop(&mut self) {
+        if self.0 {
+            HAS_MEMO.with(|m| *m.borrow_mut() = None);
+        }
+    }
+}
+
+/// Whether the element the compound under test is for matches
+/// `:has(arg)`. No element known (a build without a DOM node): no match.
+fn relational_has(arg: &str) -> bool {
+    RELATIONAL_NODE.with(|n| n.borrow().clone()).is_some_and(|anchor| has_matches(&anchor, arg))
+}
+
+/// `:has(arg)` on `anchor`: some member of the relative selector list
+/// matches, searched from the anchor (Selectors 4 §4.5).
+fn has_matches(anchor: &Rc<Node>, arg: &str) -> bool {
+    let key = (Rc::as_ptr(anchor) as usize, arg.to_string());
+    if let Some(known) = HAS_MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(&key).copied())) {
+        return known;
+    }
+    let found = SelectorMatcher::split_top_level_commas(arg)
+        .into_iter()
+        .any(|member| relative_selector_matches(anchor, member));
+    HAS_MEMO.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(key, found);
+        }
+    });
+    found
+}
+
+/// One relative selector (`> .a .b`, `+ p`, `.x`): its steps, each the
+/// combinator before a compound (a leading descendant one when none is
+/// written), searched left to right from the anchor.
+fn relative_selector_matches(anchor: &Rc<Node>, member: &str) -> bool {
+    let member = member.trim();
+    // `:has()` inside `:has()` is invalid; `selector_list_is_valid` drops
+    // the rule unless a forgiving `:is()` keeps it, and then the member
+    // matches nothing.
+    if member.to_ascii_lowercase().contains(":has(") {
+        return false;
+    }
+    let (first, rest) = match member.chars().next() {
+        Some(c @ ('>' | '+' | '~')) => (c.to_string(), member[1..].trim_start()),
+        _ => (" ".to_string(), member),
+    };
+    let tokens = SelectorMatcher.tokenize_selector(rest);
+    if !tokens.last().is_some_and(|(_, combinator)| combinator.is_empty()) {
+        return false;
+    }
+    let mut steps = Vec::with_capacity(tokens.len());
+    let mut combinator = first;
+    for (compound, next) in tokens {
+        steps.push((combinator, compound));
+        combinator = next;
+    }
+    relative_steps_match(anchor, &steps)
+}
+
+/// Whether `steps` match outward from `from`. Answers are kept per (node,
+/// steps left, what was asked) for the one relative selector, so a failing
+/// `:has(div div .x)` searches each subtree once, not once per `div` that
+/// matched on the way down.
+fn relative_steps_match(from: &Rc<Node>, steps: &[(String, String)]) -> bool {
+    struct Search<'a> {
+        steps: &'a [(String, String)],
+        memo: std::cell::RefCell<HashMap<(usize, usize, u8), bool>>,
+    }
+
+    impl Search<'_> {
+        fn memo(&self, node: &Rc<Node>, left: usize, kind: u8, compute: impl FnOnce() -> bool) -> bool {
+            let key = (Rc::as_ptr(node) as usize, left, kind);
+            if let Some(&known) = self.memo.borrow().get(&key) {
+                return known;
+            }
+            let found = compute();
+            self.memo.borrow_mut().insert(key, found);
+            found
+        }
+
+        /// The last `left` steps match from `from`.
+        fn from(&self, from: &Rc<Node>, left: usize) -> bool {
+            if left == 0 {
+                return true;
+            }
+            self.memo(from, left, 0, || {
+                let combinator = self.steps[self.steps.len() - left].0.as_str();
+                match combinator {
+                    ">" => from.children().iter().filter(|c| c.is_element()).any(|c| self.at(c, left)),
+                    "+" => next_element_sibling(from).is_some_and(|s| self.at(&s, left)),
+                    "~" => self.later_sibling(from, left),
+                    _ => self.descendant(from, left),
+                }
+            })
+        }
+
+        /// The first of the last `left` steps' compound matches `node`, and
+        /// the rest match from it.
+        fn at(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 1, || {
+                has_compound_matches(node, &self.steps[self.steps.len() - left].1) && self.from(node, left - 1)
+            })
+        }
+
+        fn descendant(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 2, || {
+                node.children()
+                    .iter()
+                    .filter(|c| c.is_element())
+                    .any(|c| self.at(c, left) || self.descendant(c, left))
+            })
+        }
+
+        fn later_sibling(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 3, || {
+                next_element_sibling(node).is_some_and(|s| self.at(&s, left) || self.later_sibling(&s, left))
+            })
+        }
+    }
+
+    let search = Search { steps, memo: Default::default() };
+    search.from(from, steps.len())
+}
+
+fn next_element_sibling(node: &Rc<Node>) -> Option<Rc<Node>> {
+    let mut next = node.next_sibling();
+    while let Some(sibling) = next {
+        if sibling.is_element() {
+            return Some(sibling);
+        }
+        next = sibling.next_sibling();
+    }
+    None
+}
+
+/// One compound of a relative selector against a DOM element, with the
+/// element's place among its siblings read from the tree.
+fn has_compound_matches(node: &Rc<Node>, compound: &str) -> bool {
+    #[cfg(test)]
+    HAS_COMPOUND_TESTS.with(|n| n.set(n.get() + 1));
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return false;
+    };
+    let prepared = SelectorMatcher.prepared_selector(compound);
+    let tag = tag_name.to_lowercase();
+    let has_children = Engine::node_has_children(node);
+    let sib = match prepared.is_context_free() {
+        true => SiblingContext::SOLE.with_children(has_children),
+        false => dom_sibling_context(node, &tag, has_children),
+    };
+    let _relational = RelationalNodeScope::enter(Some(node.clone()));
+    SelectorMatcher.selector_matches_prepared(&prepared, &tag, attributes, &[], &[], sib)
+}
+
+/// `node`'s position among its parent's element children, from the tree.
+fn dom_sibling_context(node: &Rc<Node>, tag: &str, has_children: bool) -> SiblingContext {
+    let Some(parent) = node.parent() else {
+        return SiblingContext::SOLE.with_children(has_children);
+    };
+    let (mut index, mut count, mut type_index, mut type_count) = (0, 0, 0, 0);
+    let mut before = true;
+    for c in parent.children() {
+        let NodeType::Element { tag_name, .. } = &c.node_type else {
+            continue;
+        };
+        if Rc::ptr_eq(&c, node) {
+            before = false;
+        }
+        count += 1;
+        let same_type = tag_name.eq_ignore_ascii_case(tag);
+        type_count += same_type as usize;
+        if before {
+            index += 1;
+            type_index += same_type as usize;
+        }
+    }
+    SiblingContext { index, count, type_index, type_count, has_children }
+}
+
+/// The element `ancestors[idx]` stands for, from the subject `node`: the
+/// chain holds one entry per element above it, in the DOM. A slotted node
+/// is matched against its host's light chain, which is its DOM parents
+/// too; a shadow tree's chain ends at its host, where the DOM walk meets
+/// the shadow root (no tag) and gives none. The tag is checked besides.
+fn chain_ancestor_node(node: &Rc<Node>, idx: usize, key: &AncestorKey) -> Option<Rc<Node>> {
+    let mut at = node.parent()?;
+    for _ in 0..idx {
+        at = at.parent()?;
+    }
+    at.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(&key.0)).then_some(at)
+}
+
+/// The element `siblings_before[idx]` stands for: the subject's
+/// `idx`-th earlier element sibling, checked by tag. A shadow host's light
+/// children are siblings only as their slot assigns them (a named slot
+/// takes some of them), so their positions need not be the DOM's: none.
+fn chain_sibling_node(node: &Rc<Node>, idx: usize, key: &SiblingKey) -> Option<Rc<Node>> {
+    let parent = node.parent().filter(|p| p.shadow_root().is_none())?;
+    let sibling = parent.children().into_iter().filter(|c| c.is_element()).nth(idx)?;
+    sibling.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(&key.0)).then_some(sibling)
+}
+
 /// An element's classes as its descendants and later siblings see them.
 fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
     let mut classes: Vec<String> = attributes
@@ -32485,6 +33330,12 @@ struct AncestorCompound {
     /// pseudo-class, form state, a dropped `:is()` or `:not()` member), so
     /// a match is "maybe". Inside `:not()` a maybe must exclude nothing.
     undecided: bool,
+    /// The argument of each `:has()`, decided against the element in
+    /// [`RELATIONAL_NODE`].
+    has: Vec<String>,
+    /// Some part, here or in an `:is()`/`:not()` member, is a `:has()`: the
+    /// walk names the element the compound is tested against.
+    relational: bool,
 }
 
 impl AncestorCompound {
@@ -32596,6 +33447,7 @@ impl AncestorCompound {
                                     .collect();
                                 out.undecided |= alternatives.len() != members.len()
                                     || alternatives.iter().any(|m| m.undecided);
+                                out.relational |= alternatives.iter().any(|m| m.relational);
                                 out.any_of.push(alternatives);
                             }
                             ("not", Some(a)) => {
@@ -32607,17 +33459,21 @@ impl AncestorCompound {
                                     match parsed {
                                         // `:not(:hover)`: nothing is, so it excludes nothing.
                                         Some(m) if m.never => {}
-                                        Some(m) if !m.undecided => out.none_of.push(m),
+                                        Some(m) if !m.undecided => {
+                                            out.relational |= m.relational;
+                                            out.none_of.push(m)
+                                        }
                                         _ => out.undecided = true,
                                     }
                                 }
                             }
-                            // Relational: the subject path under-matches it
-                            // too.
-                            ("has", _) => {
-                                out.never = true;
-                                out.undecided = true;
+                            // Relational: decided against the element the
+                            // walk names (`RELATIONAL_NODE`).
+                            ("has", Some(a)) => {
+                                out.has.push(a.clone());
+                                out.relational = true;
                             }
+                            ("has", None) => out.never = true,
                             // A hovered ancestor or sibling carries the
                             // mark among its classes (`element_classes`).
                             ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
@@ -32671,7 +33527,7 @@ impl AncestorCompound {
             return false;
         }
         let Some(attributes) = attributes.as_deref() else {
-            return true;
+            return !self.excluded_by_relational_not(tag, classes, id.as_ref());
         };
         self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
             && !self.none_of.iter().any(|n| n.matches_ancestor(ancestor))
@@ -32690,11 +33546,22 @@ impl AncestorCompound {
                 .any_of
                 .iter()
                 .all(|alts| alts.iter().any(|a| a.matches(tag_name, classes, id)))
+            && self.has.iter().all(|a| relational_has(a))
+    }
+
+    /// Whether a `:not()` member that reads the element through `:has()`,
+    /// and asks nothing of attributes, matches it: decided where the
+    /// element's attributes are not carried, unlike the rest of `none_of`.
+    fn excluded_by_relational_not(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
+        self.none_of
+            .iter()
+            .any(|n| n.relational && n.attrs.is_empty() && n.none_of.is_empty() && n.matches(tag_name, classes, id))
     }
 
     /// [`Self::matches`] for an earlier sibling, whose form state is known.
     fn matches_sibling(&self, (tag, classes, id, state): &SiblingKey) -> bool {
         self.matches(tag, classes, id.as_ref())
+            && !self.excluded_by_relational_not(tag, classes, id.as_ref())
             && self.state.iter().all(|want| match want {
                 StatePseudo::Checked => state.checked,
                 StatePseudo::Disabled => state.control && state.disabled,
@@ -33710,7 +34577,12 @@ impl SelectorReads {
                     match combinator.as_str() {
                         // The subject's own token: `subject` below.
                         "" => {}
-                        " " | ">" => self.note_ancestor(compound),
+                        // `:has()` on an ancestor reads its subtree, which
+                        // the chain key does not hold.
+                        " " | ">" => {
+                            self.note_ancestor(compound);
+                            positional |= compound.relational;
+                        }
                         _ => positional = true,
                     }
                 }
@@ -33850,7 +34722,6 @@ impl SelectorReads {
                     | "first-letter"
                     | "root"
                     | "scope"
-                    | "has"
             )
     }
 

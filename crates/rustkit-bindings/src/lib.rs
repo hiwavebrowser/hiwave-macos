@@ -77,6 +77,10 @@ mod form_controls_tests;
 #[cfg(test)]
 mod web_history_tests;
 #[cfg(test)]
+mod web_scripts_tests;
+#[cfg(test)]
+mod meta_refresh_noscript_tests;
+#[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
 mod range_tests;
