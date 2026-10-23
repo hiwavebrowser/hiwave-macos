@@ -53,6 +53,8 @@ pub const MAX_STACK_CHARS: usize = 4096;
 pub const MAX_SHORT_CHARS: usize = 256;
 /// Most distinct unsupported members recorded per page.
 pub const MAX_UNSUPPORTED_MEMBERS: usize = 512;
+/// Most script-inserted scripts whose inserter is remembered per page.
+pub const MAX_INSERTERS: usize = 1024;
 
 /// How a view records (part of `EngineConfig`).
 #[derive(Debug, Clone)]
@@ -228,6 +230,10 @@ pub enum InspectorEvent {
         /// The message was longer than [`MAX_MESSAGE_CHARS`] and was cut.
         truncated: bool,
         location: Option<SourceLocation>,
+        /// `console.error` only: the page's frames, innermost first, as
+        /// [`ScriptError`](Self::ScriptError)'s `stack` writes them.
+        #[serde(default)]
+        stack: Option<String>,
     },
     /// An exception no script caught, or a promise rejected with no handler.
     ScriptError {
@@ -242,7 +248,8 @@ pub enum InspectorEvent {
         /// Where it was thrown: the innermost of the page's frames.
         location: Option<SourceLocation>,
         /// The page's frames, innermost first, one `    at url:line:col`
-        /// line each (no function names).
+        /// line each; with [`InspectorConfig::keep_error_text`] a named
+        /// function's frame is `    at name (url:line:col)`.
         stack: Option<String>,
         unhandled_rejection: bool,
         /// Which of the page's scripts it came from: a script URL,
@@ -256,6 +263,10 @@ pub enum InspectorEvent {
         /// The message's length in characters, when it has one (an error's
         /// message, a thrown string).
         message_len: Option<u64>,
+        /// When the innermost frame's script was inserted by page script
+        /// (`appendChild` of a `<script src>`): where that insertion was.
+        #[serde(default)]
+        inserted_by: Option<SourceLocation>,
     },
     /// Page script used a Web API member the engine does not implement.
     /// Recorded once per page per member; `Inspector::unsupported_apis`
@@ -386,6 +397,9 @@ struct State {
     /// The names page scripts are evaluated under that are not their URL
     /// (`script#3`), and the URL each stands for (as events show it).
     aliases: Vec<(String, String)>,
+    /// Script-inserted scripts' evaluation names (`inserted#n`) and where
+    /// the page's script that inserted each was.
+    inserters: Vec<(String, SourceLocation)>,
     /// The last request id given out (per view, never reused).
     last_request_id: u64,
     /// Requests recorded and not yet answered.
@@ -420,6 +434,7 @@ impl Inspector {
                 laid_out: false,
                 painted: false,
                 aliases: Vec::new(),
+                inserters: Vec::new(),
                 last_request_id: 0,
                 open_requests: std::collections::HashSet::new(),
             }),
@@ -547,6 +562,7 @@ impl Inspector {
         state.laid_out = false;
         state.painted = false;
         state.aliases.clear();
+        state.inserters.clear();
         Self::push_locked(&mut state, InspectorEvent::NavigationStart { url });
     }
 
@@ -629,6 +645,25 @@ impl Inspector {
     /// a URL scrubbed) or its `inline#n` label.
     pub fn location(&self, path: &str, line: u32, column: u32) -> SourceLocation {
         SourceLocation { url: self.url_text(path), line, column }
+    }
+
+    /// The script to be evaluated as `name` (`inserted#n`) was inserted by
+    /// the page's script at `path:line:column` (as the JS runtime placed the
+    /// insertion call). A position that cannot be shown is not kept.
+    pub fn note_inserted(&self, name: &str, path: &str, line: u32, column: u32) {
+        if !self.is_active() {
+            return;
+        }
+        let Some(at) = self.frame_location(path, line, column) else { return };
+        let mut state = self.state();
+        if state.inserters.len() < MAX_INSERTERS {
+            state.inserters.push((name.to_string(), at));
+        }
+    }
+
+    /// Where the script evaluated as `name` was inserted by page script.
+    pub fn inserted_by(&self, name: &str) -> Option<SourceLocation> {
+        self.state().inserters.iter().find(|(n, _)| n == name).map(|(_, at)| at.clone())
     }
 
     /// What the engine named `name` with [`alias_script`](Self::alias_script).
@@ -848,11 +883,42 @@ impl Inspector {
 
     /// A console call (`message` is capped here, and URLs in it scrubbed).
     pub fn console(&self, level: ConsoleLevel, message: &str, location: Option<SourceLocation>) {
+        self.console_with_stack(level, message, location, &[]);
+    }
+
+    /// [`console`](Self::console) with the caller's frames (`console.error`).
+    pub fn console_with_stack(
+        &self,
+        level: ConsoleLevel,
+        message: &str,
+        location: Option<SourceLocation>,
+        frames: &[rustkit_js::ScriptFrame],
+    ) {
         self.emit_with(|inspector| {
             let (message, truncated) = cap(message, MAX_MESSAGE_CHARS);
             let message = inspector.scrub_text(&message);
-            InspectorEvent::Console { level, message, truncated, location }
+            let named: Vec<_> = frames.iter().map(|f| (f.function.as_deref(), &f.at)).collect();
+            let stack = inspector.stack_text(&named);
+            InspectorEvent::Console { level, message, truncated, location, stack }
         });
+    }
+
+    /// The page's frames as a `stack` field: one `    at url:line:col` line
+    /// each, `    at name (url:line:col)` for a named function; frames whose
+    /// script cannot be shown are dropped. `None` when none is left.
+    pub fn stack_text(&self, frames: &[(Option<&str>, &rustkit_js::ScriptPosition)]) -> Option<String> {
+        let lines: Vec<String> = frames
+            .iter()
+            .filter_map(|(function, at)| {
+                let place = self.frame_location(&at.path, at.line, at.column)?;
+                let place = format!("{}:{}:{}", place.url, place.line, place.column);
+                Some(match function {
+                    Some(name) => format!("    at {name} ({place})"),
+                    None => format!("    at {place}"),
+                })
+            })
+            .collect();
+        (!lines.is_empty()).then(|| cap(&lines.join("\n"), MAX_STACK_CHARS).0)
     }
 }
 

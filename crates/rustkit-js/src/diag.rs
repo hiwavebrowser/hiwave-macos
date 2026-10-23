@@ -26,10 +26,11 @@ use std::time::Instant;
 use boa_engine::builtins::error::Error;
 use boa_engine::{Context, JsObject, JsValue};
 
-use crate::{ErrorReport, LogLevel, ScriptPosition};
+use crate::{ErrorReport, LogLevel, ScriptFrame, ScriptPosition};
 
-/// One console call: level, line, the caller's position.
-pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>);
+/// One console call: level, line, the caller's position, and the page's
+/// frames for an error-level call while reports are on.
+pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>, Vec<ScriptFrame>);
 
 /// An unimplemented member the embedder's scripts saw page script reach.
 struct Unsupported {
@@ -140,11 +141,18 @@ impl Diagnostics {
             false => crate::describe::join_line(args, |arg| crate::describe::text(arg, context)),
         };
         let at = caller_position(context, false);
+        // A stack only for `console.error` (and a failed `assert`), and
+        // only for an embedder that records page errors: one more walk of
+        // the frames the position walk already started.
+        let stack = match (level, self.on.get()) {
+            (LogLevel::Error, true) => page_stack(context, self.keep_text.get()),
+            _ => Vec::new(),
+        };
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
             pending.pop_front();
         }
-        pending.push_back((level, line, at));
+        pending.push_back((level, line, at, stack));
     }
 
     /// A Console namespace member other than the five logging ones, as
@@ -327,6 +335,7 @@ impl Diagnostics {
             message: None,
             message_len: None,
             frames: Vec::new(),
+            functions: Vec::new(),
             located: false,
             rejection,
             module: None,
@@ -375,8 +384,17 @@ impl Diagnostics {
             _ => None,
         };
         let stack = own_stack.as_deref().or(frames).unwrap_or("");
-        (report.frames, report.located) = self.frames(stack);
+        self.set_frames(&mut report, stack);
         report
+    }
+
+    /// `report`'s frames from Boa's stack text, with their function names
+    /// when error text is kept.
+    fn set_frames(&self, report: &mut ErrorReport, stack: &str) {
+        let (frames, functions, located) = self.frames(stack);
+        report.frames = frames;
+        report.functions = if self.keep_text.get() { functions } else { Vec::new() };
+        report.located = located;
     }
 
     /// An error object's stack as the realm's own getter gives it (frame
@@ -399,12 +417,15 @@ impl Diagnostics {
     /// evaluated (`eval` code, `eval at :l:c`; a function `eval` code
     /// declared or `new Function` built, an `on*` attribute's handler among
     /// them, `unknown at :l:c`) has no place of its own and is never given
-    /// its caller's. A function name is never read or kept, and a line that
-    /// is not a whole frame is dropped, never copied: a name the page made
-    /// can hold a newline.
-    pub(crate) fn frames(&self, stack: &str) -> (Vec<ScriptPosition>, bool) {
+    /// its caller's. A function name never decides which frame is what, and
+    /// a line that is not a whole frame is dropped, never copied: a name the
+    /// page made can hold a newline. Each kept frame comes with its function
+    /// name as Boa wrote it (`None` for top-level code and unnamed
+    /// functions).
+    fn frames(&self, stack: &str) -> (Vec<ScriptPosition>, Vec<Option<String>>, bool) {
         let known = self.known_paths.borrow();
         let mut frames = Vec::new();
+        let mut functions = Vec::new();
         // `None` until the innermost frame that is the page's is seen.
         let mut located = None;
         for line in stack.lines() {
@@ -412,6 +433,7 @@ impl Diagnostics {
             let Some(inner) = frame.strip_suffix(')') else { continue };
             let Some(open) = inner.rfind(" (") else { continue };
             let position = &inner[open + 2..];
+            let function = function_name(&inner[..open]);
             if position == "native" || position.starts_with("native at ") {
                 continue;
             }
@@ -426,6 +448,7 @@ impl Diagnostics {
                     located.get_or_insert(true);
                     if frames.len() < MAX_FRAMES {
                         frames.push(ScriptPosition { path: path.to_string(), line, column });
+                        functions.push(function);
                     }
                 }
                 _ => {
@@ -433,7 +456,7 @@ impl Diagnostics {
                 }
             }
         }
-        (frames, located.unwrap_or(false))
+        (frames, functions, located.unwrap_or(false))
     }
 
     /// A `JsError` an evaluation ended in, as a report.
@@ -467,10 +490,10 @@ impl Diagnostics {
                         })
                         .unwrap_or("");
                     let (at, rest) = after.split_once('\n').unwrap_or((after, ""));
-                    (report.frames, report.located) = self.frames(rest);
+                    self.set_frames(&mut report, rest);
                     if report.frames.is_empty() {
                         if let Some(at) = at.strip_prefix(" (").and_then(|at| at.strip_suffix(')')) {
-                            (report.frames, report.located) = self.frames(&format!("    at <main> ({at})"));
+                            self.set_frames(&mut report, &format!("    at <main> ({at})"));
                         }
                     }
                 }
@@ -485,6 +508,7 @@ impl Diagnostics {
                     message: self.keep_text.get().then(|| message.to_string()),
                     message_len: Some(message.chars().count()),
                     frames: Vec::new(),
+                    functions: Vec::new(),
                     located: false,
                     rejection: false,
                     module: None,
@@ -492,6 +516,49 @@ impl Diagnostics {
             }
         }
     }
+}
+
+/// Longest function name kept for a frame, in characters.
+const MAX_FUNCTION_CHARS: usize = 128;
+
+/// A frame's function name as Boa writes it: `None` for its placeholders
+/// (`<main>` for top-level code, `<anonymous>`, empty), which no page
+/// identifier can spell.
+fn function_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() || (name.starts_with('<') && name.ends_with('>')) {
+        return None;
+    }
+    Some(name.chars().take(MAX_FUNCTION_CHARS).collect())
+}
+
+/// The page's frames on the VM's stack, innermost first, as
+/// [`caller_position`] reads them: frames in no named script (`eval` code,
+/// an `on*` handler) and the embedder's own are passed over. Function names
+/// only with `names`. Runs no script.
+pub(crate) fn page_stack(context: &mut Context, names: bool) -> Vec<ScriptFrame> {
+    use boa_engine::vm::SourcePath;
+    let mut frames = Vec::new();
+    for frame in context.stack_trace() {
+        let location = frame.position();
+        let path = match &location.path {
+            SourcePath::Path(path) if path.as_os_str() != EMBEDDER_PATH => path.to_string_lossy().into_owned(),
+            _ => continue,
+        };
+        let Some(position) = location.position else { continue };
+        let function = match names {
+            true => function_name(&location.function_name.to_std_string_escaped()),
+            false => None,
+        };
+        frames.push(ScriptFrame {
+            function,
+            at: ScriptPosition { path, line: position.line_number(), column: position.column_number() },
+        });
+        if frames.len() >= MAX_FRAMES {
+            break;
+        }
+    }
+    frames
 }
 
 /// The position of the innermost script frame on the VM's stack: the

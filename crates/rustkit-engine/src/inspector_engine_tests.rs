@@ -1506,3 +1506,95 @@ fn a_module_url_cannot_pass_for_an_inline_script() {
     assert!(!all.contains("inline#") && !all.contains("inline-module"), "{all}");
     assert!(all.contains("/evil.js:2:") && all.contains("/late.js"), "{all}");
 }
+
+/// The first script error's stack and inserter, ports dropped.
+fn first_error_stack(engine: &Engine, view: EngineViewId, port: u16) -> (Option<String>, Option<String>) {
+    let local = |s: &str| s.replace(&format!("http://127.0.0.1:{port}"), "");
+    records(engine, view)
+        .into_iter()
+        .find_map(|r| match r.event {
+            InspectorEvent::ScriptError { stack, inserted_by, .. } => Some((
+                stack.map(|s| local(&s)),
+                inserted_by.map(|at| format!("{}:{}:{}", local(&at.url), at.line, at.column)),
+            )),
+            _ => None,
+        })
+        .expect("a script error")
+}
+
+const DEEP_PAGE: &str = "<html><body><script>
+var s = document.createElement('script');
+s.src = '/deep.js'; document.body.appendChild(s);
+</script></body></html>";
+const DEEP_JS: &str = "function outer() {\n  middle();\n}\nfunction middle() {\n  inner();\n}\nfunction inner() {\n  null.deep;\n}\nouter();\n";
+
+/// Dev-tools T1: a throw three frames deep in a script that page script
+/// inserted shows every frame at its URL, line and column (calls placed at
+/// their `(`, as Boa places them), each named function's name when error
+/// text is kept, and where the script was inserted.
+#[test]
+fn a_deep_throw_shows_every_frame_and_where_its_script_was_inserted() {
+    let mut config = EngineConfig::default();
+    config.inspector.keep_error_text = true;
+    let (engine, view, server) =
+        load_page(config, vec![Route::html("/", DEEP_PAGE), Route::ok("/deep.js", "text/javascript", DEEP_JS)]);
+    let (stack, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(
+        stack.as_deref(),
+        Some("    at inner (/deep.js:8:8)\n    at middle (/deep.js:5:8)\n    at outer (/deep.js:2:9)\n    at /deep.js:10:6")
+    );
+    assert_eq!(inserted_by.as_deref(), Some("inline#1:3:46"));
+}
+
+/// Without error text a function's name (the page's text) is not kept:
+/// positions and the inserter only.
+#[test]
+fn a_deep_throw_keeps_positions_only_without_error_text() {
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", DEEP_PAGE), Route::ok("/deep.js", "text/javascript", DEEP_JS)],
+    );
+    let (stack, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(
+        stack.as_deref(),
+        Some("    at /deep.js:8:8\n    at /deep.js:5:8\n    at /deep.js:2:9\n    at /deep.js:10:6")
+    );
+    assert_eq!(inserted_by.as_deref(), Some("inline#1:3:46"));
+}
+
+/// Dev-tools T1: `console.error` carries its caller's stack; other levels
+/// do not.
+#[test]
+fn console_error_carries_its_callers_stack() {
+    let page = "<html><body><script>
+function a() { b(); }
+function b() { console.error('x'); console.log('y'); }
+a();
+</script></body></html>";
+    let stacks = |config: EngineConfig| {
+        let (engine, view, _server) = load_page(config, vec![Route::html("/", page)]);
+        records(&engine, view)
+            .into_iter()
+            .filter_map(|r| match r.event {
+                InspectorEvent::Console { level, stack, .. } => Some((level, stack)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut config = console_text();
+    config.inspector.keep_error_text = true;
+    assert_eq!(
+        stacks(config),
+        vec![
+            (ConsoleLevel::Error, Some("    at b (inline#1:3:29)\n    at a (inline#1:2:17)\n    at inline#1:4:2".to_string())),
+            (ConsoleLevel::Log, None),
+        ]
+    );
+    assert_eq!(
+        stacks(EngineConfig::default()),
+        vec![
+            (ConsoleLevel::Error, Some("    at inline#1:3:29\n    at inline#1:2:17\n    at inline#1:4:2".to_string())),
+            (ConsoleLevel::Log, None),
+        ]
+    );
+}
