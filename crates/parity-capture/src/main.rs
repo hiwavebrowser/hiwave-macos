@@ -365,8 +365,49 @@ struct LiveStats {
     idle_at_end: bool,
 }
 
+/// Wakes the live loop's sleep when work arrives off the page thread, as the
+/// app's event loop is woken (`rustkit_engine::set_live_wake`): an inserted
+/// script's fetch finishing is not `in_flight`, so without it a page with no
+/// timer set slept the rest of `--live-ms` and its inserted scripts ran only
+/// on the last turn.
+#[derive(Default)]
+struct LiveWake {
+    woken: std::sync::Mutex<bool>,
+    arrived: std::sync::Condvar,
+}
+
+impl LiveWake {
+    /// The process's one waker, installed in the engine on first use.
+    fn installed() -> Arc<LiveWake> {
+        static WAKE: std::sync::OnceLock<Arc<LiveWake>> = std::sync::OnceLock::new();
+        WAKE.get_or_init(|| {
+            let wake = Arc::new(LiveWake::default());
+            let engine_side = Arc::clone(&wake);
+            rustkit_engine::set_live_wake(Arc::new(move || engine_side.wake()));
+            wake
+        })
+        .clone()
+    }
+
+    fn wake(&self) {
+        *self.woken.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.arrived.notify_one();
+    }
+
+    /// Sleep up to `limit`, less if woken (or woken since the last sleep).
+    fn sleep(&self, limit: Duration) {
+        let woken = self.woken.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut woken, _) = self
+            .arrived
+            .wait_timeout_while(woken, limit, |woken| !*woken)
+            .unwrap_or_else(|e| e.into_inner());
+        *woken = false;
+    }
+}
+
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due or a request is out, never sooner than the last turn took.
+/// timer is due, a request is out or the engine wakes the loop, never sooner
+/// than the last turn took.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
@@ -379,6 +420,7 @@ fn run_live(
     let began = Instant::now();
     let mut clock = began;
     let mut stats = LiveStats::default();
+    let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
         let started = Instant::now();
@@ -401,9 +443,10 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input wakes it.
+        // An idle page still gets its time: in the app only input, or the
+        // engine's wake, ends the wait.
         let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        std::thread::sleep(wait.min(left));
+        wake.sleep(wait.min(left));
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -1497,6 +1540,72 @@ mod tests {
         let summary = result.event_summary.expect("a summary");
         assert_eq!(summary.events as usize, kinds.len());
         assert_eq!(summary.schema, rustkit_engine::inspector::SUMMARY_SCHEMA);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A page whose only pending work is an inserted script's fetch (no
+    /// timer set, nothing `in_flight`) still runs the script when its fetch
+    /// arrives, not on the live window's last turn.
+    #[test]
+    fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (ctype, body) = if line.starts_with("GET /late.js") {
+                        std::thread::sleep(Duration::from_millis(300));
+                        ("text/javascript", "console.log('late ran');".to_string())
+                    } else {
+                        let page = "<html><body>x<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/late.js'; document.body.appendChild(s); }, 50);</script></body></html>";
+                        ("text/html", page.to_string())
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("events.jsonl");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "6000",
+            "--event-log",
+            log.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let records: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let at = |pred: &dyn Fn(&serde_json::Value) -> bool| records.iter().find(|r| pred(r)).map(|r| r["t_ms"].as_f64().unwrap());
+        let load = at(&|r| r["type"] == "load_finished").expect("load_finished");
+        let ran = at(&|r| r["type"] == "console").expect("late.js logged");
+        assert!(ran - load < 2_000.0, "late.js ran {:.0} ms after load (the window is 6000 ms)", ran - load);
         let _ = fs::remove_dir_all(&dir);
     }
 
