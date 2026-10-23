@@ -3140,6 +3140,7 @@ impl Stylesheet {
 }
 
 pub mod background;
+mod color_mix;
 pub mod mask;
 pub use mask::Mask;
 
@@ -3340,6 +3341,10 @@ pub fn parse_color(value: &str) -> Option<Color> {
             _ => return None,
         };
         return Some(Color::new(r, g, b, a));
+    }
+
+    if value.starts_with("color-mix(") {
+        return color_mix::parse_color_mix(&value.to_lowercase());
     }
 
     // rgb() / rgba()

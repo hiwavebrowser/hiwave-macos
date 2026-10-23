@@ -31682,7 +31682,7 @@ mod cascade_wire_tests {
             ("border", "1px solid lab(50% 40 59)"),
             ("border", "1px solid hwb(0 0% 0%)"),
             ("border", "1px solid color(display-p3 1 0 0)"),
-            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+            ("border", "1px solid color-mix(in lab, red 50%, blue)"),
         ] {
             let mut s = ComputedStyle::default();
             e.apply_style_property(&mut s, property, "4px dashed red");
@@ -31702,6 +31702,23 @@ mod cascade_wire_tests {
         assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
     }
 
+    // `color-mix()` resolves (css-color-5 §2): the reduced page's
+    // `background: red; background: color-mix(...)` painted nothing.
+    #[test]
+    fn a_color_mix_colour_is_painted() {
+        let e = engine();
+        let half_green = rustkit_css::Color::new(0, 128, 0, 0.5);
+        for property in ["background", "background-color"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "red");
+            e.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
+            assert_eq!(s.background_color, half_green, "{property}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
+        assert_eq!(s.border_top_color, rustkit_css::Color::new(128, 0, 128, 1.0));
+    }
+
     #[test]
     fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
         let e = engine();
@@ -31710,7 +31727,7 @@ mod cascade_wire_tests {
             "url(a.png) no-repeat currentcolor",
             "url(a.png) rgb(229 231 235 / 1)",
             "url(a.png) oklch(0.7 0.1 200)",
-            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) color-mix(in lab, red 50%, blue)",
             "url(a.png) light-dark(#fff, #000)",
         ] {
             let mut s = ComputedStyle::default();

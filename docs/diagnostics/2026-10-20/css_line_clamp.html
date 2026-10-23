@@ -1,0 +1,11 @@
+<!doctype html><!-- display:-webkit-box + -webkit-box-orient:vertical + -webkit-line-clamp:2 (youtube/ebay title cards).
+ PASS: #t is 200x50 at (10,10), 2 of its 6 lines; #probe is green at (10,60). Pixel (100,70) green, pixel (100,100) white. FAIL: red at (100,70). -->
+<html><head><style>
+body { margin: 0; } #w { position: absolute; left: 10px; top: 10px; width: 200px; }
+#t { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+     font: 20px/25px monospace; color: green; background: red; }
+#cover { position: absolute; left: 0; top: 0; width: 200px; height: 50px; background: green; }
+#probe { height: 20px; background: green; }
+</style></head><body>
+<div id="w"><div id="t">one<br>two<br>three<br>four<br>five<br>six</div><div id="probe"></div><div id="cover"></div></div>
+</body></html>
