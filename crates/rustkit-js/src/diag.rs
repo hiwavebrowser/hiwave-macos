@@ -544,10 +544,15 @@ const MAX_FUNCTION_CHARS: usize = 128;
 
 /// A frame's function name as Boa writes it: `None` for its placeholders
 /// (`<main>` for top-level code, `<anonymous>`, empty), which no page
-/// identifier can spell.
+/// identifier can spell, and for a computed name holding a control
+/// character or a parenthesis, which could forge a frame line
+/// (`    at f (url:line:col)`) in the stack text.
 fn function_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty() || (name.starts_with('<') && name.ends_with('>')) {
+        return None;
+    }
+    if name.chars().any(|c| c.is_control() || c == '(' || c == ')') {
         return None;
     }
     Some(name.chars().take(MAX_FUNCTION_CHARS).collect())

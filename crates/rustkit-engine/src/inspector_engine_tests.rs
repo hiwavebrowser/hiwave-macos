@@ -1635,3 +1635,94 @@ console.error('no error argument');
         ]
     );
 }
+
+/// #784 R1 nit 1: a computed function name cannot forge a frame line in
+/// the stack text; such a frame keeps its position, without a name.
+#[test]
+fn a_computed_function_name_cannot_forge_a_frame() {
+    let page = "<html><body><script>
+var o = { ['x (https://forged.test/f.js:9:9)\\n    at forged']() { null.deep; } };
+o['x (https://forged.test/f.js:9:9)\\n    at forged']();
+</script></body></html>";
+    let mut config = EngineConfig::default();
+    config.inspector.keep_error_text = true;
+    let (engine, view, server) = load_page(config, vec![Route::html("/", page)]);
+    let (stack, _) = first_error_stack(&engine, view, server.port);
+    let stack = stack.expect("a stack");
+    assert!(!stack.contains("forged"), "{stack}");
+    assert_eq!(stack.lines().count(), 2, "{stack}");
+}
+
+/// #784 R1 nit 2: a throw in `eval` code is not located in the script
+/// that called `eval`, so it does not take that script's inserter either.
+#[test]
+fn an_eval_throw_does_not_borrow_its_scripts_inserter() {
+    let page = "<html><body><script>
+var s = document.createElement('script');
+s.src = '/e.js'; document.body.appendChild(s);
+</script></body></html>";
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", page), Route::ok("/e.js", "text/javascript", "eval('null.deep');\n")],
+    );
+    let (_, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(inserted_by, None);
+}
+
+/// #784 R1 must-fix: the console mirror (`HIWAVE_CONSOLE_LOG`) keeps the
+/// runtime's text for the tracing log, but what reaches the Inspector
+/// follows the Inspector's own `keep_error_text`: with it off, a script
+/// error has no message and every stack (`script_error.stack`,
+/// `console.stack`, `console.error_stack`) is positions only.
+#[test]
+fn the_console_mirror_does_not_put_error_text_in_the_inspector() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let page = "<html><body><script>
+function three() { return Object.keys(null); }
+function two() { return three(); }
+try { two(); } catch (e) { console.error('boundary', e); }
+</script><script>
+function outer() { inner(); }
+function inner() { throw new Error('secret-message'); }
+outer();
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("secret-message"), "{all}");
+    for name in ["three", "two", "outer", "inner"] {
+        assert!(!all.contains(&format!("at {name} ")), "{name}: {all}");
+    }
+    let logged: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Console { stack, error_stack, .. } => Some((stack.clone(), error_stack.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![(
+            Some("    at inline#1:4:41".to_string()),
+            Some("    at inline#1:2:38\n    at inline#1:3:30\n    at inline#1:4:10".to_string()),
+        )]
+    );
+    let errors: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { message, stack, .. } => Some((message.clone(), stack.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        vec![(None, Some("    at inline#2:3:26\n    at inline#2:2:25\n    at inline#2:4:6".to_string()))]
+    );
+}

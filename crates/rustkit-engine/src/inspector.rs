@@ -911,15 +911,17 @@ impl Inspector {
     }
 
     /// The page's frames as a `stack` field: one `    at url:line:col` line
-    /// each, `    at name (url:line:col)` for a named function; frames whose
-    /// script cannot be shown are dropped. `None` when none is left.
+    /// each, `    at name (url:line:col)` for a named function when error
+    /// text is kept here (the runtime may hold names for the console mirror,
+    /// which this Inspector's setting does not follow); frames whose script
+    /// cannot be shown are dropped. `None` when none is left.
     pub fn stack_text(&self, frames: &[(Option<&str>, &rustkit_js::ScriptPosition)]) -> Option<String> {
         let lines: Vec<String> = frames
             .iter()
             .filter_map(|(function, at)| {
                 let place = self.frame_location(&at.path, at.line, at.column)?;
                 let place = format!("{}:{}:{}", place.url, place.line, place.column);
-                Some(match function {
+                Some(match function.filter(|_| self.keep_error_text) {
                     Some(name) => format!("    at {name} ({place})"),
                     None => format!("    at {place}"),
                 })

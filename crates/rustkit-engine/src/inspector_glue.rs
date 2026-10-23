@@ -115,14 +115,26 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
         let stack = inspector.stack_text(&named);
         InspectorEvent::ScriptError {
             name: report.name.unwrap_or("").to_string(),
-            message: report.message.as_deref().map(|m| cap(m, MAX_MESSAGE_CHARS).0),
+            // The runtime keeps text for the console mirror too; the
+            // Inspector keeps it only when its own setting asks.
+            message: report
+                .message
+                .as_deref()
+                .filter(|_| inspector.keeps_error_text())
+                .map(|m| cap(m, MAX_MESSAGE_CHARS).0),
             location,
             stack,
             unhandled_rejection: report.rejection,
             script: inspector.url_text(report.module.as_deref().unwrap_or(script)),
             value: report.value.to_string(),
             message_len: report.message_len.map(|n| n as u64),
-            inserted_by: report.frames.first().and_then(|f| inspector.inserted_by(&f.path)),
+            // Like `location`: an `eval` or `on*` throw does not borrow
+            // its outer script's inserter.
+            inserted_by: report
+                .frames
+                .first()
+                .filter(|_| report.located)
+                .and_then(|f| inspector.inserted_by(&f.path)),
         }
     });
 }
