@@ -2684,6 +2684,9 @@ pub struct ComputedStyle {
 
     // Visual
     pub opacity: f32,
+    /// `clip-path` as authored (empty for `none`); layout resolves the
+    /// basic shape against the box it clips. Not inherited.
+    pub clip_path: String,
     pub visibility: Visibility,
     pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
