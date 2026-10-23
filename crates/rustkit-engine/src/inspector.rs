@@ -285,7 +285,9 @@ pub enum InspectorEvent {
         method: String,
         resource_type: ResourceType,
         /// What asked for it: `parser` (the document's markup), `css` (a
-        /// stylesheet's `url()`), `script` (page script), `navigation`.
+        /// stylesheet's `url()`), `fetch`, `xhr`, `inserted_script` (a
+        /// `<script src>` page script inserted), `script` (other page
+        /// script: `import`, images it added), `navigation`.
         initiator: Option<String>,
     },
     /// The request's answer arrived (any status, 4xx and 5xx included).
@@ -309,8 +311,32 @@ pub enum InspectorEvent {
         /// A short reason in the engine's words (no header, body or query).
         reason: String,
         duration_ms: f64,
+        /// The shield's list and rule, when the shield refused it and said
+        /// which; else `null`.
+        #[serde(default)]
+        blocked_by: Option<BlockedBy>,
     },
 }
+
+/// Which filter list, and which of its rules, refused a request: the
+/// list's own public text, capped, never the page's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedBy {
+    pub list: String,
+    pub rule: Option<String>,
+}
+
+impl BlockedBy {
+    fn from_reason(reason: &rustkit_net::BlockReason) -> Self {
+        BlockedBy {
+            list: cap(&reason.list, MAX_SHORT_CHARS).0,
+            rule: reason.rule.as_deref().map(|r| cap(r, MAX_RULE_CHARS).0),
+        }
+    }
+}
+
+/// Longest filter rule kept in `blocked_by`, in characters.
+const MAX_RULE_CHARS: usize = 256;
 
 impl InspectorEvent {
     /// The `type` tag.
@@ -700,6 +726,7 @@ impl Inspector {
             dropped_as: FailureStage::Cancelled,
             dropped_reason: "abandoned (navigation or view closed)",
             budget: None,
+            blocked_by: None,
             done: false,
         })
     }
@@ -869,6 +896,8 @@ pub struct RequestGuard {
     /// Dropped at or past this deadline, it ran out of a budget: the stage
     /// and the reason to record.
     budget: Option<(Instant, FailureStage, &'static str)>,
+    /// The shield's list and rule, for the failure it ends in.
+    blocked_by: Option<BlockedBy>,
     done: bool,
 }
 
@@ -876,6 +905,13 @@ impl RequestGuard {
     /// The request's id in the events.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The shield refused it with `reason` (if it said which list and rule):
+    /// the failure this ends in carries them as `blocked_by`.
+    pub fn blocked_by(mut self, reason: Option<&rustkit_net::BlockReason>) -> Self {
+        self.blocked_by = reason.map(BlockedBy::from_reason);
+        self
     }
 
     /// The stage and reason recorded if this is dropped unanswered.
@@ -935,7 +971,13 @@ impl RequestGuard {
     pub fn fail(mut self, stage: FailureStage, reason: &str) {
         self.done = true;
         let reason = self.inspector.scrub_text(&cap(reason, MAX_SHORT_CHARS).0);
-        let event = InspectorEvent::Failure { id: self.id, stage, reason, duration_ms: self.duration_ms() };
+        let event = InspectorEvent::Failure {
+            id: self.id,
+            stage,
+            reason,
+            duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
+        };
         self.inspector.finish_request(self.id, event);
     }
 }
@@ -954,6 +996,7 @@ impl Drop for RequestGuard {
             stage,
             reason: reason.to_string(),
             duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1039,7 +1082,7 @@ pub fn answer_module(
         Ok(Err(rustkit_net::policy::Denial::BadStatus(status))) => guard.response(*status, None, None, None, false),
         Ok(Err(denial)) => {
             let (stage, reason) = denial_stage(denial);
-            guard.fail(stage, reason);
+            guard.blocked_by(denial_block_reason(denial)).fail(stage, reason);
         }
         Err(_) => guard.fail(FailureStage::Timeout, "timed out"),
     }
@@ -1049,7 +1092,23 @@ pub fn answer_module(
 pub fn fail_net(guard: Option<RequestGuard>, error: &rustkit_net::NetError) {
     if let Some(guard) = guard {
         let (stage, reason) = net_error_stage(error);
-        guard.fail(stage, reason);
+        guard.blocked_by(net_block_reason(error)).fail(stage, reason);
+    }
+}
+
+/// The shield's list and rule, when `error` is its block and it said which.
+pub fn net_block_reason(error: &rustkit_net::NetError) -> Option<&rustkit_net::BlockReason> {
+    match error {
+        rustkit_net::NetError::Blocked(reason) => reason.as_ref(),
+        _ => None,
+    }
+}
+
+/// The shield's list and rule, when `denial` is its block and it said which.
+pub fn denial_block_reason(denial: &rustkit_net::policy::Denial) -> Option<&rustkit_net::BlockReason> {
+    match denial {
+        rustkit_net::policy::Denial::Shield(reason) => reason.as_ref(),
+        _ => None,
     }
 }
 
@@ -1071,7 +1130,7 @@ pub fn denial_stage(denial: &rustkit_net::policy::Denial) -> (FailureStage, &'st
         Denial::ResponseTooLarge => (FailureStage::OverBudget, "response too large"),
         Denial::Timeout => (FailureStage::Timeout, "timed out"),
         Denial::BudgetExhausted => (FailureStage::OverBudget, "page request budget spent"),
-        Denial::Shield => (FailureStage::Policy, "blocked by the shield"),
+        Denial::Shield(_) => (FailureStage::Policy, "blocked by the shield"),
         Denial::BadMime(_) => (FailureStage::Mime, "not a JavaScript MIME type"),
         Denial::BadStatus(_) => (FailureStage::HttpError, "module answered with an error status"),
         Denial::Network(_) => (FailureStage::Connect, "network error"),
@@ -1088,7 +1147,7 @@ pub fn net_error_stage(error: &rustkit_net::NetError) -> (FailureStage, &'static
         "tls" => (FailureStage::Tls, "TLS failed"),
         "timeout" => (FailureStage::Timeout, "timed out"),
         "policy" => match error {
-            rustkit_net::NetError::Blocked => (FailureStage::Policy, "blocked by the shield"),
+            rustkit_net::NetError::Blocked(_) => (FailureStage::Policy, "blocked by the shield"),
             _ => (FailureStage::Policy, "address not allowed"),
         },
         "redirect" => (FailureStage::HttpError, "too many redirects"),
@@ -1528,7 +1587,7 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
     use rustkit_http::HttpError;
     use rustkit_net::NetError;
     match error {
-        NetError::Blocked => "policy",
+        NetError::Blocked(_) => "policy",
         NetError::Timeout(_) => "timeout",
         NetError::Cancelled => "cancelled",
         NetError::InvalidUrl(_) => "invalid_url",

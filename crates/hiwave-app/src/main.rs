@@ -55,7 +55,7 @@ mod window_stall;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
-mod shield_adapter;
+use hiwave_shield_intercept as shield_adapter;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
 

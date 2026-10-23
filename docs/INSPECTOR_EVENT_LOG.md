@@ -55,7 +55,7 @@ field that is `null` today may hold a value later.
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
 | `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
-| `failure` | `id`, `stage`, `reason`, `duration_ms` |
+| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`) |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -158,8 +158,11 @@ deadline, a navigation) is still answered.
 (a module script or an import), `image`, `font`, `fetch`, `xhr`, `other`.
 
 `initiator`: `navigation` (the document), `parser` (the document's markup),
-`css` (a stylesheet's `url()`: fonts, background images), `script` (page
-script: `fetch`, XHR, `import`, images scripts added).
+`css` (a stylesheet's `url()`: fonts, background images), `fetch` (page
+script's `fetch()`), `xhr` (an `XMLHttpRequest`), `inserted_script` (a
+`<script src>` page script inserted; `script_error.inserted_by` says where
+from), `script` (other page script: `import`, images scripts added). Before
+dev-tools T2, `fetch`, `xhr` and `inserted_script` were all `script`.
 
 A response with an error status (`404`) is a `response`: the server answered.
 `encoded_size` is the body as transferred (before gzip/deflate were undone),
