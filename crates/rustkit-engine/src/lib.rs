@@ -30700,6 +30700,12 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Compounds a `:has()` search tested, for the tests that bound it.
+    static HAS_COMPOUND_TESTS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// Sets [`RELATIONAL_NODE`] for its lifetime and puts the previous one back.
 struct RelationalNodeScope(Option<Rc<Node>>);
 
@@ -30792,36 +30798,69 @@ fn relative_selector_matches(anchor: &Rc<Node>, member: &str) -> bool {
     relative_steps_match(anchor, &steps)
 }
 
+/// Whether `steps` match outward from `from`. Answers are kept per (node,
+/// steps left, what was asked) for the one relative selector, so a failing
+/// `:has(div div .x)` searches each subtree once, not once per `div` that
+/// matched on the way down.
 fn relative_steps_match(from: &Rc<Node>, steps: &[(String, String)]) -> bool {
-    let Some(((combinator, compound), rest)) = steps.split_first() else {
-        return true;
-    };
-    let step = |candidate: &Rc<Node>| {
-        has_compound_matches(candidate, compound) && relative_steps_match(candidate, rest)
-    };
-    match combinator.as_str() {
-        ">" => from.children().iter().filter(|c| c.is_element()).any(step),
-        "+" => next_element_sibling(from).is_some_and(|s| step(&s)),
-        "~" => {
-            let mut next = next_element_sibling(from);
-            while let Some(sibling) = next {
-                if step(&sibling) {
-                    return true;
-                }
-                next = next_element_sibling(&sibling);
+    struct Search<'a> {
+        steps: &'a [(String, String)],
+        memo: std::cell::RefCell<HashMap<(usize, usize, u8), bool>>,
+    }
+
+    impl Search<'_> {
+        fn memo(&self, node: &Rc<Node>, left: usize, kind: u8, compute: impl FnOnce() -> bool) -> bool {
+            let key = (Rc::as_ptr(node) as usize, left, kind);
+            if let Some(&known) = self.memo.borrow().get(&key) {
+                return known;
             }
-            false
+            let found = compute();
+            self.memo.borrow_mut().insert(key, found);
+            found
         }
-        _ => {
-            fn any_descendant(node: &Rc<Node>, step: &dyn Fn(&Rc<Node>) -> bool) -> bool {
+
+        /// The last `left` steps match from `from`.
+        fn from(&self, from: &Rc<Node>, left: usize) -> bool {
+            if left == 0 {
+                return true;
+            }
+            self.memo(from, left, 0, || {
+                let combinator = self.steps[self.steps.len() - left].0.as_str();
+                match combinator {
+                    ">" => from.children().iter().filter(|c| c.is_element()).any(|c| self.at(c, left)),
+                    "+" => next_element_sibling(from).is_some_and(|s| self.at(&s, left)),
+                    "~" => self.later_sibling(from, left),
+                    _ => self.descendant(from, left),
+                }
+            })
+        }
+
+        /// The first of the last `left` steps' compound matches `node`, and
+        /// the rest match from it.
+        fn at(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 1, || {
+                has_compound_matches(node, &self.steps[self.steps.len() - left].1) && self.from(node, left - 1)
+            })
+        }
+
+        fn descendant(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 2, || {
                 node.children()
                     .iter()
                     .filter(|c| c.is_element())
-                    .any(|c| step(c) || any_descendant(c, step))
-            }
-            any_descendant(from, &step)
+                    .any(|c| self.at(c, left) || self.descendant(c, left))
+            })
+        }
+
+        fn later_sibling(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 3, || {
+                next_element_sibling(node).is_some_and(|s| self.at(&s, left) || self.later_sibling(&s, left))
+            })
         }
     }
+
+    let search = Search { steps, memo: Default::default() };
+    search.from(from, steps.len())
 }
 
 fn next_element_sibling(node: &Rc<Node>) -> Option<Rc<Node>> {
@@ -30838,6 +30877,8 @@ fn next_element_sibling(node: &Rc<Node>) -> Option<Rc<Node>> {
 /// One compound of a relative selector against a DOM element, with the
 /// element's place among its siblings read from the tree.
 fn has_compound_matches(node: &Rc<Node>, compound: &str) -> bool {
+    #[cfg(test)]
+    HAS_COMPOUND_TESTS.with(|n| n.set(n.get() + 1));
     let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
         return false;
     };
@@ -30878,8 +30919,10 @@ fn dom_sibling_context(node: &Rc<Node>, tag: &str, has_children: bool) -> Siblin
 }
 
 /// The element `ancestors[idx]` stands for, from the subject `node`: the
-/// chain holds one entry per element above it. A chain that does not
-/// mirror the tree (a shadow or slot scope) gives none.
+/// chain holds one entry per element above it, in the DOM. A slotted node
+/// is matched against its host's light chain, which is its DOM parents
+/// too; a shadow tree's chain ends at its host, where the DOM walk meets
+/// the shadow root (no tag) and gives none. The tag is checked besides.
 fn chain_ancestor_node(node: &Rc<Node>, idx: usize, key: &AncestorKey) -> Option<Rc<Node>> {
     let mut at = node.parent()?;
     for _ in 0..idx {
@@ -30889,9 +30932,11 @@ fn chain_ancestor_node(node: &Rc<Node>, idx: usize, key: &AncestorKey) -> Option
 }
 
 /// The element `siblings_before[idx]` stands for: the subject's
-/// `idx`-th earlier element sibling, checked by tag.
+/// `idx`-th earlier element sibling, checked by tag. A shadow host's light
+/// children are siblings only as their slot assigns them (a named slot
+/// takes some of them), so their positions need not be the DOM's: none.
 fn chain_sibling_node(node: &Rc<Node>, idx: usize, key: &SiblingKey) -> Option<Rc<Node>> {
-    let parent = node.parent()?;
+    let parent = node.parent().filter(|p| p.shadow_root().is_none())?;
     let sibling = parent.children().into_iter().filter(|c| c.is_element()).nth(idx)?;
     sibling.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(&key.0)).then_some(sibling)
 }

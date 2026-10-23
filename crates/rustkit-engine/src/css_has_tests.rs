@@ -153,11 +153,27 @@ nav:is(.z:has(:has(.t)), .z) { display: block; }
 #[test]
 fn has_inside_has_is_invalid() {
     assert_eq!(shown(INVALID), "z1");
-    for selector in [":has(:has(.t))", "a:not(:has(:has(b)))", ":has()", "a:has(b), :has(:has(c))"] {
-        assert!(!SelectorMatcher::selector_list_is_valid(selector), "{selector} is invalid");
+    for selector in [
+        ":has(:has(.t))",
+        "a:not(:has(:has(b)))",
+        ":has()",
+        "a:has(b), :has(:has(c))",
+    ] {
+        assert!(
+            !SelectorMatcher::selector_list_is_valid(selector),
+            "{selector} is invalid"
+        );
     }
-    for selector in [":has(.t)", ":has(> a, + b, ~ c)", "a:not(:has(b))", ":is(:has(:has(a)), b)"] {
-        assert!(SelectorMatcher::selector_list_is_valid(selector), "{selector} is valid");
+    for selector in [
+        ":has(.t)",
+        ":has(> a, + b, ~ c)",
+        "a:not(:has(b))",
+        ":is(:has(:has(a)), b)",
+    ] {
+        assert!(
+            SelectorMatcher::selector_list_is_valid(selector),
+            "{selector} is valid"
+        );
     }
 }
 
@@ -186,9 +202,17 @@ fn has_takes_its_most_specific_arguments_specificity() {
 /// sharing key does not hold.
 #[test]
 fn a_has_rule_is_never_shared() {
-    for selector in [".a:has(.b)", ".a:has(.b) .c", ".a:not(:has(.b))", ":is(.a:has(> .b)) > .c"] {
+    for selector in [
+        ".a:has(.b)",
+        ".a:has(.b) .c",
+        ".a:not(:has(.b))",
+        ":is(.a:has(> .b)) > .c",
+    ] {
         let mut reads = SelectorReads::default();
-        assert!(reads.note(&SelectorMatcher.prepared_selector(selector)), "{selector} is positional");
+        assert!(
+            reads.note(&SelectorMatcher.prepared_selector(selector)),
+            "{selector} is positional"
+        );
     }
     // Look-alike siblings under look-alike parents: only the subtree differs.
     let page = r#"<!doctype html><html><head><style>
@@ -201,6 +225,45 @@ fn a_has_rule_is_never_shared() {
     assert_eq!(shown(page), "r1 u1");
 }
 
+/// A failing multi-step relative selector searches each subtree once per
+/// anchor, not once per element that matched a step on the way down: on a
+/// complete binary tree of 511 divs, `div:has(div div .missing)` used to
+/// test 35,334 compounds (each nested `div` restarted the search below it).
+#[test]
+fn a_failing_multi_step_has_searches_each_subtree_once_per_anchor() {
+    fn tree(depth: usize) -> String {
+        match depth {
+            0 => String::new(),
+            _ => format!("<div>{}{}</div>", tree(depth - 1), tree(depth - 1)),
+        }
+    }
+    let page = format!(
+        "<!doctype html><html><head><style>div:has(div div .missing) {{ color: red; }}</style></head><body>{}</body></html>",
+        tree(9)
+    );
+    let document = Document::parse_html(&page).expect("html");
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    HAS_COMPOUND_TESTS.with(|n| n.set(0));
+    engine.build_layout_from_document(&document, &[]);
+    let tested = HAS_COMPOUND_TESTS.with(|n| n.get());
+    // Each of the 511 anchors tests each node under it at most once per
+    // step: 3 steps * 3586 (the nodes under all anchors, summed).
+    assert!(tested <= 3 * 3586, "{tested} compound tests");
+}
+
+/// A slotted element is matched against its host's light-tree chain, which
+/// is its DOM parents: `:has()` on that ancestor is decided on the host.
+#[test]
+fn a_has_on_the_host_reaches_its_slotted_children() {
+    let page = r#"<!doctype html><html><head><style>
+        nav { display: none; } .host:has(> .t) > nav { display: block; }
+        </style></head><body>
+        <div class="host"><template shadowrootmode="open"><p><slot></slot></p></template><i class="t"></i><nav>s1</nav></div>
+        <div class="host"><template shadowrootmode="open"><p><slot></slot></p></template><nav>s0</nav></div>
+        </body></html>"#;
+    assert_eq!(shown(page), "s1");
+}
+
 /// The DOM bindings' matcher (`querySelector`, `matches`) answers the same.
 #[test]
 fn script_queries_match_has_against_the_live_tree() {
@@ -211,7 +274,11 @@ fn script_queries_match_has_against_the_live_tree() {
     let m = SelectorMatcher;
     let no_checked = HashMap::new();
     let ask = |id: &str, selector: &str| {
-        m.node_matches(&document.get_element_by_id(id).unwrap(), selector, &no_checked)
+        m.node_matches(
+            &document.get_element_by_id(id).unwrap(),
+            selector,
+            &no_checked,
+        )
     };
     assert_eq!(ask("a", "div:has(> .t)"), Some(true));
     assert_eq!(ask("b", "div:has(> .t)"), Some(false));
@@ -250,7 +317,10 @@ fn a_dom_change_under_the_anchor_restyles_it_both_ways() {
 
     // Moved up to the box: the nav loses it, the paragraph gains it.
     on.remove_from_parent();
-    document.get_element_by_id("box").unwrap().append_child(on.clone());
+    document
+        .get_element_by_id("box")
+        .unwrap()
+        .append_child(on.clone());
     assert_eq!(shown_in(&engine, &document), vec!["after"]);
 
     on.remove_from_parent();
@@ -290,7 +360,10 @@ body { margin: 0; } .p { position: absolute; top: 10px; width: 100px; height: 10
             format!("{id}:{},{},{}", c.r, c.g, c.b)
         })
         .collect();
-    assert_eq!(colors.join(" "), "p1:0,128,0 p2:0,128,0 p3:0,128,0 p4:0,128,0");
+    assert_eq!(
+        colors.join(" "),
+        "p1:0,128,0 p2:0,128,0 p3:0,128,0 p4:0,128,0"
+    );
 }
 
 /// A script that appends and removes the child: `getComputedStyle` follows.
@@ -303,13 +376,24 @@ fn a_script_append_and_remove_restyles_the_anchor() {
     let server = serve_routes(vec![("/", "text/html", page.to_string())]);
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
-        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 200,
+        })
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(engine.load_url(view, url)).expect("load_url");
     let color = "getComputedStyle(document.getElementById('a')).color";
-    assert_eq!(engine.execute_script(view, color).unwrap(), "String(\"rgb(0, 0, 255)\")");
+    assert_eq!(
+        engine.execute_script(view, color).unwrap(),
+        "String(\"rgb(0, 0, 255)\")"
+    );
     engine
         .execute_script(
             view,
@@ -317,7 +401,15 @@ fn a_script_append_and_remove_restyles_the_anchor() {
              document.getElementById('a').appendChild(i); 1",
         )
         .unwrap();
-    assert_eq!(engine.execute_script(view, color).unwrap(), "String(\"rgb(0, 128, 0)\")");
-    engine.execute_script(view, "document.querySelector('.on').remove(); 1").unwrap();
-    assert_eq!(engine.execute_script(view, color).unwrap(), "String(\"rgb(0, 0, 255)\")");
+    assert_eq!(
+        engine.execute_script(view, color).unwrap(),
+        "String(\"rgb(0, 128, 0)\")"
+    );
+    engine
+        .execute_script(view, "document.querySelector('.on').remove(); 1")
+        .unwrap();
+    assert_eq!(
+        engine.execute_script(view, color).unwrap(),
+        "String(\"rgb(0, 0, 255)\")"
+    );
 }
