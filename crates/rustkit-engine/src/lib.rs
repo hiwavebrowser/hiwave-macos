@@ -17084,6 +17084,9 @@ fn parse_background_shorthand_layer(
                     layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
                 } else if let Some(c) = parse_color(token) {
                     color = Some(c);
+                } else if is_unresolved_color(token) {
+                    // A valid colour RustKit cannot resolve yet: the rest
+                    // of the layer (its image above all) still applies.
                 } else {
                     const UNPAINTED: [&str; 10] = [
                         "image-set(",
@@ -17358,7 +17361,9 @@ fn parse_border_shorthand(
     let mut saw_style = false;
     let mut color_parts: Vec<&str> = Vec::new();
 
-    for token in value.split_whitespace() {
+    // Split outside parentheses: `rgb(0 0 0 / 10%)` is one colour token,
+    // and its `0`s must not be read as a width.
+    for token in split_top_level_whitespace(value) {
         let lower = token.to_ascii_lowercase();
         if STYLE_KEYWORDS.contains(&lower.as_str()) {
             saw_style = true;
@@ -17387,12 +17392,40 @@ fn parse_border_shorthand(
     }
     // A token that is neither width, style nor colour makes the whole
     // declaration invalid: it is dropped, not applied as `medium none`.
-    let color = if color_parts.is_empty() {
-        None
-    } else {
-        Some(parse_color(&color_parts.join(" "))?)
+    // A colour RustKit cannot resolve yet (`currentcolor`, `oklch()`) is
+    // valid: width and style apply and the colour is left as it was.
+    let color = match color_parts.as_slice() {
+        [] => None,
+        [one] if is_unresolved_color(one) && parse_color(one).is_none() => None,
+        _ => Some(parse_color(&color_parts.join(" "))?),
     };
     Some((resolved_width, color))
+}
+
+/// A colour CSS accepts that `parse_color` cannot resolve yet: the
+/// `currentcolor` keyword or any colour function (space-syntax or percent
+/// `rgb()`/`hsl()`, `oklch()`, `color-mix()`, ...). A shorthand naming one
+/// is valid, so it must be kept with the colour left unpainted, not dropped
+/// whole as if the token were junk.
+fn is_unresolved_color(token: &str) -> bool {
+    const COLOR_FUNCTIONS: [&str; 13] = [
+        "rgb(",
+        "rgba(",
+        "hsl(",
+        "hsla(",
+        "hwb(",
+        "lab(",
+        "lch(",
+        "oklab(",
+        "oklch(",
+        "color(",
+        "color-mix(",
+        "light-dark(",
+        "contrast-color(",
+    ];
+    let lower = token.trim().to_ascii_lowercase();
+    lower == "currentcolor"
+        || (lower.ends_with(')') && COLOR_FUNCTIONS.iter().any(|f| lower.starts_with(f)))
 }
 
 fn parse_shorthand_4(
@@ -29367,6 +29400,67 @@ mod cascade_wire_tests {
         // Every prefix keyword the grammar allows still parses.
         e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
         assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
+    }
+
+    // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
+    // percent `rgb()`/`hsl()`, `oklch()`, `color-mix()` ...) is still a
+    // VALID colour: the shorthand is kept and its other parts apply, the
+    // colour itself is left unpainted.
+    #[test]
+    fn a_border_shorthand_with_an_unresolved_colour_keeps_width_and_style() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for (property, value) in [
+            ("border", "1px solid currentColor"),
+            ("border", "1px solid rgb(0 0 0 / 10%)"),
+            ("border-top", "1px solid rgb(229 231 235 / 1)"),
+            ("border", "1px solid rgba(0,0,0,10%)"),
+            ("border", "1px solid rgb(100%,0%,0%)"),
+            ("border", "1px solid hsl(210 40% 96%)"),
+            ("border", "1px solid oklch(0.7 0.1 200)"),
+            ("border", "1px solid lab(50% 40 59)"),
+            ("border", "1px solid hwb(0 0% 0%)"),
+            ("border", "1px solid color(display-p3 1 0 0)"),
+            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "4px dashed red");
+            e.apply_style_property(&mut s, property, value);
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
+            assert_eq!(
+                s.border_top_style,
+                rustkit_css::BorderStyle::Solid,
+                "{property}: {value}"
+            );
+            assert_eq!(s.border_top_color, red, "{property}: {value}: colour left as it was");
+        }
+        // A token that is not colour-shaped still drops the declaration.
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "2px solid red");
+        e.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
+        assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
+    }
+
+    #[test]
+    fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
+        let e = engine();
+        for value in [
+            "url(a.png) no-repeat rgb(0 0 0 / .5)",
+            "url(a.png) no-repeat currentcolor",
+            "url(a.png) rgb(229 231 235 / 1)",
+            "url(a.png) oklch(0.7 0.1 200)",
+            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) light-dark(#fff, #000)",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the image applies");
+            match &s.background_layers[0].image {
+                rustkit_css::BackgroundImage::Url(u) => assert_eq!(u, "a.png", "{value}"),
+                other => panic!("{value}: {other:?}"),
+            }
+        }
     }
 
     // animation (#50)
