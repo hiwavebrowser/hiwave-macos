@@ -6,11 +6,22 @@ pub mod filter_lists;
 
 use adblock::lists::ParseOptions;
 use adblock::Engine;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
 use hiwave_core::HiWaveResult;
 
 pub use filter_lists::{FilterListManager, FilterListSource, FILTER_LISTS};
+
+/// Which list, and which of its rules, blocked a request (dev-tools T2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockMatch {
+    /// The list's name (`EasyList`, `EasyPrivacy`), `HiWave defaults` for
+    /// the starter rules, or `custom` for rules handed to `with_rules`.
+    pub list: String,
+    /// The rule as the list writes it.
+    pub rule: Option<String>,
+}
 
 /// Ad blocker powered by Brave's adblock-rust engine
 pub struct AdBlocker {
@@ -18,6 +29,12 @@ pub struct AdBlocker {
     enabled: bool,
     requests_blocked: AtomicU64,
     trackers_blocked: AtomicU64,
+    /// The list each rule came from, when rules came from more than one.
+    /// The engine is built with debug information, so a match names its
+    /// rule's text (a few MB more for the full lists).
+    rule_lists: HashMap<String, &'static str>,
+    /// The list a rule not in `rule_lists` came from.
+    default_list: &'static str,
 }
 
 impl AdBlocker {
@@ -71,29 +88,40 @@ impl AdBlocker {
     pub fn new() -> Self {
         log::info!("Initializing ad blocker");
 
-        let engine =
-            Engine::from_rules(Self::DEFAULT_RULES.iter().copied(), ParseOptions::default());
-
-        Self {
-            engine,
-            enabled: true,
-            requests_blocked: AtomicU64::new(0),
-            trackers_blocked: AtomicU64::new(0),
-        }
+        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults")
     }
 
     /// Creates ad blocker with the given filter rules
     pub fn with_rules(rules: &[&str]) -> Self {
         log::info!("Initializing ad blocker with {} rules", rules.len());
+        Self::from_parts(rules, HashMap::new(), "custom")
+    }
 
-        let engine = Engine::from_rules(rules.iter().copied(), ParseOptions::default());
-
+    fn from_parts(rules: &[&str], rule_lists: HashMap<String, &'static str>, default_list: &'static str) -> Self {
+        let engine = Engine::from_rules_debug(rules.iter().copied(), ParseOptions::default());
         Self {
             engine,
             enabled: true,
             requests_blocked: AtomicU64::new(0),
             trackers_blocked: AtomicU64::new(0),
+            rule_lists,
+            default_list,
         }
+    }
+
+    /// Creates ad blocker from several named lists: a match names the list
+    /// its rule came from (the first, for a rule two lists share).
+    pub fn from_named_lists(lists: &[(&'static str, &str)]) -> Self {
+        let mut rules = Vec::new();
+        let mut rule_lists = HashMap::new();
+        for (name, content) in lists {
+            for line in content.lines() {
+                rule_lists.entry(line.trim().to_string()).or_insert(*name);
+                rules.push(line);
+            }
+        }
+        let default_list = lists.first().map(|(name, _)| *name).unwrap_or("custom");
+        Self::from_parts(&rules, rule_lists, default_list)
     }
 
     /// Creates ad blocker from filter list content (e.g., EasyList)
@@ -111,20 +139,27 @@ impl AdBlocker {
 
         match FilterListManager::new() {
             Some(manager) => {
-                let combined = manager.get_all_filter_lists();
-                if combined.is_empty() {
+                // Each list kept apart, so a match can name its list.
+                let lists: Vec<(&'static str, String)> = FILTER_LISTS
+                    .iter()
+                    .filter_map(|source| manager.get_filter_list(source).map(|content| (source.name, content)))
+                    .collect();
+                if lists.is_empty() {
                     log::warn!("No filter lists available, using default rules");
                     Self::new()
                 } else {
-                    let rule_count = combined
-                        .lines()
+                    let rule_count = lists
+                        .iter()
+                        .flat_map(|(_, content)| content.lines())
                         .filter(|l| !l.trim().is_empty() && !l.starts_with('!'))
                         .count();
                     log::info!(
                         "Loaded {} filter rules from EasyList/EasyPrivacy",
                         rule_count
                     );
-                    Self::from_filter_list(&combined)
+                    let named: Vec<(&'static str, &str)> =
+                        lists.iter().map(|(name, content)| (*name, content.as_str())).collect();
+                    Self::from_named_lists(&named)
                 }
             }
             None => {
@@ -139,7 +174,9 @@ impl AdBlocker {
         log::info!("Reloading ad blocker with {} rules", rules.len());
 
         let rules_refs: Vec<&str> = rules.iter().map(|s| s.as_str()).collect();
-        self.engine = Engine::from_rules(rules_refs, ParseOptions::default());
+        self.engine = Engine::from_rules_debug(rules_refs, ParseOptions::default());
+        self.rule_lists.clear();
+        self.default_list = "custom";
         self.requests_blocked.store(0, Ordering::Relaxed);
         self.trackers_blocked.store(0, Ordering::Relaxed);
 
@@ -148,14 +185,19 @@ impl AdBlocker {
 
     /// Check if a request should be blocked
     pub fn should_block(&self, url: &Url, source_url: &Url, resource_type: ResourceType) -> bool {
+        self.check(url, source_url, resource_type).is_some()
+    }
+
+    /// The list and rule that block a request, or `None` when none does.
+    pub fn check(&self, url: &Url, source_url: &Url, resource_type: ResourceType) -> Option<BlockMatch> {
         if !self.enabled {
-            return false;
+            return None;
         }
         // Only network requests are filtered. A `data:` (or `blob:`) URL
         // carries its own content: nothing is requested, and adblock cannot
         // build a request from it.
         if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
-            return false;
+            return None;
         }
 
         let request = adblock::request::Request::new(
@@ -172,14 +214,19 @@ impl AdBlocker {
                     log::debug!("Blocked: {} (from {})", url, source_url);
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
                     self.trackers_blocked.fetch_add(1, Ordering::Relaxed);
-                    true
+                    let rule = result.filter;
+                    let list = rule
+                        .as_deref()
+                        .and_then(|r| self.rule_lists.get(r.trim()).copied())
+                        .unwrap_or(self.default_list);
+                    Some(BlockMatch { list: list.to_string(), rule })
                 } else {
-                    false
+                    None
                 }
             }
             Err(e) => {
                 log::warn!("Failed to create request for {}: {}", url, e);
-                false
+                None
             }
         }
     }
@@ -302,6 +349,33 @@ mod tests {
 
         let blocked = blocker.should_block(&url, &source, ResourceType::Script);
         assert!(blocked);
+    }
+
+    /// Dev-tools T2: a block names the list its rule came from and the rule
+    /// as the list writes it; an allowed request names nothing.
+    #[test]
+    fn a_block_names_its_list_and_rule() {
+        let blocker = AdBlocker::from_named_lists(&[
+            ("EasyList", "! comment\n||ads.example.com^\n"),
+            ("EasyPrivacy", "||pixel.example.org^$image\n"),
+        ]);
+        let source = Url::parse("https://example.com/").unwrap();
+        let ad = Url::parse("https://ads.example.com/banner.js").unwrap();
+        let pixel = Url::parse("https://pixel.example.org/p.gif").unwrap();
+        let fine = Url::parse("https://example.com/app.js").unwrap();
+        assert_eq!(
+            blocker.check(&ad, &source, ResourceType::Script),
+            Some(BlockMatch { list: "EasyList".into(), rule: Some("||ads.example.com^".into()) })
+        );
+        assert_eq!(
+            blocker.check(&pixel, &source, ResourceType::Image),
+            Some(BlockMatch { list: "EasyPrivacy".into(), rule: Some("||pixel.example.org^$image".into()) })
+        );
+        assert_eq!(blocker.check(&fine, &source, ResourceType::Script), None);
+        assert_eq!(
+            AdBlocker::new().check(&Url::parse("https://doubleclick.net/x").unwrap(), &source, ResourceType::Script),
+            Some(BlockMatch { list: "HiWave defaults".into(), rule: Some("||doubleclick.net^".into()) })
+        );
     }
 
     #[test]

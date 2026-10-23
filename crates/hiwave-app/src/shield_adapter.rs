@@ -12,7 +12,7 @@
 
 use hiwave_shield::ResourceType as ShieldResourceType;
 use url::Url;
-use rustkit_net::{InterceptAction, InterceptHandler, Request, RequestDestination};
+use rustkit_net::{BlockReason, InterceptAction, InterceptHandler, Request, RequestDestination};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -135,13 +135,16 @@ impl ShieldInterceptHandler {
 
     /// Check if a host should be blocked.
     fn should_block_host(&self, host: &str) -> bool {
+        self.floor_domain(host).is_some()
+    }
+
+    /// The interim list's domain that `host` is, or is under.
+    fn floor_domain(&self, host: &str) -> Option<&str> {
         let host_lower = host.to_lowercase();
-        for domain in &self.blocked_domains {
-            if host_lower == *domain || host_lower.ends_with(&format!(".{}", domain)) {
-                return true;
-            }
-        }
-        false
+        self.blocked_domains
+            .iter()
+            .find(|domain| host_lower == **domain || host_lower.ends_with(&format!(".{}", domain)))
+            .map(String::as_str)
     }
 
     /// Convert HTTP method and URL to a shield ResourceType.
@@ -247,8 +250,10 @@ impl InterceptHandler for ShieldInterceptHandler {
         // disables third-party-only rules rather than inventing a party.
         let source = request.referrer.as_ref().unwrap_or(&request.url);
 
+        // Which list and rule blocked it (dev-tools T2: the event log's
+        // `failure.blocked_by`); the floor names itself and its domain.
         let blocked = match shared_block(&request.url, source, dest_to_shield(dest)) {
-            Some(verdict) => verdict,
+            Some(verdict) => verdict.map(|found| BlockReason { list: found.list, rule: found.rule }),
             None => {
                 // PENDING FLOOR (Prometheus R1 on this PR): while EasyList is
                 // still compiling/downloading, the interim domain list keeps
@@ -261,19 +266,19 @@ impl InterceptHandler for ShieldInterceptHandler {
                 request
                     .url
                     .host_str()
-                    .map(|host| self.should_block_host(host))
-                    .unwrap_or(false)
+                    .and_then(|host| self.floor_domain(host))
+                    .map(|domain| BlockReason { list: "domain-floor".into(), rule: Some(domain.to_string()) })
             }
         };
 
-        if blocked {
+        if let Some(reason) = blocked {
             self.census.blocked(dest);
             self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            debug!(url = %request.url, ?dest, "Shield blocked request");
+            debug!(url = %request.url, ?dest, list = %reason.list, "Shield blocked request");
             if let Some(ref callback) = self.on_blocked {
                 callback(request.url.as_str());
             }
-            InterceptAction::Block
+            InterceptAction::BlockedBy(reason)
         } else {
             InterceptAction::Allow
         }
@@ -297,7 +302,8 @@ struct ShieldQuery {
     url: String,
     source: String,
     resource_type: hiwave_shield::ResourceType,
-    reply: std::sync::mpsc::Sender<bool>,
+    /// The list and rule that block it, `None` when allowed.
+    reply: std::sync::mpsc::Sender<Option<hiwave_shield::BlockMatch>>,
 }
 
 fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
@@ -316,10 +322,8 @@ fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
                 tracing::info!("shield filter engine ready");
                 while let Ok(q) = rx.recv() {
                     let verdict = match (Url::parse(&q.url), Url::parse(&q.source)) {
-                        (Ok(url), Ok(source)) => {
-                            engine.should_block(&url, &source, q.resource_type)
-                        }
-                        _ => false,
+                        (Ok(url), Ok(source)) => engine.check(&url, &source, q.resource_type),
+                        _ => None,
                     };
                     let _ = q.reply.send(verdict);
                 }
@@ -339,8 +343,13 @@ fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
         .and_then(|m| m.lock().ok().map(|tx| tx.clone()))
 }
 
-/// Ask the worker; None means "floor decides" (building, dead, or hop failed).
-fn shared_block(url: &Url, source: &Url, rt: hiwave_shield::ResourceType) -> Option<bool> {
+/// Ask the worker; None means "floor decides" (building, dead, or hop
+/// failed), `Some(None)` allowed, `Some(Some(_))` blocked by that rule.
+fn shared_block(
+    url: &Url,
+    source: &Url,
+    rt: hiwave_shield::ResourceType,
+) -> Option<Option<hiwave_shield::BlockMatch>> {
     let tx = shield_worker()?;
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     tx.send(ShieldQuery {
@@ -575,7 +584,16 @@ mod tests {
             RequestDestination::Script,
             Some("https://news.example/"),
         ));
-        assert!(matches!(action, InterceptAction::Block));
+        // Named either way: the list and rule once EasyList is ready, the
+        // floor and its domain before.
+        match action {
+            InterceptAction::BlockedBy(reason) => assert!(
+                reason.list == "domain-floor" && reason.rule.as_deref() == Some("doubleclick.net")
+                    || reason.list != "domain-floor" && reason.rule.as_deref().is_some_and(|r| r.contains("doubleclick")),
+                "{reason:?}"
+            ),
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
         assert_eq!(handler.blocked_count(), 1);
         let census = handler.census_snapshot();
         assert_eq!(census[2].0, 1, "script attempted");
