@@ -686,8 +686,10 @@ struct InsertedJob {
 /// microsoft gate); Chrome holds an HTTP/1.1 host to six connections.
 pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 8;
 /// How many may be waiting behind those. Past this the script hears
-/// `error` instead of the queue growing without a bound.
-const MAX_INSERTED_FETCH_QUEUE: usize = 64;
+/// `error` instead of the queue growing without a bound. The queue is the
+/// process's, not a view's: 64 failed a burst of about 73 (walmart inserts
+/// about 113 at once). Per-view bounds come with M6's tabs.
+const MAX_INSERTED_FETCH_QUEUE: usize = 512;
 
 struct FetchCancel {
     flag: std::sync::atomic::AtomicBool,
