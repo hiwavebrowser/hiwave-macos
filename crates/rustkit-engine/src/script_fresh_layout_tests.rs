@@ -47,3 +47,37 @@ fn lifecycle_handlers_read_geometry_after_the_previous_steps_writes() {
     assert_eq!(read(&mut engine, view, "__load"), "120", "load sees the DOMContentLoaded handler's write");
     assert_eq!(read(&mut engine, view, "__timer"), "160", "a timer sees the load handler's write");
 }
+
+#[test]
+fn a_geometry_read_in_the_same_task_as_a_write_sees_the_write() {
+    // cnn's header (#786, Atlas 2026-10-23): hide nav items one at a time
+    // and measure the row again after each, until it fits. Browsers lay out
+    // on the read (forced layout); here every read gave the first layout's
+    // width, so the loop hid every item it could reach. 16 boxes of 60px are
+    // 960px; Chrome stops after 8, at 480px.
+    let mut items = String::new();
+    for i in 0..16 {
+        items.push_str(&format!("<span id=i{i} style='display:inline-block;width:60px;height:10px'></span>"));
+    }
+    let page = format!(
+        "<html><head><style>body{{margin:0}}</style></head><body>\
+         <div id=row style='display:inline-block;white-space:nowrap'>{items}</div></body></html>"
+    );
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 1200, height: 200 })
+        .expect("view");
+    engine.load_html(view, &page).expect("load_html");
+    engine
+        .execute_script(
+            view,
+            "var row = document.getElementById('row'); var n = 0;\
+             window.__first = row.offsetWidth;\
+             while (row.offsetWidth > 500 && n < 16) { document.getElementById('i' + n).style.display = 'none'; n++; }\
+             window.__hidden = n; window.__last = row.getBoundingClientRect().width;",
+        )
+        .unwrap();
+    assert_eq!(read(&mut engine, view, "__first"), "960");
+    assert_eq!(read(&mut engine, view, "__hidden"), "8", "hidden until the row fits, as in Chrome");
+    assert_eq!(read(&mut engine, view, "__last"), "480");
+}
