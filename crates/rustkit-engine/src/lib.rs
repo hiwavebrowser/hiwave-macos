@@ -13157,6 +13157,9 @@ impl Engine {
         self.nav_seq.fetch_max(nav_id, Ordering::AcqRel);
         canceller.cancel_nav(view.control.loading_nav());
         view.nav_id = nav_id;
+        // The Inspector's outline names a node of the document going away;
+        // node ids do not survive a navigation (#785 R1).
+        view.devtools_highlight = None;
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
         self.image_manager.begin_navigation(id.0, view.decode_epoch);

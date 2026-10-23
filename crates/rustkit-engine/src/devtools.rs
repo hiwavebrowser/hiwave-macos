@@ -27,8 +27,6 @@ use std::collections::BTreeMap;
 pub const DEVTOOLS_TREE_MAX_NODES: usize = 3000;
 /// Depth the tree is expanded to, below the node asked for.
 pub const DEVTOOLS_TREE_DEPTH: usize = 6;
-/// Longest text node shown, in characters.
-pub const DEVTOOLS_TEXT_CHARS: usize = 80;
 /// Why `ruleSources` is empty: the cascade keeps no stylesheet URL on a
 /// rule, nor which rule won each property.
 pub const RULE_SOURCES_UNAVAILABLE: &str =
@@ -170,8 +168,8 @@ pub struct DevtoolsConsole {
     pub next_seq: u64,
     /// Records the view's ring buffer dropped.
     pub dropped: u64,
-    /// The page committed, laid out for the first time or finished loading
-    /// since `since`: the panel's tree is stale.
+    /// A new document committed since `since`: node ids from before name
+    /// nothing, so the panel drops its selection and outline.
     pub page_changed: bool,
     /// The document laid out for the first time or finished loading since
     /// `since` (or a new one committed): the panel's tree is stale.
@@ -198,11 +196,18 @@ fn classes_of(node: &Node) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn cap_text(text: &str) -> String {
-    let t = text.trim();
-    match t.char_indices().nth(DEVTOOLS_TEXT_CHARS) {
-        Some((at, _)) => format!("{}…", &t[..at]),
-        None => t.to_string(),
+/// A text or comment node as the panel shows it: its length, not the
+/// page's words (Pete 2026-10-23, the Inspector is shape-only).
+fn text_shape(text: &str) -> String {
+    format!("<text len={}>", text.chars().count())
+}
+
+/// A URL as the panel shows it: no query, fragment or credentials, whatever
+/// the Inspector's own setting keeps (Pete 2026-10-23).
+fn url_shape(text: &str) -> String {
+    match Url::parse(text) {
+        Ok(url) => crate::inspector::scrub_url(&url, false),
+        Err(_) => text.split(['?', '#']).next().unwrap_or_default().to_string(),
     }
 }
 
@@ -227,8 +232,8 @@ fn tree_node(node: &Rc<Node>, depth: usize, reveal: &[usize], budget: &mut usize
             classes_of(node),
             None,
         ),
-        NodeType::Text(t) => ("text", String::new(), None, Vec::new(), Some(cap_text(t))),
-        NodeType::Comment(t) => ("comment", String::new(), None, Vec::new(), Some(cap_text(t))),
+        NodeType::Text(t) => ("text", String::new(), None, Vec::new(), Some(text_shape(t))),
+        NodeType::Comment(t) => ("comment", String::new(), None, Vec::new(), Some(text_shape(t))),
         _ => ("document", String::new(), None, Vec::new(), None),
     };
     let raw = node.id.raw();
@@ -378,7 +383,7 @@ pub(crate) fn with_highlight(
 
 fn frame(loc: &Option<SourceLocation>) -> Vec<DevtoolsFrame> {
     loc.iter()
-        .map(|l| DevtoolsFrame { file: l.url.clone(), line: l.line, column: l.column })
+        .map(|l| DevtoolsFrame { file: url_shape(&l.url), line: l.line, column: l.column })
         .collect()
 }
 
@@ -430,7 +435,8 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
             entry("warn", format!("Load ended early ({reason}): {detail}"), Vec::new())
         }
         InspectorEvent::NavigationStart { url } => {
-            entry("info", format!("Navigated to {}", url.as_deref().unwrap_or("(inline document)")), Vec::new())
+            let url = url.as_deref().map_or_else(|| "(inline document)".to_string(), url_shape);
+            entry("info", format!("Navigated to {url}"), Vec::new())
         }
         _ => return None,
     })
@@ -442,13 +448,15 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
         entries: snapshot.records.iter().filter_map(console_entry).collect(),
         next_seq: snapshot.next_seq,
         dropped: snapshot.dropped,
-        page_changed: snapshot.records.iter().any(|r| {
+        // Keyed on the events, not on a nav id: the ring can drop records,
+        // and the window reads a new document's commit at most one poll late.
+        page_changed: snapshot.records.iter().any(|r| matches!(r.event, InspectorEvent::NavigationCommit { .. })),
+        tree_stale: snapshot.records.iter().any(|r| {
             matches!(
                 r.event,
                 InspectorEvent::NavigationCommit { .. } | InspectorEvent::FirstLayout | InspectorEvent::LoadFinished { .. }
             )
         }),
-        tree_stale: false,
     }
 }
 

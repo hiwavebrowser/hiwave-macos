@@ -2587,8 +2587,11 @@ fn main() {
                             }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
-                        // The page's console lines, and a new tree after it changed.
-                        devtools.pump(view, &inspector_for_events);
+                        // The page's console lines, and a new tree after it
+                        // changed; an open panel asks on its own clock.
+                        if let Some(at) = devtools.pump(view, &inspector_for_events) {
+                            live_wake.set(Some(live_wake.get().map_or(at, |wake| wake.min(at))));
+                        }
                         view.render();
                     }
                 }

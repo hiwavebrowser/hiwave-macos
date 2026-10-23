@@ -163,9 +163,16 @@ fn devtools_answer(engine: &mut Engine, view: EngineViewId, query: DevtoolsQuery
 }
 
 /// Whether an answer is worth waking the window for, rather than waiting
-/// for its next wake.
-pub(crate) fn devtools_wakes_window(_answer: &DevtoolsAnswer, _frame_changed: bool) -> bool {
-    true
+/// for its next wake. A console answer with nothing new is not: the panel
+/// asks a few times a second on its own clock, and a woken panel used to ask
+/// again at once, so an idle page and an open panel woke each other without
+/// pause (#785 R1). An acknowledgement nobody reads is not either.
+pub(crate) fn devtools_wakes_window(answer: &DevtoolsAnswer, frame_changed: bool) -> bool {
+    match answer {
+        DevtoolsAnswer::Console(c) => !c.entries.is_empty() || c.page_changed || c.tree_stale,
+        DevtoolsAnswer::Done => frame_changed,
+        _ => true,
+    }
 }
 
 /// Input and the synchronous questions the window still asks.
@@ -526,7 +533,7 @@ impl PageEndpoint {
                     self.after_page_change();
                 }
                 // No event carries the answer: wake the content thread's
-                // window so it reads it now, not at its next input.
+                // window so it reads it now, when there is something to read.
                 if self.wake_window && wake {
                     crate::script_net::poke_live_turn();
                 }

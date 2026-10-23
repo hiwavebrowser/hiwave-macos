@@ -135,10 +135,10 @@ fn dom_tree_shows_elements_text_and_comments_and_skips_blank_text() {
     let body = html.children.iter().find(|n| n.tag == "body").expect("body");
     let kinds: Vec<(&str, &str)> = body.children.iter().map(|n| (n.kind, n.tag.as_str())).collect();
     assert_eq!(kinds, [("element", "div"), ("element", "div"), ("comment", "")]);
-    assert_eq!(body.children[2].text_content.as_deref(), Some("note"));
+    assert_eq!(body.children[2].text_content.as_deref(), Some("<text len=6>"));
     let span = &body.children[1].children[0];
     assert_eq!(span.id.as_deref(), Some("c"));
-    assert_eq!(span.children[0].text_content.as_deref(), Some("x"));
+    assert_eq!(span.children[0].text_content.as_deref(), Some("<text len=1>"));
 }
 
 #[test]
@@ -330,9 +330,9 @@ fn console_lines_from_inspector_records() {
     assert_eq!(c.entries[2].stack, [DevtoolsFrame { file: "https://news.test/app.js".into(), line: 3, column: 7 }]);
     assert_eq!(c.entries[3].message, "Not supported by RustKit: Window.fetchLater");
     assert!(c.entries[4].message.starts_with("2 script(s) skipped or stopped"));
-    assert_eq!((c.next_seq, c.dropped, c.page_changed), (7, 1, true));
+    assert_eq!((c.next_seq, c.dropped, c.page_changed, c.tree_stale), (7, 1, false, true));
     let quiet = devtools_console_entries(&InspectorSnapshot { records: vec![], next_seq: 7, dropped: 0 });
-    assert!(quiet.entries.is_empty() && !quiet.page_changed);
+    assert!(quiet.entries.is_empty() && !quiet.page_changed && !quiet.tree_stale);
 }
 
 #[test]

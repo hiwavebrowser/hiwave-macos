@@ -34,7 +34,13 @@ fn run(panel: &WebView, script: &str) {
     let _ = panel.evaluate_script(script);
 }
 
-/// When the open panel asks the page for new console lines.
+/// How often an open panel asks the page for new console lines.
+const CONSOLE_POLL: Duration = Duration::from_millis(250);
+
+/// When the open panel asks the page for new console lines: on its own
+/// clock, never because an answer arrived. Asking again the moment one
+/// arrived, while every answer woke the window, kept an idle page and an
+/// open panel waking each other without pause (#785 R1).
 #[derive(Default)]
 struct ConsolePoll {
     asked_at: Option<Instant>,
@@ -42,12 +48,19 @@ struct ConsolePoll {
 
 impl ConsolePoll {
     /// At `now`, with a console question out or not: whether to ask now,
-    /// and when the window should wake for the panel next.
+    /// and when the window should wake for the panel next (always later
+    /// than `now`, or the loop would spin).
     fn at(&mut self, now: Instant, waiting: bool) -> (bool, Instant) {
-        if !waiting {
+        let due = self.asked_at.map_or(now, |t| t + CONSOLE_POLL);
+        let ask = !waiting && due <= now;
+        if ask {
             self.asked_at = Some(now);
         }
-        (!waiting, now)
+        let next = match self.asked_at {
+            Some(t) if t + CONSOLE_POLL > now => t + CONSOLE_POLL,
+            _ => now + CONSOLE_POLL,
+        };
+        (ask, next)
     }
 }
 
@@ -198,11 +211,12 @@ impl Devtools {
     }
 
     /// Act on the answers that have arrived, then ask for new console
-    /// lines. Called on every live wake of the content view.
-    pub fn pump(&mut self, view: &RustKitView, panel: &WebView) {
+    /// lines when they are due. Called on every live wake of the content
+    /// view; returns when the open panel wants the next one.
+    pub fn pump(&mut self, view: &RustKitView, panel: &WebView) -> Option<Instant> {
         if !self.open {
             self.asked.clear();
-            return;
+            return None;
         }
         let mut arrived = Vec::new();
         self.asked.retain_mut(|asked| match asked {
@@ -248,11 +262,12 @@ impl Devtools {
             }
         }
         let waiting = self.waiting_for(Want::Console);
-        let (ask, _next) = self.console_poll.at(Instant::now(), waiting);
-        if self.open && ask {
+        let (ask, next) = self.console_poll.at(Instant::now(), waiting);
+        if ask {
             let since = self.console_seq;
             self.ask(view, Want::Console, DevtoolsQuery::Console { since });
         }
+        Some(next)
     }
 
     fn hovered_now(&mut self, view: &RustKitView, panel: &WebView, node: Option<usize>) {
@@ -282,6 +297,7 @@ impl Devtools {
             (Want::Element, _) => {
                 run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
             }
+            (Want::Hover, DevtoolsAnswer::Unavailable) => self.hover_next = None,
             (Want::Hover, DevtoolsAnswer::Node(node)) => {
                 if self.picking {
                     self.hovered_now(view, panel, node);
@@ -306,11 +322,21 @@ impl Devtools {
                     run(panel, &panel_call("addConsoleEntries", &console.entries));
                 }
                 // Node ids do not survive a navigation: a new page loses
-                // its selection and gets a new tree.
+                // its selection and outline, and an answer still out about
+                // the old page's nodes is not shown on the new one.
                 if console.page_changed {
                     self.selected = None;
-                    self.send_tree(view);
+                    self.hovered = None;
+                    self.hover_next = None;
+                    self.asked
+                        .retain(|a| matches!(a, Asked::Eval(_) | Asked::Page(Want::Console | Want::Ack, _)));
+                    self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
                     run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
+                }
+                // A first layout or the end of the load: the same page,
+                // a newer tree, the selection kept.
+                if console.tree_stale {
+                    self.send_tree(view);
                 }
             }
             _ => {}
