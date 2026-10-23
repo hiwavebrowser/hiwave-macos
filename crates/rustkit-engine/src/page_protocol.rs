@@ -288,6 +288,13 @@ pub struct PageEndpoint {
     /// Post the window's live wake when an event is published. The
     /// same-thread drain does not: it is already on the window thread.
     wake_window: bool,
+    /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
+    /// autofocus or a new document moves focus without any input from the
+    /// window, and the window answers its keys from this report.
+    last_focused: Option<bool>,
+    /// The newest navigation the window was told failed. A navigation is
+    /// reported failed at most once.
+    failed_nav: u64,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
@@ -308,6 +315,8 @@ pub(crate) fn adopt(
         visible: true,
         settle_keys: false,
         wake_window: false,
+        last_focused: None,
+        failed_nav: 0,
     }
 }
 
@@ -337,6 +346,8 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         visible: true,
         settle_keys: false,
         wake_window: false,
+        last_focused: None,
+        failed_nav: 0,
     };
     (handle, endpoint)
 }
@@ -441,6 +452,7 @@ impl PageEndpoint {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
                 self.publish_commit();
+                self.report_focus();
                 // `location.href =` and `link.click()` from this script.
                 // The same-thread window asks with TakeNavigation instead.
                 self.report_script_navigation();
@@ -576,6 +588,7 @@ impl PageEndpoint {
             }
             PageInput::FocusAt { x, y, reply } => {
                 let tag = self.engine.focus_at_point(view, x, y);
+                self.last_focused = Some(tag.is_some());
                 self.emit(PageEvent::Focused(tag.is_some()));
                 let _ = reply.send(tag);
             }
@@ -622,11 +635,13 @@ impl PageEndpoint {
             }
             PageInput::HasFocus { reply } => {
                 let focused = self.engine.focused_node(view).is_some();
+                self.last_focused = Some(focused);
                 self.emit(PageEvent::Focused(focused));
                 let _ = reply.send(focused);
             }
         }
         self.publish_commit();
+        self.report_focus();
         // A listener's `location.href =` or `link.click()` is not the
         // click's own default action. The content thread reports it; the
         // same-thread window still pulls with TakeNavigation.
@@ -672,6 +687,7 @@ impl PageEndpoint {
         let engine_events = &mut self.engine_events;
         let tx = &self.events;
         let last_commit = &mut self.last_commit;
+        let failed_nav = &mut self.failed_nav;
         let mut load = Box::pin(async move {
             if nav_id == 0 {
                 engine.load_url_yielding(view, url).await
@@ -695,13 +711,13 @@ impl PageEndpoint {
                     if let Some(e) = &failed {
                         tracing::error!(error = %e, "Failed to load URL");
                     }
-                    forward_events(engine_events, tx, last_commit, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, failed_nav, nav_id, wake);
                     drop(load);
                     self.end_uncommitted_nav(nav_id, failed);
                     return;
                 }
                 std::task::Poll::Pending => {
-                    forward_events(engine_events, tx, last_commit, nav_id, wake);
+                    forward_events(engine_events, tx, last_commit, failed_nav, nav_id, wake);
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
             }
@@ -714,8 +730,9 @@ impl PageEndpoint {
     /// running script would stop, and only a commit lowers it. Unless a
     /// newer navigation or a Stop cancelled this one (they lower it
     /// themselves), lower it here, so the document still on screen keeps
-    /// its timers, clicks and keys. Tell the window the load failed, so it
-    /// stops showing the page as loading.
+    /// its timers, clicks and keys. Tell the window the load is over, so
+    /// it stops showing the page as loading: Failed once for an error,
+    /// Complete for a load that ended Ok with nothing to commit (a 204).
     fn end_uncommitted_nav(&mut self, nav_id: u64, failed: Option<String>) {
         if nav_id == 0 {
             return;
@@ -723,15 +740,28 @@ impl PageEndpoint {
         let Some(control) = self.engine.view_control(self.view) else {
             return;
         };
-        if control.nav_committed(nav_id) || control.nav_cancelled(nav_id) {
+        if !control.end_uncommitted(nav_id) {
             return;
         }
-        control.clear_all();
-        let error = failed.unwrap_or_else(|| "navigation did not commit".to_string());
-        let _ = self.events.send(PageEvent::LoadState {
-            state: LoadState::Failed { error },
-            nav_id,
-        });
+        // The address bar went to the URL that failed. The document on
+        // screen is still the committed one; show its URL again.
+        if let Some(url) = self.engine.get_url(self.view) {
+            let _ = self.events.send(PageEvent::Url { url, nav_id });
+        }
+        // A load that ended Ok without a commit (a 204) is not a failure:
+        // the page stays as it is and the load is over. A failure the
+        // engine already reported is not reported again.
+        let state = match failed {
+            None => Some(LoadState::Complete),
+            Some(_) if self.failed_nav == nav_id => None,
+            Some(error) => {
+                self.failed_nav = nav_id;
+                Some(LoadState::Failed { error })
+            }
+        };
+        if let Some(state) = state {
+            let _ = self.events.send(PageEvent::LoadState { state, nav_id });
+        }
         if self.wake_window {
             crate::script_net::poke_live_turn();
         }
@@ -759,7 +789,24 @@ impl PageEndpoint {
     fn after_page_change(&mut self) {
         self.translate_engine_events();
         self.publish_commit();
+        self.report_focus();
         self.report_script_navigation();
+    }
+
+    /// Tell the content thread's window when the page's focus changed on
+    /// its own: a script's `focus()` or `blur()`, a timer, a new document
+    /// with nothing focused. Only the content thread reports it; the
+    /// same-thread window asks with [`PageInput::HasFocus`].
+    fn report_focus(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let focused = self.engine.focused_node(self.view).is_some();
+        if self.last_focused == Some(focused) {
+            return;
+        }
+        self.last_focused = Some(focused);
+        self.emit(PageEvent::Focused(focused));
     }
 
     /// A navigation the page's script asked for (`location.href`,
@@ -790,6 +837,7 @@ impl PageEndpoint {
             &mut self.engine_events,
             &self.events,
             &mut self.last_commit,
+            &mut self.failed_nav,
             nav_id,
             wake,
         );
@@ -912,6 +960,7 @@ fn forward_events(
     engine_events: &mut Option<tokio::sync::mpsc::UnboundedReceiver<EngineEvent>>,
     tx: &Sender<PageEvent>,
     last_commit: &mut Option<(u64, u64, (f32, f32))>,
+    failed_nav: &mut u64,
     nav_id: u64,
     wake: bool,
 ) {
@@ -943,13 +992,20 @@ fn forward_events(
                 });
                 out
             }
-            EngineEvent::NavigationFailed { url, error, .. } => vec![
-                PageEvent::Url { url, nav_id },
-                PageEvent::LoadState {
-                    state: LoadState::Failed { error },
-                    nav_id,
-                },
-            ],
+            EngineEvent::NavigationFailed { url, error, .. } => {
+                if *failed_nav == nav_id && nav_id != 0 {
+                    Vec::new()
+                } else {
+                    *failed_nav = nav_id;
+                    vec![
+                        PageEvent::Url { url, nav_id },
+                        PageEvent::LoadState {
+                            state: LoadState::Failed { error },
+                            nav_id,
+                        },
+                    ]
+                }
+            }
             EngineEvent::TitleChanged { title, .. } => {
                 vec![PageEvent::Title {
                     text: title,

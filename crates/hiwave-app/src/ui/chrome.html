@@ -6286,11 +6286,28 @@
             urlInputWasFocused = false;
         });
         // Allow clicking to position cursor without selecting all
-        urlInput.addEventListener('mousedown', () => {
+        let urlInputFocusPress = null;
+        urlInput.addEventListener('mousedown', (e) => {
             if (document.activeElement === urlInput) {
                 // Input is already focused, don't select all
                 urlInputWasFocused = true;
+                urlInputFocusPress = null;
+            } else {
+                urlInputFocusPress = { x: e.clientX, y: e.clientY };
             }
+        });
+        // WebKit (this UI runs in a WKWebView) undoes the focus handler's
+        // select() after the mouseup of the click that focused the field and
+        // leaves a caret at the click point, so typing appended to the URL.
+        // Cancel that mouseup's default and select all again, unless the
+        // press dragged out a selection of its own.
+        urlInput.addEventListener('mouseup', (e) => {
+            const press = urlInputFocusPress;
+            urlInputFocusPress = null;
+            if (!press) return;
+            if (Math.abs(e.clientX - press.x) > 3 || Math.abs(e.clientY - press.y) > 3) return;
+            e.preventDefault();
+            urlInput.select();
         });
 
         // New tab button

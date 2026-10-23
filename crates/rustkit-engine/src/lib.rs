@@ -430,6 +430,8 @@ mod grid_block_axis_align_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_abspos_tests;
 #[cfg(all(test, feature = "headless"))]
+mod positioned_form_control_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
@@ -2130,6 +2132,10 @@ fn absolutize_one(reference: &str, base: &Url) -> Option<String> {
 
 fn decode_data_url(src: &str) -> Option<Vec<u8>> {
     let rest = src.get(5..)?;
+    // Fetch serializes a data: URL without its fragment, so
+    // `data:font/ttf;base64,AAEC#x` is the three bytes `AAEC`, not a
+    // base64 error. Same rule as `rustkit_net::decode_data_url` (#712).
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest.split_once(',')?;
     if meta.to_ascii_lowercase().contains(";base64") {
         use base64::Engine as _;
@@ -6657,6 +6663,20 @@ impl Engine {
             .and_then(|v| v.to_str().ok())
             .and_then(ReferrerPolicy::parse_header);
 
+        // A 204 or 205 aborts the navigation (HTML, "process a navigate
+        // response"): the document on screen stays and keeps running. It
+        // is not a failure; the load just ends with nothing committed.
+        if matches!(status.as_u16(), 204 | 205) {
+            info!(?id, %url, %status, "Navigation answered with no content; the page stays");
+            if let Some(received) = received {
+                received.read(0);
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                let _ = view.navigation.fail_navigation(format!("HTTP {status}"));
+            }
+            return Ok(());
+        }
+
         // A server's error page is a page: the body of a 403 or a 404 is
         // shown like any other document. Only an error response with
         // nothing in it fails the navigation.
@@ -9336,6 +9356,11 @@ impl Engine {
                     // unit tests missed it by hand-building boxes; only the
                     // production path exercises this.
                     let mut b = LayoutBox::new(BoxType::FormControl(control), style);
+                    // Form controls return before the general path's
+                    // positioning, so `position: absolute`/`fixed` and the
+                    // offsets were never copied: a positioned <input> stayed
+                    // in the flow, painted and hit there (#730 follow-up i).
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9384,6 +9409,7 @@ impl Engine {
                             }),
                             style,
                         );
+                        Self::transfer_own_positioning(&mut b);
                         Self::attach_identity(
                             &mut b,
                             selector_path,
@@ -9427,6 +9453,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -9504,6 +9531,7 @@ impl Engine {
                         }),
                         style,
                     );
+                    Self::transfer_own_positioning(&mut b);
                     Self::attach_identity(
                         &mut b,
                         selector_path,
@@ -26219,7 +26247,6 @@ mod web_font_tests {
     /// not part of the payload — the rule `rustkit_net::decode_data_url`
     /// already follows (#712).
     #[test]
-    #[ignore = "bug: engine decode_data_url keeps a data: URL's #fragment in the payload"]
     fn a_data_uri_fragment_is_not_part_of_the_payload() {
         assert_eq!(
             decode_data_url("data:font/ttf;base64,AAEC#ignored").as_deref(),
@@ -31629,7 +31656,7 @@ mod cascade_wire_tests {
             ("border", "1px solid lab(50% 40 59)"),
             ("border", "1px solid hwb(0 0% 0%)"),
             ("border", "1px solid color(display-p3 1 0 0)"),
-            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+            ("border", "1px solid color-mix(in lab, red 50%, blue)"),
         ] {
             let mut s = ComputedStyle::default();
             e.apply_style_property(&mut s, property, "4px dashed red");
@@ -31649,6 +31676,23 @@ mod cascade_wire_tests {
         assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
     }
 
+    // `color-mix()` resolves (css-color-5 §2): the reduced page's
+    // `background: red; background: color-mix(...)` painted nothing.
+    #[test]
+    fn a_color_mix_colour_is_painted() {
+        let e = engine();
+        let half_green = rustkit_css::Color::new(0, 128, 0, 0.5);
+        for property in ["background", "background-color"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "red");
+            e.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
+            assert_eq!(s.background_color, half_green, "{property}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
+        assert_eq!(s.border_top_color, rustkit_css::Color::new(128, 0, 128, 1.0));
+    }
+
     #[test]
     fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
         let e = engine();
@@ -31657,7 +31701,7 @@ mod cascade_wire_tests {
             "url(a.png) no-repeat currentcolor",
             "url(a.png) rgb(229 231 235 / 1)",
             "url(a.png) oklch(0.7 0.1 200)",
-            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) color-mix(in lab, red 50%, blue)",
             "url(a.png) light-dark(#fff, #000)",
         ] {
             let mut s = ComputedStyle::default();
