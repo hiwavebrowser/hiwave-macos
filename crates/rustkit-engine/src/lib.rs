@@ -382,6 +382,8 @@ mod scroll_after_yielded_load_tests;
 mod feed_reveal_trigger_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
+#[cfg(test)]
+mod css_has_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8389,6 +8391,8 @@ impl Engine {
             true => StyleShareMode::Off,
             false => style_share_mode(),
         });
+        // `:has()` answers for this build's DOM.
+        let _has_memo = HasMemoScope::install();
 
         let walk_started = mark();
 
@@ -8425,6 +8429,7 @@ impl Engine {
                 ..
             } = &html.node_type
             {
+                let _relational = RelationalNodeScope::enter(Some(html.clone()));
                 Some(memoized_style(html.id, || {
                     self.compute_style_for_element(
                         tag_name,
@@ -8951,6 +8956,8 @@ impl Engine {
                 // elements under the pointer are styled as hovered.
                 let live = self.live_attributes(node.id.raw(), &tag_lower, attributes);
                 let attributes = &*live;
+                // `:has()` reads this element's subtree and siblings.
+                let _relational = RelationalNodeScope::enter(Some(node.clone()));
 
                 // Skip rendering for certain elements
                 let is_hidden = matches!(
@@ -15088,6 +15095,7 @@ impl SelectorMatcher {
         };
         let live_own = live(node.id.raw(), attributes);
         let attributes = live_own.as_ref().unwrap_or(attributes);
+        let _relational = RelationalNodeScope::enter(Some(node.clone()));
         // A selector that reads neither the ancestors nor the siblings (`.a`,
         // `div`, `#id`, `[data-x]`, `div.a.b`, and lists of those) needs
         // neither: building them walked every ancestor and every sibling of
@@ -15260,6 +15268,22 @@ impl SelectorMatcher {
         // Handle combinators by walking backwards through tokens
         // Track current position in ancestor chain
         let mut ancestor_idx = 0;
+        // A compound with `:has()` is decided against the DOM element its
+        // chain entry stands for, found from the subject's (still the one
+        // in `RELATIONAL_NODE`: each scope below ends with its test).
+        let subject_node = || RELATIONAL_NODE.with(|n| n.borrow().clone());
+        let at_ancestor = |compound: &AncestorCompound, idx: usize, anc: &AncestorKey| {
+            let _relational = compound.relational.then(|| {
+                RelationalNodeScope::enter(subject_node().and_then(|n| chain_ancestor_node(&n, idx, anc)))
+            });
+            compound.matches_ancestor(anc)
+        };
+        let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
+            let _relational = compound.relational.then(|| {
+                RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
+            });
+            compound.matches_sibling(prev)
+        };
 
         for i in (0..tokens.len() - 1).rev() {
             let combinator = &tokens[i].1;
@@ -15271,7 +15295,7 @@ impl SelectorMatcher {
                     let mut found = false;
                     let mut found_idx = ancestor_idx;
                     for (idx, anc) in ancestors.iter().enumerate().skip(ancestor_idx) {
-                        if compound.matches_ancestor(anc) {
+                        if at_ancestor(compound, idx, anc) {
                             found = true;
                             found_idx = idx + 1; // Next position after this ancestor
                             break;
@@ -15285,7 +15309,7 @@ impl SelectorMatcher {
                 ">" => {
                     // Child combinator: immediate parent (at current position) must match
                     if let Some(parent) = ancestors.get(ancestor_idx) {
-                        if !compound.matches_ancestor(parent) {
+                        if !at_ancestor(compound, ancestor_idx, parent) {
                             return false;
                         }
                         ancestor_idx += 1; // Move to next ancestor
@@ -15296,13 +15320,14 @@ impl SelectorMatcher {
                 "+" => {
                     // Adjacent sibling combinator: immediate previous sibling must match
                     // Note: sibling combinators only apply at the element level, not up the tree
-                    if !siblings_before.last().is_some_and(|prev| compound.matches_sibling(prev)) {
+                    let last = siblings_before.len().wrapping_sub(1);
+                    if !siblings_before.last().is_some_and(|prev| at_sibling(compound, last, prev)) {
                         return false;
                     }
                 }
                 "~" => {
                     // General sibling combinator: any previous sibling must match
-                    if !siblings_before.iter().any(|prev| compound.matches_sibling(prev)) {
+                    if !siblings_before.iter().enumerate().any(|(idx, prev)| at_sibling(compound, idx, prev)) {
                         return false;
                     }
                 }
@@ -15842,6 +15867,8 @@ impl SelectorMatcher {
         // where unknown names are ignored rather than fatal.
         let mut forgiving_depth = 0usize;
         let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
+        // Parallel to `paren_depth`: true = this paren is a `:has(`.
+        let mut has_parens: Vec<bool> = Vec::new();
         while i < chars.len() {
             let c = chars[i];
             if let Some(q) = quote {
@@ -15855,8 +15882,12 @@ impl SelectorMatcher {
                 '"' | '\'' => quote = Some(c),
                 '[' => in_brackets = true,
                 ']' => in_brackets = false,
-                '(' => paren_depth.push(false),
+                '(' => {
+                    paren_depth.push(false);
+                    has_parens.push(false);
+                }
                 ')' => {
+                    has_parens.pop();
                     if paren_depth.pop() == Some(true) {
                         forgiving_depth -= 1;
                     }
@@ -15895,7 +15926,17 @@ impl SelectorMatcher {
                         if forgiving {
                             forgiving_depth += 1;
                         }
+                        // Selectors 4 §4.5: `:has()` takes a non-empty
+                        // relative selector list and does not nest.
+                        let has = name_l == "has";
+                        if has && forgiving_depth == 0 {
+                            let empty = chars[end + 1..].iter().find(|c| !c.is_whitespace()) == Some(&')');
+                            if empty || has_parens.contains(&true) {
+                                return false;
+                            }
+                        }
                         paren_depth.push(forgiving);
+                        has_parens.push(has);
                         i = end + 1;
                         continue;
                     }
@@ -16033,9 +16074,10 @@ impl SelectorMatcher {
             "is" | "where" | "matches" | "-webkit-any" => arg.is_some_and(|a| {
                 SelectorMatcher.any_compound_in_list_matches(a, tag_name, attributes, sib)
             }),
-            // Relational: needs the subtree; under-match rather than style
-            // every element. Ledgered.
-            "has" => false,
+            // Relational: searched from the element the compound is for
+            // (`RELATIONAL_NODE`), in its subtree or among its later
+            // siblings.
+            "has" => arg.is_some_and(relational_has),
             // User-action and target pseudo-classes: nothing is hovered,
             // focused, or targeted in the first static frame. `focus-within`
             // and `focus-visible` used to fall to the catch-all below and
@@ -16348,8 +16390,8 @@ impl SelectorMatcher {
 
                             if i < chars.len() && chars[i] == '(' {
                                 // Functional pseudo-class
-                                if name == "not" || name == "is" {
-                                    // :not() and :is() - add specificity of argument
+                                if name == "not" || name == "is" || name == "has" {
+                                    // :not(), :is() and :has() - add specificity of argument
                                     i += 1; // Skip (
                                     let mut paren_depth = 1;
                                     let arg_start = i;
@@ -32936,6 +32978,262 @@ impl SubjectCompound {
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
 
+thread_local! {
+    /// The DOM element the compound under test is matched against, for
+    /// `:has()`: the subject while the subject compound is tested, the
+    /// ancestor or sibling while the walk tests one. The rest of the matcher
+    /// reads key tuples; `:has()` needs the element's subtree and siblings.
+    static RELATIONAL_NODE: std::cell::RefCell<Option<Rc<Node>>> = const { std::cell::RefCell::new(None) };
+    /// `:has()` answers by (anchor node address, argument), for one build:
+    /// the DOM does not change inside a build, and `.a:has(.b) .c` asks the
+    /// same anchor once for every `.c` under it. The address, not the
+    /// NodeId: a frame's document built inside the build numbers its nodes
+    /// from 1 too, and every node outlives the build.
+    static HAS_MEMO: std::cell::RefCell<Option<HashMap<(usize, String), bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Compounds a `:has()` search tested, for the tests that bound it.
+    static HAS_COMPOUND_TESTS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Sets [`RELATIONAL_NODE`] for its lifetime and puts the previous one back.
+struct RelationalNodeScope(Option<Rc<Node>>);
+
+impl RelationalNodeScope {
+    fn enter(node: Option<Rc<Node>>) -> Self {
+        RelationalNodeScope(RELATIONAL_NODE.with(|n| n.replace(node)))
+    }
+}
+
+impl Drop for RelationalNodeScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        RELATIONAL_NODE.with(|n| *n.borrow_mut() = previous);
+    }
+}
+
+/// Keeps [`HAS_MEMO`] for one build. An inner scope joins the outer one.
+struct HasMemoScope(bool);
+
+impl HasMemoScope {
+    fn install() -> Self {
+        HasMemoScope(HAS_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            let fresh = m.is_none();
+            if fresh {
+                *m = Some(HashMap::new());
+            }
+            fresh
+        }))
+    }
+}
+
+impl Drop for HasMemoScope {
+    fn drop(&mut self) {
+        if self.0 {
+            HAS_MEMO.with(|m| *m.borrow_mut() = None);
+        }
+    }
+}
+
+/// Whether the element the compound under test is for matches
+/// `:has(arg)`. No element known (a build without a DOM node): no match.
+fn relational_has(arg: &str) -> bool {
+    RELATIONAL_NODE.with(|n| n.borrow().clone()).is_some_and(|anchor| has_matches(&anchor, arg))
+}
+
+/// `:has(arg)` on `anchor`: some member of the relative selector list
+/// matches, searched from the anchor (Selectors 4 §4.5).
+fn has_matches(anchor: &Rc<Node>, arg: &str) -> bool {
+    let key = (Rc::as_ptr(anchor) as usize, arg.to_string());
+    if let Some(known) = HAS_MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(&key).copied())) {
+        return known;
+    }
+    let found = SelectorMatcher::split_top_level_commas(arg)
+        .into_iter()
+        .any(|member| relative_selector_matches(anchor, member));
+    HAS_MEMO.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(key, found);
+        }
+    });
+    found
+}
+
+/// One relative selector (`> .a .b`, `+ p`, `.x`): its steps, each the
+/// combinator before a compound (a leading descendant one when none is
+/// written), searched left to right from the anchor.
+fn relative_selector_matches(anchor: &Rc<Node>, member: &str) -> bool {
+    let member = member.trim();
+    // `:has()` inside `:has()` is invalid; `selector_list_is_valid` drops
+    // the rule unless a forgiving `:is()` keeps it, and then the member
+    // matches nothing.
+    if member.to_ascii_lowercase().contains(":has(") {
+        return false;
+    }
+    let (first, rest) = match member.chars().next() {
+        Some(c @ ('>' | '+' | '~')) => (c.to_string(), member[1..].trim_start()),
+        _ => (" ".to_string(), member),
+    };
+    let tokens = SelectorMatcher.tokenize_selector(rest);
+    if !tokens.last().is_some_and(|(_, combinator)| combinator.is_empty()) {
+        return false;
+    }
+    let mut steps = Vec::with_capacity(tokens.len());
+    let mut combinator = first;
+    for (compound, next) in tokens {
+        steps.push((combinator, compound));
+        combinator = next;
+    }
+    relative_steps_match(anchor, &steps)
+}
+
+/// Whether `steps` match outward from `from`. Answers are kept per (node,
+/// steps left, what was asked) for the one relative selector, so a failing
+/// `:has(div div .x)` searches each subtree once, not once per `div` that
+/// matched on the way down.
+fn relative_steps_match(from: &Rc<Node>, steps: &[(String, String)]) -> bool {
+    struct Search<'a> {
+        steps: &'a [(String, String)],
+        memo: std::cell::RefCell<HashMap<(usize, usize, u8), bool>>,
+    }
+
+    impl Search<'_> {
+        fn memo(&self, node: &Rc<Node>, left: usize, kind: u8, compute: impl FnOnce() -> bool) -> bool {
+            let key = (Rc::as_ptr(node) as usize, left, kind);
+            if let Some(&known) = self.memo.borrow().get(&key) {
+                return known;
+            }
+            let found = compute();
+            self.memo.borrow_mut().insert(key, found);
+            found
+        }
+
+        /// The last `left` steps match from `from`.
+        fn from(&self, from: &Rc<Node>, left: usize) -> bool {
+            if left == 0 {
+                return true;
+            }
+            self.memo(from, left, 0, || {
+                let combinator = self.steps[self.steps.len() - left].0.as_str();
+                match combinator {
+                    ">" => from.children().iter().filter(|c| c.is_element()).any(|c| self.at(c, left)),
+                    "+" => next_element_sibling(from).is_some_and(|s| self.at(&s, left)),
+                    "~" => self.later_sibling(from, left),
+                    _ => self.descendant(from, left),
+                }
+            })
+        }
+
+        /// The first of the last `left` steps' compound matches `node`, and
+        /// the rest match from it.
+        fn at(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 1, || {
+                has_compound_matches(node, &self.steps[self.steps.len() - left].1) && self.from(node, left - 1)
+            })
+        }
+
+        fn descendant(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 2, || {
+                node.children()
+                    .iter()
+                    .filter(|c| c.is_element())
+                    .any(|c| self.at(c, left) || self.descendant(c, left))
+            })
+        }
+
+        fn later_sibling(&self, node: &Rc<Node>, left: usize) -> bool {
+            self.memo(node, left, 3, || {
+                next_element_sibling(node).is_some_and(|s| self.at(&s, left) || self.later_sibling(&s, left))
+            })
+        }
+    }
+
+    let search = Search { steps, memo: Default::default() };
+    search.from(from, steps.len())
+}
+
+fn next_element_sibling(node: &Rc<Node>) -> Option<Rc<Node>> {
+    let mut next = node.next_sibling();
+    while let Some(sibling) = next {
+        if sibling.is_element() {
+            return Some(sibling);
+        }
+        next = sibling.next_sibling();
+    }
+    None
+}
+
+/// One compound of a relative selector against a DOM element, with the
+/// element's place among its siblings read from the tree.
+fn has_compound_matches(node: &Rc<Node>, compound: &str) -> bool {
+    #[cfg(test)]
+    HAS_COMPOUND_TESTS.with(|n| n.set(n.get() + 1));
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return false;
+    };
+    let prepared = SelectorMatcher.prepared_selector(compound);
+    let tag = tag_name.to_lowercase();
+    let has_children = Engine::node_has_children(node);
+    let sib = match prepared.is_context_free() {
+        true => SiblingContext::SOLE.with_children(has_children),
+        false => dom_sibling_context(node, &tag, has_children),
+    };
+    let _relational = RelationalNodeScope::enter(Some(node.clone()));
+    SelectorMatcher.selector_matches_prepared(&prepared, &tag, attributes, &[], &[], sib)
+}
+
+/// `node`'s position among its parent's element children, from the tree.
+fn dom_sibling_context(node: &Rc<Node>, tag: &str, has_children: bool) -> SiblingContext {
+    let Some(parent) = node.parent() else {
+        return SiblingContext::SOLE.with_children(has_children);
+    };
+    let (mut index, mut count, mut type_index, mut type_count) = (0, 0, 0, 0);
+    let mut before = true;
+    for c in parent.children() {
+        let NodeType::Element { tag_name, .. } = &c.node_type else {
+            continue;
+        };
+        if Rc::ptr_eq(&c, node) {
+            before = false;
+        }
+        count += 1;
+        let same_type = tag_name.eq_ignore_ascii_case(tag);
+        type_count += same_type as usize;
+        if before {
+            index += 1;
+            type_index += same_type as usize;
+        }
+    }
+    SiblingContext { index, count, type_index, type_count, has_children }
+}
+
+/// The element `ancestors[idx]` stands for, from the subject `node`: the
+/// chain holds one entry per element above it, in the DOM. A slotted node
+/// is matched against its host's light chain, which is its DOM parents
+/// too; a shadow tree's chain ends at its host, where the DOM walk meets
+/// the shadow root (no tag) and gives none. The tag is checked besides.
+fn chain_ancestor_node(node: &Rc<Node>, idx: usize, key: &AncestorKey) -> Option<Rc<Node>> {
+    let mut at = node.parent()?;
+    for _ in 0..idx {
+        at = at.parent()?;
+    }
+    at.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(&key.0)).then_some(at)
+}
+
+/// The element `siblings_before[idx]` stands for: the subject's
+/// `idx`-th earlier element sibling, checked by tag. A shadow host's light
+/// children are siblings only as their slot assigns them (a named slot
+/// takes some of them), so their positions need not be the DOM's: none.
+fn chain_sibling_node(node: &Rc<Node>, idx: usize, key: &SiblingKey) -> Option<Rc<Node>> {
+    let parent = node.parent().filter(|p| p.shadow_root().is_none())?;
+    let sibling = parent.children().into_iter().filter(|c| c.is_element()).nth(idx)?;
+    sibling.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(&key.0)).then_some(sibling)
+}
+
 /// An element's classes as its descendants and later siblings see them.
 fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
     let mut classes: Vec<String> = attributes
@@ -33018,6 +33316,12 @@ struct AncestorCompound {
     /// pseudo-class, form state, a dropped `:is()` or `:not()` member), so
     /// a match is "maybe". Inside `:not()` a maybe must exclude nothing.
     undecided: bool,
+    /// The argument of each `:has()`, decided against the element in
+    /// [`RELATIONAL_NODE`].
+    has: Vec<String>,
+    /// Some part, here or in an `:is()`/`:not()` member, is a `:has()`: the
+    /// walk names the element the compound is tested against.
+    relational: bool,
 }
 
 impl AncestorCompound {
@@ -33129,6 +33433,7 @@ impl AncestorCompound {
                                     .collect();
                                 out.undecided |= alternatives.len() != members.len()
                                     || alternatives.iter().any(|m| m.undecided);
+                                out.relational |= alternatives.iter().any(|m| m.relational);
                                 out.any_of.push(alternatives);
                             }
                             ("not", Some(a)) => {
@@ -33140,17 +33445,21 @@ impl AncestorCompound {
                                     match parsed {
                                         // `:not(:hover)`: nothing is, so it excludes nothing.
                                         Some(m) if m.never => {}
-                                        Some(m) if !m.undecided => out.none_of.push(m),
+                                        Some(m) if !m.undecided => {
+                                            out.relational |= m.relational;
+                                            out.none_of.push(m)
+                                        }
                                         _ => out.undecided = true,
                                     }
                                 }
                             }
-                            // Relational: the subject path under-matches it
-                            // too.
-                            ("has", _) => {
-                                out.never = true;
-                                out.undecided = true;
+                            // Relational: decided against the element the
+                            // walk names (`RELATIONAL_NODE`).
+                            ("has", Some(a)) => {
+                                out.has.push(a.clone());
+                                out.relational = true;
                             }
+                            ("has", None) => out.never = true,
                             // A hovered ancestor or sibling carries the
                             // mark among its classes (`element_classes`).
                             ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
@@ -33204,7 +33513,7 @@ impl AncestorCompound {
             return false;
         }
         let Some(attributes) = attributes.as_deref() else {
-            return true;
+            return !self.excluded_by_relational_not(tag, classes, id.as_ref());
         };
         self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
             && !self.none_of.iter().any(|n| n.matches_ancestor(ancestor))
@@ -33223,11 +33532,22 @@ impl AncestorCompound {
                 .any_of
                 .iter()
                 .all(|alts| alts.iter().any(|a| a.matches(tag_name, classes, id)))
+            && self.has.iter().all(|a| relational_has(a))
+    }
+
+    /// Whether a `:not()` member that reads the element through `:has()`,
+    /// and asks nothing of attributes, matches it: decided where the
+    /// element's attributes are not carried, unlike the rest of `none_of`.
+    fn excluded_by_relational_not(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
+        self.none_of
+            .iter()
+            .any(|n| n.relational && n.attrs.is_empty() && n.none_of.is_empty() && n.matches(tag_name, classes, id))
     }
 
     /// [`Self::matches`] for an earlier sibling, whose form state is known.
     fn matches_sibling(&self, (tag, classes, id, state): &SiblingKey) -> bool {
         self.matches(tag, classes, id.as_ref())
+            && !self.excluded_by_relational_not(tag, classes, id.as_ref())
             && self.state.iter().all(|want| match want {
                 StatePseudo::Checked => state.checked,
                 StatePseudo::Disabled => state.control && state.disabled,
@@ -34243,7 +34563,12 @@ impl SelectorReads {
                     match combinator.as_str() {
                         // The subject's own token: `subject` below.
                         "" => {}
-                        " " | ">" => self.note_ancestor(compound),
+                        // `:has()` on an ancestor reads its subtree, which
+                        // the chain key does not hold.
+                        " " | ">" => {
+                            self.note_ancestor(compound);
+                            positional |= compound.relational;
+                        }
                         _ => positional = true,
                     }
                 }
@@ -34383,7 +34708,6 @@ impl SelectorReads {
                     | "first-letter"
                     | "root"
                     | "scope"
-                    | "has"
             )
     }
 
