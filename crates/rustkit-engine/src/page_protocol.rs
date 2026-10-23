@@ -654,10 +654,9 @@ impl PageEndpoint {
         let Some(control) = self.engine.view_control(self.view) else {
             return;
         };
-        if control.nav_committed(nav_id) || control.nav_cancelled(nav_id) {
+        if !control.end_uncommitted(nav_id) {
             return;
         }
-        control.clear_all();
         let error = failed.unwrap_or_else(|| "navigation did not commit".to_string());
         let _ = self.events.send(PageEvent::LoadState {
             state: LoadState::Failed { error },
