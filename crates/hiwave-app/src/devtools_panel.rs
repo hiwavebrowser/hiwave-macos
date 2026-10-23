@@ -18,6 +18,7 @@
 use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsQuery};
 use serde::Serialize;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use wry::WebView;
 
@@ -31,6 +32,23 @@ pub fn panel_call(method: &str, arg: &impl Serialize) -> String {
 
 fn run(panel: &WebView, script: &str) {
     let _ = panel.evaluate_script(script);
+}
+
+/// When the open panel asks the page for new console lines.
+#[derive(Default)]
+struct ConsolePoll {
+    asked_at: Option<Instant>,
+}
+
+impl ConsolePoll {
+    /// At `now`, with a console question out or not: whether to ask now,
+    /// and when the window should wake for the panel next.
+    fn at(&mut self, now: Instant, waiting: bool) -> (bool, Instant) {
+        if !waiting {
+            self.asked_at = Some(now);
+        }
+        (!waiting, now)
+    }
 }
 
 /// What an answer is for.
@@ -70,6 +88,7 @@ pub struct Devtools {
     selected: Option<usize>,
     /// The next Inspector record the console has not shown.
     console_seq: u64,
+    console_poll: ConsolePoll,
     asked: Vec<Asked>,
 }
 
@@ -228,7 +247,9 @@ impl Devtools {
                 }
             }
         }
-        if self.open && !self.waiting_for(Want::Console) {
+        let waiting = self.waiting_for(Want::Console);
+        let (ask, _next) = self.console_poll.at(Instant::now(), waiting);
+        if self.open && ask {
             let since = self.console_seq;
             self.ask(view, Want::Console, DevtoolsQuery::Console { since });
         }
@@ -313,5 +334,27 @@ mod tests {
         let hostile = panel_call("addConsoleEntries", &["\"); alert(1); (\"", "</script>"]);
         assert!(hostile.ends_with(r#"addConsoleEntries(["\"); alert(1); (\"","</script>"])"#), "{hostile}");
         assert!(panel_call("highlightElement", &None::<String>).ends_with("highlightElement(null)"));
+    }
+
+    #[test]
+    fn an_open_panel_on_an_idle_page_asks_for_the_console_a_few_times_a_second() {
+        // #785 R1 HOLD 1: the pump asked again the moment an answer arrived,
+        // and every answer woke the window, so an idle page and an open
+        // panel woke each other without pause. Worst case here: the answer
+        // arrives 1 ms after each question and wakes the window at once.
+        let start = Instant::now();
+        let mut poll = ConsolePoll::default();
+        let (mut now, mut asks) = (start, 0);
+        while now < start + Duration::from_millis(500) {
+            let (ask, next) = poll.at(now, false);
+            assert!(next > now, "a wake that is already due spins the loop");
+            asks += usize::from(ask);
+            now = if ask { now + Duration::from_millis(1) } else { next };
+        }
+        assert!(asks <= 3, "{asks} console questions in 500 ms");
+        // A question still out is not asked again, and the panel still gets
+        // a wake to read its answer.
+        let (ask, next) = poll.at(now, true);
+        assert!(!ask && next > now);
     }
 }

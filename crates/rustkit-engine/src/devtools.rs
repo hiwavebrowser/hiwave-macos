@@ -173,6 +173,9 @@ pub struct DevtoolsConsole {
     /// The page committed, laid out for the first time or finished loading
     /// since `since`: the panel's tree is stale.
     pub page_changed: bool,
+    /// The document laid out for the first time or finished loading since
+    /// `since` (or a new one committed): the panel's tree is stale.
+    pub tree_stale: bool,
 }
 
 /// `tag#id.class.class`.
@@ -445,6 +448,7 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
                 InspectorEvent::NavigationCommit { .. } | InspectorEvent::FirstLayout | InspectorEvent::LoadFinished { .. }
             )
         }),
+        tree_stale: false,
     }
 }
 

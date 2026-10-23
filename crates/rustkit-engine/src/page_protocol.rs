@@ -162,6 +162,12 @@ fn devtools_answer(engine: &mut Engine, view: EngineViewId, query: DevtoolsQuery
     (answer.unwrap_or(DevtoolsAnswer::Unavailable), false)
 }
 
+/// Whether an answer is worth waking the window for, rather than waiting
+/// for its next wake.
+pub(crate) fn devtools_wakes_window(_answer: &DevtoolsAnswer, _frame_changed: bool) -> bool {
+    true
+}
+
 /// Input and the synchronous questions the window still asks.
 ///
 /// The ones that return a value keep a oneshot so the window's current
@@ -509,6 +515,7 @@ impl PageEndpoint {
             }
             PageCmd::Devtools { query, reply } => {
                 let (answer, frame_changed) = devtools_answer(&mut self.engine, self.view, query);
+                let wake = devtools_wakes_window(&answer, frame_changed);
                 let _ = reply.send(answer);
                 if frame_changed {
                     // On the page's own thread there is no presenter: this
@@ -520,7 +527,7 @@ impl PageEndpoint {
                 }
                 // No event carries the answer: wake the content thread's
                 // window so it reads it now, not at its next input.
-                if self.wake_window {
+                if self.wake_window && wake {
                     crate::script_net::poke_live_turn();
                 }
             }

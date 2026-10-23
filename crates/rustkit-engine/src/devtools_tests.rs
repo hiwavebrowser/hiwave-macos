@@ -212,6 +212,79 @@ fn highlight_adds_an_overlay_to_the_committed_list_only_while_set() {
     assert!(engine.devtools_highlight(view, None).unwrap());
 }
 
+#[test]
+fn a_navigation_clears_the_outline() {
+    // #785 R1 HOLD 2: node ids do not survive a navigation, and nothing
+    // cleared the outline, so the new page outlined whichever node took the
+    // old id and every commit copied the display list.
+    let (mut engine, view) = page(PAGE);
+    let b = node(&engine, view, "#b");
+    assert!(engine.devtools_highlight(view, Some(b)).unwrap());
+    engine.load_html(view, PAGE).expect("load_html");
+    let state = &engine.views[&view];
+    assert_eq!(state.devtools_highlight, None);
+    let base = state.display_list.clone().expect("a display list");
+    let committed = devtools::with_highlight(Some(base.clone()), state.layout.as_deref(), state.devtools_highlight).unwrap();
+    assert!(Arc::ptr_eq(&committed, &base), "the page's own list is committed");
+}
+
+#[test]
+fn an_idle_console_answer_does_not_wake_the_window() {
+    // #785 R1 HOLD 1: every answer woke the window, and the woken pump asked
+    // for the console again at once, so an open panel on an idle page kept
+    // the window and the page waking each other.
+    use crate::page_protocol::devtools_wakes_window as wakes;
+    let (mut engine, view) = page("<html><body><p>hi</p></body></html>");
+    engine.devtools_attach(view, true).unwrap();
+    let since = engine.devtools_console(view, 0).unwrap().next_seq;
+    let idle = engine.devtools_console(view, since).unwrap();
+    assert!(idle.entries.is_empty() && !idle.page_changed);
+    assert!(!wakes(&DevtoolsAnswer::Console(idle), false), "nothing new");
+    engine.execute_script(view, "console.log('x')").unwrap();
+    let news = engine.devtools_console(view, since).unwrap();
+    assert!(wakes(&DevtoolsAnswer::Console(news), false), "a new line");
+    assert!(wakes(&DevtoolsAnswer::Done, true), "an outline drawn");
+    assert!(!wakes(&DevtoolsAnswer::Done, false), "an acknowledgement");
+    assert!(wakes(&DevtoolsAnswer::Node(None), false), "the panel waits on what it asked");
+}
+
+#[test]
+fn the_panel_shows_text_and_urls_as_shapes() {
+    // Pete 2026-10-23: the Inspector is shape-only everywhere. Tree text and
+    // comments give their length, not the page's words; a URL loses its
+    // query and fragment.
+    let (engine, view) = page(PAGE);
+    let tree = engine.devtools_dom_tree(view, None, None).unwrap().expect("a tree");
+    let body = tree.children[0].children.iter().find(|n| n.tag == "body").expect("body");
+    assert_eq!(body.children[2].text_content.as_deref(), Some("<text len=6>"), "the comment");
+    assert_eq!(body.children[1].children[0].children[0].text_content.as_deref(), Some("<text len=1>"));
+    let at = Some(SourceLocation { url: "https://news.test/app.js?token=s3cret#x".into(), line: 1, column: 2 });
+    let snapshot = InspectorSnapshot {
+        records: vec![
+            record(0, InspectorEvent::NavigationStart { url: Some("https://news.test/a?q=private#top".into()) }),
+            record(1, InspectorEvent::Console { level: ConsoleLevel::Log, message: "<string len=5>".into(), truncated: false, location: at }),
+        ],
+        next_seq: 2,
+        dropped: 0,
+    };
+    let c = devtools_console_entries(&snapshot);
+    assert_eq!(c.entries[0].message, "Navigated to https://news.test/a");
+    assert_eq!(c.entries[1].stack[0].file, "https://news.test/app.js");
+}
+
+#[test]
+fn only_a_new_document_resets_the_panel() {
+    // #785 R1 NIT: a first layout or the end of the same document's load
+    // dropped the selection; they only make the tree stale.
+    let at = |event| InspectorSnapshot { records: vec![record(0, event)], next_seq: 1, dropped: 0 };
+    let settled = devtools_console_entries(&at(InspectorEvent::FirstLayout));
+    assert!(!settled.page_changed && settled.tree_stale);
+    let finished = devtools_console_entries(&at(InspectorEvent::LoadFinished { url: None, scripts_over_budget: 0 }));
+    assert!(!finished.page_changed && finished.tree_stale);
+    let committed = devtools_console_entries(&at(InspectorEvent::NavigationCommit { url: None, status: Some(200) }));
+    assert!(committed.page_changed && committed.tree_stale);
+}
+
 fn record(seq: u64, event: InspectorEvent) -> InspectorRecord {
     InspectorRecord { seq, t_ms: 0.0, event }
 }
