@@ -2703,6 +2703,18 @@ pub struct ComputedStyle {
     pub container_type: ContainerType,
     /// css-contain-3 §6.2 `container-name`; empty is `none`. Not inherited.
     pub container_name: Vec<String>,
+    /// `width: min-content | max-content`, which `Length` cannot carry;
+    /// layout keeps the previous width. `@container` treats the box's width
+    /// as unknown. Not inherited.
+    pub width_content_keyword: bool,
+    /// `columns` or `column-width` other than `auto` was declared. Layout
+    /// does not split into columns for them yet, but `@container` treats a
+    /// child's width as unknown. Not inherited.
+    pub columns_declared: bool,
+    /// An author `display: contents`, which layout does not honour yet
+    /// (only `<slot>` gets `Display::Contents`): the box is still laid out,
+    /// but `@container` treats it as having no size. Not inherited.
+    pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,

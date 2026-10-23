@@ -24,7 +24,7 @@ use std::cell::RefCell;
 
 use rustkit_css::{
     BoxSizing, ComputedStyle, ContainerType, Display, FlexBasis, FlexDirection, Float, Length,
-    Position,
+    Overflow, Position,
 };
 
 /// A query container, as an `@container` condition sees it.
@@ -49,6 +49,11 @@ struct Frame {
     container: Option<Option<Container>>,
     /// Names of an element that is a container of unknown size.
     unknown_names: Vec<String>,
+    /// The element starts a block formatting context, which floats inside
+    /// it do not leave.
+    new_context: bool,
+    /// A float child has been entered.
+    floats: bool,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +81,8 @@ impl DocumentScope {
                 width: Some(w),
                 container: None,
                 unknown_names: Vec::new(),
+                new_context: true,
+                floats: false,
             }],
         });
         Self {
@@ -105,7 +112,22 @@ impl ElementScope {
                 return false;
             };
             let parent_width = state.frames.last().and_then(|f| f.width);
-            let frame = frame_for(style, parent, parent_width, state.viewport);
+            // An earlier float in the same formatting context may sit beside
+            // this box; one that starts a new context is then narrowed by
+            // it, which only layout knows. (`clear` is not modelled.)
+            let mut float_seen = false;
+            for f in state.frames.iter().rev() {
+                float_seen |= f.floats;
+                if float_seen || f.new_context {
+                    break;
+                }
+            }
+            let frame = frame_for(style, parent, parent_width, state.viewport, float_seen);
+            if style.float != Float::None {
+                if let Some(parent) = state.frames.last_mut() {
+                    parent.floats = true;
+                }
+            }
             state.frames.push(frame);
             true
         });
@@ -175,10 +197,23 @@ fn frame_for(
     parent: Option<&ComputedStyle>,
     parent_width: Option<f32>,
     viewport: (f32, f32),
+    float_seen: bool,
 ) -> Frame {
-    let width = content_width(style, parent, parent_width, viewport);
+    let width = content_width(style, parent, parent_width, viewport, float_seen);
     let container = match style.container_type {
         ContainerType::Normal => None,
+        // An inline box (or one with no box) has no inline size of its own
+        // to contain (css-contain-3 §6.1 applies size containment, which
+        // inline boxes ignore): a query against it is unknown, so false.
+        // Its descendants still see the parent's width through it.
+        _ if style.display_contents_declared
+            || matches!(
+                style.display,
+                Display::Inline | Display::Contents | Display::None
+            ) =>
+        {
+            Some(None)
+        }
         kind => Some(width.map(|inline| Container {
             names: style.container_name.clone(),
             inline,
@@ -192,7 +227,18 @@ fn frame_for(
         width,
         container,
         unknown_names: style.container_name.clone(),
+        new_context: starts_context(style),
+        floats: false,
     }
+}
+
+/// The box starts a block formatting context that floats do not leave (a
+/// subset; missing some only makes more widths unknown).
+fn starts_context(style: &ComputedStyle) -> bool {
+    style.container_type != ContainerType::Normal
+        || style.float != Float::None
+        || matches!(style.position, Position::Absolute | Position::Fixed)
+        || !matches!(style.overflow_x, Overflow::Visible | Overflow::Clip)
 }
 
 fn font_px(style: &ComputedStyle) -> f32 {
@@ -239,6 +285,7 @@ fn content_width(
     parent: Option<&ComputedStyle>,
     parent_width: Option<f32>,
     vp: (f32, f32),
+    float_seen: bool,
 ) -> Option<f32> {
     let out_of_flow = matches!(style.position, Position::Absolute | Position::Fixed);
     let parent_display = parent.map(|p| p.display);
@@ -249,6 +296,11 @@ fn content_width(
         |kinds: &[Display]| !out_of_flow && parent_display.is_some_and(|d| kinds.contains(&d));
     let flex_item = item_of(&[Display::Flex, Display::InlineFlex]);
     let grid_item = item_of(&[Display::Grid, Display::InlineGrid]);
+    // In a multi-column container the containing block is a column, whose
+    // width multicol layout decides (`columns`/`column-width` are not
+    // parsed yet but still make one).
+    let in_columns = !out_of_flow
+        && parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared);
     if item_of(&[Display::Contents])
         && !matches!(style.display, Display::Inline | Display::Contents)
     {
@@ -267,7 +319,7 @@ fn content_width(
     // fixed box that is the nearest positioned ancestor (or the viewport),
     // and for a grid item its grid area; the walk knows neither, so they do
     // not resolve. A flex item's is the flex container, the parent.
-    let basis = match out_of_flow || grid_item {
+    let basis = match out_of_flow || grid_item || in_columns {
         true => None,
         false => parent_width,
     };
@@ -306,7 +358,13 @@ fn content_width(
             || grid_item
             || out_of_flow
             || style.float != Float::None
-            || !block_level =>
+            || !block_level
+            || in_columns
+            || (float_seen && starts_context(style))
+            // Content-sized, not stretched: `fit-content`, and the
+            // `min-content`/`max-content` keywords `Length` cannot carry.
+            || matches!(style.width, Length::FitContent)
+            || style.width_content_keyword =>
         {
             return None
         }

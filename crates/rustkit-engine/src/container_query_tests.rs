@@ -102,3 +102,30 @@ fn container_query_answers_with_the_laid_out_width_not_the_style_width() {
     // parent. k4: 100% of the 200px grid column. k5: flex-shrink:0 keeps 300 (`flex: none` is not parsed yet).
     assert_eq!(heights, ["0", "0", "0", "0", "15"]);
 }
+
+/// #782 HOLD 2 (Atlas #843): where only layout knows a container's width,
+/// the walk guessed one wider than the laid-out box. Each such width is now
+/// unknown, so the query is false. Chromium 148 on this page at 800 x 600:
+/// k1 an inline container, k2 an auto width beside a float, k3 a child of
+/// a two-column box, k4 a `display: contents` container, k7 `fit-content`,
+/// k8 `max-content` all get 0; k5 and k6 (plain and list-item containers
+/// 600px wide) get 10.
+const UNKNOWN_WIDTH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .w { width: 600px }
+@container (min-width: 400px) { #k1,#k2,#k3,#k4,#k5,#k6,#k7,#k8 { height: 10px } }
+</style></head><body>
+<div class="w"><span style="container-type:inline-size"><b id="k1" style="display:inline-block;width:5px"></b></span></div>
+<div class="w"><div style="float:left;width:300px;height:1px"></div><div style="container-type:inline-size"><div id="k2"></div></div></div>
+<div class="w" style="columns:2;column-gap:0"><div style="container-type:inline-size"><div id="k3"></div></div></div>
+<div class="w"><div style="display:contents;container-type:inline-size"><div id="k4"></div></div></div>
+<div class="w"><div style="container-type:inline-size"><div id="k5"></div></div></div>
+<div class="w"><ul style="margin:0;padding:0"><li style="container-type:inline-size"><div id="k6"></div></li></ul></div>
+<div class="w"><div style="width:fit-content;container-type:inline-size"><div id="k7"></div></div></div>
+<div class="w"><div style="width:max-content;container-type:inline-size"><div id="k8"></div></div></div>
+</body></html>"#;
+
+#[test]
+fn container_query_is_false_where_only_layout_knows_the_width() {
+    let heights = offset_heights(UNKNOWN_WIDTH_PAGE, 800, 600, 8);
+    assert_eq!(heights, ["0", "0", "0", "0", "10", "10", "0", "0"]);
+}

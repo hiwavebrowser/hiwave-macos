@@ -11925,11 +11925,15 @@ impl Engine {
                 }
             }
             "display" => {
-                if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
+                if value.trim().eq_ignore_ascii_case("contents") {
+                    style.display_contents_declared = true;
+                } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);
+                    style.display_contents_declared = false;
                 } else if let Some(display) = parse_display(value) {
                     style.display = display;
                     style.webkit_box = None;
+                    style.display_contents_declared = false;
                 }
             }
             // css-overflow-4 §4.2's legacy line clamp; see
@@ -12314,7 +12318,15 @@ impl Engine {
             "width" => {
                 if let Some(length) = parse_length(value) {
                     style.width = length;
+                    style.width_content_keyword = false;
+                } else if matches!(value.trim(), "min-content" | "max-content") {
+                    style.width_content_keyword = true;
                 }
+            }
+            "columns" | "column-width" => {
+                style.columns_declared = !value
+                    .split_whitespace()
+                    .all(|part| part.eq_ignore_ascii_case("auto"));
             }
             "height" => {
                 if let Some(length) = parse_length(value) {
