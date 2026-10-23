@@ -10469,6 +10469,17 @@ impl Engine {
                     .filter(|p| p.parse::<f32>().is_err())
                     .filter(|p| is_flex_basis_value(p))
                     .count();
+                // At most two numbers (grow, shrink). A third is a basis
+                // only when it is a unitless `0` (`flex: 1 1 0`); `1 2 3`
+                // is invalid.
+                let (numbers, bases) = if numbers == 3 && parts[2].parse::<f32>() == Ok(0.0) {
+                    (2, bases + 1)
+                } else {
+                    (numbers, bases)
+                };
+                if numbers > 2 {
+                    return;
+                }
                 if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
                 {
                     return;
@@ -29391,7 +29402,9 @@ mod cascade_wire_tests {
     #[test]
     fn an_invalid_flex_shorthand_keeps_the_earlier_flex() {
         let e = engine();
-        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk"] {
+        // Three bare numbers are invalid: the basis needs a unit unless it
+        // is `0` (`flex: 1 1 0` stays valid).
+        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
             let mut s = ComputedStyle::default();
             e.apply_style_property(&mut s, "flex", "2 3 10px");
             e.apply_style_property(&mut s, "flex", junk);
