@@ -226,6 +226,10 @@ pub struct PageEndpoint {
     /// Post the window's live wake when an event is published. The
     /// same-thread drain does not: it is already on the window thread.
     wake_window: bool,
+    /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
+    /// autofocus or a new document moves focus without any input from the
+    /// window, and the window answers its keys from this report.
+    last_focused: Option<bool>,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
@@ -246,6 +250,7 @@ pub(crate) fn adopt(
         visible: true,
         settle_keys: false,
         wake_window: false,
+        last_focused: None,
     }
 }
 
@@ -275,6 +280,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         visible: true,
         settle_keys: false,
         wake_window: false,
+        last_focused: None,
     };
     (handle, endpoint)
 }
@@ -379,6 +385,7 @@ impl PageEndpoint {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
                 self.publish_commit();
+                self.report_focus();
                 // `location.href =` and `link.click()` from this script.
                 // The same-thread window asks with TakeNavigation instead.
                 self.report_script_navigation();
@@ -497,6 +504,7 @@ impl PageEndpoint {
             }
             PageInput::FocusAt { x, y, reply } => {
                 let tag = self.engine.focus_at_point(view, x, y);
+                self.last_focused = Some(tag.is_some());
                 self.emit(PageEvent::Focused(tag.is_some()));
                 let _ = reply.send(tag);
             }
@@ -543,11 +551,13 @@ impl PageEndpoint {
             }
             PageInput::HasFocus { reply } => {
                 let focused = self.engine.focused_node(view).is_some();
+                self.last_focused = Some(focused);
                 self.emit(PageEvent::Focused(focused));
                 let _ = reply.send(focused);
             }
         }
         self.publish_commit();
+        self.report_focus();
         // A listener's `location.href =` or `link.click()` is not the
         // click's own default action. The content thread reports it; the
         // same-thread window still pulls with TakeNavigation.
@@ -680,7 +690,24 @@ impl PageEndpoint {
     fn after_page_change(&mut self) {
         self.translate_engine_events();
         self.publish_commit();
+        self.report_focus();
         self.report_script_navigation();
+    }
+
+    /// Tell the content thread's window when the page's focus changed on
+    /// its own: a script's `focus()` or `blur()`, a timer, a new document
+    /// with nothing focused. Only the content thread reports it; the
+    /// same-thread window asks with [`PageInput::HasFocus`].
+    fn report_focus(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let focused = self.engine.focused_node(self.view).is_some();
+        if self.last_focused == Some(focused) {
+            return;
+        }
+        self.last_focused = Some(focused);
+        self.emit(PageEvent::Focused(focused));
     }
 
     /// A navigation the page's script asked for (`location.href`,

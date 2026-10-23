@@ -742,6 +742,8 @@ impl RustKitView {
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
             self.accepted_nav.set(thread.last_nav_id());
+            // The new document has nothing focused until it says otherwise.
+            self.page_focused.set(false);
             self.live_clock.set(Instant::now());
             return Ok(());
         }
@@ -892,6 +894,7 @@ impl RustKitView {
             // Signal cancel and the interrupt before the command is queued.
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
+            self.page_focused.set(false);
             *self.loading.borrow_mut() = true;
             self.live_clock.set(Instant::now());
             return;
@@ -1713,6 +1716,35 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         while !read(&view, "String(window.scrollY > 0)").contains("true") {
             assert!(Instant::now() < deadline, "the page never scrolled");
             wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// #730 delta R1 NIT: a new document starts with nothing focused. The
+    /// window kept the old page's answer until the page next reported, so
+    /// the first key on the new page went to the page instead of the window.
+    #[test]
+    fn content_thread_a_new_document_starts_with_no_focused_field() {
+        let view = content_view();
+        let (base, _log) = logging_server(
+            "<body style='margin:0'><input id=f style='width:200px;height:40px'></body>",
+        );
+        load_and_settle(&view, &base);
+        focus_the_field(&view);
+        view.load_url_blocking(&base);
+        assert!(!view.page_focused.get(), "a navigation kept the old page's focused field");
+        load_and_settle(&view, &base);
+        focus_the_field(&view);
+        view.load_html_internal("<body><p>new tab</p></body>").unwrap();
+        assert!(!view.page_focused.get(), "New Tab kept the old page's focused field");
+    }
+
+    fn focus_the_field(view: &RustKitView) {
+        let _ = view.focus_at_point(20.0, 20.0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !view.has_focused_element() {
+            assert!(Instant::now() < deadline, "the window never learned the field was focused");
+            wake(view);
             std::thread::sleep(Duration::from_millis(5));
         }
     }

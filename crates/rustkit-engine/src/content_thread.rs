@@ -463,6 +463,54 @@ mod tests {
         assert!(value.contains("x2"), "{value}");
     }
 
+    /// The newest `Focused` report among the events seen within `budget`.
+    fn last_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::Focused(focused) = event {
+                    last = Some(focused);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn the_window_hears_focus_a_script_moved_and_a_new_document_has_none() {
+        // #730 delta R1 NIT: the window answers "is a field focused" from
+        // the page's last Focused report. A script's `focus()` sent none, so
+        // the first key after it went to the window, and a new document
+        // kept the old document's answer.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(300)),
+            Some(true),
+            "a script focused the field and the window was not told"
+        );
+        let mut timer = page.eval("document.getElementById('i').blur(); setTimeout(function () { document.getElementById('i').focus(); }, 20); 1");
+        assert!(wait_recv(&mut timer, Duration::from_secs(5)).is_some());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(500)),
+            Some(true),
+            "a timer focused the field and the window was not told"
+        );
+        let mut next = page.load_html("<p>next</p>");
+        assert!(wait_recv(&mut next, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(
+            last_focused(&page, Duration::from_millis(300)),
+            Some(false),
+            "the new document has no focused field and the window was not told"
+        );
+    }
+
     #[test]
     fn a_superseded_navigation_drops_the_late_result() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
