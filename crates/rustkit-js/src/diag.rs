@@ -28,8 +28,9 @@ use boa_engine::{Context, JsObject, JsValue};
 
 use crate::{ErrorReport, LogLevel, ScriptPosition};
 
-/// One console call: level, line, the caller's position.
-pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>);
+/// One console call: level, line, its shape line (when one was asked
+/// for, see `console_shapes`), the caller's position.
+pub(crate) type ConsoleCall = (LogLevel, String, Option<String>, Option<ScriptPosition>);
 
 /// An unimplemented member the embedder's scripts saw page script reach.
 struct Unsupported {
@@ -121,6 +122,9 @@ pub(crate) struct Diagnostics {
     pub(crate) console_capturing: Cell<bool>,
     /// Console arguments are recorded as type and length only.
     pub(crate) console_redacted: Cell<bool>,
+    /// Each call also records a type-and-length line beside its line (an
+    /// embedder set a shape handler).
+    pub(crate) console_shapes: Cell<bool>,
     console: RefCell<VecDeque<ConsoleCall>>,
     console_counts: RefCell<HashMap<String, u64>>,
     console_timers: RefCell<HashMap<String, Instant>>,
@@ -139,12 +143,16 @@ impl Diagnostics {
             true => crate::describe::join_line(args, |arg| crate::describe::redacted_text(arg, context)),
             false => crate::describe::join_line(args, |arg| crate::describe::text(arg, context)),
         };
+        let shape = self
+            .console_shapes
+            .get()
+            .then(|| crate::describe::join_line(args, |arg| crate::describe::redacted_text(arg, context)));
         let at = caller_position(context, false);
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
             pending.pop_front();
         }
-        pending.push_back((level, line, at));
+        pending.push_back((level, line, shape, at));
     }
 
     /// A Console namespace member other than the five logging ones, as

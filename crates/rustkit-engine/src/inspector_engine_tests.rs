@@ -764,6 +764,45 @@ console.log('https://h.test/p?token=Q', 'x', 12, true, null, undefined, {a: 1}, 
     );
 }
 
+/// `HIWAVE_CONSOLE_LOG` mirrors the text the page logged into the tracing
+/// log. The Inspector's own rule still holds while it is on: without
+/// `keep_console_text` the record is shapes only, and the mirror keeps its
+/// text.
+#[test]
+fn the_console_mirror_does_not_put_page_text_in_the_inspector() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.log('secret-console-text', 12);
+console.count('secret-label');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut lines = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        lines.push(only(&described(&engine, view, server.port), &["console"]));
+    }
+    assert_eq!(
+        lines,
+        vec![
+            vec!["console Log <string len=19> <number> @inline#1:2:9", "console Info <string len=15> @inline#1:3:10"],
+            vec!["console Log secret-console-text 12 @inline#1:2:9", "console Info secret-label: 1 @inline#1:3:10"],
+        ]
+    );
+    let mirrored = mirrored.lock().unwrap().join("\n");
+    assert!(mirrored.contains("secret-console-text 12"), "{mirrored}");
+}
+
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
 
 /// Page scripts now run under a name (`inline#n`, `script#n`) so positions
