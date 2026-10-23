@@ -402,8 +402,8 @@ fn the_held_fixed_boxes_are_found_once_per_layout() {
             "<p style='position:fixed;top:0'>one<span style='position:fixed;top:50px'>inside it</span></p>\
              <div><div><p style='position:fixed;top:20px'>two</p></div></div>{UNDER}"
         )),
-        2,
-        "outermost fixed boxes only"
+        3,
+        "a fixed box inside a fixed box is held too: it can lie outside it"
     );
 }
 
