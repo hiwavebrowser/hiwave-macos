@@ -103,16 +103,25 @@ fn container_query_answers_with_the_laid_out_width_not_the_style_width() {
     assert_eq!(heights, ["0", "0", "0", "0", "15"]);
 }
 
-/// #782 HOLD 2 (Atlas #843): where only layout knows a container's width,
-/// the walk guessed one wider than the laid-out box. Each such width is now
-/// unknown, so the query is false. Chromium 148 on this page at 800 x 600:
+/// #782 HOLD 2 (Atlas #843) and HOLD 3 (Atlas #847, review 5634168311):
+/// where only layout knows a container's width, the walk guessed one wider
+/// than the laid-out box, so wide-layout rules fired on a narrow box. Every
+/// width is now unknown (the query false) unless the container and its
+/// ancestors are plain blocks. Chromium 148 on this page at 800 x 600 gives
+/// 0 to all fifteen probes:
 /// k1 an inline container, k2 an auto width beside a float, k3 a child of
 /// a two-column box, k4 a `display: contents` container, k7 `fit-content`,
-/// k8 `max-content` all get 0; k5 and k6 (plain and list-item containers
-/// 600px wide) get 10.
+/// k8 `max-content`; k9 a float left by an earlier wrapper div, k10 one
+/// left by an earlier span, k11 `max-width: min-content`, k12
+/// `-webkit-max-content`, k13 a `display: block` button, k14 a vertical-lr
+/// container, k15 a child of a table with `border-spacing` (580px, asked
+/// for 590px), k16 a child of a `-webkit-box`, k17 `MAX-CONTENT`.
+/// Controls get 10: k5 and k6 (plain and list-item containers 600px wide)
+/// and k18 (a 600px scroll container).
 const UNKNOWN_WIDTH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
 body { margin: 0 } .w { width: 600px }
-@container (min-width: 400px) { #k1,#k2,#k3,#k4,#k5,#k6,#k7,#k8 { height: 10px } }
+@container (min-width: 400px) { .a, #k1,#k2,#k3,#k4,#k5,#k6,#k7,#k8 { height: 10px } }
+@container (min-width: 590px) { .b { height: 10px } }
 </style></head><body>
 <div class="w"><span style="container-type:inline-size"><b id="k1" style="display:inline-block;width:5px"></b></span></div>
 <div class="w"><div style="float:left;width:300px;height:1px"></div><div style="container-type:inline-size"><div id="k2"></div></div></div>
@@ -122,10 +131,26 @@ body { margin: 0 } .w { width: 600px }
 <div class="w"><ul style="margin:0;padding:0"><li style="container-type:inline-size"><div id="k6"></div></li></ul></div>
 <div class="w"><div style="width:fit-content;container-type:inline-size"><div id="k7"></div></div></div>
 <div class="w"><div style="width:max-content;container-type:inline-size"><div id="k8"></div></div></div>
+<div class="w"><div><div style="float:left;width:300px;height:50px"></div></div><div style="container-type:inline-size"><div id="k9" class="a"></div></div></div>
+<div class="w"><span><b style="float:left;width:300px;height:50px"></b></span><div style="container-type:inline-size"><div id="k10" class="a"></div></div></div>
+<div class="w"><div style="max-width:min-content;container-type:inline-size"><div id="k11" class="a"></div></div></div>
+<div class="w"><div style="width:-webkit-max-content;container-type:inline-size"><div id="k12" class="a"></div></div></div>
+<div class="w"><button style="display:block;padding:0;border:0;container-type:inline-size"><div id="k13" class="a"></div></button></div>
+<div class="w"><div style="writing-mode:vertical-lr;width:600px;height:100px;container-type:inline-size"><div id="k14" class="a" style="writing-mode:horizontal-tb"></div></div></div>
+<div class="w"><div style="display:table;width:600px;border-spacing:10px"><div style="container-type:inline-size"><div id="k15" class="b"></div></div></div></div>
+<div class="w"><div style="display:-webkit-box"><div style="container-type:inline-size"><div id="k16" class="a"></div></div></div></div>
+<div class="w"><div style="width:MAX-CONTENT;container-type:inline-size"><div id="k17" class="a"></div></div></div>
+<div class="w"><div style="overflow-y:scroll;container-type:inline-size"><div id="k18" class="a"></div></div></div>
 </body></html>"#;
 
 #[test]
 fn container_query_is_false_where_only_layout_knows_the_width() {
-    let heights = offset_heights(UNKNOWN_WIDTH_PAGE, 800, 600, 8);
-    assert_eq!(heights, ["0", "0", "0", "0", "10", "10", "0", "0"]);
+    let heights = offset_heights(UNKNOWN_WIDTH_PAGE, 800, 600, 18);
+    let fired: Vec<String> = heights
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h != "0")
+        .map(|(i, h)| format!("k{}={h}", i + 1))
+        .collect();
+    assert_eq!(fired, ["k5=10", "k6=10", "k18=10"]);
 }
