@@ -10457,7 +10457,9 @@ impl Engine {
                 // to content — and CSS allows `flex: <grow> <basis>`, so a
                 // second value that does NOT parse as a bare number is the
                 // basis, not a shrink of 200.
-                let parts: Vec<&str> = value.split_whitespace().collect();
+                // Split outside parentheses: `calc(50% - 10px)` is one basis,
+                // not three junk tokens.
+                let parts: Vec<&str> = split_top_level_whitespace(value);
                 // Validate before setting anything: `flex: 1 junk` is
                 // invalid and dropped whole (css-syntax-3 §8). It set the
                 // grow and reset the basis to auto from the junk.
@@ -10465,11 +10467,7 @@ impl Engine {
                 let bases = parts
                     .iter()
                     .filter(|p| p.parse::<f32>().is_err())
-                    .filter(|p| {
-                        p.eq_ignore_ascii_case("auto")
-                            || p.eq_ignore_ascii_case("content")
-                            || parse_length(p).is_some()
-                    })
+                    .filter(|p| is_flex_basis_value(p))
                     .count();
                 if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
                 {
@@ -17794,6 +17792,22 @@ fn place_pair(value: &str) -> (&str, &str) {
 
 /// Parse a CSS timing function.
 /// `flex-basis` value: `auto`, `content`, a length, or a percentage.
+/// Whether a `flex` shorthand token is a valid `flex-basis`: `auto`, a
+/// `*-content` keyword, a length, or a math / `fit-content()` function.
+/// The ones `parse_flex_basis` cannot resolve yet still make the
+/// declaration valid, so its grow and shrink apply.
+fn is_flex_basis_value(token: &str) -> bool {
+    let lower = token.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "auto" | "content" | "min-content" | "max-content" | "fit-content"
+    ) || (lower.ends_with(')')
+        && ["calc(", "min(", "max(", "clamp(", "fit-content("]
+            .iter()
+            .any(|f| lower.starts_with(f)))
+        || parse_length(token).is_some()
+}
+
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     let v = value.trim();
     if v.eq_ignore_ascii_case("auto") {
@@ -29385,6 +29399,36 @@ mod cascade_wire_tests {
             assert_eq!(s.flex_shrink, 3.0, "flex: {junk}");
             assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(10.0), "flex: {junk}");
         }
+    }
+
+    // A function or `*-content` basis is valid: the declaration applies
+    // (grow and shrink at least) rather than being dropped, which left
+    // the initial shrink of 1 on a `flex: 0 0 calc(...)` card.
+    #[test]
+    fn a_flex_shorthand_with_a_function_basis_keeps_grow_and_shrink() {
+        let e = engine();
+        for value in [
+            "0 0 calc(50% - 10px)",
+            "0 0 calc( 50% - 10px )",
+            "0 0 min(50%, 200px)",
+            "0 0 max(50%, 200px)",
+            "0 0 clamp(100px, 50%, 300px)",
+            "0 0 fit-content(200px)",
+            "0 0 min-content",
+            "0 0 max-content",
+            "0 0 fit-content",
+            "0 0 content",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "flex", "3 3 10px");
+            e.apply_style_property(&mut s, "flex", value);
+            assert_eq!(s.flex_grow, 0.0, "flex: {value}");
+            assert_eq!(s.flex_shrink, 0.0, "flex: {value}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "3 3 10px");
+        e.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
+        assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
     }
 
     #[test]
