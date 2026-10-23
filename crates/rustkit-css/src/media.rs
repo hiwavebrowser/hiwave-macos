@@ -18,6 +18,29 @@ pub fn media_query_list_matches(list: &str, width: f32, height: f32) -> bool {
         .any(|q| query_matches(q.trim(), width, height))
 }
 
+/// Does an `@container` size condition (css-contain-3 §6.3) hold for a query
+/// container whose content box is `width` x `height` CSS px? `height` is
+/// `None` for an `inline-size` container: a condition that reads its block
+/// size does not hold. `inline-size` and `block-size` are `width` and
+/// `height` (horizontal writing mode).
+pub fn container_condition_matches(condition: &str, width: f32, height: Option<f32>) -> bool {
+    let cond = condition
+        .to_ascii_lowercase()
+        .replace("inline-size", "width")
+        .replace("block-size", "height");
+    let cond = cond.trim();
+    if !cond.starts_with('(') && !cond.starts_with("not") {
+        return false;
+    }
+    let reads_height = ["height", "aspect-ratio", "orientation"]
+        .iter()
+        .any(|f| cond.contains(f));
+    match height {
+        None if reads_height => false,
+        h => condition_matches(cond, width, h.unwrap_or(0.0)),
+    }
+}
+
 fn query_matches(query: &str, width: f32, height: f32) -> bool {
     let lower = query.to_ascii_lowercase();
     let mut q = lower.trim();
@@ -339,6 +362,24 @@ fn split_top_level_word<'a>(s: &'a str, word: &str) -> Vec<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::media_query_list_matches as m;
+
+    #[test]
+    fn container_conditions_read_the_container_size() {
+        use super::container_condition_matches as c;
+        assert!(c("(width >= 200px)", 300.0, None));
+        assert!(c("(min-width: 250px)", 300.0, None));
+        assert!(!c("(min-width: 400px)", 300.0, None));
+        assert!(c("(inline-size > 299px) and (not (width > 300px))", 300.0, None));
+        assert!(c("(200px < width <= 300px) or (width > 1000px)", 300.0, None));
+        // An inline-size container has no queryable block size.
+        assert!(!c("(height > 0px)", 300.0, None));
+        assert!(!c("(orientation: portrait)", 300.0, None));
+        assert!(c("(block-size >= 100px)", 300.0, Some(100.0)));
+        assert!(c("(orientation: landscape)", 300.0, Some(100.0)));
+        // Style queries and bare words are not size conditions.
+        assert!(!c("style(--x: 1)", 300.0, None));
+        assert!(!c("card", 300.0, None));
+    }
 
     #[test]
     fn widths_and_types_at_the_board_viewport() {
