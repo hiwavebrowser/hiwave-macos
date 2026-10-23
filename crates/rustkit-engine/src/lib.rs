@@ -1766,8 +1766,16 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
     // Every token before the size is a style, variant, weight or stretch
     // keyword; anything else makes the shorthand invalid, so it is dropped
     // rather than resetting style, weight and line-height.
-    let prefix_ok = tokens[..idx].iter().all(|t| {
+    // An angle is only an `oblique <angle>` argument, in any angle unit.
+    let is_angle = |t: &str| {
+        ["deg", "grad", "rad", "turn"]
+            .iter()
+            .find_map(|unit| t.strip_suffix(unit))
+            .is_some_and(|n| n.parse::<f32>().is_ok())
+    };
+    let prefix_ok = tokens[..idx].iter().enumerate().all(|(i, t)| {
         let t = t.to_ascii_lowercase();
+        let after_oblique = i > 0 && tokens[i - 1].eq_ignore_ascii_case("oblique");
         matches!(
             t.as_str(),
             "normal"
@@ -1786,7 +1794,7 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
                 | "extra-expanded"
                 | "ultra-expanded"
         ) || t.parse::<f32>().is_ok_and(|w| (1.0..=1000.0).contains(&w))
-            || t.ends_with("deg")
+            || (after_oblique && is_angle(&t))
     });
     if !prefix_ok {
         return None;
@@ -29457,6 +29465,30 @@ mod cascade_wire_tests {
         // Every prefix keyword the grammar allows still parses.
         e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
         assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
+    }
+
+    // An angle is only valid right after `oblique`, in any angle unit.
+    #[test]
+    fn a_font_shorthand_takes_an_angle_only_after_oblique() {
+        let e = engine();
+        for junk in ["10deg 30px serif", "bolddeg 30px serif", "oblique xdeg 30px serif"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", junk);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(20.0), "font: {junk}");
+        }
+        for valid in [
+            "oblique 10deg 30px serif",
+            "oblique -14deg 30px serif",
+            "oblique 0.2rad 30px serif",
+            "oblique 15grad 30px serif",
+            "oblique 0.05turn 30px serif",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", valid);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(30.0), "font: {valid}");
+        }
     }
 
     // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
