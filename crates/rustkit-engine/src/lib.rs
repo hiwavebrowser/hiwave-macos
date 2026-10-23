@@ -2240,11 +2240,32 @@ pub struct Engine {
 
 /// One element's author SVG paint declarations, as `style` text: `normal`
 /// goes before the element's own `style` attribute (which beats it),
-/// `important` after it.
+/// `important` after it, less any property the own `style` declares
+/// `!important` (which beats an author `!important`). `inherit` names the
+/// properties whose winning author value is `inherit` (or `unset`, for an
+/// inherited one): the declaration is left out and the same-named
+/// presentation attribute dropped, so rustkit-svg's parse-time inheritance
+/// gives the parent's value.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct SvgPaintStyle {
     normal: String,
     important: String,
+    inherit: Vec<String>,
+}
+
+/// Of `SVG_PAINT_PROPERTIES`, the ones that are not inherited (`unset` is
+/// `initial` for them).
+const SVG_PAINT_NOT_INHERITED: &[&str] = &["stop-color", "stop-opacity"];
+
+/// Lowercased names of the declarations `style` text marks `!important`.
+fn style_important_properties(style: &str) -> std::collections::HashSet<String> {
+    style
+        .split(';')
+        .filter_map(|decl| {
+            let (property, value) = decl.split_once(':')?;
+            split_important(value).1.then(|| property.trim().to_ascii_lowercase())
+        })
+        .collect()
 }
 
 /// The properties rustkit-svg paints with that an author sheet may set
@@ -13539,8 +13560,24 @@ impl Engine {
                     let attributes = match paint.get(&node.id.raw()) {
                         Some(p) => {
                             let mut a = attributes.clone();
+                            for property in &p.inherit {
+                                a.remove(property);
+                            }
                             let own = a.get("style").map(String::as_str).unwrap_or("");
-                            let style = format!("{}{};{}", p.normal, own, p.important);
+                            // The own `!important` beats the author one
+                            // (Cascade 4 §6.1); rustkit-svg's parser is
+                            // last-wins and ignores `!important`, so leave
+                            // the author one out.
+                            let own_important = style_important_properties(own);
+                            let important: String = p
+                                .important
+                                .split_inclusive(';')
+                                .filter(|d| {
+                                    d.split_once(':')
+                                        .is_none_or(|(prop, _)| !own_important.contains(&prop.trim().to_ascii_lowercase()))
+                                })
+                                .collect();
+                            let style = format!("{}{};{}", p.normal, own, important);
                             a.insert("style".to_string(), style);
                             styled = a;
                             &styled
@@ -13588,10 +13625,18 @@ impl Engine {
     /// inline svg was painted from its markup alone, so `.icon { fill: red }`
     /// (Census #8: 86 of 100 sites) painted the initial black.
     ///
+    /// `inherit` (and `unset` on an inherited property) as the winning
+    /// value drops the declaration and the presentation attribute, so the
+    /// parse-time inheritance gives the parent's value. Values are written
+    /// with `'` for `"`, since rustkit-svg reads the markup without decoding
+    /// `&quot;` (`url("#g")` is a common way to name a gradient). Only svgs
+    /// in the document tree take document rules: those do not reach into a
+    /// shadow tree.
+    ///
     /// Not modelled: cascade layers (ranked as unlayered), element-scoped
-    /// custom properties, shadow-tree sheets, `inherit`/`initial` keywords
-    /// (dropped: the parse-time inheritance already gives the parent's
-    /// value).
+    /// custom properties, shadow-tree sheets, `initial` and `revert*` (left
+    /// out, so the presentation attribute or the inherited value stands
+    /// where Chrome would use the initial or user-agent value).
     fn cache_svg_paint_styles(&mut self, document: &Document, view: EngineViewId, viewport: Option<(f32, f32)>) {
         self.svg_paint_styles.clear();
         let inline = self.inline_sheets(document, Some(view));
@@ -13631,7 +13676,7 @@ impl Engine {
         }
         let no_checked = HashMap::new();
         let mut styles = HashMap::new();
-        for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
+        for svg_el in document.get_elements_by_tag_name("svg") {
             walk(&svg_el, &mut |n| {
                 if !matches!(n.node_type, NodeType::Element { .. }) || styles.contains_key(&n.id.raw()) {
                     return;
@@ -13651,9 +13696,10 @@ impl Engine {
                             continue;
                         }
                         let value = self.resolve_css_variables(value, &root_vars);
-                        if value.trim().is_empty() || value.contains(';') {
+                        if value.trim().is_empty() || value.contains(';') || (value.contains('"') && value.contains('\'')) {
                             continue;
                         }
+                        let value = value.replace('"', "'");
                         won.push((decl.important, specificity, order, decl.property.as_str(), value));
                     }
                 }
@@ -13662,6 +13708,25 @@ impl Engine {
                 }
                 won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
                 let mut style = SvgPaintStyle::default();
+                // The winner per property is its last entry; a CSS-wide
+                // keyword there is applied here rather than written out.
+                let mut keyword: HashMap<&str, String> = HashMap::new();
+                for (_, _, _, property, value) in &won {
+                    keyword.insert(property, value.trim().to_ascii_lowercase());
+                }
+                let wide = |v: &str| matches!(v, "inherit" | "unset" | "initial" | "revert" | "revert-layer");
+                for (property, value) in &keyword {
+                    let inherits = value == "inherit"
+                        || (value == "unset" && !SVG_PAINT_NOT_INHERITED.contains(property));
+                    if inherits {
+                        style.inherit.push(property.to_string());
+                    }
+                }
+                style.inherit.sort();
+                won.retain(|(_, _, _, property, _)| !keyword.get(property).is_some_and(|v| wide(v)));
+                if won.is_empty() && style.inherit.is_empty() {
+                    return;
+                }
                 for (important, _, _, property, value) in won {
                     let out = if important { &mut style.important } else { &mut style.normal };
                     out.push_str(property);
@@ -23885,8 +23950,9 @@ mod tests {
     }
 
     /// Paints `html`'s inline svgs through the author paint styles and
-    /// returns each one's fill and gradient commands, in document order of
-    /// first paint, as debug-ish strings: `rgb(r,g,b)` or `gradient`.
+    /// returns each one's fill and gradient commands, in paint order with
+    /// runs of one colour collapsed (a gradient paints as strips), as
+    /// `rgb(r,g,b)` or `gradient`.
     fn author_svg_paints(html: &str) -> Vec<String> {
         let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
         let compositor = match crate::test_compositor() {
@@ -23934,6 +24000,7 @@ mod tests {
                     _ => {}
                 }
             }
+            out.dedup();
         }
         out
     }
@@ -23949,7 +24016,7 @@ mod tests {
         // B, B2: `inherit` / `unset` take the svg's fill="#0000ff".
         let b = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:inherit}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
         let b2 = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:unset}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
-        // C: a quoted url() names the gradient.
+        // C: a quoted url() names the (blue to blue) gradient.
         let c = author_svg_paints(r##"<!DOCTYPE html><style>.g rect{fill:url("#gr")}</style><svg class=g width=10 height=10><defs><linearGradient id=gr><stop offset=0 stop-color="#0000ff"/><stop offset=1 stop-color="#0000ff"/></linearGradient></defs><rect width=10 height=10 fill="url(#gr)"/></svg>"##);
         // F: document rules do not reach into a shadow tree.
         let f = author_svg_paints(r##"<!DOCTYPE html><style>rect{fill:red}</style><div><template shadowrootmode="open"><svg width=10 height=10><rect width=10 height=10 fill="#0000ff"/></svg></template></div>"##);
@@ -23957,7 +24024,7 @@ mod tests {
             return;
         }
         let got = [a, b, b2, c, f];
-        let want = [vec![blue], vec![blue], vec![blue], vec!["gradient"], vec![blue]];
+        let want = [vec![blue], vec![blue], vec![blue], vec![blue], vec![blue]];
         assert_eq!(got.iter().map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()).collect::<Vec<_>>(), want);
     }
 
