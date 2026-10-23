@@ -1053,6 +1053,27 @@ impl RustKitView {
             None => None,
         }
     }
+
+    // The developer tools (`devtools_panel`): on-demand, bounded questions
+    // about the page's last committed DOM and layout, answered on the
+    // page's own thread. Nothing here waits for the answer.
+
+    /// Ask the page a developer-tools question. The answer arrives on the
+    /// receiver: before this returns on the same-thread path, after the
+    /// page's current turn on the content thread. A closed receiver means
+    /// no answer (a closed view, or a load holding the same-thread page).
+    pub fn devtools_ask(&self, query: rustkit_engine::DevtoolsQuery) -> oneshot::Receiver<rustkit_engine::DevtoolsAnswer> {
+        let (reply, rx) = oneshot::channel();
+        self.submit(PageCmd::Devtools { query, reply });
+        rx
+    }
+
+    /// Run the console's `code` in the page: the value, or the error.
+    pub fn devtools_eval(&self, code: &str) -> oneshot::Receiver<Result<String, String>> {
+        let (reply, rx) = oneshot::channel();
+        self.submit(PageCmd::Eval { script: code.to_string(), reply });
+        rx
+    }
 }
 
 impl Drop for RustKitView {
@@ -1715,6 +1736,44 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
             wake(&view);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// #764 re-cut: the Inspector's questions borrowed an engine the window
+    /// no longer has once the page runs on its own thread (the shipped
+    /// default). They are asked through the page protocol and answered
+    /// without the window waiting.
+    #[test]
+    fn content_thread_the_inspector_gets_the_dom_tree_and_an_element() {
+        use rustkit_engine::{DevtoolsAnswer, DevtoolsQuery};
+        let view = content_view();
+        let (base, _log) = logging_server("<body><p id=hello class=greeting>hi</p></body>");
+        load_and_settle(&view, &base);
+        let answer = |query| {
+            let mut rx = view.devtools_ask(query);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match rx.try_recv() {
+                    Ok(answer) => return answer,
+                    Err(_) => assert!(Instant::now() < deadline, "the Inspector was never answered"),
+                }
+                wake(&view);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let DevtoolsAnswer::Tree(Some(tree)) = answer(DevtoolsQuery::DomTree { root: None, reveal: None }) else {
+            panic!("no DOM tree");
+        };
+        fn find(node: &rustkit_engine::DevtoolsNode) -> Option<usize> {
+            if node.id.as_deref() == Some("hello") {
+                return Some(node.node_id);
+            }
+            node.children.iter().find_map(find)
+        }
+        let node = find(&tree).expect("the tree has #hello");
+        let DevtoolsAnswer::Element(Some(element)) = answer(DevtoolsQuery::Element(node)) else {
+            panic!("no element");
+        };
+        assert_eq!((element.tag.as_str(), element.classes.clone()), ("p", vec!["greeting".to_string()]));
     }
 
     /// Independent R1 on #730, NIT 4: a script navigation the old page
