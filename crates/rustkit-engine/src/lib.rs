@@ -23884,6 +23884,83 @@ mod tests {
         );
     }
 
+    /// Paints `html`'s inline svgs through the author paint styles and
+    /// returns each one's fill and gradient commands, in document order of
+    /// first paint, as debug-ish strings: `rgb(r,g,b)` or `gradient`.
+    fn author_svg_paints(html: &str) -> Vec<String> {
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+        let compositor = match crate::test_compositor() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return vec!["skip".to_string()];
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            font_loader: Arc::new(FontLoader::new()),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            image_manager: Arc::new(ImageManager::new()),
+            event_tx,
+            event_rx: Some(event_rx),
+            style_trace: std::cell::RefCell::new(None),
+            svg_cache: std::collections::HashMap::new(),
+            svg_paint_styles: HashMap::new(),
+            building_focus: std::cell::Cell::new(None),
+            building_view: std::cell::Cell::new(None),
+        };
+        engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
+        engine.cache_inline_svgs(&document);
+        let mut out = Vec::new();
+        for svg in document.get_elements_by_tag_name_shadow_including("svg") {
+            let key = Engine::inline_svg_key(&engine.inline_svg_markup_styled(&svg));
+            let Some(doc) = engine.svg_cache.get(&key) else {
+                out.push("uncached".to_string());
+                continue;
+            };
+            for c in doc.render(0.0, 0.0, 10.0, 10.0) {
+                match c {
+                    rustkit_layout::DisplayCommand::FillRect { color, .. }
+                    | rustkit_layout::DisplayCommand::FillPolygon { color, .. } => {
+                        out.push(format!("rgb({},{},{})", color.r, color.g, color.b))
+                    }
+                    other if format!("{other:?}").contains("Gradient") => out.push("gradient".to_string()),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_author_svg_paint_follows_the_cascade_where_develop_did() {
+        // #787 review 5634328533 (Atlas #847): five inputs develop painted
+        // as Chrome does and the author paint styles changed.
+        let blue = "rgb(0,0,255)";
+        let skip = |v: &Vec<String>| v.first().is_some_and(|s| s == "skip");
+        // A: the own style's !important beats an author !important.
+        let a = author_svg_paints(r#"<!DOCTYPE html><style>.imp{fill:green !important}</style><svg width=10 height=10><rect class=imp width=10 height=10 style="fill:blue !important"/></svg>"#);
+        // B, B2: `inherit` / `unset` take the svg's fill="#0000ff".
+        let b = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:inherit}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
+        let b2 = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:unset}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
+        // C: a quoted url() names the gradient.
+        let c = author_svg_paints(r##"<!DOCTYPE html><style>.g rect{fill:url("#gr")}</style><svg class=g width=10 height=10><defs><linearGradient id=gr><stop offset=0 stop-color="#0000ff"/><stop offset=1 stop-color="#0000ff"/></linearGradient></defs><rect width=10 height=10 fill="url(#gr)"/></svg>"##);
+        // F: document rules do not reach into a shadow tree.
+        let f = author_svg_paints(r##"<!DOCTYPE html><style>rect{fill:red}</style><div><template shadowrootmode="open"><svg width=10 height=10><rect width=10 height=10 fill="#0000ff"/></svg></template></div>"##);
+        if [&a, &b, &b2, &c, &f].iter().any(|v| skip(v)) {
+            return;
+        }
+        let got = [a, b, b2, c, f];
+        let want = [vec![blue], vec![blue], vec![blue], vec!["gradient"], vec![blue]];
+        assert_eq!(got.iter().map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()).collect::<Vec<_>>(), want);
+    }
+
     #[test]
     fn test_inline_svg_paints_through_the_svg_cache() {
         // n37 gave the inline <svg> a correctly sized box but nothing ever
