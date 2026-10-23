@@ -285,7 +285,9 @@ pub enum InspectorEvent {
         method: String,
         resource_type: ResourceType,
         /// What asked for it: `parser` (the document's markup), `css` (a
-        /// stylesheet's `url()`), `script` (page script), `navigation`.
+        /// stylesheet's `url()`), `fetch`, `xhr`, `inserted_script` (a
+        /// `<script src>` page script inserted), `script` (other page
+        /// script: `import`, images it added), `navigation`.
         initiator: Option<String>,
     },
     /// The request's answer arrived (any status, 4xx and 5xx included).

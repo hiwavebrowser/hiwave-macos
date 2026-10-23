@@ -158,8 +158,11 @@ deadline, a navigation) is still answered.
 (a module script or an import), `image`, `font`, `fetch`, `xhr`, `other`.
 
 `initiator`: `navigation` (the document), `parser` (the document's markup),
-`css` (a stylesheet's `url()`: fonts, background images), `script` (page
-script: `fetch`, XHR, `import`, images scripts added).
+`css` (a stylesheet's `url()`: fonts, background images), `fetch` (page
+script's `fetch()`), `xhr` (an `XMLHttpRequest`), `inserted_script` (a
+`<script src>` page script inserted; `script_error.inserted_by` says where
+from), `script` (other page script: `import`, images scripts added). Before
+dev-tools T2, `fetch`, `xhr` and `inserted_script` were all `script`.
 
 A response with an error status (`404`) is a `response`: the server answered.
 `encoded_size` is the body as transferred (before gzip/deflate were undone),

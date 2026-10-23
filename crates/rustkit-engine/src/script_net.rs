@@ -310,13 +310,13 @@ async fn execute(
     let log_net = crate::console_log::enabled();
     let method = if log_net { script_request.method.to_string() } else { String::new() };
     let url = if log_net { script_request.url.to_string() } else { String::new() };
-    let resource_type = match script_request.destination {
-        RequestDestination::Xhr => ResourceType::Xhr,
-        RequestDestination::Fetch => ResourceType::Fetch,
-        _ => ResourceType::Other,
+    let (resource_type, initiator) = match script_request.destination {
+        RequestDestination::Xhr => (ResourceType::Xhr, "xhr"),
+        RequestDestination::Fetch => (ResourceType::Fetch, "fetch"),
+        _ => (ResourceType::Other, "script"),
     };
     let guard = inspector
-        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
+        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some(initiator))
         .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
     match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
         Ok(Ok(response)) => {
@@ -1062,7 +1062,7 @@ fn enqueue_inserted(
             match Url::parse(&url) {
                 Ok(parsed) => {
                     let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
+                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"));
                     let cancel = FetchCancel::new();
                     board.jobs.push(InsertedJob {
                         id,

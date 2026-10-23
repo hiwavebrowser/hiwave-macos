@@ -119,8 +119,8 @@ fn every_kind_of_resource_is_a_request_with_one_outcome() {
             "script /app.js by=parser -> 200 text/javascript".to_string(),
             "module /m.js by=parser -> 200 text/javascript".to_string(),
             "module /dep.js by=script -> 200 text/javascript".to_string(),
-            "fetch /api/data by=script -> 200 application/json".to_string(),
-            "xhr /api/xhr by=script -> 200 text/plain".to_string(),
+            "fetch /api/data by=fetch -> 200 application/json".to_string(),
+            "xhr /api/xhr by=xhr -> 200 text/plain".to_string(),
         ])
     );
 }
@@ -276,8 +276,8 @@ fetch('http://127.0.0.1:{port}/data?again', {{ mode: 'same-origin' }}).catch(fun
     assert_eq!(
         refused,
         vec![
-            format!("fetch http://127.0.0.1:{}/data by=script -> failed policy", other.port),
-            format!("fetch http://127.0.0.1:{}/data by=script -> failed cors", other.port),
+            format!("fetch http://127.0.0.1:{}/data by=fetch -> failed policy", other.port),
+            format!("fetch http://127.0.0.1:{}/data by=fetch -> failed cors", other.port),
         ]
     );
     assert_eq!(other.hits.load(std::sync::atomic::Ordering::SeqCst), 0, "neither reached the other server");
@@ -304,7 +304,7 @@ fn a_slow_request_is_cancelled_by_navigating_away() {
         .map(|r| describe(r, server.port))
         .filter(|l| l.contains("/slow") || l.starts_with("failure"))
         .collect();
-    assert_eq!(slow, vec!["request #2 GET fetch /slow by=script", "failure #2 cancelled abandoned (navigation or view closed)"]);
+    assert_eq!(slow, vec!["request #2 GET fetch /slow by=fetch", "failure #2 cancelled abandoned (navigation or view closed)"]);
 }
 
 #[test]
@@ -508,4 +508,57 @@ var x = new XMLHttpRequest(); x.open('GET', '/ct1;p=JSESSIONSECRET'); x.send();
         assert!(all.contains(&format!("\"url\":\"http://127.0.0.1:{port}{url}\"")), "{url} not requested: {all}");
     }
     assert!(all.contains(&format!("\"to\":\"http://127.0.0.1:{port}/\"")), "{all}");
+}
+
+/// What asked for a request: `fetch()` and XHR name themselves, and a
+/// `<script src>` page script inserted is `inserted_script`, apart from
+/// the markup's (`parser`).
+#[test]
+fn script_made_requests_name_the_api_that_made_them() {
+    let page = "<html><body><script src=\"/parsed.js\"></script><script>
+fetch('/f').catch(function () {});
+var x = new XMLHttpRequest(); x.open('GET', '/x'); x.send();
+var s = document.createElement('script'); s.src = '/ins.js'; document.body.appendChild(s);
+</script></body></html>";
+    let server = serve(vec![
+        Route::html("/", page),
+        Route::ok("/parsed.js", "text/javascript", "0"),
+        Route::ok("/ins.js", "text/javascript", "0"),
+        Route::ok("/f", "text/plain", "f"),
+        Route::ok("/x", "text/plain", "x"),
+    ]);
+    let (mut engine, view) = engine(EngineConfig::default(), None);
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
+    // Live turns until the four have been answered (the script-made ones
+    // finish on later turns), at most about 3 s.
+    for _ in 0..60 {
+        rt.block_on(engine.pump_live(view, 50));
+        let answered = records(&engine, view)
+            .iter()
+            .filter(|r| matches!(r.event, InspectorEvent::Response { .. } | InspectorEvent::Failure { .. }))
+            .count();
+        if answered >= 5 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let records = records(&engine, view);
+    assert_each_request_answered_once(&records);
+    let mut requests: Vec<String> = records
+        .iter()
+        .map(|r| describe(r, server.port))
+        .filter(|l| l.starts_with("request") && !l.contains(" document "))
+        .map(|l| l.splitn(3, ' ').nth(2).unwrap_or_default().to_string())
+        .collect();
+    requests.sort();
+    assert_eq!(
+        requests,
+        vec![
+            "GET fetch /f by=fetch",
+            "GET script /ins.js by=inserted_script",
+            "GET script /parsed.js by=parser",
+            "GET xhr /x by=xhr",
+        ]
+    );
 }
