@@ -1071,7 +1071,7 @@ pub fn denial_stage(denial: &rustkit_net::policy::Denial) -> (FailureStage, &'st
         Denial::ResponseTooLarge => (FailureStage::OverBudget, "response too large"),
         Denial::Timeout => (FailureStage::Timeout, "timed out"),
         Denial::BudgetExhausted => (FailureStage::OverBudget, "page request budget spent"),
-        Denial::Shield => (FailureStage::Policy, "blocked by the shield"),
+        Denial::Shield(_) => (FailureStage::Policy, "blocked by the shield"),
         Denial::BadMime(_) => (FailureStage::Mime, "not a JavaScript MIME type"),
         Denial::BadStatus(_) => (FailureStage::HttpError, "module answered with an error status"),
         Denial::Network(_) => (FailureStage::Connect, "network error"),
@@ -1088,7 +1088,7 @@ pub fn net_error_stage(error: &rustkit_net::NetError) -> (FailureStage, &'static
         "tls" => (FailureStage::Tls, "TLS failed"),
         "timeout" => (FailureStage::Timeout, "timed out"),
         "policy" => match error {
-            rustkit_net::NetError::Blocked => (FailureStage::Policy, "blocked by the shield"),
+            rustkit_net::NetError::Blocked(_) => (FailureStage::Policy, "blocked by the shield"),
             _ => (FailureStage::Policy, "address not allowed"),
         },
         "redirect" => (FailureStage::HttpError, "too many redirects"),
@@ -1528,7 +1528,7 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
     use rustkit_http::HttpError;
     use rustkit_net::NetError;
     match error {
-        NetError::Blocked => "policy",
+        NetError::Blocked(_) => "policy",
         NetError::Timeout(_) => "timeout",
         NetError::Cancelled => "cancelled",
         NetError::InvalidUrl(_) => "invalid_url",

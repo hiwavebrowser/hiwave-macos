@@ -75,7 +75,7 @@ fn log_denial(method: &str, url: &str, denial: &rustkit_net::policy::Denial) {
     }
     use rustkit_net::policy::Denial;
     let (disposition, status) = match denial {
-        Denial::Shield | Denial::Csp => ("blocked", "-".to_string()),
+        Denial::Shield(_) | Denial::Csp => ("blocked", "-".to_string()),
         Denial::Timeout => ("timeout", "-".to_string()),
         Denial::Cancelled => ("cancelled", "-".to_string()),
         Denial::BadStatus(code) => ("response", code.to_string()),

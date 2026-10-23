@@ -133,8 +133,9 @@ pub enum Denial {
     ResponseTooLarge,
     Timeout,
     BudgetExhausted,
-    /// The shield (EasyList) blocked it, exactly as it blocks a subresource.
-    Shield,
+    /// The shield (EasyList) blocked it, exactly as it blocks a subresource;
+    /// with its list and rule when the shield gave them.
+    Shield(Option<crate::BlockReason>),
     /// A module script whose response is not a JavaScript MIME type.
     BadMime(String),
     /// A module script whose response is not 2xx.
@@ -342,7 +343,7 @@ fn split_list(v: Option<&str>) -> Vec<String> {
 
 fn map_net_error(e: NetError) -> Denial {
     match e {
-        NetError::Blocked => Denial::Shield,
+        NetError::Blocked(reason) => Denial::Shield(reason),
         NetError::Timeout(_) | NetError::HttpError(rustkit_http::HttpError::Timeout) => Denial::Timeout,
         NetError::HttpError(rustkit_http::HttpError::AddressDenied(a)) => Denial::PrivateNetwork(a),
         NetError::HttpError(rustkit_http::HttpError::BodyTooLarge(_)) => Denial::ResponseTooLarge,
@@ -856,7 +857,7 @@ impl FetchPolicy {
             )
             .await
             .map_err(|e| match map_net_error(e) {
-                d @ (Denial::PrivateNetwork(_) | Denial::Shield | Denial::Timeout) => d,
+                d @ (Denial::PrivateNetwork(_) | Denial::Shield(_) | Denial::Timeout) => d,
                 other => Denial::Preflight(other.to_string()),
             })?;
         if !resp.status.is_success() {
@@ -1741,16 +1742,53 @@ mod tests {
         ic.add_handler(Arc::new(BlockAds));
         let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
         let sub = l.fetch(Request::get(s.url("/ads/x.js"))).await;
-        assert!(matches!(sub, Err(NetError::Blocked)));
+        assert!(matches!(sub, Err(NetError::Blocked(None))));
         let p = allow_ports(page("http://page.test/"), &[s.port]);
         let r = p.execute(&l, ScriptRequest::get(s.url("/ads/x.js"))).await;
-        assert_eq!(r.unwrap_err(), Denial::Shield);
+        assert_eq!(r.unwrap_err(), Denial::Shield(None));
         assert_eq!(s.hits(), 0);
         // And a redirect hop into a blocked URL is blocked too.
         let to = format!("http://127.0.0.1:{}/ads/y.js", s.port);
         let r2 = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
         let p = allow_ports(page("http://page.test/"), &[s.port, r2.port]);
-        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield);
+        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield(None));
+        assert_eq!(s.hits(), 0);
+    }
+
+    /// Dev-tools T2: a shield that names its list and rule has them carried
+    /// to the caller, on a subresource's error and on a script's denial,
+    /// redirect hop included.
+    #[tokio::test]
+    async fn a_shield_block_carries_its_list_and_rule() {
+        struct BlockAdsBy;
+        impl InterceptHandler for BlockAdsBy {
+            fn intercept(&self, request: &Request) -> InterceptAction {
+                if request.url.path().contains("/ads/") {
+                    InterceptAction::BlockedBy(crate::BlockReason {
+                        list: "EasyList".into(),
+                        rule: Some("/ads/*$script".into()),
+                    })
+                } else {
+                    InterceptAction::Allow
+                }
+            }
+        }
+        let want = crate::BlockReason { list: "EasyList".into(), rule: Some("/ads/*$script".into()) };
+        let s = serve(|_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ad")).await;
+        let mut ic = RequestInterceptor::new();
+        ic.add_handler(Arc::new(BlockAdsBy));
+        let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
+        match l.fetch(Request::get(s.url("/ads/x.js"))).await {
+            Err(NetError::Blocked(Some(reason))) => assert_eq!(reason, want),
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
+        let p = allow_ports(page("http://page.test/"), &[s.port]);
+        let r = p.execute(&l, ScriptRequest::get(s.url("/ads/x.js"))).await;
+        assert_eq!(r.unwrap_err(), Denial::Shield(Some(want.clone())));
+        let to = format!("http://127.0.0.1:{}/ads/y.js", s.port);
+        let r2 = serve(move |_| resp(302, &[("Location", &to), ("Access-Control-Allow-Origin", "*")], b"")).await;
+        let p = allow_ports(page("http://page.test/"), &[s.port, r2.port]);
+        assert_eq!(p.execute(&l, ScriptRequest::get(r2.url("/"))).await.unwrap_err(), Denial::Shield(Some(want)));
         assert_eq!(s.hits(), 0);
     }
 
@@ -2043,7 +2081,7 @@ mod tests {
         ic.add_handler(Arc::new(BlockAds));
         let l = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(ic)).unwrap();
         let p = allow_ports(page("http://page.test/"), &[s.port]);
-        assert_eq!(module(&p, &l, &s.url("/ads/m.js")).await.unwrap_err(), Denial::Shield);
+        assert_eq!(module(&p, &l, &s.url("/ads/m.js")).await.unwrap_err(), Denial::Shield(None));
         assert_eq!(s.hits(), 0);
 
         // script-src, not connect-src, governs modules; 'self' and * work.
