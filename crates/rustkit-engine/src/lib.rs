@@ -1894,8 +1894,12 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
             _ => return None,
         })
     };
+    // A bare number is a weight (`font: 300 30px serif`), never a size:
+    // font-size takes no unitless value but `0`.
     let is_length = |t: &str| {
-        t.starts_with(|c: char| c.is_ascii_digit() || c == '.') && parse_length(t).is_some()
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+            && (t == "0" || t.parse::<f32>().is_err())
+            && parse_length(t).is_some()
     };
     let idx = tokens.iter().position(|t| {
         let (size, _) = t.split_once('/').unwrap_or((t, ""));
@@ -1922,6 +1926,42 @@ fn split_font_shorthand(value: &str) -> Option<FontShorthand> {
     }
     let family = tokens.get(rest..)?.join(" ");
     if family.is_empty() {
+        return None;
+    }
+    // Every token before the size is a style, variant, weight or stretch
+    // keyword; anything else makes the shorthand invalid, so it is dropped
+    // rather than resetting style, weight and line-height.
+    // An angle is only an `oblique <angle>` argument, in any angle unit.
+    let is_angle = |t: &str| {
+        ["deg", "grad", "rad", "turn"]
+            .iter()
+            .find_map(|unit| t.strip_suffix(unit))
+            .is_some_and(|n| n.parse::<f32>().is_ok())
+    };
+    let prefix_ok = tokens[..idx].iter().enumerate().all(|(i, t)| {
+        let t = t.to_ascii_lowercase();
+        let after_oblique = i > 0 && tokens[i - 1].eq_ignore_ascii_case("oblique");
+        matches!(
+            t.as_str(),
+            "normal"
+                | "italic"
+                | "oblique"
+                | "small-caps"
+                | "bold"
+                | "bolder"
+                | "lighter"
+                | "ultra-condensed"
+                | "extra-condensed"
+                | "condensed"
+                | "semi-condensed"
+                | "semi-expanded"
+                | "expanded"
+                | "extra-expanded"
+                | "ultra-expanded"
+        ) || t.parse::<f32>().is_ok_and(|w| (1.0..=1000.0).contains(&w))
+            || (after_oblique && is_angle(&t))
+    });
+    if !prefix_ok {
         return None;
     }
     Some(FontShorthand {
@@ -11436,6 +11476,44 @@ impl Engine {
                     return;
                 }
 
+                // Parse every layer before touching the style: a value
+                // that does not parse is dropped whole (css-syntax-3 §8),
+                // so `background: red; background: junk(1)` stays red. It
+                // used to clear the layers and the colour first, then skip
+                // the token it could not read.
+                let shorthand = property == "background";
+                let mut color = None;
+                let mut layers = Vec::new();
+                // Process layers in reverse order so index 0 is bottommost
+                for layer_str in layer_strs.iter().rev() {
+                    let layer_str = layer_str.trim();
+                    if layer_str.is_empty() {
+                        continue;
+                    }
+
+                    // Check for color (goes to background_color, not layers)
+                    if let Some(c) = parse_color(layer_str) {
+                        color = Some(c);
+                        continue;
+                    }
+                    // The shorthand's layer names its image, position, size,
+                    // repeat and boxes in any order, and a colour beside
+                    // them (`#fff url(a.png) no-repeat center / cover`).
+                    // `background-image` is the image alone.
+                    let layer = if shorthand {
+                        let Some((c, layer)) = parse_background_shorthand_layer(layer_str) else {
+                            return;
+                        };
+                        if c.is_some() {
+                            color = c;
+                        }
+                        layer
+                    } else {
+                        parse_background_layer(layer_str)
+                    };
+                    layers.extend(layer);
+                }
+
                 // Clear existing layers when setting new background
                 style.background_layers.clear();
                 // The legacy gradient goes with them: paint falls back to
@@ -11447,44 +11525,17 @@ impl Engine {
                 // ever SET a colour, so `background: none`, `0 0`, `unset`,
                 // `initial` or an image alone over an earlier colour left
                 // that colour painted.
-                let shorthand = property == "background";
-                if shorthand && !value.trim().eq_ignore_ascii_case("inherit") {
-                    style.background_color = rustkit_css::Color::TRANSPARENT;
+                if shorthand {
+                    style.background_color = color.unwrap_or(rustkit_css::Color::TRANSPARENT);
+                } else if let Some(color) = color {
+                    style.background_color = color;
                 }
-
-                // Process layers in reverse order so index 0 is bottommost
-                for layer_str in layer_strs.iter().rev() {
-                    let layer_str = layer_str.trim();
-                    if layer_str.is_empty() {
-                        continue;
+                for layer in layers {
+                    // Also set legacy field for backwards compatibility
+                    if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
+                        style.background_gradient = Some(gradient.clone());
                     }
-
-                    // Check for color (goes to background_color, not layers)
-                    if let Some(color) = parse_color(layer_str) {
-                        style.background_color = color;
-                        continue;
-                    }
-                    // The shorthand's layer names its image, position, size,
-                    // repeat and boxes in any order, and a colour beside
-                    // them (`#fff url(a.png) no-repeat center / cover`).
-                    // `background-image` is the image alone.
-                    let layer = if shorthand {
-                        let (color, layer) = parse_background_shorthand_layer(layer_str);
-                        if let Some(color) = color {
-                            style.background_color = color;
-                        }
-                        layer
-                    } else {
-                        parse_background_layer(layer_str)
-                    };
-
-                    if let Some(layer) = layer {
-                        style.background_layers.push(layer.clone());
-                        // Also set legacy field for backwards compatibility
-                        if let rustkit_css::BackgroundImage::Gradient(ref gradient) = layer.image {
-                            style.background_gradient = Some(gradient.clone());
-                        }
-                    }
+                    style.background_layers.push(layer);
                 }
             }
             // `mask-*` and the `-webkit-mask-*` aliases (css-masking-1 §6).
@@ -11863,7 +11914,33 @@ impl Engine {
                 // to content — and CSS allows `flex: <grow> <basis>`, so a
                 // second value that does NOT parse as a bare number is the
                 // basis, not a shrink of 200.
-                let parts: Vec<&str> = value.split_whitespace().collect();
+                // Split outside parentheses: `calc(50% - 10px)` is one basis,
+                // not three junk tokens.
+                let parts: Vec<&str> = split_top_level_whitespace(value);
+                // Validate before setting anything: `flex: 1 junk` is
+                // invalid and dropped whole (css-syntax-3 §8). It set the
+                // grow and reset the basis to auto from the junk.
+                let numbers = parts.iter().filter(|p| p.parse::<f32>().is_ok()).count();
+                let bases = parts
+                    .iter()
+                    .filter(|p| p.parse::<f32>().is_err())
+                    .filter(|p| is_flex_basis_value(p))
+                    .count();
+                // At most two numbers (grow, shrink). A third is a basis
+                // only when it is a unitless `0` (`flex: 1 1 0`); `1 2 3`
+                // is invalid.
+                let (numbers, bases) = if numbers == 3 && parts[2].parse::<f32>() == Ok(0.0) {
+                    (2, bases + 1)
+                } else {
+                    (numbers, bases)
+                };
+                if numbers > 2 {
+                    return;
+                }
+                if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
+                {
+                    return;
+                }
                 if let Some(first) = parts.first() {
                     if let Ok(grow) = first.parse::<f32>() {
                         style.flex_grow = grow;
@@ -18574,11 +18651,14 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
 /// order, and a colour beside them. Returns the colour the layer names and
 /// the layer itself when it has an image.
 ///
-/// A token that is none of these (`image-set()`, a `calc()` length) is
-/// skipped rather than failing the declaration.
+/// `None` when a token is none of these: the declaration is invalid and
+/// must be dropped whole, not applied as a reset. An image function Chrome
+/// paints but RustKit does not yet (`image-set()`, `cross-fade()`) is
+/// skipped rather than failing it.
+#[allow(clippy::type_complexity)]
 fn parse_background_shorthand_layer(
     value: &str,
-) -> (Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>) {
+) -> Option<(Option<rustkit_css::Color>, Option<rustkit_css::BackgroundLayer>)> {
     // `center/cover` is one whitespace token: give the slash its own.
     let mut spaced = String::with_capacity(value.len() + 2);
     let mut depth = 0usize;
@@ -18598,6 +18678,12 @@ fn parse_background_shorthand_layer(
     let numeric = |lower: &str| {
         let digits = lower.strip_prefix(['-', '+']).unwrap_or(lower);
         digits.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+    };
+    // A math function: a position or size value, resolved or not.
+    let math = |lower: &str| {
+        ["calc(", "min(", "max(", "clamp("]
+            .iter()
+            .any(|f| lower.starts_with(f))
     };
 
     let mut layer = rustkit_css::BackgroundLayer::default();
@@ -18627,9 +18713,10 @@ fn parse_background_shorthand_layer(
                 size.push(token);
                 continue;
             }
-            // A `calc()` size is not resolved yet: it holds its place as
-            // `auto` rather than being read as a position.
-            if lower.starts_with("calc(") && size.len() < 2 {
+            // A `calc()` (or `min()`/`max()`/`clamp()`) size is not
+            // resolved yet: it holds its place as `auto` rather than being
+            // read as a position.
+            if math(&lower) && size.len() < 2 {
                 size.push("auto");
                 continue;
             }
@@ -18652,6 +18739,12 @@ fn parse_background_shorthand_layer(
                 };
                 boxes += 1;
             }
+            // backgrounds-4 `text` is a clip box only; it never sets the
+            // origin.
+            "text" => {
+                layer.clip = rustkit_css::BackgroundClip::Text;
+                boxes += 1;
+            }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
                 let url = token[4..token.len() - 1]
@@ -18659,12 +18752,31 @@ fn parse_background_shorthand_layer(
                     .trim_matches(|c| c == '"' || c == '\'');
                 layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
             }
-            _ if numeric(&lower) || lower.starts_with("calc(") => position.push(token),
+            _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {
                 if let Some(gradient) = parse_gradient(token) {
                     layer.image = rustkit_css::BackgroundImage::Gradient(gradient);
                 } else if let Some(c) = parse_color(token) {
                     color = Some(c);
+                } else if is_unresolved_color(token) {
+                    // A valid colour RustKit cannot resolve yet: the rest
+                    // of the layer (its image above all) still applies.
+                } else {
+                    const UNPAINTED: [&str; 10] = [
+                        "image-set(",
+                        "-webkit-image-set(",
+                        "cross-fade(",
+                        "-webkit-cross-fade(",
+                        "-webkit-gradient(",
+                        "element(",
+                        "paint(",
+                        "var(",
+                        "env(",
+                        "attr(",
+                    ];
+                    if !UNPAINTED.iter().any(|f| lower.starts_with(f)) {
+                        return None;
+                    }
                 }
             }
         }
@@ -18688,7 +18800,7 @@ fn parse_background_shorthand_layer(
     }
 
     let has_image = !matches!(layer.image, rustkit_css::BackgroundImage::None);
-    (color, has_image.then_some(layer))
+    Some((color, has_image.then_some(layer)))
 }
 
 /// Parse a position value (percentage, keyword, or length).
@@ -18923,7 +19035,9 @@ fn parse_border_shorthand(
     let mut saw_style = false;
     let mut color_parts: Vec<&str> = Vec::new();
 
-    for token in value.split_whitespace() {
+    // Split outside parentheses: `rgb(0 0 0 / 10%)` is one colour token,
+    // and its `0`s must not be read as a width.
+    for token in split_top_level_whitespace(value) {
         let lower = token.to_ascii_lowercase();
         if STYLE_KEYWORDS.contains(&lower.as_str()) {
             saw_style = true;
@@ -18950,12 +19064,42 @@ fn parse_border_shorthand(
     if style_none {
         resolved_width = rustkit_css::Length::Zero;
     }
-    let color = if color_parts.is_empty() {
-        None
-    } else {
-        parse_color(&color_parts.join(" "))
+    // A token that is neither width, style nor colour makes the whole
+    // declaration invalid: it is dropped, not applied as `medium none`.
+    // A colour RustKit cannot resolve yet (`currentcolor`, `oklch()`) is
+    // valid: width and style apply and the colour is left as it was.
+    let color = match color_parts.as_slice() {
+        [] => None,
+        [one] if is_unresolved_color(one) && parse_color(one).is_none() => None,
+        _ => Some(parse_color(&color_parts.join(" "))?),
     };
     Some((resolved_width, color))
+}
+
+/// A colour CSS accepts that `parse_color` cannot resolve yet: the
+/// `currentcolor` keyword or any colour function (space-syntax or percent
+/// `rgb()`/`hsl()`, `oklch()`, `color-mix()`, ...). A shorthand naming one
+/// is valid, so it must be kept with the colour left unpainted, not dropped
+/// whole as if the token were junk.
+fn is_unresolved_color(token: &str) -> bool {
+    const COLOR_FUNCTIONS: [&str; 13] = [
+        "rgb(",
+        "rgba(",
+        "hsl(",
+        "hsla(",
+        "hwb(",
+        "lab(",
+        "lch(",
+        "oklab(",
+        "oklch(",
+        "color(",
+        "color-mix(",
+        "light-dark(",
+        "contrast-color(",
+    ];
+    let lower = token.trim().to_ascii_lowercase();
+    lower == "currentcolor"
+        || (lower.ends_with(')') && COLOR_FUNCTIONS.iter().any(|f| lower.starts_with(f)))
 }
 
 fn parse_shorthand_4(
@@ -19324,6 +19468,22 @@ fn place_pair(value: &str) -> (&str, &str) {
 
 /// Parse a CSS timing function.
 /// `flex-basis` value: `auto`, `content`, a length, or a percentage.
+/// Whether a `flex` shorthand token is a valid `flex-basis`: `auto`, a
+/// `*-content` keyword, a length, or a math / `fit-content()` function.
+/// The ones `parse_flex_basis` cannot resolve yet still make the
+/// declaration valid, so its grow and shrink apply.
+fn is_flex_basis_value(token: &str) -> bool {
+    let lower = token.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "auto" | "content" | "min-content" | "max-content" | "fit-content"
+    ) || (lower.ends_with(')')
+        && ["calc(", "min(", "max(", "clamp(", "fit-content("]
+            .iter()
+            .any(|f| lower.starts_with(f)))
+        || parse_length(token).is_some()
+}
+
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     let v = value.trim();
     if v.eq_ignore_ascii_case("auto") {
@@ -24497,11 +24657,13 @@ mod element_identity_tests {
 
         // The shorthand takes them as position tokens too.
         let (_, layer) =
-            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px");
+            parse_background_shorthand_layer("url(a.png) no-repeat right 5px bottom 10px")
+                .expect("valid");
         let p = layer.expect("layer").position;
         assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (195.0, 140.0));
         let (_, layer) =
-            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat");
+            parse_background_shorthand_layer("url(a.png) calc(100% - 20px) 50% / 100px no-repeat")
+                .expect("valid");
         let layer = layer.expect("layer");
         let p = &layer.position;
         assert_eq!((p.x.to_px(300.0, 100.0), p.y.to_px(200.0, 50.0)), (180.0, 75.0));
@@ -24516,7 +24678,8 @@ mod element_identity_tests {
         // The url ended at the first `)`, which a data: url may contain.
         let (color, layer) = parse_background_shorthand_layer(
             "url(\"data:image/svg+xml,<svg fill='rgb(0,0,0)'/>\") no-repeat #eee",
-        );
+        )
+        .expect("valid");
         assert_eq!(color, Some(rustkit_css::Color::new(238, 238, 238, 1.0)));
         match layer.expect("layer").image {
             rustkit_css::BackgroundImage::Url(u) => {
@@ -24525,7 +24688,7 @@ mod element_identity_tests {
             other => panic!("{other:?}"),
         }
         // No image, no layer; the colour is still named.
-        let (color, layer) = parse_background_shorthand_layer("none repeat-x red");
+        let (color, layer) = parse_background_shorthand_layer("none repeat-x red").expect("valid");
         assert_eq!(color, Some(rustkit_css::Color::new(255, 0, 0, 1.0)));
         assert!(layer.is_none());
     }
@@ -31223,6 +31386,228 @@ mod cascade_wire_tests {
             before,
             "invalid value must not clobber the computed transform"
         );
+    }
+
+    // An invalid declaration is dropped at parse time (css-syntax-3 §8,
+    // css-cascade-4 §4.2), so a shorthand that does not parse must leave
+    // every longhand an earlier declaration set. These shorthands reset
+    // their longhands (or applied the parts they could read) first.
+    #[test]
+    fn an_invalid_background_shorthand_keeps_the_earlier_background() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "red");
+        e.apply_style_property(&mut s, "background", "invalid-junk(1)");
+        assert_eq!(s.background_color, red, "the colour stays");
+
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
+        e.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
+        assert_eq!(s.background_color, red, "one bad layer drops the whole value");
+        assert_eq!(s.background_layers.len(), 1, "the image stays");
+        assert!(s.background_gradient.is_some());
+
+        // A valid value still resets what it does not name.
+        e.apply_style_property(&mut s, "background", "none");
+        assert_eq!(s.background_color, rustkit_css::Color::TRANSPARENT);
+        assert!(s.background_layers.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_background_color_keeps_the_earlier_colour() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background-color", "red");
+        e.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
+        assert_eq!(s.background_color, rustkit_css::Color::new(255, 0, 0, 1.0));
+    }
+
+    #[test]
+    fn an_invalid_border_shorthand_keeps_the_earlier_border() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for property in ["border", "border-top"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "2px solid red");
+            e.apply_style_property(&mut s, property, "invalid-junk(1)");
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: width");
+            assert_eq!(s.border_top_style, rustkit_css::BorderStyle::Solid, "{property}: style");
+            assert_eq!(s.border_top_color, red, "{property}: colour");
+            e.apply_style_property(&mut s, property, "4px dashed bogus");
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: bad colour");
+        }
+    }
+
+    #[test]
+    fn an_invalid_flex_shorthand_keeps_the_earlier_flex() {
+        let e = engine();
+        // Three bare numbers are invalid: the basis needs a unit unless it
+        // is `0` (`flex: 1 1 0` stays valid).
+        for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "flex", "2 3 10px");
+            e.apply_style_property(&mut s, "flex", junk);
+            assert_eq!(s.flex_grow, 2.0, "flex: {junk}");
+            assert_eq!(s.flex_shrink, 3.0, "flex: {junk}");
+            assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(10.0), "flex: {junk}");
+        }
+    }
+
+    // A function or `*-content` basis is valid: the declaration applies
+    // (grow and shrink at least) rather than being dropped, which left
+    // the initial shrink of 1 on a `flex: 0 0 calc(...)` card.
+    #[test]
+    fn a_flex_shorthand_with_a_function_basis_keeps_grow_and_shrink() {
+        let e = engine();
+        for value in [
+            "0 0 calc(50% - 10px)",
+            "0 0 calc( 50% - 10px )",
+            "0 0 min(50%, 200px)",
+            "0 0 max(50%, 200px)",
+            "0 0 clamp(100px, 50%, 300px)",
+            "0 0 fit-content(200px)",
+            "0 0 min-content",
+            "0 0 max-content",
+            "0 0 fit-content",
+            "0 0 content",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "flex", "3 3 10px");
+            e.apply_style_property(&mut s, "flex", value);
+            assert_eq!(s.flex_grow, 0.0, "flex: {value}");
+            assert_eq!(s.flex_shrink, 0.0, "flex: {value}");
+        }
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "flex", "3 3 10px");
+        e.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
+        assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
+    }
+
+    #[test]
+    fn an_invalid_font_shorthand_keeps_the_earlier_font() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "font", "italic bold 20px serif");
+        let (size, weight, font_style) = (s.font_size.clone(), s.font_weight, s.font_style);
+        e.apply_style_property(&mut s, "font", "bogus 30px serif");
+        assert_eq!(s.font_size, size, "an unknown prefix token drops the value");
+        assert_eq!(s.font_weight, weight);
+        assert_eq!(s.font_style, font_style);
+        // Every prefix keyword the grammar allows still parses.
+        e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
+        assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
+    }
+
+    // The `text` box (backgrounds-4) and min()/max()/clamp() positions and
+    // sizes are valid: the layer applies instead of being dropped.
+    #[test]
+    fn a_background_shorthand_keeps_text_clip_and_math_positions() {
+        let e = engine();
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
+        assert_eq!(s.background_layers.len(), 1, "text clip");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
+        assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
+        for value in [
+            "url(a.png) min(10px, 5%) 0 no-repeat",
+            "url(a.png) max(10px, 5%) center no-repeat",
+            "url(a.png) clamp(0px, 10%, 20px) 50% no-repeat",
+            "url(a.png) center / min(100px, 50%) no-repeat",
+            "url(a.png) center / clamp(10px, 50%, 100px) auto",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the layer applies");
+        }
+    }
+
+    // An angle is only valid right after `oblique`, in any angle unit.
+    #[test]
+    fn a_font_shorthand_takes_an_angle_only_after_oblique() {
+        let e = engine();
+        for junk in ["10deg 30px serif", "bolddeg 30px serif", "oblique xdeg 30px serif"] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", junk);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(20.0), "font: {junk}");
+        }
+        for valid in [
+            "oblique 10deg 30px serif",
+            "oblique -14deg 30px serif",
+            "oblique 0.2rad 30px serif",
+            "oblique 15grad 30px serif",
+            "oblique 0.05turn 30px serif",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "font", "20px serif");
+            e.apply_style_property(&mut s, "font", valid);
+            assert_eq!(s.font_size, rustkit_css::Length::Px(30.0), "font: {valid}");
+        }
+    }
+
+    // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
+    // percent `rgb()`/`hsl()`, `oklch()`, `color-mix()` ...) is still a
+    // VALID colour: the shorthand is kept and its other parts apply, the
+    // colour itself is left unpainted.
+    #[test]
+    fn a_border_shorthand_with_an_unresolved_colour_keeps_width_and_style() {
+        let e = engine();
+        let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for (property, value) in [
+            ("border", "1px solid currentColor"),
+            ("border", "1px solid rgb(0 0 0 / 10%)"),
+            ("border-top", "1px solid rgb(229 231 235 / 1)"),
+            ("border", "1px solid rgba(0,0,0,10%)"),
+            ("border", "1px solid rgb(100%,0%,0%)"),
+            ("border", "1px solid hsl(210 40% 96%)"),
+            ("border", "1px solid oklch(0.7 0.1 200)"),
+            ("border", "1px solid lab(50% 40 59)"),
+            ("border", "1px solid hwb(0 0% 0%)"),
+            ("border", "1px solid color(display-p3 1 0 0)"),
+            ("border", "1px solid color-mix(in srgb, red 50%, blue)"),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, property, "4px dashed red");
+            e.apply_style_property(&mut s, property, value);
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
+            assert_eq!(
+                s.border_top_style,
+                rustkit_css::BorderStyle::Solid,
+                "{property}: {value}"
+            );
+            assert_eq!(s.border_top_color, red, "{property}: {value}: colour left as it was");
+        }
+        // A token that is not colour-shaped still drops the declaration.
+        let mut s = ComputedStyle::default();
+        e.apply_style_property(&mut s, "border", "2px solid red");
+        e.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
+        assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
+    }
+
+    #[test]
+    fn a_background_shorthand_with_an_unresolved_colour_keeps_its_image() {
+        let e = engine();
+        for value in [
+            "url(a.png) no-repeat rgb(0 0 0 / .5)",
+            "url(a.png) no-repeat currentcolor",
+            "url(a.png) rgb(229 231 235 / 1)",
+            "url(a.png) oklch(0.7 0.1 200)",
+            "url(a.png) color-mix(in srgb, red 50%, blue)",
+            "url(a.png) light-dark(#fff, #000)",
+        ] {
+            let mut s = ComputedStyle::default();
+            e.apply_style_property(&mut s, "background", "red");
+            e.apply_style_property(&mut s, "background", value);
+            assert_eq!(s.background_layers.len(), 1, "{value}: the image applies");
+            match &s.background_layers[0].image {
+                rustkit_css::BackgroundImage::Url(u) => assert_eq!(u, "a.png", "{value}"),
+                other => panic!("{value}: {other:?}"),
+            }
+        }
     }
 
     // animation (#50)
