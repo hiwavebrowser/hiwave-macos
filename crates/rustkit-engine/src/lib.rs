@@ -321,6 +321,8 @@ pub use inspector_page::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod inspector_page_tests;
+#[cfg(test)]
+mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
