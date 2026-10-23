@@ -506,6 +506,10 @@ pub struct Renderer {
 
     // Surface format for creating compatible textures
     surface_format: wgpu::TextureFormat,
+    /// What `flush_to` clears to. The page's canvas colour; white until a
+    /// frame sets it. The display list covers the viewport it was laid out
+    /// for, and this colour is what a larger surface shows past that.
+    clear_color: wgpu::Color,
 }
 
 /// A stacking context for z-ordering.
@@ -776,7 +780,19 @@ impl Renderer {
             intermediate_size: (0, 0),
             filter_sampler,
             surface_format,
+            clear_color: wgpu::Color::WHITE,
         })
+    }
+
+    /// The colour a frame clears to. The page's canvas, so a surface that
+    /// is wider than the layout shows that colour rather than white.
+    pub fn set_clear_color(&mut self, rgba: [f64; 4]) {
+        self.clear_color = wgpu::Color {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        };
     }
 
     /// Set the viewport size.
@@ -6671,13 +6687,7 @@ impl Renderer {
                 a: 1.0,
             }
         } else {
-            // Normal white background
-            wgpu::Color {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            }
+            self.clear_color
         };
 
         // Clear gradient queues (safety measure - they should already be empty)

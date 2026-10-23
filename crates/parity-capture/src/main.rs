@@ -236,6 +236,10 @@ struct CaptureResult {
     /// `--inspector-out`
     #[serde(skip_serializing_if = "Option::is_none", default)]
     inspector: Option<inspector::InspectorOutput>,
+    /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
+    /// Absent means an older capture tool. `false` is the flag-off worker.
+    #[serde(default)]
+    content_thread: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -323,6 +327,7 @@ impl CaptureResult {
             diagnostics: None,
             diagnostics_path: None,
             inspector: None,
+            content_thread: false,
         }
     }
 
@@ -444,9 +449,14 @@ fn main() {
 
     let started = Instant::now();
     let args_clone = args.clone();
+    // Flag off: today's worker. Flag on: the page thread's name and stack,
+    // so a 26-case run with HIWAVE_CONTENT_THREAD set is not the flag-off
+    // capture again. The tool has no window, so the headless presenter stays
+    // with the page on that thread.
+    let (worker_name, worker_stack) = capture_worker_spec(rustkit_engine::content_thread_enabled());
     let handler = std::thread::Builder::new()
-        .name("capture-worker".into())
-        .stack_size(16 * 1024 * 1024)
+        .name(worker_name.into())
+        .stack_size(worker_stack)
         .spawn(move || run_capture(&args_clone))
         .expect("failed to spawn capture worker thread");
     let mut result = match handler.join() {
@@ -466,6 +476,17 @@ fn main() {
     }
 }
 
+/// Where a capture runs. `HIWAVE_CONTENT_THREAD` selects the content
+/// thread (the name the page thread uses, and its stack). Anything else
+/// keeps the capture worker the campaign has always used.
+fn capture_worker_spec(content_thread: bool) -> (&'static str, usize) {
+    if content_thread {
+        ("page", rustkit_engine::content_stack_bytes())
+    } else {
+        ("capture-worker", 16 * 1024 * 1024)
+    }
+}
+
 /// The user agent the shipping RustKit content view sends
 /// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
 /// capture must present as the product does, not as a test tool.
@@ -478,6 +499,7 @@ fn run_capture(args: &Args) -> CaptureResult {
     let sink = wants_events.then(CollectingSink::default);
     let mut inspector: Option<Arc<Inspector>> = None;
     let mut result = capture(args, sink.as_ref(), &mut inspector);
+    result.content_thread = std::thread::current().name() == Some("page");
     if let Some(sink) = sink {
         let records = sink.records();
         if let Some(ref path) = args.event_log {
@@ -1646,5 +1668,22 @@ mod tests {
         assert_eq!(parse_point("point:-10.0:40.5"), Some((-10.0, 40.5)));
         assert_eq!(parse_point("String(\"fallback_clicked\")"), None);
         assert_eq!(parse_point("missing"), None);
+    }
+
+    #[test]
+    fn the_content_thread_flag_selects_the_page_worker() {
+        let (name, stack) = capture_worker_spec(false);
+        assert_eq!((name, stack), ("capture-worker", 16 * 1024 * 1024));
+        let (name, stack) = capture_worker_spec(true);
+        assert_eq!(name, "page");
+        assert!(stack >= 8 * 1024 * 1024, "content stack {stack}");
+        let got = std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(stack)
+            .spawn(|| std::thread::current().name().unwrap().to_string())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, "page");
     }
 }

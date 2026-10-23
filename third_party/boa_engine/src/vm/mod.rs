@@ -28,7 +28,8 @@ pub(crate) use opcode::{Instruction, InstructionIterator, Opcode};
 pub(crate) use {
     call_frame::CallFrameFlags,
     code_block::{
-        CodeBlockFlags, Constant, Handler, create_function_object, create_function_object_fast,
+        CodeBlockFlags, Constant, Handler, StopFinally, create_function_object,
+        create_function_object_fast,
     },
     completion_record::CompletionRecord,
     inline_cache::InlineCache,
@@ -89,6 +90,8 @@ mod runtime_limits;
 pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
+pub mod interrupt_diag; // HIWAVE PATCH (interrupt diagnostics)
+pub mod host_stack; // HIWAVE PATCH (host stack)
 
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
@@ -132,6 +135,16 @@ pub struct Vm {
     pub(crate) settling_promises: bool,
     // END HIWAVE PATCH
 
+    // HIWAVE PATCH (stop finally): how long the `finally` blocks a stop
+    // unwinds through may run (`None`: they do not run, as upstream), and
+    // the stop unwinding now. See PATCHES.md.
+    pub(crate) stop_finally_grace: Option<std::time::Duration>,
+    pub(crate) stop_unwind: Option<StopUnwind>,
+    // Set while the run entry check reports a stop: a body that has not
+    // started in this turn does not run its `finally` either.
+    pub(crate) stop_finally_blocked: bool,
+    // END HIWAVE PATCH
+
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
@@ -142,6 +155,13 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    // HIWAVE PATCH (host stack): names of the functions `call`/`construct`
+    // re-entered, parallel to `host_call_depth` while the console log is on.
+    // `host_stack_logged` remembers which of 256/512/1000 this climb already
+    // reported. See `host_stack`.
+    pub(crate) host_frames: Vec<String>,
+    pub(crate) host_stack_logged: u8,
 
     /// Deepest JavaScript frame count (excluding the dummy frame) since
     /// [`Context::reset_recursion_max`](crate::Context::reset_recursion_max).
@@ -156,6 +176,21 @@ pub struct Vm {
     #[cfg(feature = "trace")]
     pub(crate) current_frame: Option<*const CallFrame>,
 }
+
+// HIWAVE PATCH (stop finally)
+/// A stop (the interrupt word, or a runtime limit an embedder uses as one)
+/// on its way out of the script, and the `finally` blocks it is running.
+#[derive(Debug)]
+pub(crate) struct StopUnwind {
+    /// What the stop reports once it reaches the Rust caller.
+    pub(crate) error: RuntimeLimitError,
+    /// No `finally` runs past this, and script still running is stopped.
+    pub(crate) until: std::time::Instant,
+    /// The `finally` blocks running for the stop, innermost last: the
+    /// frame count (`frames.len()`) of the frame each is in, and where.
+    pub(crate) running: Vec<(usize, StopFinally)>,
+}
+// END HIWAVE PATCH
 
 /// The stack holds the [`JsValue`]s for the calling convention and registers.
 ///
@@ -488,8 +523,13 @@ impl Vm {
             interrupt_turn: 0,            // HIWAVE PATCH (interrupt)
             interrupt_exempt_once: false, // HIWAVE PATCH (interrupt)
             settling_promises: false,     // HIWAVE PATCH (interrupt)
+            stop_finally_grace: None,     // HIWAVE PATCH (stop finally)
+            stop_unwind: None,            // HIWAVE PATCH (stop finally)
+            stop_finally_blocked: false,  // HIWAVE PATCH (stop finally)
             native_active_function: None,
             host_call_depth: 0,
+            host_frames: Vec::new(),      // HIWAVE PATCH (host stack)
+            host_stack_logged: 0,         // HIWAVE PATCH (host stack)
             max_frame_depth: Cell::new(0), // HIWAVE PATCH (recursion)
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -886,6 +926,11 @@ impl Context {
         // If we hit the execution step limit, bubble up the error to the
         // (Rust) caller instead of trying to handle as an exception.
         if !err.is_catchable() {
+            // HIWAVE PATCH (stop finally)
+            if let Some(flow) = self.enter_stop_finally(&err) {
+                return flow;
+            }
+            // END HIWAVE PATCH
             let mut frame = None;
             let mut env_fp = self.vm.frame().environments.len();
             loop {
@@ -913,8 +958,20 @@ impl Context {
                 self.vm.stack.stack.truncate(fp);
             }
             // END HIWAVE PATCH
+            // HIWAVE PATCH (stop finally): out of the script the Rust caller
+            // started (a script, a job): the next one is stopped afresh.
+            if self.vm.frames.len() <= 2 {
+                self.vm.stop_unwind = None;
+            }
+            // END HIWAVE PATCH
             return ControlFlow::Break(CompletionRecord::Throw(err));
         }
+
+        // HIWAVE PATCH (stop finally)
+        if self.stop_claims_throw() {
+            return self.resume_stop();
+        }
+        // END HIWAVE PATCH
 
         if let Some(native) = err.as_native_mut()
             && let ErrorStack::Position(position) = &mut native.stack.0
@@ -942,7 +999,21 @@ impl Context {
     }
 
     fn handle_return(&mut self) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (stop finally): a `return` in a `finally` the stop
+        // runs does not end the stop.
+        if self.in_stop_finally_frame() {
+            return self.resume_stop();
+        }
+        // END HIWAVE PATCH
         let exit_early = self.vm.frame().exit_early();
+        // HIWAVE PATCH (stop finally): the script the Rust caller started
+        // ended normally (an `await` or `yield` in a `finally` the stop ran
+        // suspended it): the stop is over, and the next script is not
+        // stopped by what is left of its grace.
+        if exit_early && self.vm.frames.len() <= 2 {
+            self.vm.stop_unwind = None;
+        }
+        // END HIWAVE PATCH
         let frame = self.vm.frames.last().expect("frame must exist");
         self.vm.stack.truncate_to_frame(frame);
 
@@ -958,6 +1029,11 @@ impl Context {
 
     fn handle_yield(&mut self) -> ControlFlow<CompletionRecord> {
         let result = self.vm.take_return_value();
+        // HIWAVE PATCH (stop finally): as `handle_return`.
+        if self.vm.frame().exit_early() && self.vm.frames.len() <= 2 {
+            self.vm.stop_unwind = None;
+        }
+        // END HIWAVE PATCH
         if self.vm.frame().exit_early() {
             return ControlFlow::Break(CompletionRecord::Normal(result));
         }
@@ -1070,10 +1146,15 @@ impl Context {
         // when an engine reaction let in by `new_promise_reaction_job`
         // resumes a body or runs a module: it fails as its first opcode
         // would.
-        if let Err(err) = self.check_interrupt()
-            && let ControlFlow::Break(value) = self.handle_error(err)
-        {
-            return value;
+        if let Err(err) = self.check_interrupt() {
+            // HIWAVE PATCH (stop finally): a body that has not started does
+            // not run its `finally`.
+            self.vm.stop_finally_blocked = true;
+            let flow = self.handle_error(err);
+            self.vm.stop_finally_blocked = false;
+            if let ControlFlow::Break(value) = flow {
+                return value;
+            }
         }
         // END HIWAVE PATCH
         while let Some(byte) = self
@@ -1159,13 +1240,207 @@ impl Context {
     // or is `u64::MAX` (every turn). 0 never stops anything.
     #[inline]
     pub(crate) fn check_interrupt(&self) -> JsResult<()> {
+        // HIWAVE PATCH (stop finally): while a stop runs `finally` blocks,
+        // the word naming the stopped turn is what they run despite; the
+        // grace's end stops them, and `u64::MAX` (Stop) still does.
+        let unwinding = self.vm.stop_unwind.as_ref();
+        if let Some(stop) = unwinding {
+            if std::time::Instant::now() >= stop.until {
+                return Err(RuntimeLimitError::Interrupted.into());
+            }
+            // Left the block by `break` or `continue`: the stop goes on.
+            if let Some((depth, finally)) = stop.running.last()
+                && *depth == self.vm.frames.len()
+                && !(finally.entry..finally.exit_end).contains(&self.vm.frame().pc.saturating_sub(1))
+            {
+                return Err(stop.error.into());
+            }
+        }
+        // END HIWAVE PATCH
         if let Some(word) = &self.vm.interrupt {
             let value = word.load(std::sync::atomic::Ordering::Relaxed);
-            if value != 0 && (value == u64::MAX || value == self.vm.interrupt_turn) {
+            if value != 0
+                && (value == u64::MAX || (value == self.vm.interrupt_turn && unwinding.is_none()))
+            {
+                // HIWAVE PATCH (interrupt diagnostics): one line per stopped
+                // turn, and only after the word has already tripped.
+                interrupt_diag::note_interrupt_stop(value, self.vm.interrupt_turn);
                 return Err(RuntimeLimitError::Interrupted.into());
             }
         }
         Ok(())
+    }
+    // END HIWAVE PATCH
+
+    // HIWAVE PATCH (stop finally)
+    /// Whether `err` is a stop whose unwinding runs `finally` blocks now:
+    /// the interrupt word or the loop limit (an embedder's deadline is
+    /// reported as one), with a grace configured, not Stop (`u64::MAX`),
+    /// and the grace not over.
+    fn stop_may_run_finally(&self, err: &JsError) -> Option<RuntimeLimitError> {
+        let grace = self.vm.stop_finally_grace?;
+        if self.vm.stop_finally_blocked {
+            return None;
+        }
+        let kind = match err.as_engine() {
+            Some(crate::error::EngineError::RuntimeLimit(
+                kind @ (RuntimeLimitError::Interrupted | RuntimeLimitError::LoopIteration),
+            )) => *kind,
+            _ => return None,
+        };
+        if let Some(word) = &self.vm.interrupt
+            && word.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX
+        {
+            return None;
+        }
+        let _ = grace;
+        match &self.vm.stop_unwind {
+            Some(stop) if std::time::Instant::now() >= stop.until => None,
+            Some(stop) => Some(stop.error),
+            None => Some(kind),
+        }
+    }
+
+    /// The stop `err` leaves the running code. If a `try` with a `finally`
+    /// encloses it, in this frame or a caller's up to the frame the Rust
+    /// caller entered, the frames above that one are left, and its
+    /// `finally` block runs, never a `catch`. `None` when there is none, or
+    /// the stop runs no `finally` (`stop_may_run_finally`): the stop then
+    /// unwinds to the Rust caller, as upstream.
+    fn enter_stop_finally(&mut self, err: &JsError) -> Option<ControlFlow<CompletionRecord>> {
+        let kind = self.stop_may_run_finally(err)?;
+        // Find the frame and its innermost `finally` first, so frames are
+        // left only when there is one.
+        let top = self.vm.frames.len() - 1;
+        let mut index = top;
+        let mut pc = self.vm.frame().pc.saturating_sub(1);
+        let found = loop {
+            let frame = &self.vm.frames[index];
+            let finally = frame
+                .code_block()
+                .handlers
+                .iter()
+                .rev()
+                .find(|handler| handler.contains(pc) && handler.stop_finally.is_some())
+                .copied();
+            if let Some(handler) = finally {
+                break Some((index, pc, handler));
+            }
+            if frame.exit_early() || index <= 1 {
+                break None;
+            }
+            index -= 1;
+            pc = self.vm.frames[index].pc;
+        };
+        let Some((index, leaving_pc, handler)) = found else {
+            // The stop leaves for the Rust caller from here: the `finally`
+            // blocks of the frames it leaves are over.
+            let depth = index + 1;
+            if let Some(stop) = self.vm.stop_unwind.as_mut() {
+                stop.running.retain(|(at, _)| *at < depth);
+            }
+            return None;
+        };
+        let now = std::time::Instant::now();
+        let grace = self.vm.stop_finally_grace.unwrap_or_default();
+        let stop = self.vm.stop_unwind.get_or_insert_with(|| StopUnwind {
+            error: kind,
+            until: now + grace,
+            running: Vec::new(),
+        });
+        // The `finally` blocks being left: those of the frames above, and
+        // the one in this frame the stop is leaving.
+        let depth = index + 1;
+        stop.running.retain(|(at, finally)| {
+            *at < depth
+                || (*at == depth && !(finally.entry..finally.exit_end).contains(&leaving_pc))
+        });
+        let finally = handler.stop_finally.expect("found by it");
+        stop.running.push((depth, finally));
+        let mut last = None;
+        while self.vm.frames.len() > depth {
+            last = self.vm.pop_frame();
+        }
+        if let Some(frame) = last {
+            self.vm.stack.truncate_to_frame(&frame);
+        }
+        let frame = self.vm.frame_mut();
+        let environment_sp = frame.env_fp + handler.environment_count;
+        frame.pc = finally.entry;
+        frame.environments.truncate(environment_sp as usize);
+        self.vm.pending_exception = None;
+        Some(ControlFlow::Continue(()))
+    }
+
+    /// The innermost `finally` the stop runs is in the running frame.
+    fn in_stop_finally_frame(&self) -> bool {
+        self.vm
+            .stop_unwind
+            .as_ref()
+            .and_then(|stop| stop.running.last())
+            .is_some_and(|(depth, _)| *depth == self.vm.frames.len())
+    }
+
+    /// The running `finally` the stop entered has ended at `pc`, at its
+    /// rethrow: the stop goes on.
+    pub(crate) fn stop_finally_ends_at(&self, pc: u32) -> bool {
+        self.in_stop_finally_frame()
+            && self
+                .vm
+                .stop_unwind
+                .as_ref()
+                .and_then(|stop| stop.running.last())
+                .is_some_and(|(_, finally)| (finally.exit..finally.exit_end).contains(&pc))
+    }
+
+    /// Go on with the stop from here: the next `finally` out, or the Rust
+    /// caller.
+    pub(crate) fn resume_stop(&mut self) -> ControlFlow<CompletionRecord> {
+        let kind = self
+            .vm
+            .stop_unwind
+            .as_ref()
+            .map_or(RuntimeLimitError::Interrupted, |stop| stop.error);
+        self.vm.pending_exception = None;
+        self.handle_error(kind.into())
+    }
+
+    /// An exception thrown while a stop runs a `finally` would be caught
+    /// outside that block (by a `catch` around the `try` it belongs to, or
+    /// in a caller): the stop goes on instead. One caught inside the block,
+    /// or in a function it calls, is the page's own.
+    pub(crate) fn stop_claims_throw(&self) -> bool {
+        let Some((depth, finally)) = self
+            .vm
+            .stop_unwind
+            .as_ref()
+            .and_then(|stop| stop.running.last().copied())
+        else {
+            return false;
+        };
+        let mut index = self.vm.frames.len() - 1;
+        let mut pc = self.vm.frame().pc.saturating_sub(1);
+        loop {
+            if index + 1 < depth {
+                return true;
+            }
+            let frame = &self.vm.frames[index];
+            if let Some((_, handler)) = frame.code_block().find_handler(pc) {
+                return index + 1 == depth
+                    && !(handler.start.as_u32() >= finally.entry
+                        && handler.end.as_u32() <= finally.exit);
+            }
+            if frame.exit_early() {
+                // Leaving for a native caller, which hands it back to the
+                // VM: that run decides, unless this is the `finally`'s frame.
+                return index + 1 == depth;
+            }
+            if index == 0 {
+                return true;
+            }
+            index -= 1;
+            pc = self.vm.frames[index].pc;
+        }
     }
     // END HIWAVE PATCH
 }

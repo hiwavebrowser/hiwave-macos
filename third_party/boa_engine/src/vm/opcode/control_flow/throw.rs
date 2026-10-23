@@ -21,6 +21,13 @@ impl Throw {
         value: RegisterOperand,
         context: &mut Context,
     ) -> ControlFlow<CompletionRecord> {
+        // HIWAVE PATCH (stop finally): the end of a `finally` a stop runs
+        // rethrows the stop, and a throw out of that block is the stop.
+        let pc = context.vm.frame().pc - 1;
+        if context.stop_finally_ends_at(pc) || context.stop_claims_throw() {
+            return context.resume_stop();
+        }
+        // END HIWAVE PATCH
         let value = context.vm.get_register(value.into());
         let error = JsError::from_opaque(value.clone());
         context.vm.pending_exception = Some(error);
@@ -53,6 +60,13 @@ impl ReThrow {
     pub(crate) fn operation((): (), context: &mut Context) -> ControlFlow<CompletionRecord> {
         // Note: -1 because we increment after fetching the opcode.
         let pc = context.vm.frame().pc.saturating_sub(1);
+        // HIWAVE PATCH (stop finally): as `Throw`.
+        if context.stop_finally_ends_at(pc)
+            || (context.vm.pending_exception.is_some() && context.stop_claims_throw())
+        {
+            return context.resume_stop();
+        }
+        // END HIWAVE PATCH
         if context.vm.handle_exception_at(pc) {
             return ControlFlow::Continue(());
         }

@@ -117,6 +117,49 @@ fn a_hover_that_changes_a_colour_skips_layout() {
     assert_eq!(short, painted_by_a_full_relayout(&mut engine, view));
 }
 
+/// #702: a paint-only pointer restyle republishes the lazy geometry source,
+/// so the next script read rebuilds and sees hover paint — not a stale
+/// pre-hover snapshot from an earlier `getComputedStyle` / box read.
+#[test]
+fn a_paint_only_hover_republishes_geometry_for_the_next_script_read() {
+    let (mut engine, view) = page();
+    let color = |engine: &mut Engine, view: EngineViewId| {
+        let value = engine
+            .execute_script(
+                view,
+                "String(getComputedStyle(document.getElementById('l')).color)",
+            )
+            .expect("script");
+        value
+            .strip_prefix("String(\"")
+            .and_then(|v| v.strip_suffix("\")"))
+            .unwrap_or(&value)
+            .to_string()
+    };
+    let builds = |engine: &Engine, view: EngineViewId| {
+        engine.views[&view]
+            .bindings
+            .as_ref()
+            .expect("bindings")
+            .geometry_builds()
+    };
+
+    let resting = color(&mut engine, view);
+    let builds_after_rest = builds(&engine, view);
+    assert!(builds_after_rest >= 1, "the first read builds a snapshot");
+
+    hover(&mut engine, view, LINK);
+    assert_eq!(skipped(&engine, view), 1, "paint-only hover");
+
+    let hovered = color(&mut engine, view);
+    assert_ne!(hovered, resting, "script sees the hover colour, not the old snapshot");
+    assert_eq!(
+        builds(&engine, view),
+        builds_after_rest + 1,
+        "the restyle dropped the stale source so the next read rebuilt"
+    );
+}
+
 #[test]
 fn a_hover_over_a_card_restyles_its_descendants_without_layout() {
     let (mut engine, view) = page();
