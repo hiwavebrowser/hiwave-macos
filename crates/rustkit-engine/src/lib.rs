@@ -8477,7 +8477,7 @@ impl Engine {
         // `<html>` has no box here, but its width and `container-type` count.
         let _html_container_scope = html_style
             .as_deref()
-            .map(|s| container_query::ElementScope::enter(s, None));
+            .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
         if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
             view.html_clips.set(html_style.as_ref().is_some_and(|s| {
@@ -9651,7 +9651,11 @@ impl Engine {
                 // The element's descendants and its own pseudo-elements ask
                 // `@container` queries of it and its ancestors.
                 let _container_scope =
-                    container_query::ElementScope::enter(&layout_box.style, parent_style);
+                    container_query::ElementScope::enter(
+                        &layout_box.style,
+                        parent_style,
+                        Some(&tag_lower),
+                    );
 
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
@@ -12316,12 +12320,14 @@ impl Engine {
                 }
             }
             "width" => {
-                if let Some(length) = parse_length(value) {
+                let length = parse_length(value);
+                container_query::note_width_value(style, 1, length.is_some(), value);
+                if let Some(length) = length {
                     style.width = length;
-                    style.width_content_keyword = false;
-                } else if matches!(value.trim(), "min-content" | "max-content") {
-                    style.width_content_keyword = true;
                 }
+            }
+            "writing-mode" | "-webkit-writing-mode" => {
+                style.writing_mode_declared = !value.eq_ignore_ascii_case("horizontal-tb");
             }
             "columns" | "column-width" => {
                 style.columns_declared = !value
@@ -12334,7 +12340,9 @@ impl Engine {
                 }
             }
             "min-width" => {
-                if let Some(length) = parse_length(value) {
+                let length = parse_length(value);
+                container_query::note_width_value(style, 2, length.is_some(), value);
+                if let Some(length) = length {
                     style.min_width = length;
                 }
             }
@@ -12344,7 +12352,9 @@ impl Engine {
                 }
             }
             "max-width" => {
-                if let Some(length) = parse_length(value) {
+                let length = parse_length(value);
+                container_query::note_width_value(style, 4, length.is_some(), value);
+                if let Some(length) = length {
                     style.max_width = length;
                 }
             }

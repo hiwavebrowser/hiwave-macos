@@ -5,26 +5,36 @@
 //! with a `container-type` other than `normal` (and the queried
 //! `container-name`, when one is given). Chrome answers the query with the
 //! container's laid-out size. The cascade here runs before layout, so the
-//! walk carries an estimate of each box's content width instead: the
-//! viewport at the root, then for each block-level box in flow its parent's
-//! width less its margins, borders and padding, or its own definite width.
-//! Where no estimate can be made, a query on that container does not hold,
-//! which is how the engine treated every `@container` rule before: shrink-
-//! to-fit boxes, flex and grid items (layout sizes them, except a row flex
-//! item that neither grows nor shrinks, or a column one, with a definite
-//! width, and a grid item with a definite non-percentage width), and
-//! percentage sizes of absolute and fixed boxes (their containing block is
-//! not the parent).
+//! walk carries an estimate of each box's content width instead.
 //!
-//! Not covered: container-relative units (`cq*`), style queries, vertical
-//! writing modes, and sizes that only layout knows (a flex item's flexed
-//! width, a block's auto height).
+//! The estimate is an allowlist (#782 HOLD 3): a width is known only when
+//! the container and every ancestor up to the root are plain in-flow
+//! blocks, each with an auto width (its parent's width less its margins,
+//! borders and padding) or a length or percentage of its parent's width.
+//! A plain block here is `display: block` (which includes `list-item` and
+//! `flow-root`), horizontal-tb, not floated or absolutely positioned, not a
+//! `-webkit-box`, not a form control or replaced element, with no sizing
+//! keyword (`min-content`, `fit-content`, ...) in `width`, `min-width` or
+//! `max-width`, and not a child of a multi-column box. An auto-width box
+//! that starts a formatting context after a float anywhere earlier in the
+//! same formatting context is narrowed by it, so is unknown too.
+//!
+//! Everything else is unknown, and a query on an unknown container does not
+//! hold, which is how the engine treated every `@container` rule before:
+//! flex, grid and table descendants, inline and `display: contents`
+//! containers, floats, absolute boxes, vertical writing modes. Some of
+//! those have a width Chrome knows (a `flex: none` item, a table with a
+//! fixed width); they stay false rather than risk a guess wider than the
+//! laid-out box.
+//!
+//! Not covered: container-relative units (`cq*`), style queries, and sizes
+//! that only layout knows (a block's auto height).
 
 use std::cell::RefCell;
 
 use rustkit_css::{
-    BoxSizing, ComputedStyle, ContainerType, Display, FlexBasis, FlexDirection, Float, Length,
-    Overflow, Position,
+    BoxSizing, ComputedStyle, ContainerType, Display, Float, Length, Overflow, Position,
+    WritingMode,
 };
 
 /// A query container, as an `@container` condition sees it.
@@ -52,8 +62,15 @@ struct Frame {
     /// The element starts a block formatting context, which floats inside
     /// it do not leave.
     new_context: bool,
-    /// A float child has been entered.
+    /// A float has been entered in this box's formatting context, here or
+    /// in an earlier descendant that does not start its own.
     floats: bool,
+    /// Definite content-box height, when `height` is a length.
+    height: Option<f32>,
+    /// Element children entered so far.
+    children: u32,
+    /// The element was its parent's first element child.
+    first: bool,
 }
 
 #[derive(Debug, Default)]
@@ -83,6 +100,9 @@ impl DocumentScope {
                 unknown_names: Vec::new(),
                 new_context: true,
                 floats: false,
+                height: Some(h),
+                children: 0,
+                first: true,
             }],
         });
         Self {
@@ -105,7 +125,11 @@ pub(crate) struct ElementScope {
 }
 
 impl ElementScope {
-    pub(crate) fn enter(style: &ComputedStyle, parent: Option<&ComputedStyle>) -> Self {
+    pub(crate) fn enter(
+        style: &ComputedStyle,
+        parent: Option<&ComputedStyle>,
+        tag: Option<&str>,
+    ) -> Self {
         let pushed = STATE.with(|s| {
             let mut s = s.borrow_mut();
             let Some(state) = s.as_mut() else {
@@ -122,10 +146,30 @@ impl ElementScope {
                     break;
                 }
             }
-            let frame = frame_for(style, parent, parent_width, state.viewport, float_seen);
-            if style.float != Float::None {
-                if let Some(parent) = state.frames.last_mut() {
-                    parent.floats = true;
+            let mut frame = frame_for(style, parent, tag, parent_width, state.viewport, float_seen);
+            if let Some(p) = state.frames.last_mut() {
+                frame.first = p.children == 0;
+                p.children += 1;
+            }
+            // A float overhangs a wrapper (block or inline) that does not
+            // start a formatting context, so it still narrows a later box
+            // there: record it up to the context's root. It stops short of
+            // that at an ancestor of definite height no shorter than the
+            // float when the float is that ancestor's leading content (it
+            // and every box between are first children), so it sits at the
+            // ancestor's top and cannot reach below it.
+            if style.float != Float::None && style.display != Display::None {
+                let float_h = margin_box_height(style, state.viewport);
+                let mut leading = frame.first;
+                for f in state.frames.iter_mut().rev() {
+                    f.floats = true;
+                    if f.new_context {
+                        break;
+                    }
+                    if leading && float_h.is_some_and(|fh| f.height.is_some_and(|h| fh <= h)) {
+                        break;
+                    }
+                    leading &= f.first;
                 }
             }
             state.frames.push(frame);
@@ -195,25 +239,17 @@ fn prelude_holds(prelude: &str, frames: &[Frame]) -> bool {
 fn frame_for(
     style: &ComputedStyle,
     parent: Option<&ComputedStyle>,
+    tag: Option<&str>,
     parent_width: Option<f32>,
     viewport: (f32, f32),
     float_seen: bool,
 ) -> Frame {
-    let width = content_width(style, parent, parent_width, viewport, float_seen);
+    let width = content_width(style, parent, tag, parent_width, viewport, float_seen);
     let container = match style.container_type {
         ContainerType::Normal => None,
-        // An inline box (or one with no box) has no inline size of its own
-        // to contain (css-contain-3 §6.1 applies size containment, which
-        // inline boxes ignore): a query against it is unknown, so false.
-        // Its descendants still see the parent's width through it.
-        _ if style.display_contents_declared
-            || matches!(
-                style.display,
-                Display::Inline | Display::Contents | Display::None
-            ) =>
-        {
-            Some(None)
-        }
+        // An unknown width (every box that is not a plain block, among
+        // them inline and `display: contents` ones) keeps the names, so a
+        // named query stops here and fails.
         kind => Some(width.map(|inline| Container {
             names: style.container_name.clone(),
             inline,
@@ -229,7 +265,32 @@ fn frame_for(
         unknown_names: style.container_name.clone(),
         new_context: starts_context(style),
         floats: false,
+        height: definite_height(style, viewport),
+        children: 0,
+        first: true,
     }
+}
+
+/// Definite margin-box height (`height` a length; vertical margins,
+/// padding and borders resolvable without a basis), else `None`.
+fn margin_box_height(style: &ComputedStyle, vp: (f32, f32)) -> Option<f32> {
+    let h = resolve(&style.height, style, None, vp)?;
+    let v = |l: &Length| match l {
+        Length::Auto => Some(0.0),
+        l => resolve(l, style, None, vp),
+    };
+    let border = |w: &Length, s: rustkit_css::BorderStyle| match s {
+        rustkit_css::BorderStyle::None => Some(0.0),
+        _ => resolve(w, style, None, vp).or(Some(0.0)),
+    };
+    let around = v(&style.margin_top)?
+        + v(&style.margin_bottom)?
+        + border(&style.border_top_width, style.border_top_style)?
+        + border(&style.border_bottom_width, style.border_bottom_style)?;
+    Some(match style.box_sizing {
+        BoxSizing::BorderBox => h.max(0.0) + v(&style.margin_top)? + v(&style.margin_bottom)?,
+        BoxSizing::ContentBox => h + around + v(&style.padding_top)? + v(&style.padding_bottom)?,
+    })
 }
 
 /// The box starts a block formatting context that floats do not leave (a
@@ -280,103 +341,102 @@ fn horizontal_extras(style: &ComputedStyle, basis: Option<f32>, vp: (f32, f32)) 
     )
 }
 
+/// Shrink-to-fit form controls and replaced elements: their width is not
+/// the parent's even with `display: block`.
+const NOT_PLAIN_TAGS: &[&str] = &[
+    "button", "input", "select", "textarea", "fieldset", "legend", "meter", "progress", "img",
+    "video", "audio", "canvas", "iframe", "embed", "object", "svg", "math",
+];
+
+/// Floated or absolutely positioned: out of flow, so the block rules give
+/// an auto or percentage width no meaning here, but a length is exact.
+fn out_of_flow(style: &ComputedStyle) -> bool {
+    style.float != Float::None || matches!(style.position, Position::Absolute | Position::Fixed)
+}
+
+/// A length with no percentage in it (`px`, `em`, `vw`, ...).
+fn absolute_length(len: &Length) -> bool {
+    !matches!(
+        len,
+        Length::Auto
+            | Length::FitContent
+            | Length::Percent(_)
+            | Length::Calc(..)
+            | Length::Min(..)
+            | Length::Max(..)
+            | Length::Clamp(..)
+    )
+}
+
+/// A box whose width follows from its parent's by the block rules alone,
+/// or (out of flow) from its own length `width`.
+fn plain_block(style: &ComputedStyle, tag: Option<&str>) -> bool {
+    style.display == Display::Block
+        && style.webkit_box.is_none()
+        && !style.display_contents_declared
+        && (!out_of_flow(style)
+            || (absolute_length(&style.width)
+                && [&style.min_width, &style.max_width]
+                    .iter()
+                    .all(|l| matches!(l, Length::Auto) || absolute_length(l))))
+        && style.writing_mode == WritingMode::HorizontalTb
+        && !style.writing_mode_declared
+        && style.width_keywords == 0
+        && ![&style.width, &style.min_width, &style.max_width]
+            .iter()
+            .any(|l| matches!(l, Length::FitContent))
+        && !tag.is_some_and(|t| NOT_PLAIN_TAGS.iter().any(|n| t.eq_ignore_ascii_case(n)))
+}
+
+/// Records a `width` / `min-width` / `max-width` declaration for the walk:
+/// `bit` is set while the winning value is one `Length` cannot carry (the
+/// content keywords in any case or with a `-webkit-` prefix), and cleared
+/// by one it can (or `none`).
+pub(crate) fn note_width_value(style: &mut ComputedStyle, bit: u8, parsed: bool, value: &str) {
+    if parsed || value.trim().eq_ignore_ascii_case("none") {
+        style.width_keywords &= !bit;
+    } else {
+        style.width_keywords |= bit;
+    }
+}
+
 fn content_width(
     style: &ComputedStyle,
     parent: Option<&ComputedStyle>,
+    tag: Option<&str>,
     parent_width: Option<f32>,
     vp: (f32, f32),
     float_seen: bool,
 ) -> Option<f32> {
-    let out_of_flow = matches!(style.position, Position::Absolute | Position::Fixed);
-    let parent_display = parent.map(|p| p.display);
-    // A flex or grid item's width is decided by flex or grid layout, which
-    // runs after this walk; so is the width of a child of a
-    // `display: contents` box, whose real parent the walk does not know.
-    let item_of =
-        |kinds: &[Display]| !out_of_flow && parent_display.is_some_and(|d| kinds.contains(&d));
-    let flex_item = item_of(&[Display::Flex, Display::InlineFlex]);
-    let grid_item = item_of(&[Display::Grid, Display::InlineGrid]);
-    // In a multi-column container the containing block is a column, whose
-    // width multicol layout decides (`columns`/`column-width` are not
+    // Unknown below any box that is not a plain block (the parent's width
+    // is then `None`), and in a multi-column box, whose children sit in
+    // columns multicol layout sizes (`columns`/`column-width` are not
     // parsed yet but still make one).
-    let in_columns = !out_of_flow
-        && parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared);
-    if item_of(&[Display::Contents])
-        && !matches!(style.display, Display::Inline | Display::Contents)
+    let parent_width = parent_width?;
+    if !plain_block(style, tag)
+        || parent.is_some_and(|p| p.column_count.is_some() || p.columns_declared)
     {
         return None;
     }
-    match style.display {
-        // Inline content (and a box that is replaced by its children) sits
-        // in the parent's line boxes; in a flex or grid container it is an
-        // item (or its children are) and layout sizes it.
-        Display::Inline | Display::Contents if flex_item || grid_item => return None,
-        Display::Inline | Display::Contents => return parent_width,
-        Display::None => return None,
-        _ => {}
-    }
-    // Percentages resolve against the containing block. For an absolute or
-    // fixed box that is the nearest positioned ancestor (or the viewport),
-    // and for a grid item its grid area; the walk knows neither, so they do
-    // not resolve. A flex item's is the flex container, the parent.
-    let basis = match out_of_flow || grid_item || in_columns {
-        true => None,
-        false => parent_width,
-    };
+    let basis = Some(parent_width);
     let extras = horizontal_extras(style, basis, vp)?;
     let to_content = |border_box_or_content: f32| match style.box_sizing {
         BoxSizing::BorderBox => (border_box_or_content - extras).max(0.0),
         BoxSizing::ContentBox => border_box_or_content.max(0.0),
     };
-    let definite = resolve(&style.width, style, basis, vp).map(to_content);
-    if flex_item {
-        let row = parent.is_some_and(|p| {
-            matches!(
-                p.flex_direction,
-                FlexDirection::Row | FlexDirection::RowReverse
-            )
-        });
-        // In a row the width is the main size: flexing replaces it unless
-        // the item neither grows nor shrinks and its basis is that width.
-        // In a column it is the cross size, which only stretch changes, and
-        // stretch leaves a definite width alone.
-        if row
-            && (style.flex_grow != 0.0
-                || style.flex_shrink != 0.0
-                || style.flex_basis != FlexBasis::Auto)
-        {
-            return None;
-        }
-    }
-    let block_level = matches!(
-        style.display,
-        Display::Block | Display::Flex | Display::Grid
-    );
-    let width = match definite {
-        Some(w) => w,
-        None if flex_item
-            || grid_item
-            || out_of_flow
-            || style.float != Float::None
-            || !block_level
-            || in_columns
-            || (float_seen && starts_context(style))
-            // Content-sized, not stretched: `fit-content`, and the
-            // `min-content`/`max-content` keywords `Length` cannot carry.
-            || matches!(style.width, Length::FitContent)
-            || style.width_content_keyword =>
-        {
-            return None
-        }
-        None => {
+    let width = match &style.width {
+        // An earlier float in the same formatting context narrows a box
+        // that starts its own; only layout knows by how much.
+        Length::Auto if float_seen && starts_context(style) => return None,
+        Length::Auto => {
             let margins = resolve(&style.margin_left, style, basis, vp).unwrap_or(0.0)
                 + resolve(&style.margin_right, style, basis, vp).unwrap_or(0.0);
-            (parent_width? - margins - extras).max(0.0)
+            (parent_width - margins - extras).max(0.0)
         }
+        l => to_content(resolve(l, style, basis, vp)?),
     };
     // min-width wins over max-width (CSS 2.1 §10.4). A limit that does not
-    // resolve here (a percentage without a basis, `fit-content`) makes the
-    // width unknown rather than unlimited.
+    // resolve here makes the width unknown rather than unlimited.
     let limit = |len: &Length| match len {
         Length::Auto => Some(None),
         l => resolve(l, style, basis, vp).map(|v| Some(to_content(v))),

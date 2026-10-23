@@ -1,0 +1,12 @@
+<!DOCTYPE html><!-- #782 HOLD 3 (Atlas #847, review 5634168311 probes 7-17): @container is false unless every box up to the container is a plain block. Bars are absolutely placed so only the query decides colour. Pass: 9 green bars at (15,15+60n). (The anonymous-table-cell case of the review is covered by the unit test only: rustkit does not paint an anonymous cell yet.) -->
+<style>body{margin:0} .w{position:relative;width:600px;height:60px;overflow:hidden} i{position:absolute;left:10px;top:10px;width:20px;height:20px;background:green} .c i{background:red}
+@container (min-width:400px){i{background:red} .c i{background:green}}</style>
+<div class="w c"><div style="container-type:inline-size"><i></i></div></div>
+<div class="w"><div><div style="float:left;width:300px;height:50px"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="w"><span><b style="float:left;width:300px;height:50px"></b></span><div style="container-type:inline-size"><i></i></div></div>
+<div class="w"><div style="max-width:min-content;container-type:inline-size"><i></i></div></div>
+<div class="w"><div style="width:-webkit-max-content;container-type:inline-size"><i></i></div></div>
+<div class="w"><button style="display:block;padding:0;border:0;background:none;container-type:inline-size"><i></i></button></div>
+<div class="w"><div style="writing-mode:vertical-lr;width:600px;height:100px;container-type:inline-size"><i style="writing-mode:horizontal-tb"></i></div></div>
+<div class="w"><div style="display:-webkit-box"><div style="container-type:inline-size"><i></i></div></div></div>
+<div class="w"><div style="width:MAX-CONTENT;container-type:inline-size"><i></i></div></div>

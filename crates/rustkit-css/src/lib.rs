@@ -2703,10 +2703,15 @@ pub struct ComputedStyle {
     pub container_type: ContainerType,
     /// css-contain-3 §6.2 `container-name`; empty is `none`. Not inherited.
     pub container_name: Vec<String>,
-    /// `width: min-content | max-content`, which `Length` cannot carry;
-    /// layout keeps the previous width. `@container` treats the box's width
-    /// as unknown. Not inherited.
-    pub width_content_keyword: bool,
+    /// A `width` (bit 1), `min-width` (2) or `max-width` (4) value that
+    /// `Length` cannot carry (`min-content`, `-webkit-max-content`,
+    /// `MAX-CONTENT`, ...); layout keeps the previous value. `@container`
+    /// treats the box's width as unknown. Not inherited.
+    pub width_keywords: u8,
+    /// A `writing-mode` other than `horizontal-tb` was declared. Layout
+    /// does not honour it yet, but `@container` treats the box's width as
+    /// unknown (its inline size is the physical height). Not inherited.
+    pub writing_mode_declared: bool,
     /// `columns` or `column-width` other than `auto` was declared. Layout
     /// does not split into columns for them yet, but `@container` treats a
     /// child's width as unknown. Not inherited.

@@ -74,7 +74,7 @@ fn container_rules_apply_where_their_query_container_matches() {
 /// narrow box. Same page as docs/diagnostics/2026-10-23/
 /// css_container_query_flex.html; Chromium 148 lays `.s` at 300px, `.main`
 /// at 400px, `.a` and `.gi` at 200px, `.n` at 300px, and applies only #k5's
-/// rule.
+/// rule (which the walk now declines, see below).
 const LAYOUT_WIDTH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
 body { margin: 0 }
 .f { display: flex; width: 300px } .s { width: 500px; min-width: 0; container-type: inline-size }
@@ -99,8 +99,10 @@ fn container_query_answers_with_the_laid_out_width_not_the_style_width() {
     let heights = offset_heights(LAYOUT_WIDTH_PAGE, 800, 600, 5);
     // k1: flex shrinks 500 -> 300. k2: 100% of 600 shrinks to 400 beside a
     // 200px sidebar. k3: 100% of the positioned 200px box, not of the 600px
-    // parent. k4: 100% of the 200px grid column. k5: flex-shrink:0 keeps 300 (`flex: none` is not parsed yet).
-    assert_eq!(heights, ["0", "0", "0", "0", "15"]);
+    // parent. k4: 100% of the 200px grid column. k5: flex-shrink:0 keeps
+    // 300, so Chromium gives 15, but since HOLD 3 the walk knows widths of
+    // plain blocks only and a flex item is unknown: the query is false.
+    assert_eq!(heights, ["0", "0", "0", "0", "0"]);
 }
 
 /// #782 HOLD 2 (Atlas #843) and HOLD 3 (Atlas #847, review 5634168311):
@@ -117,18 +119,22 @@ fn container_query_answers_with_the_laid_out_width_not_the_style_width() {
 /// container, k15 a child of a table with `border-spacing` (580px, asked
 /// for 590px), k16 a child of a `-webkit-box`, k17 `MAX-CONTENT`.
 /// Controls get 10: k5 and k6 (plain and list-item containers 600px wide)
-/// and k18 (a 600px scroll container).
+/// and k18 (a 600px scroll container). They come first: an earlier float
+/// in the same formatting context makes every later container that starts
+/// a context unknown, however far down the page (float heights and `clear`
+/// are not modelled).
 const UNKNOWN_WIDTH_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
 body { margin: 0 } .w { width: 600px }
 @container (min-width: 400px) { .a, #k1,#k2,#k3,#k4,#k5,#k6,#k7,#k8 { height: 10px } }
 @container (min-width: 590px) { .b { height: 10px } }
 </style></head><body>
+<div class="w"><div style="container-type:inline-size"><div id="k5"></div></div></div>
+<div class="w"><ul style="margin:0;padding:0"><li style="container-type:inline-size"><div id="k6"></div></li></ul></div>
+<div class="w"><div style="overflow-y:scroll;container-type:inline-size"><div id="k18" class="a"></div></div></div>
 <div class="w"><span style="container-type:inline-size"><b id="k1" style="display:inline-block;width:5px"></b></span></div>
 <div class="w"><div style="float:left;width:300px;height:1px"></div><div style="container-type:inline-size"><div id="k2"></div></div></div>
 <div class="w" style="columns:2;column-gap:0"><div style="container-type:inline-size"><div id="k3"></div></div></div>
 <div class="w"><div style="display:contents;container-type:inline-size"><div id="k4"></div></div></div>
-<div class="w"><div style="container-type:inline-size"><div id="k5"></div></div></div>
-<div class="w"><ul style="margin:0;padding:0"><li style="container-type:inline-size"><div id="k6"></div></li></ul></div>
 <div class="w"><div style="width:fit-content;container-type:inline-size"><div id="k7"></div></div></div>
 <div class="w"><div style="width:max-content;container-type:inline-size"><div id="k8"></div></div></div>
 <div class="w"><div><div style="float:left;width:300px;height:50px"></div></div><div style="container-type:inline-size"><div id="k9" class="a"></div></div></div>
@@ -140,7 +146,6 @@ body { margin: 0 } .w { width: 600px }
 <div class="w"><div style="display:table;width:600px;border-spacing:10px"><div style="container-type:inline-size"><div id="k15" class="b"></div></div></div></div>
 <div class="w"><div style="display:-webkit-box"><div style="container-type:inline-size"><div id="k16" class="a"></div></div></div></div>
 <div class="w"><div style="width:MAX-CONTENT;container-type:inline-size"><div id="k17" class="a"></div></div></div>
-<div class="w"><div style="overflow-y:scroll;container-type:inline-size"><div id="k18" class="a"></div></div></div>
 </body></html>"#;
 
 #[test]
@@ -153,4 +158,29 @@ fn container_query_is_false_where_only_layout_knows_the_width() {
         .map(|(i, h)| format!("k{}={h}", i + 1))
         .collect();
     assert_eq!(fired, ["k5=10", "k6=10", "k18=10"]);
+}
+
+/// What the allowlist still knows (#782 HOLD 3 regressions seen on the
+/// 2026-10-20 and HOLD 2 pages): an absolutely positioned or floated
+/// container with a length width (k2, k3), and a container after a float
+/// that cannot leave its fixed-height row (k1). Unknown: a percentage
+/// width on an absolute box (k4), and anything after a float taller than
+/// its row (k5), which comes last because it narrows everything after it.
+const OUT_OF_FLOW_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .w { position: relative; width: 600px; height: 30px }
+@container (min-width: 250px) { .a { height: 10px } }
+</style></head><body>
+<div class="w"><div style="float:left;width:300px;height:1px"></div></div>
+<div class="w"><div style="container-type:inline-size"><div id="k1" class="a"></div></div></div>
+<div class="w"><div style="position:absolute;width:300px;container-type:inline-size"><div id="k2" class="a"></div></div></div>
+<div class="w"><div style="float:left;width:300px;height:10px;container-type:inline-size"><div id="k3" class="a"></div></div></div>
+<div class="w"><div style="position:absolute;width:30%;container-type:inline-size"><div id="k4" class="a"></div></div></div>
+<div class="w"><div style="float:left;width:10px;height:50px"></div></div>
+<div class="w"><div style="container-type:inline-size"><div id="k5" class="a"></div></div></div>
+</body></html>"#;
+
+#[test]
+fn container_query_knows_out_of_flow_lengths_and_contained_floats() {
+    let heights = offset_heights(OUT_OF_FLOW_PAGE, 800, 600, 5);
+    assert_eq!(heights, ["10", "10", "10", "0", "0"]);
 }
