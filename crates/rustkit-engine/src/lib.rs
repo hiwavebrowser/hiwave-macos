@@ -12308,6 +12308,14 @@ impl Engine {
                     style.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
+            "clip-path" | "-webkit-clip-path" => {
+                let value = value.trim();
+                style.clip_path = if value.eq_ignore_ascii_case("none") {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+            }
             "object-fit" => {
                 // Layout and paint already honour every keyword; only this
                 // arm was missing, so every `object-fit: cover` painted as
@@ -12986,6 +12994,7 @@ impl Engine {
                 style.webkit_box = None;
             }
             "opacity" => style.opacity = 1.0,
+            "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
                 style.object_position = (0.5, 0.5);
