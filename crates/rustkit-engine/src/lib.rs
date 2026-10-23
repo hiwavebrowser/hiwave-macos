@@ -13637,6 +13637,13 @@ impl Engine {
     /// custom properties, shadow-tree sheets, `initial` and `revert*` (left
     /// out, so the presentation attribute or the inherited value stands
     /// where Chrome would use the initial or user-agent value).
+    ///
+    /// Cost: one `node_matches` per (svg element, paint rule, comma
+    /// member), rerun on every relayout, with no rule index. Review
+    /// 5634328533 measured 1.5 s for 500 icons x 50 rules and 36 s for
+    /// 3000 x 200 in the debug test profile. Follow-up: bucket the rules by
+    /// rightmost compound (tag/class/id) as the main cascade does, or
+    /// memoize per svg subtree and class/attribute signature.
     fn cache_svg_paint_styles(&mut self, document: &Document, view: EngineViewId, viewport: Option<(f32, f32)>) {
         self.svg_paint_styles.clear();
         let inline = self.inline_sheets(document, Some(view));
