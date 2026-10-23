@@ -1065,32 +1065,26 @@ impl FormState {
         // Resolve action URL relative to base
         let url = if action.is_empty() {
             base_url.to_string()
-        } else if action.starts_with("http://") || action.starts_with("https://") {
-            action
-        } else if action.starts_with('/') {
-            // Absolute path
-            if let Some(origin) = extract_origin(base_url) {
-                format!("{}{}", origin, action)
-            } else {
-                action
-            }
         } else {
-            // Relative path
-            if let Some(base) = base_url.rfind('/') {
-                format!("{}/{}", &base_url[..base], action)
-            } else {
-                action
-            }
+            resolve_url(base_url, &action).unwrap_or(action)
         };
 
         match method {
             FormMethod::Get => {
                 // Append data to URL as query string
                 let query = String::from_utf8_lossy(&FormState::encode_url(entries)).to_string();
-                let final_url = if url.contains('?') {
-                    format!("{}&{}", url, query)
-                } else {
-                    format!("{}?{}", url, query)
+                let final_url = match url::Url::parse(&url) {
+                    // Into the query, ahead of any fragment.
+                    Ok(mut parsed) => {
+                        let joined = match parsed.query() {
+                            Some(existing) => format!("{}&{}", existing, query),
+                            None => query,
+                        };
+                        parsed.set_query(Some(&joined));
+                        parsed.to_string()
+                    }
+                    Err(_) if url.contains('?') => format!("{}&{}", url, query),
+                    Err(_) => format!("{}?{}", url, query),
                 };
 
                 FormSubmission {
@@ -1133,16 +1127,10 @@ impl FormState {
     }
 }
 
-/// Extract the origin (scheme + host + port) from a URL.
-fn extract_origin(url: &str) -> Option<String> {
-    if let Some(idx) = url.find("://") {
-        let rest = &url[idx + 3..];
-        if let Some(path_idx) = rest.find('/') {
-            return Some(format!("{}{}", &url[..idx + 3], &rest[..path_idx]));
-        }
-        return Some(url.to_string());
-    }
-    None
+/// `input` resolved against `base` as the URL Standard says (`//host/path`
+/// keeps only the base's scheme), or `None` when either does not parse.
+pub fn resolve_url(base: &str, input: &str) -> Option<String> {
+    url::Url::parse(base).ok()?.join(input).ok().map(String::from)
 }
 
 /// A prepared form submission ready to be sent.
@@ -2071,16 +2059,68 @@ mod tests {
         assert!(submission.is_self_target());
     }
 
+    /// A protocol-relative action (`//host/path`) takes only its scheme
+    /// from the document (WHATWG URL): the Wikipedia portal's search form.
     #[test]
-    fn test_extract_origin() {
+    fn test_form_submission_protocol_relative_action() {
+        let base = "https://www.wikipedia.org/";
+        let submit = |action: &str, method: FormMethod| {
+            let form = FormState::new();
+            form.set_action(action);
+            form.set_method(method);
+            form.create_submission(base, &[]).url
+        };
         assert_eq!(
-            extract_origin("https://example.com/path/page"),
-            Some("https://example.com".to_string())
+            submit("//www.wikipedia.org/search-redirect.php", FormMethod::Post),
+            "https://www.wikipedia.org/search-redirect.php"
+        );
+        assert_eq!(submit("//example.test", FormMethod::Post), "https://example.test/");
+        assert_eq!(
+            submit("//example.test/path?q#f", FormMethod::Post),
+            "https://example.test/path?q#f"
         );
         assert_eq!(
-            extract_origin("http://localhost:8080/"),
-            Some("http://localhost:8080".to_string())
+            form_with_entry("//www.wikipedia.org/search-redirect.php", base),
+            "https://www.wikipedia.org/search-redirect.php?search=rust"
         );
-        assert_eq!(extract_origin("invalid"), None);
+    }
+
+    /// The other relative forms resolve as the URL Standard says too.
+    #[test]
+    fn test_form_submission_relative_actions() {
+        let base = "https://example.com/dir/page?old#frag";
+        let submit = |action: &str| {
+            let form = FormState::new();
+            form.set_action(action);
+            form.set_method(FormMethod::Post);
+            form.create_submission(base, &[]).url
+        };
+        assert_eq!(submit("next"), "https://example.com/dir/next");
+        assert_eq!(submit("../up"), "https://example.com/up");
+        assert_eq!(submit("?q=1"), "https://example.com/dir/page?q=1");
+        assert_eq!(submit("http://other.test/x"), "http://other.test/x");
+        assert_eq!(submit(""), base);
+    }
+
+    /// A GET submission of one `search=rust` pair to `action`.
+    fn form_with_entry(action: &str, base: &str) -> String {
+        let form = FormState::new();
+        form.set_action(action);
+        form.set_method(FormMethod::Get);
+        let entries = vec![FormDataEntry {
+            name: "search".to_string(),
+            value: FormDataValue::String("rust".to_string()),
+        }];
+        form.create_submission(base, &entries).url
+    }
+
+    #[test]
+    fn test_resolve_url() {
+        let base = "https://www.wikipedia.org/";
+        assert_eq!(resolve_url(base, "//example.test/path").as_deref(), Some("https://example.test/path"));
+        assert_eq!(resolve_url(base, "//example.test").as_deref(), Some("https://example.test/"));
+        assert_eq!(resolve_url(base, "//example.test/p?q#f").as_deref(), Some("https://example.test/p?q#f"));
+        assert_eq!(resolve_url("http://localhost:8080/a/b", "c").as_deref(), Some("http://localhost:8080/a/c"));
+        assert_eq!(resolve_url("invalid", "/x"), None);
     }
 }

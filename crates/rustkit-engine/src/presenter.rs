@@ -76,6 +76,10 @@ pub struct FrameCommit {
     /// The earliest input the page took since its last commit, for the
     /// input-to-present log.
     pub input: Option<InputMark>,
+    /// The page's canvas colour (CSS 2.1 §14.2), as the window should
+    /// clear a surface that is larger than `laid_out_for`. Opaque; a
+    /// transparent canvas is white.
+    pub canvas: [f64; 4],
 }
 
 /// The window thread's half of the engine: every NSView/HWND, every GPU
@@ -283,6 +287,11 @@ impl Presenter {
 
     /// The host view's bounds (a headless view has none here; the page
     /// side keeps those).
+    /// The platform view pointer (`NSView` on macOS). 0 when the view is gone.
+    pub(crate) fn raw_view(&self, viewhost_id: ViewId) -> isize {
+        self.viewhost.raw_view(viewhost_id)
+    }
+
     pub(crate) fn host_bounds(&self, viewhost_id: ViewId) -> Result<Bounds, EngineError> {
         self.viewhost
             .get_bounds(viewhost_id)
@@ -388,7 +397,9 @@ impl Presenter {
             max_scroll_offset: (0.0, 0.0),
             laid_out_for: (0, 0),
             input: None,
+            canvas: self.background_color,
         });
+        let canvas = commit.canvas;
         let display_list: Option<&DisplayList> = commit.list.as_deref();
         let generation = commit.generation;
         let scroll_offset = commit.scroll_offset;
@@ -445,7 +456,7 @@ impl Presenter {
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let Some(renderer) = &mut self.renderer {
                 // A headless view is drawn unscrolled, as it always was.
-                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view)?;
+                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas)?;
             } else {
                 // Fallback to compositor solid color
                 self.compositor
@@ -476,7 +487,7 @@ impl Presenter {
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let Some(renderer) = &mut self.renderer {
-                    Self::execute(renderer, display_list, scroll_offset, &texture_view)?;
+                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas)?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
                     drop(output); // Release the texture
@@ -521,9 +532,11 @@ impl Presenter {
         display_list: Option<&DisplayList>,
         scroll_offset: (f32, f32),
         target: &wgpu::TextureView,
+        canvas: [f64; 4],
     ) -> Result<(), EngineError> {
         let commands = display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]);
         renderer.set_scroll_offset(scroll_offset);
+        renderer.set_clear_color(canvas);
         let drawn = renderer
             .execute(commands, target)
             .map_err(|e| EngineError::RenderError(e.to_string()));
@@ -552,7 +565,13 @@ impl Presenter {
                     .compositor
                     .get_headless_texture_view(viewhost_id)
                     .map_err(|e| EngineError::RenderError(e.to_string()))?;
-                Self::execute(renderer, Some(display_list), scroll_offset, &target)
+                Self::execute(
+                    renderer,
+                    Some(display_list),
+                    scroll_offset,
+                    &target,
+                    [1.0, 1.0, 1.0, 1.0],
+                )
             }
             Some(path) => {
                 renderer.set_scroll_offset(scroll_offset);
@@ -763,6 +782,165 @@ impl Presenter {
         } else {
             Err(EngineError::RenderError("No renderer available".to_string()))
         }
+    }
+}
+
+/// What of a [`FrameCommit`] is already on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ShownFrame {
+    pub nav_generation: u64,
+    pub generation: u64,
+    pub scroll_offset: (f32, f32),
+}
+
+/// Whether `commit` should be drawn over `shown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentChoice {
+    /// No display list yet. Drawing this is the background, and it must not
+    /// count as the frame on screen or the laid-out frame is dropped.
+    WaitForLayout,
+    AlreadyShown,
+    Draw,
+}
+
+/// A new navigation is a different frame even when its generation and
+/// scroll match the one on screen. A commit with no display list is not
+/// presented.
+pub(crate) fn present_choice(shown: Option<ShownFrame>, commit: &FrameCommit) -> PresentChoice {
+    if commit.list.is_none() {
+        return PresentChoice::WaitForLayout;
+    }
+    let key = ShownFrame {
+        nav_generation: commit.nav_generation,
+        generation: commit.generation,
+        scroll_offset: commit.scroll_offset,
+    };
+    if shown == Some(key) {
+        PresentChoice::AlreadyShown
+    } else {
+        PresentChoice::Draw
+    }
+}
+
+/// The window thread's surface for a page that lives on the content thread.
+///
+/// The NSView, the GPU surface and the renderer are created here, on the
+/// thread that calls [`WindowSurface::attach`]. The page thread never sees
+/// them. It publishes [`FrameCommit`]s; this draws the newest one, including
+/// a commit whose only change is the scroll offset.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub struct WindowSurface {
+    presenter: Presenter,
+    viewhost_id: ViewId,
+    id: super::EngineViewId,
+    shown: Option<ShownFrame>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl WindowSurface {
+    /// A host view and its GPU surface in `parent`. Fails before any page
+    /// state exists.
+    pub fn attach(parent: WindowHandle, bounds: Bounds) -> Result<Self, EngineError> {
+        let mut presenter = Presenter::new(super::EngineConfig::default().background_color)?;
+        let viewhost_id = presenter.create_host_view(parent, bounds)?;
+        presenter.attach_surface(viewhost_id, bounds)?;
+        presenter.clear_to_background(viewhost_id)?;
+        Ok(Self {
+            presenter,
+            viewhost_id,
+            id: super::EngineViewId::new(),
+            shown: None,
+        })
+    }
+
+    pub fn raw_view(&self) -> isize {
+        self.presenter.raw_view(self.viewhost_id)
+    }
+
+    /// The NSView and the GPU surface take `bounds` now. The page lays out
+    /// when it receives the same bounds as a message. The surface is new,
+    /// so the caller draws the commit already published again: anchored at
+    /// the top left, with the page's canvas colour in the area the old
+    /// layout does not cover.
+    pub fn resize(&mut self, bounds: Bounds) -> Result<(), EngineError> {
+        self.shown = None;
+        self.presenter.apply_bounds(self.viewhost_id, false, bounds)
+    }
+
+    pub fn grab_keyboard(&self) {
+        self.presenter.grab_keyboard(self.viewhost_id)
+    }
+
+    /// Draw `commit` when its navigation, generation or scroll offset
+    /// differs from the frame on screen. A commit that has not been laid
+    /// out is not drawn and does not become the frame on screen.
+    pub fn present_commit(&mut self, commit: &FrameCommit, images: &ImageManager) -> Result<(), EngineError> {
+        if present_choice(self.shown, commit) != PresentChoice::Draw {
+            return Ok(());
+        }
+        let key = ShownFrame {
+            nav_generation: commit.nav_generation,
+            generation: commit.generation,
+            scroll_offset: commit.scroll_offset,
+        };
+        self.presenter.commit(self.id, commit.clone());
+        let drawn = self.presenter.present(self.id, self.viewhost_id, false, images);
+        let noted = match &drawn {
+            Ok(_) => Ok(()),
+            Err(error) => Err(EngineError::RenderError(error.to_string())),
+        };
+        self.presenter.note_render_result(self.id, &noted);
+        if drawn.is_ok() {
+            self.shown = Some(key);
+        }
+        drawn.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod present_choice_tests {
+    use super::*;
+
+    fn commit(nav: u64, generation: u64, laid_out: bool) -> FrameCommit {
+        FrameCommit {
+            generation,
+            nav_generation: nav,
+            list: laid_out.then(|| Arc::new(DisplayList::new())),
+            scroll_offset: (0.0, 0.0),
+            max_scroll_offset: (0.0, 0.0),
+            laid_out_for: if laid_out { (800, 600) } else { (0, 0) },
+            input: None,
+            canvas: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn a_commit_before_layout_is_not_the_frame_on_screen() {
+        assert_eq!(
+            present_choice(None, &commit(1, 0, false)),
+            PresentChoice::WaitForLayout
+        );
+        // Recording that empty frame would hide the laid-out one when the
+        // generation matches.
+        let laid_out = commit(1, 1, true);
+        assert_eq!(present_choice(None, &laid_out), PresentChoice::Draw);
+    }
+
+    #[test]
+    fn a_new_navigation_is_drawn_when_the_generation_matches() {
+        let shown = ShownFrame {
+            nav_generation: 1,
+            generation: 1,
+            scroll_offset: (0.0, 0.0),
+        };
+        assert_eq!(
+            present_choice(Some(shown), &commit(1, 1, true)),
+            PresentChoice::AlreadyShown
+        );
+        assert_eq!(
+            present_choice(Some(shown), &commit(2, 1, true)),
+            PresentChoice::Draw
+        );
     }
 }
 

@@ -1,0 +1,10 @@
+<!doctype html><!-- color-mix() in oklab, direct and through var() (x). Each box declares red first; a working color-mix() replaces it.
+ PASS: (60,60) rgb(0,128,0); (170,60) rgba(0,128,0,0.5) over white; (280,60) the same through var(). FAIL: red, or (280,60) white. -->
+<html><head><style>
+body { margin: 0; } div { position: absolute; top: 10px; width: 100px; height: 100px; }
+#m1 { left: 10px; background: red; background: color-mix(in oklab, green, green); }
+#m2 { left: 120px; background: red; background: color-mix(in oklab, green 50%, transparent); }
+#m3 { left: 230px; --mix: color-mix(in oklab, green 50%, transparent); background: red; background: var(--mix); }
+</style></head><body>
+<div id="m1"></div><div id="m2"></div><div id="m3"></div>
+</body></html>

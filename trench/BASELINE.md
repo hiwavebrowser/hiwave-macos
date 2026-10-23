@@ -1,7 +1,7 @@
 # Trench baseline — MCP Phase 1 engine exports
 
 **Started:** 2026-07-29 · **Authorized by:** Pete ("good trench candidate. Do it.")
-**Plan:** `HIWAVE_MCP_PLAN.md` §11 · **Branch:** `atlas/trench-mcp-exports`
+**Plan:** `docs/HIWAVE_MCP_PLAN.md` §11 · **Branch:** `atlas/trench-mcp-exports`
 
 ---
 

@@ -6,8 +6,11 @@
 //
 // An external classic script is queued for the engine, which fetches it
 // like a parser-inserted one (its own request, never through page script)
-// and runs it as the element's script, then fires `load` or `error`. An
-// external module is `import()`ed. An inline classic script runs at once.
+// and runs it as the element's script, then fires `load` or `error`. It is
+// force-async (HTML: the flag starts true; the parser is what clears it),
+// so it runs when its own fetch finishes. `async = false` clears the flag
+// and puts it in the in-order list. An external module is `import()`ed. An
+// inline classic script runs at once.
 //
 // Only elements script created are prepared (`createElement`, an HTML
 // `createElementNS`, or a copy of one not yet started): the parser's scripts
@@ -22,6 +25,9 @@
     // Captured before page script can replace them.
     var indirectEval = g.eval, resolved = Promise.resolve(), URL_ = g.URL, Event_ = g.Event;
     var STATE = Symbol('rustkit.script');
+    // HTML §4.12.1 "force async": an element script made is async until its
+    // `async` is set or its `async` attribute changes; the parser's are not.
+    var FORCE = Symbol('rustkit.forceAsync');
     var XHTML = 'http://www.w3.org/1999/xhtml';
     // Created and not yet started: inserts look for scripts only while
     // there is one.
@@ -62,7 +68,7 @@
                 import(url).then(function () { fire(el, 'load'); }, function () { fire(el, 'error'); });
                 return;
             }
-            internals.fetch(el, url);
+            internals.fetch(el, url, !(el[FORCE] === true || el.hasAttribute('async')));
             return;
         }
         if (k === 'module') return;
@@ -76,10 +82,24 @@
         }
     }
 
+    // `async` reads true while the element is forced async, and setting it
+    // either way ends that (web_reflect.js defined the attribute's half).
+    var SP = g.HTMLScriptElement && g.HTMLScriptElement.prototype;
+    var asyncIdl = SP && Object.getOwnPropertyDescriptor(SP, 'async');
+    if (asyncIdl && asyncIdl.get && asyncIdl.set) {
+        Object.defineProperty(SP, 'async', {
+            get: function () { return this[FORCE] === true || asyncIdl.get.call(this); },
+            set: function (v) { if (this[FORCE] === true) this[FORCE] = false; asyncIdl.set.call(this, v); },
+            enumerable: asyncIdl.enumerable,
+            configurable: true
+        });
+    }
+
     HOOKS.scripts = {
         created: function (el) {
             if (!isScript(el) || (el.namespaceURI != null && el.namespaceURI !== XHTML)) return;
             Object.defineProperty(el, STATE, { value: 'fresh', writable: true, configurable: true });
+            Object.defineProperty(el, FORCE, { value: true, writable: true, configurable: true });
             fresh++;
         },
         // HTML §4.12.1 cloning steps: a copy is started when its original
@@ -100,14 +120,18 @@
         },
         // Before `node` goes into `parent`: the fresh scripts it carries (a
         // fragment empties as it goes in), prepared in tree order after.
+        // Walked, not queried: a fragment's scripts are not in the document
+        // the selector walks.
         inserting: function (node, parent) {
             if (fresh === 0) return null;
             var found = [];
-            if (isScript(node)) found.push(node);
-            else if (node && typeof node.querySelectorAll === 'function') {
-                var all = node.querySelectorAll('script');
-                for (var i = 0; i < all.length; i++) found.push(all[i]);
+            function walk(n) {
+                if (!n || n.localName === 'template') return;
+                if (isScript(n)) found.push(n);
+                for (var c = n.firstChild; c; c = c.nextSibling) walk(c);
             }
+            if (isScript(node)) found.push(node);
+            else walk(node);
             // Text added to a script already in the document.
             if (isScript(parent)) found.push(parent);
             found = found.filter(function (s) { return s[STATE] === 'fresh'; });
@@ -115,6 +139,7 @@
         },
         // A `src` set, or text written, on a script already in the document.
         changed: function (node, op, name) {
+            if (isScript(node) && op === 'setAttr' && String(name).toLowerCase() === 'async') node[FORCE] = false;
             if (fresh === 0 || !isScript(node)) return;
             if (op === 'setText' || (op === 'setAttr' && String(name).toLowerCase() === 'src')) prepare(node);
         }

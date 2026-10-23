@@ -40,6 +40,8 @@ fn frame(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand], t
     let path = std::env::temp_dir().join(format!("rustkit-atlas-{tag}-{}.ppm", std::process::id()));
     engine
         .presenter
+        .as_mut()
+        .expect("window presenter")
         .capture_commands(viewhost_id, (400, 100), path.to_str().unwrap(), commands)
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");

@@ -20,6 +20,10 @@
 //!
 //!    ```text
 //!    Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 acquire_ms=0.0 execute_ms=0.0 present_ms=0.0 other_ms=612.0
+//!    Content thread hold entry=live_turn ms=612 ...
+//!
+//!    The word is `Content` when the entry runs on the page thread
+//!    (named `page`). Flag-off entries stay `Window thread hold`.
 //!    ```
 //!
 //!    `other_ms` is what no stage claims: script, timers, network
@@ -220,7 +224,7 @@ impl Drop for WindowHold {
         let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
         #[cfg(test)]
         LAST_ENTRY.with(|c| c.set(Some(self.entry)));
-        if let Some(line) = hold_line(self.entry, total_ms, &stages) {
+        if let Some(line) = hold_line(hold_thread_name(), self.entry, total_ms, &stages) {
             #[cfg(test)]
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
             tracing::warn!("{line}");
@@ -228,14 +232,23 @@ impl Drop for WindowHold {
     }
 }
 
+/// `Content` on the page thread, `Window` everywhere else. The content
+/// thread is spawned with the name `page`.
+pub(crate) fn hold_thread_name() -> &'static str {
+    match std::thread::current().name() {
+        Some("page") => "Content",
+        _ => "Window",
+    }
+}
+
 /// The log line of a hold, or `None` under the threshold. Pure, so the
-/// decision is testable without a clock.
-pub(crate) fn hold_line(entry: &str, total_ms: f64, stages: &HoldMs) -> Option<String> {
+/// decision is testable without a clock. `thread` is [`hold_thread_name`].
+pub(crate) fn hold_line(thread: &str, entry: &str, total_ms: f64, stages: &HoldMs) -> Option<String> {
     if total_ms < HOLD_THRESHOLD_MS {
         return None;
     }
     Some(format!(
-        "Window thread hold entry={entry} ms={:.0} {stages} other_ms={:.1}",
+        "{thread} thread hold entry={entry} ms={:.0} {stages} other_ms={:.1}",
         total_ms,
         stages.other_ms(total_ms)
     ))
@@ -298,10 +311,27 @@ mod tests {
 
     #[test]
     fn a_hold_under_the_threshold_is_not_reported() {
-        assert_eq!(hold_line("scroll", 49.9, &HoldMs::default()), None);
-        let line = hold_line("scroll", 50.0, &HoldMs::default()).expect("reported");
+        assert_eq!(hold_line("Window", "scroll", 49.9, &HoldMs::default()), None);
+        let line = hold_line("Window", "scroll", 50.0, &HoldMs::default()).expect("reported");
         assert!(line.starts_with("Window thread hold entry=scroll ms=50 "), "{line}");
         assert!(line.ends_with(" other_ms=50.0"), "{line}");
+    }
+
+    #[test]
+    fn a_hold_on_the_content_thread_is_not_labelled_as_the_window() {
+        assert_eq!(hold_thread_name(), "Window");
+        let label = std::thread::Builder::new()
+            .name("page".into())
+            .spawn(hold_thread_name)
+            .expect("spawn")
+            .join()
+            .expect("join");
+        assert_eq!(label, "Content");
+        let line = hold_line("Content", "live_turn", 80.0, &HoldMs::default()).expect("reported");
+        assert!(
+            line.starts_with("Content thread hold entry=live_turn ms=80 "),
+            "{line}"
+        );
     }
 
     #[test]
@@ -311,7 +341,7 @@ mod tests {
         stages.add(HoldStage::Render, 40.0);
         stages.add(HoldStage::Acquire, 16.0);
         stages.add(HoldStage::Acquire, 16.0);
-        let line = hold_line("live_turn", 612.0, &stages).expect("reported");
+        let line = hold_line("Window", "live_turn", 612.0, &stages).expect("reported");
         // The presenter's three stages are a breakdown of `render`, so
         // they are not counted again: `other` is 612 - 300 - 40.
         assert_eq!(

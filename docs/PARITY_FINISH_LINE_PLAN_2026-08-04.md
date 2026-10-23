@@ -4,7 +4,7 @@
 > finish line (§3) is the acceptance bar, the trench runs §5 config on the §4
 > queue, and the product-feel number stays unsigned until P5's holdout board.
 > This retires the 100%-raw-pixel acceptance criterion in
-> `100pct-pixel-parity-plan.md` — the bar changes, the ruthlessness does not.
+> `docs/archive/100pct-pixel-parity-plan.md` — the bar changes, the ruthlessness does not.
 > **Authors:** Atlas (assessment + plan) · Prometheus (independent attack + amendments, exchange reply 2026-08-04). Disagreements are recorded, not smoothed over.
 > **Scope:** macOS only. This finish line is **engine correctness**, not product launch. Windows/Linux port their own flavors of the defect classes; they do not join this re-instrument.
 > **Exists in service of:** HiWave.
@@ -53,7 +53,7 @@ Before any corpus expansion, all 26 cases must hold **simultaneously**:
 5. Forensic board published (non-gating).
 6. Holdout suite: canary-only until 1–4 are green, then promote the 2 worst holdouts into the gate set.
 
-**Rejected as ship bar:** mean pixel-diff ≤ N% alone; "93% so basically done"; corpus expansion that dilutes the mean; the 100%-raw-pixel goal in `100pct-pixel-parity-plan.md` (acceptance criteria change; the ruthlessness stays).
+**Rejected as ship bar:** mean pixel-diff ≤ N% alone; "93% so basically done"; corpus expansion that dilutes the mean; the 100%-raw-pixel goal in `docs/archive/100pct-pixel-parity-plan.md` (acceptance criteria change; the ruthlessness stays).
 
 ## 4. Campaign order (trench queue)
 

@@ -35,6 +35,8 @@ fn capture(engine: &mut Engine, view: EngineViewId, commands: &[DisplayCommand],
     let path = std::env::temp_dir().join(format!("rustkit-fixed-{tag}-{}.ppm", std::process::id()));
     engine
         .presenter
+        .as_mut()
+        .expect("window presenter")
         .capture_commands(viewhost_id, (200, 100), path.to_str().unwrap(), commands)
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");
@@ -52,6 +54,8 @@ fn capture_at(engine: &mut Engine, view: EngineViewId, offset: (f32, f32), tag: 
     let display_list = engine.views[&view].display_list.as_ref().expect("display list");
     engine
         .presenter
+        .as_mut()
+        .expect("window presenter")
         .draw_scrolled(viewhost_id, display_list, offset, Some(path.to_str().unwrap()))
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");

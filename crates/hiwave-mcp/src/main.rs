@@ -1,6 +1,6 @@
 //! HiWave MCP — the RustKit engine, exposed to agents over stdio.
 //!
-//! Phase 0 of `HIWAVE_MCP_PLAN.md`. Three properties matter, and they are the
+//! Phase 0 of `docs/HIWAVE_MCP_PLAN.md`. Three properties matter, and they are the
 //! reasons this is a crate rather than a wrapper around `parity-capture`:
 //!
 //! 1. **In-process.** It calls `rustkit-engine` directly, so an agent can ask

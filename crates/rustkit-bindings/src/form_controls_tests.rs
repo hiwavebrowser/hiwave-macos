@@ -271,3 +271,31 @@ fn click_on_a_submit_or_reset_button_acts_on_its_form() {
     );
     assert!(b.take_submit_requests().is_empty());
 }
+
+/// A protocol-relative URL (`//host/path`) reads back with the document's
+/// scheme and its own host and path (WHATWG URL): the Wikipedia portal's
+/// search form, and the other URL-reflecting attributes.
+#[test]
+fn protocol_relative_urls_read_back_absolute() {
+    let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    bindings
+        .set_document(Rc::new(
+            Document::parse_html(
+                r#"<html><body><form id="f" action="//www.wikipedia.org/search-redirect.php"></form>
+<a id="a" href="//example.test/p?q#f">a</a><img id="i" src="//example.test"></body></html>"#,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+    bindings
+        .set_location(&url::Url::parse("https://www.wikipedia.org/").unwrap())
+        .unwrap();
+    assert_eq!(
+        ev(
+            &bindings,
+            "var $ = function (id) { return document.getElementById(id); }; \
+             [$('f').action, $('a').href, $('i').src, new URL('//example.test/s', location.href).href].join(' ')"
+        ),
+        "https://www.wikipedia.org/search-redirect.php https://example.test/p?q#f https://example.test/ https://example.test/s"
+    );
+}

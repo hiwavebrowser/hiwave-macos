@@ -433,6 +433,10 @@ impl AsyncGenerator {
                 let reason = match e.into_opaque(context) {
                     Ok(reason) => reason,
                     Err(stop) => {
+                        crate::vm::interrupt_diag::note_interrupt(
+                            "async_generator.complete",
+                            INTERRUPTED,
+                        );
                         Promise::reject_interrupted(
                             promise_capability.reject(),
                             INTERRUPTED,
@@ -543,6 +547,7 @@ impl AsyncGenerator {
         // which no handler in the body takes; it ends the job, and the
         // generator is abandoned so later calls settle.
         if let CompletionRecord::Throw(err) = result {
+            crate::vm::interrupt_diag::note_interrupt("async_generator.resume", INTERRUPTED);
             Self::abandon_interrupted(&generator.clone().upcast(), context);
             return Err(err);
         }
@@ -572,6 +577,7 @@ impl AsyncGenerator {
             r#gen.context = None;
             std::mem::take(&mut r#gen.queue)
         };
+        crate::vm::interrupt_diag::note_interrupt("async_generator.abandon", INTERRUPTED);
         for request in queue {
             Promise::reject_interrupted(request.capability.reject(), INTERRUPTED, context);
         }
@@ -852,6 +858,7 @@ fn settle_refused(
     if let Err(err) = result
         && !err.is_catchable()
     {
+        crate::vm::interrupt_diag::note_interrupt("async_generator.settle_refused", INTERRUPTED);
         Promise::reject_interrupted(capability.reject(), INTERRUPTED, context);
     }
 }

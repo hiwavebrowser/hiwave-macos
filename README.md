@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/logo.png" alt="HiWave" width="120" />
-</p>
-
 <h1 align="center">HiWave</h1>
 
 <p align="center">
@@ -20,7 +16,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/status-alpha-blueviolet" alt="Status: Alpha" />
   <img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0" />
-  <img src="https://img.shields.io/badge/platforms-Win%20%7C%20Mac%20%7C%20Linux-lightgrey" alt="Platforms" />
+  <img src="https://img.shields.io/badge/platform-macOS-lightgrey" alt="Platform: macOS" />
 </p>
 
 ---
@@ -60,21 +56,10 @@ regressions. **The real-site board is the number to watch:** it loads live
 sites and scores each one on *loads*, *readable* and *looks right* against the
 same Chrome.
 
-### What landed recently (week of 2026-09-19)
+### What landed recently
 
-86 PRs merged. The highlights:
-- **Style cascade 7× faster.** Rules are indexed by subject, selectors are
-  prepared once, and text measurement and shaping are cached (#256–#258,
-  #277/#278). netflix, github and cnn now load inside the 30 s budget.
-- **CSS correctness.** Real `@media` blocks (#259), `visibility`, `object-fit`,
-  floats, logical properties and `display` keywords (#270–#276). Per-element
-  custom properties (#289). One bad rule no longer drops a whole stylesheet
-  (#268). `url()` resolves against its stylesheet, which fixes most web-font
-  404s (#291).
-- **Hangs fixed.** A self-referencing CSS variable loop (#286), and a garbage
-  collector cycle in the JS engine that took pages to 13 GB (#287).
-- **Instruments.** A live-site board, a Chrome ground-truth probe and an
-  80-site wide board.
+See the [merged pull requests](https://github.com/hiwavebrowser/hiwave-macos/pulls?q=is%3Apr+is%3Amerged+base%3Adevelop)
+into `develop`.
 
 ### Known gaps — stated, not hidden
 
@@ -156,36 +141,74 @@ Power users rejoice. Everything is accessible via keyboard:
 
 ### Build from Source
 
-```bash
-# Prerequisites: Rust 1.75+, platform dependencies (see CONTRIBUTING.md)
+macOS is the supported platform for this repository: RustKit content
+rendering, the `rustkit` feature's engine dependencies and every CI job that
+builds Rust are macOS-only (`macos-14`). The Rust toolchain is pinned by
+`rust-toolchain.toml` (currently 1.91.0); `rustup` picks it up automatically.
 
+```bash
 git clone https://github.com/hiwavebrowser/hiwave-macos.git
 cd hiwave-macos
-cargo run -p hiwave-app
+cargo run -p hiwave-app            # debug build; the binary is `hiwave`
+cargo run -p hiwave-app --release  # optimized build
+./scripts/run-rustkit.sh           # same, via the convenience script
 ```
 
-### Run Modes
+On macOS, page content is always rendered by RustKit (GPU rendering via wgpu,
+engine-level ad/tracker blocking through `hiwave-shield`). The browser UI is
+still drawn by the system WebView through WRY.
 
-On macOS, page content is always rendered by RustKit:
+**Feature flags** (`hiwave-app`):
 
-| Mode | Command | Description |
-|------|---------|-------------|
-| **RustKit** | `./scripts/run-rustkit.sh` | Pure Rust browser engine for content with engine-level ad blocking |
+| Feature | Default | What it does |
+|---------|---------|--------------|
+| `rustkit` | yes | Pulls in the RustKit engine crates and wgpu for content rendering (macOS targets only) |
 
-#### RustKit Mode (Default)
+`rustkit-engine` also has a `headless` feature (offscreen rendering, no window
+surface), which `hiwave-app` enables for its macOS integration tests. The old
+`webview-fallback` mode has been removed.
+
+### Tests
+
 ```bash
-# Using convenience script
-./scripts/run-rustkit.sh
+cargo test --workspace --no-run      # CI: every test target must compile
+cargo test -p rustkit-layout --lib   # CI runs the lib suites of layout, engine, js,
+                                     # bindings, renderer, image, viewhost and http
+cargo test -p rustkit-js --tests     # JS engine integration tests
+cargo fmt --all -- --check
+cargo clippy --workspace -- -D warnings
 
-# Or directly with cargo
-cargo run -p hiwave-app --features rustkit
-cargo run -p hiwave-app --features rustkit --release  # optimized build
+# Python instrument guards (CI runs these on Ubuntu; needs pyyaml)
+for t in scripts/tests/test_*.py; do python3 "$t"; done
 ```
 
-RustKit mode uses our pure-Rust browser engine for content rendering:
-- 🚀 Hardware-accelerated GPU rendering via wgpu
-- 🛡️ Engine-level ad/tracker blocking (requests blocked before they leave the browser)
-- 🔧 Full control over the rendering pipeline
+### Parity against Chrome
+
+```bash
+cargo build --release -p parity-capture
+python3 scripts/parity_test.py                    # all campaign cases
+python3 scripts/parity_test.py --scope builtins   # builtins | websuite | micro | holdout
+python3 scripts/parity_test.py --case new_tab     # one case
+python3 scripts/parity_swarm.py --jobs 4 --scope all
+python3 scripts/generate_baselines.py             # regenerate Chrome baselines
+```
+
+Chrome baselines need the oracle's Node dependencies (`npm ci` in
+`tools/parity_oracle`). Test cases are registered in `cases/registry.json`.
+
+### Workspace
+
+| Area | Crates |
+|------|--------|
+| App | `hiwave-app` (entry point, event loop, IPC, UI in `src/ui/`), `hiwave-core`, `hiwave-shell` (tabs, workspaces, command palette), `hiwave-shield` (adblock-rust), `hiwave-vault` (AES-256 passwords), `hiwave-analytics` (local-only) |
+| Engine core | `rustkit-engine`, `rustkit-core`, `rustkit-common`, `rustkit-dom`, `rustkit-html`, `rustkit-css`, `rustkit-cssparser`, `rustkit-layout`, `rustkit-text` |
+| Rendering | `rustkit-renderer` (wgpu), `rustkit-compositor`, `rustkit-viewhost`, `rustkit-image`, `rustkit-codecs`, `rustkit-svg`, `rustkit-canvas`, `rustkit-webgl` |
+| Scripting and web APIs | `rustkit-js` (Boa, vendored with a patch in `third_party/boa_engine`), `rustkit-bindings`, `rustkit-animation`, `rustkit-worker`, `rustkit-sw`, `rustkit-idb`, `rustkit-media`, `rustkit-a11y` |
+| Network | `rustkit-net`, `rustkit-http` |
+| Testing and tools | `rustkit-test`, `rustkit-bench`, `parity-capture`, `hiwave-mcp`, `hiwave-smoke` |
+
+Docs and plans are in [`docs/`](docs/); superseded plans are in
+[`docs/archive/`](docs/archive/).
 
 ---
 
@@ -252,9 +275,9 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 **Quick Start:**
 ```bash
-cargo test --workspace        # Run tests
-cargo fmt                     # Format code
-cargo clippy                  # Lint
+cargo test --workspace                  # Run tests
+cargo fmt --all                         # Format code
+cargo clippy --workspace -- -D warnings # Lint
 ```
 
 ---
@@ -284,18 +307,23 @@ Your support helps cover:
 ## Architecture
 
 Web pages are rendered by **RustKit**, HiWave's own engine, which is the
-default. The browser's own UI (tabs, address bar, sidebar) is still HTML
-rendered by the system WebView through WRY. Moving that UI onto RustKit too,
+default. The browser's own UI (tabs, address bar, sidebar, and the shelf
+panel below the page) is still HTML rendered by the system WebView through
+WRY, and talks to Rust over IPC (`window.ipc.postMessage()`, handled in
+`crates/hiwave-app/src/ipc/commands.rs`). Moving that UI onto RustKit too,
 so that nothing borrowed remains, is part of the [mission](MISSION.md).
 
 ```
 ┌─────────────────────────────────────────┐
-│  Chrome WebView (Browser UI)            │
+│  Chrome WebView (Browser UI, WRY)       │
 │  Tabs • Address Bar • Sidebar           │
 ├─────────────────────────────────────────┤
 │                                         │
 │  Content (Web Pages): RustKit engine    │
 │                                         │
+├─────────────────────────────────────────┤
+│  Shelf WebView (WRY)                    │
+│  Shelf • Command palette                │
 └─────────────────────────────────────────┘
 ```
 

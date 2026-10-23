@@ -2578,6 +2578,11 @@ impl Promise {
                             let reason = match e.into_opaque(context) {
                                 Ok(reason) => reason,
                                 Err(stop) => {
+                                    crate::vm::interrupt_diag::note_interrupt_err(
+                                        "promise.resolve.then",
+                                        INTERRUPTED_JOB,
+                                        &stop,
+                                    );
                                     let error = JsNativeError::error()
                                         .with_message(INTERRUPTED_JOB)
                                         .into_opaque(context);
@@ -2766,6 +2771,11 @@ fn new_promise_reaction_job(
                     Err(e) => match e.into_opaque(context) {
                         Ok(reason) => Err(reason),
                         Err(stop) => {
+                            crate::vm::interrupt_diag::note_interrupt_err(
+                                "promise.reaction.handler",
+                                INTERRUPTED_JOB,
+                                &stop,
+                            );
                             if let Some(capability) = &promise_capability {
                                 Promise::reject_interrupted(
                                     capability.reject(),
@@ -2824,6 +2834,11 @@ fn new_promise_reaction_job(
                 if let Err(err) = &result
                     && !err.is_catchable()
                 {
+                    crate::vm::interrupt_diag::note_interrupt_err(
+                        "promise.reaction.settle",
+                        INTERRUPTED_JOB,
+                        err,
+                    );
                     Promise::reject_interrupted(reject, INTERRUPTED_JOB, context);
                 }
                 result
@@ -2882,6 +2897,11 @@ fn new_promise_resolve_thenable_job(
             let value = match value.into_opaque(context) {
                 Ok(value) => value,
                 Err(stop) => {
+                    crate::vm::interrupt_diag::note_interrupt_err(
+                        "promise.thenable",
+                        INTERRUPTED_JOB,
+                        &stop,
+                    );
                     Promise::reject_interrupted(
                         &resolving_functions.reject,
                         INTERRUPTED_JOB,

@@ -19,8 +19,9 @@ pub(crate) struct Server {
     pub(crate) hits: Arc<AtomicUsize>,
 }
 
-/// `/echo` answers with the request body, `/slow*` after 300 ms, anything
-/// else with its own path as the body.
+/// `/echo` answers with the request body, `/slow*` after 300 ms, `/beacon*`
+/// after 2 s, anything with `delay=<ms>` in its query after that long,
+/// anything else with its own path as the body.
 fn serve() -> Server {
     serve_routes(Vec::new())
 }
@@ -83,6 +84,14 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 if path.starts_with("/held") {
                     std::thread::sleep(Duration::from_millis(300));
                 }
+                // Any path with `delay=<ms>` in its query answers that late.
+                if let Some(ms) = path
+                    .split_once('?')
+                    .and_then(|(_, query)| query.split('&').find_map(|kv| kv.strip_prefix("delay=")))
+                    .and_then(|ms| ms.parse::<u64>().ok())
+                {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
                 let content_type = fixed.map(|(_, ct, _)| *ct).unwrap_or("text/plain");
                 let body = if let Some((_, _, body)) = fixed {
                     body.clone()
@@ -91,6 +100,9 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 } else {
                     if path.starts_with("/slow") {
                         std::thread::sleep(Duration::from_millis(300));
+                    }
+                    if path.starts_with("/beacon") {
+                        std::thread::sleep(Duration::from_secs(2));
                     }
                     path.clone().into_bytes()
                 };
@@ -324,4 +336,23 @@ fn a_page_without_the_bridge_has_no_requests() {
         &crate::inspector::Inspector::new(&Default::default()),
     ));
     assert_eq!((found.requests, found.rounds, found.poisoned), (0, 0, false));
+}
+
+/// #730 follow-up (f), Prometheus NIT: a stopped `load` listener marked the
+/// last record with the same URL. Two inserts of one URL could swap: the
+/// first element's stop landed on the second element's run.
+#[test]
+fn a_stopped_listener_marks_its_own_scripts_record_not_another_with_the_same_url() {
+    use crate::script_net::mark_listener_stopped;
+    use crate::{ScriptOutcome, ScriptRecord};
+    let run = |source: &str| ScriptRecord { source: source.into(), bytes: 1, elapsed_ms: 1, outcome: ScriptOutcome::Ran };
+    let mut out = Pump::default();
+    out.records.push(run("https://a.test/x.js"));
+    out.records.push(run("https://a.test/x.js"));
+    mark_listener_stopped(&mut out, Some(0), "https://a.test/x.js".into());
+    assert_eq!(out.records[0].outcome, ScriptOutcome::OverBudget, "the first element's record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran, "the second element's run was marked");
+    mark_listener_stopped(&mut out, None, "https://a.test/x.js".into());
+    assert_eq!(out.records.len(), 3, "an event owed to a later turn adds its own record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran);
 }
