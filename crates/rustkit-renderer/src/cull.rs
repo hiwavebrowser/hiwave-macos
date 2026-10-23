@@ -177,6 +177,8 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
         | C::PopTransform
         | C::PushOpacity(_)
         | C::PopOpacity
+        | C::PushFilter(_)
+        | C::PopFilter
         | C::PushViewportFixed
         | C::PopViewportFixed => return None,
         // Fills keep the exact rect the check has always used.
