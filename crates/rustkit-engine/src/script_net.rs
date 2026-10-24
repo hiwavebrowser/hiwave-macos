@@ -1052,7 +1052,11 @@ fn enqueue_inserted(
     let mut started = Vec::new();
     {
         let mut board = lock_board(&scripts.board);
-        for rustkit_bindings::InsertedScript { node, url, in_order } in queued {
+        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by } in queued {
+            if let Some(at) = inserted_by {
+                // The name `run_inserted` evaluates it under.
+                inspector.note_inserted(&format!("inserted#{node}"), &at.path, at.line, at.column);
+            }
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
