@@ -152,6 +152,9 @@ fn a_small_load_is_recorded_in_this_exact_order() {
             "response #3 200 image/png",
             "relayout image_loaded(count=1)",
             "console Log <string len=2> @inline#1:1:9",
+            "script parser inline#1 ran held=DOMContentLoaded",
+            "lifecycle DOMContentLoaded held_by=0",
+            "lifecycle load held_by=0",
             "load_finished over_budget=0",
         ]
     );
