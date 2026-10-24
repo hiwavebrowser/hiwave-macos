@@ -339,9 +339,13 @@ const OWN_SITE: &str = "the page's own script: ";
 /// The last two host labels (`www.yahoo.com` -> `yahoo.com`). Close enough
 /// for ranking; a two-label public suffix (`co.uk`) reads as one site.
 fn site_of(url: &str) -> Option<String> {
-    let host = url.split("://").nth(1)?.split(['/', ':', '?', '#']).next()?;
+    let host = host_of(url)?;
     let labels: Vec<&str> = host.split('.').collect();
     Some(labels[labels.len().saturating_sub(2)..].join("."))
+}
+
+fn host_of(url: &str) -> Option<String> {
+    Some(url.split("://").nth(1)?.split(['/', ':', '?', '#']).next()?.to_string())
 }
 
 /// The site of the URL in an R5 key (`uncaught X in <url>:line:col`).
@@ -523,7 +527,7 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     }
 
     // R5: uncaught errors, grouped by name and place.
-    let mut errors: Vec<(String, usize)> = Vec::new();
+    let mut errors: Vec<(String, usize, f64)> = Vec::new();
     for e in of("script_error") {
         let at = &e["location"];
         let key = format!(
@@ -536,20 +540,34 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
                 format!("{}:{}:{}", text(&at["url"]), at["line"], at["column"])
             }
         );
-        match errors.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, n)) => *n += 1,
-            None => errors.push((key, 1)),
+        match errors.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, n, _)) => *n += 1,
+            None => errors.push((key, 1, ms(&e["t_ms"]).unwrap_or(0.0))),
         }
     }
     // An error in the page's own site's script ranks first of the event
     // causes (design note R5): yahoo's chunk 7730 SyntaxError is the app
-    // bundle failing, where an ad script's error is noise.
-    let site = of("navigation_start").next().and_then(|r| r["url"].as_str()).and_then(site_of);
-    errors.sort_by_key(|(key, _)| !(site.is_some() && site_of_error(key) == site));
-    for (key, n) in errors.into_iter().take(PER_RULE) {
+    // bundle failing, where an ad script's error is noise. Its line says how
+    // many fetch/XHR went to the page's own host afterwards (yahoo: none to
+    // www.yahoo.com, so the feed never asked for its data). The host, not the
+    // site: yahoo's ad and analytics hosts share the site.
+    let page_url = of("navigation_start").next().and_then(|r| r["url"].as_str());
+    let site = page_url.and_then(site_of);
+    let page_host = page_url.and_then(host_of);
+    let own_calls_after = |t: f64| {
+        of("request")
+            .filter(|r| matches!(r["resource_type"].as_str(), Some("fetch" | "xhr")))
+            .filter(|r| ms(&r["t_ms"]).is_some_and(|at| at >= t))
+            .filter(|r| r["url"].as_str().and_then(host_of) == page_host)
+            .count()
+    };
+    errors.sort_by_key(|(key, _, _)| !(site.is_some() && site_of_error(key) == site));
+    for (key, n, first) in errors.into_iter().take(PER_RULE) {
         let mut line = if n > 1 { format!("{key} (x{n})") } else { key };
         if site.is_some() && site_of_error(&line) == site {
-            line = format!("{OWN_SITE}{line}");
+            let calls = own_calls_after(first);
+            let host = page_host.as_deref().unwrap_or("-");
+            line = format!("{OWN_SITE}{line}; then {calls} fetch/XHR to {host}");
         }
         causes.push(Cause { rule: "R5", line });
     }
@@ -892,6 +910,12 @@ mod tests {
             json!({"t_ms": 1000.0, "type": "script_error", "name": "SyntaxError", "message": null,
                    "location": {"url": "https://www.x.test/chunks/7730.js", "line": 1, "column": 6278},
                    "unhandled_rejection": false, "script": "https://www.x.test/chunks/7730.js", "value": "error"}),
+            // Counted: only the www.x.test call after the error. Not: one
+            // before it, another site's, and another host of the same site.
+            json!({"t_ms": 800.0, "type": "request", "id": 3, "resource_type": "fetch", "url": "https://www.x.test/api/early"}),
+            json!({"t_ms": 2000.0, "type": "request", "id": 4, "resource_type": "fetch", "url": "https://ads.y.test/bid"}),
+            json!({"t_ms": 2100.0, "type": "request", "id": 5, "resource_type": "xhr", "url": "https://pbd.x.test/analytics"}),
+            json!({"t_ms": 2200.0, "type": "request", "id": 6, "resource_type": "fetch", "url": "https://www.x.test/api/feed"}),
             json!({"t_ms": 5000.0, "type": "script", "script": "inline#1", "kind": "parser", "outcome": "ran", "ran_ms": 10.0}),
             json!({"t_ms": 16745.0, "type": "script", "script": "https://x.test/67222.js", "kind": "inserted", "outcome": "ran",
                    "fetch_ms": 1853.0, "waited_ms": 5444.0, "ran_ms": 11.0}),
@@ -904,7 +928,7 @@ mod tests {
         assert_eq!(
             ranked[..3],
             [
-                "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278",
+                "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 1 fetch/XHR to www.x.test",
                 "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
                 "R5 uncaught TypeError in https://ads.y.test/ad.js:1:5",
             ]
