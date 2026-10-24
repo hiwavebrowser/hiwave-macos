@@ -557,28 +557,46 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
         }
     }
 
-    // R8: the log silent for a while before the load finished.
+    // R8: the log silent for a while before the load finished, or while a
+    // script body was in and waiting to run (yahoo: nine inserted chunks in
+    // at 11.3 s, nothing recorded until 15.4 s, well after load).
     let finished = of("load_finished").next().and_then(|r| ms(&r["t_ms"]));
     // A script running is not silence: its start is a point too, and its run
     // span is taken out of any gap it falls in.
     let spans: Vec<(f64, f64)> = scripts.iter().map(|s| run_span(s)).collect();
+    let waits: Vec<(f64, f64)> = scripts
+        .iter()
+        .filter_map(|s| {
+            let start = run_span(s).0;
+            Some((start - ms(&s["waited_ms"])?, start))
+        })
+        .collect();
     let mut times: Vec<f64> = records.iter().filter_map(|r| ms(&r["t_ms"])).chain(spans.iter().map(|s| s.0)).collect();
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut gaps: Vec<(f64, f64)> = times
+    let mut gaps: Vec<(f64, f64, usize)> = times
         .windows(2)
-        .filter(|w| finished.is_none_or(|end| w[1] <= end))
-        .map(|w| {
+        .filter_map(|w| {
+            let waiting = waits.iter().filter(|(a, b)| *a <= w[0] && *b >= w[1]).count();
+            let pending = finished.is_none_or(|end| w[1] <= end);
+            if !pending && waiting == 0 {
+                return None;
+            }
             let ran: f64 = spans.iter().map(|(a, b)| (b.min(w[1]) - a.max(w[0])).max(0.0)).sum();
-            (w[0], (w[1] - w[0] - ran).max(0.0))
+            Some((w[0], (w[1] - w[0] - ran).max(0.0), if pending { 0 } else { waiting }))
         })
-        .filter(|(_, gap)| *gap >= SILENT_MS)
+        .filter(|(_, gap, _)| *gap >= SILENT_MS)
         .collect();
     gaps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for (from, gap) in gaps.into_iter().take(PER_RULE) {
+    for (from, gap, waiting) in gaps.into_iter().take(PER_RULE) {
+        let when = if waiting == 0 {
+            "before the load finished".to_string()
+        } else {
+            format!("with {waiting} script(s) in and waiting to run")
+        };
         causes.push(Cause {
             rule: "R8",
             line: format!(
-                "event log silent {:.1} s from t={:.1} s before the load finished: no script ran, no request moved",
+                "event log silent {:.1} s from t={:.1} s {when}: no script ran, no request moved",
                 gap / 1000.0,
                 from / 1000.0
             ),
@@ -791,6 +809,27 @@ mod tests {
             vec![
                 "R7 load fired 8.6 s after DOMContentLoaded; it waited for: https://x.test/otSDKStub.js, https://x.test/otBannerSdk.js",
                 "R8 event log silent 5.9 s from t=11.8 s before the load finished: no script ran, no request moved",
+            ]
+        );
+    }
+
+    /// yahoo, 2026-10-24 (LW + T3 + T4 stack): long after load, inserted
+    /// chunks were in at 11.3 s and nothing was recorded until 15.4 s.
+    #[test]
+    fn a_silent_stretch_after_load_with_a_script_waiting_is_r8() {
+        let records = vec![
+            json!({"t_ms": 5000.0, "type": "script", "script": "inline#1", "kind": "parser", "outcome": "ran", "ran_ms": 10.0}),
+            json!({"t_ms": 6602.0, "type": "load_finished"}),
+            json!({"t_ms": 11318.0, "type": "response", "id": 145}),
+            json!({"t_ms": 15364.0, "type": "request", "id": 152, "resource_type": "fetch", "url": "https://x.test/cfg"}),
+            json!({"t_ms": 16745.0, "type": "script", "script": "https://x.test/67222.js", "kind": "inserted", "outcome": "ran",
+                   "fetch_ms": 1853.0, "waited_ms": 5444.0, "ran_ms": 11.0}),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
+                "R8 event log silent 4.0 s from t=11.3 s with 1 script(s) in and waiting to run: no script ran, no request moved",
             ]
         );
     }
