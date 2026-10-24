@@ -119,6 +119,13 @@ fn is_within(inner: &str, outer: &str) -> bool {
     inner == outer || inner.starts_with(&format!("{outer} > "))
 }
 
+/// `html` and `body`: a page that locks scrolling often makes the body
+/// `position: fixed`. That is the lock (R1), not an overlay, and what is in
+/// the body is still the document's content.
+fn is_root(element: &Value) -> bool {
+    matches!(element["identity"]["tag"].as_str(), Some("html" | "body"))
+}
+
 fn visible(element: &Value) -> bool {
     element["box"]["has_box"].as_bool() == Some(true)
         && style(element, "visibility") != Some("hidden")
@@ -148,7 +155,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
                 position: style(element, "position").map(str::to_string),
             });
         }
-        if style(element, "position") == Some("fixed") {
+        if style(element, "position") == Some("fixed") && !is_root(element) {
             continue;
         }
         if let Some((_, y, _, h)) = rect(element) {
@@ -157,19 +164,35 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     }
 
     let viewport_area = (viewport.0 * viewport.1).max(1.0);
-    let mut covering: Vec<Covering> = Vec::new();
-    let mut candidates: Vec<(&Value, f64)> = elements
+    let share_of = |e: &Value| {
+        let (x, y, w, h) = rect(e)?;
+        let cw = (x + w).min(viewport.0) - x.max(0.0);
+        let ch = (y + h).min(viewport.1) - y.max(0.0);
+        Some((cw.max(0.0) * ch.max(0.0)) / viewport_area)
+    };
+    let positioned: Vec<(&Value, f64)> = elements
         .iter()
         .copied()
-        .filter(|e| visible(e) && matches!(style(e, "position"), Some("fixed" | "absolute" | "sticky")))
-        .filter_map(|e| {
-            let (x, y, w, h) = rect(e)?;
-            let cw = (x + w).min(viewport.0) - x.max(0.0);
-            let ch = (y + h).min(viewport.1) - y.max(0.0);
-            let share = (cw.max(0.0) * ch.max(0.0)) / viewport_area;
-            (share >= COVERING_SHARE).then_some((e, share))
-        })
+        .filter(|e| !is_root(e) && visible(e) && matches!(style(e, "position"), Some("fixed" | "absolute" | "sticky")))
+        .filter_map(|e| Some((e, share_of(e)?)))
         .collect();
+    // The largest fixed box on screen, whatever its share: what R1 names
+    // when nothing covers the viewport (a consent bar).
+    let largest_fixed = positioned
+        .iter()
+        .filter(|(e, share)| style(e, "position") == Some("fixed") && *share > 0.0)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(e, share)| Covering {
+            selector: label(e),
+            position: "fixed".to_string(),
+            z_index: style(e, "z-index").filter(|z| *z != "auto").map(str::to_string),
+            covers_pct: (share * 1000.0).round() / 10.0,
+            takes_centre: false,
+            structural: structural(e).to_string(),
+        });
+    let mut covering: Vec<Covering> = Vec::new();
+    let mut candidates: Vec<(&Value, f64)> =
+        positioned.iter().copied().filter(|(_, share)| *share >= COVERING_SHARE).collect();
     // Tree order keeps an outer box before the boxes inside it.
     candidates.sort_by(|a, b| structural(a.0).len().cmp(&structural(b.0).len()));
     for (element, share) in candidates {
@@ -194,7 +217,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     // What is inside a fixed box is not the document's content.
     let fixed: Vec<&str> = elements
         .iter()
-        .filter(|e| style(e, "position") == Some("fixed"))
+        .filter(|e| !is_root(e) && style(e, "position") == Some("fixed"))
         .map(|e| structural(e))
         .collect();
     for element in &elements {
@@ -218,7 +241,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     }
 
     let mut ranked = Vec::new();
-    let overlay = covering.iter().find(|c| c.takes_centre).or_else(|| covering.first());
+    let overlay = covering.iter().find(|c| c.takes_centre).or_else(|| covering.first()).or(largest_fixed.as_ref());
     let describe = |c: &Covering| {
         format!(
             "{} {}{} covers {}% of the viewport",
@@ -260,7 +283,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
         if let Some(empty) = bands
             .iter()
             .skip(1)
-            .find(|b| b.top < document_height && b.text == 0 && b.images == 0)
+            .find(|b| b.bottom <= document_height && b.text == 0 && b.images == 0)
         {
             ranked.push(Cause {
                 rule: "R9",

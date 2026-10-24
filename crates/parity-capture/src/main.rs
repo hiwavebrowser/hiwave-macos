@@ -1801,6 +1801,27 @@ mod tests {
         assert!(text.contains("1. [R1] scroll locked"), "{text}");
     }
 
+    /// cnn, 2026-10-24: the consent script makes the body `position: fixed`
+    /// with `overflow: hidden`. The body is the lock, not the overlay, and
+    /// its content is still the page's; a bottom bar smaller than the
+    /// covering share is what the lock names.
+    #[test]
+    fn a_fixed_body_is_the_lock_and_the_largest_fixed_box_is_named() {
+        let (report, text) = report_for(
+            "fixed-body",
+            "<html><head><style>body { margin: 0; position: fixed; overflow: hidden; width: 100% }
+p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white }</style></head>
+<body><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><div id=\"bar\"><p>cookies</p></div></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec!["R1 scroll locked (body overflow-y:hidden) by overlay: fixed div#bar (z 50) covers 20% of the viewport"],
+            "{text}"
+        );
+        assert_eq!(report["covering"], serde_json::json!([]), "{text}");
+        assert_eq!(report["bands"][1]["text"], 3, "{text}");
+    }
+
     #[test]
     fn an_empty_viewport_band_below_content_is_r9() {
         let (report, text) = report_for(
