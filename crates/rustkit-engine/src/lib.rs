@@ -32090,6 +32090,12 @@ mod remote_font_tests {
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // load_html leaves the page at about:blank, and the private-address
+        // vet lets a page with no http(s) origin reach public addresses only:
+        // every face would be denied, not fetched. Serve the page from the
+        // font host, so its fetches are same-origin loopback.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -32453,6 +32459,10 @@ document.currentScript.remove();
             })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // From about:blank the vet denies 127.0.0.1 at once, which would pass
+        // this test without the budget ever cutting a fetch.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rules = engine.view_font_face_rules(view);
         assert_eq!(rules.len(), 1, "inline @font-face must be discovered");
@@ -32469,6 +32479,10 @@ document.currentScript.remove();
         let took = started.elapsed();
 
         assert_eq!(loaded, 0, "a stalled face must not count as loaded");
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "the face failed in {took:?}, before the 500 ms budget could cut it"
+        );
         assert!(
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled web font: {took:?}"
