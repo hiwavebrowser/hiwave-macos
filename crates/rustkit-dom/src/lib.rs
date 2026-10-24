@@ -750,6 +750,26 @@ impl Document {
     /// into this document. Returns the top-level nodes in order, detached
     /// and with fresh NodeIds; ids in the fragment join the id table.
     pub fn parse_fragment(&self, html: &str, context: &str) -> Result<Vec<Rc<Node>>, DomError> {
+        // HTML §13.4 step 4: a fragment whose context is a raw text element
+        // starts the tokenizer in RAWTEXT or script data state, and one in
+        // title or textarea in RCDATA. No tag is recognised, so the whole
+        // string is one text node. A framework that writes a script's code
+        // with `script.innerHTML = code` (Next.js's script loader) otherwise
+        // loses everything from the first `i<n` onward.
+        let context_lower = context.to_ascii_lowercase();
+        let verbatim = match context_lower.as_str() {
+            "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript" => {
+                Some(html.to_string())
+            }
+            "title" | "textarea" => Some(rustkit_html::entities::decode(html)),
+            _ => None,
+        };
+        if let Some(text) = verbatim {
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![self.create_node(NodeType::Text(text))]);
+        }
         let sink = rustkit_html::parse_fragment(html, DocumentSink::new(), context)
             .map_err(|e| DomError::ParseError(e.to_string()))?;
         Ok(sink
