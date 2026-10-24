@@ -374,13 +374,49 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
             .sum::<f64>()
             .min(to - from)
     };
+    // Before the first page script runs, every script waits on the load
+    // itself, not for a turn (yahoo: bodies by 1.7 s, first script at 5.8 s,
+    // after first layout and the last image). That is one fact, said once.
+    let first_start = scripts.iter().map(|s| run_span(s).0).fold(f64::INFINITY, f64::min);
+    let early: Vec<f64> = scripts
+        .iter()
+        .filter_map(|s| Some(run_span(s).0 - ms(&s["waited_ms"])?))
+        .filter(|arrived| first_start - arrived >= STARVED_MS)
+        .collect();
+    if let Some(first_arrival) = early.iter().copied().reduce(f64::min) {
+        let kind_of: std::collections::HashMap<u64, &str> = of("request")
+            .filter_map(|r| Some((r["id"].as_u64()?, r["resource_type"].as_str()?)))
+            .collect();
+        let last_answer = records
+            .iter()
+            .filter(|r| r["type"] == "response" || r["type"] == "failure")
+            .filter(|r| ms(&r["t_ms"]).is_some_and(|t| t <= first_start))
+            .last();
+        let mut line = format!(
+            "no page script ran until t={:.1} s: {} script body(ies) had arrived {:.1} s or more before (first at t={:.1} s)",
+            first_start / 1000.0,
+            early.len(),
+            STARVED_MS / 1000.0,
+            first_arrival / 1000.0
+        );
+        if let Some(t) = of("first_layout").next().and_then(|r| ms(&r["t_ms"])) {
+            line.push_str(&format!("; first layout at t={:.1} s", t / 1000.0));
+        }
+        if let Some(r) = last_answer {
+            let kind = r["id"].as_u64().and_then(|id| kind_of.get(&id)).copied().unwrap_or("request");
+            line.push_str(&format!("; last answer before it: {kind} at t={:.1} s", ms(&r["t_ms"]).unwrap_or(0.0) / 1000.0));
+        }
+        causes.push(Cause { rule: "R4", line });
+    }
     let mut starved: Vec<(&Value, f64, f64)> = scripts
         .iter()
         .filter(|s| matches!(s["kind"].as_str(), Some("inserted" | "async")))
         .filter_map(|s| {
-            let waited = ms(&s["waited_ms"])?;
             let (start, _) = run_span(s);
-            let busy = busy_during(s, start - waited, start);
+            // Only the wait after the first script ran can be a missed turn.
+            let from = (start - ms(&s["waited_ms"])?).max(first_start);
+            let waited = (start - from).max(0.0);
+            let busy = busy_during(s, from, start);
             (waited - busy >= STARVED_MS).then_some((*s, waited, busy))
         })
         .collect();
@@ -631,6 +667,8 @@ mod tests {
             json!({"seq": 2, "t_ms": 5766.0, "type": "lifecycle", "event": "DOMContentLoaded", "held_by": [], "held_by_count": 0}),
             json!({"seq": 3, "t_ms": 5766.0, "type": "lifecycle", "event": "load", "held_by": [], "held_by_count": 0}),
             json!({"seq": 4, "t_ms": 5881.0, "type": "load_finished"}),
+            json!({"seq": 5, "t_ms": 5838.0, "type": "script", "script": "inline#34", "kind": "parser",
+                   "outcome": "ran", "ran_ms": 1.0}),
             json!({"seq": 5, "t_ms": 32229.0, "type": "script", "script": "https://s.test/benji.js", "kind": "inserted",
                    "outcome": "ran", "reason": null, "fetch_ms": 196.0, "waited_ms": 24519.0, "held": null}),
         ];
@@ -668,6 +706,30 @@ mod tests {
                 "R4 async script https://x.test/idle.js arrived in 50 ms and waited 8.0 s for a turn (4.0 s of it behind other scripts running)",
                 // The idle part of that wait, once; p1's and p2's runs are not silence.
                 "R8 event log silent 4.0 s from t=5.0 s before the load finished: no script ran, no request moved",
+            ]
+        );
+    }
+
+    /// yahoo, 2026-10-24 (LW + T3 + T4 stack): the async chunks' bodies were
+    /// in by 1.7 s, but no page script ran until 5.8 s, after first layout
+    /// and the last image. That is one line about the load, not one
+    /// "starved" line per chunk.
+    #[test]
+    fn scripts_held_until_the_load_reaches_its_script_phase_are_one_r4_line() {
+        let records = vec![
+            json!({"t_ms": 900.0, "type": "request", "id": 8, "resource_type": "script", "url": "https://x.test/a.js"}),
+            json!({"t_ms": 900.0, "type": "request", "id": 9, "resource_type": "image", "url": "https://x.test/i.png"}),
+            json!({"t_ms": 1700.0, "type": "response", "id": 8}),
+            json!({"t_ms": 4532.0, "type": "first_layout"}),
+            json!({"t_ms": 5816.0, "type": "response", "id": 9}),
+            json!({"t_ms": 5838.0, "type": "script", "script": "inline#34", "kind": "parser", "outcome": "ran", "ran_ms": 2.0}),
+            json!({"t_ms": 6023.0, "type": "script", "script": "https://x.test/a.js", "kind": "async", "outcome": "ran",
+                   "fetch_ms": 800.0, "waited_ms": 4153.0, "ran_ms": 170.0}),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R4 no page script ran until t=5.8 s: 1 script body(ies) had arrived 3.0 s or more before (first at t=1.7 s); first layout at t=4.5 s; last answer before it: image at t=5.8 s",
             ]
         );
     }
