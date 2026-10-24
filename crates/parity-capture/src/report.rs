@@ -77,7 +77,7 @@ pub struct Band {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cause {
-    /// `R1`..`R9` (see the T4 design note).
+    /// `R1`..`R10` (see the T4 design note).
     pub rule: &'static str,
     pub line: String,
 }
@@ -302,6 +302,16 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
                 ),
             });
         }
+    } else if bands.first().is_some() {
+        // R10: nothing to read at all. yahoo with #777 merged ended as 77
+        // elements and no text after React's error boundary took the page.
+        ranked.push(Cause {
+            rule: "R10",
+            line: format!(
+                "the first viewport has no text and no image ({} elements, document {document_height:.0}px tall)",
+                dump["total_elements"].as_u64().unwrap_or(elements.len() as u64)
+            ),
+        });
     }
 
     Report {
@@ -348,9 +358,18 @@ fn host_of(url: &str) -> Option<String> {
     Some(url.split("://").nth(1)?.split(['/', ':', '?', '#']).next()?.to_string())
 }
 
-/// The site of the URL in an R5 key (`uncaught X in <url>:line:col`).
+/// The site of the URL in an R5 key (`uncaught X in <url>:line:col`,
+/// `logged X thrown in <url>:line:col`).
 fn site_of_error(key: &str) -> Option<String> {
     site_of(key.split(" in ").nth(1)?)
+}
+
+/// The error name in a console message: the shape `<TypeError message len=46>`
+/// or the kept text `TypeError: ...`.
+fn error_name(message: &str) -> &str {
+    let name = message.trim_start_matches('<');
+    let end = name.find([' ', ':', '>']).unwrap_or(name.len());
+    if end == 0 { "error" } else { &name[..end] }
 }
 
 fn ms(v: &Value) -> Option<f64> {
@@ -545,6 +564,21 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
             None => errors.push((key, 1, ms(&e["t_ms"]).unwrap_or(0.0))),
         }
     }
+    // An error the page caught and passed to console.error carries its own
+    // stack (`error_stack`); it is named by where it was thrown. yahoo with
+    // #777 merged: two such TypeErrors, no uncaught one, and a blank page.
+    for c in of("console").filter(|c| c["level"] == "error") {
+        let Some(thrown) = c["error_stack"].as_str().and_then(|s| s.lines().next()) else {
+            continue;
+        };
+        let place = thrown.trim().trim_start_matches("at ");
+        let place = place.rsplit_once(" (").map_or(place, |(_, p)| p.trim_end_matches(')'));
+        let key = format!("logged {} thrown in {place}", error_name(text(&c["message"])));
+        match errors.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, n, _)) => *n += 1,
+            None => errors.push((key, 1, ms(&c["t_ms"]).unwrap_or(0.0))),
+        }
+    }
     // An error in the page's own site's script ranks first of the event
     // causes (design note R5): yahoo's chunk 7730 SyntaxError is the app
     // bundle failing, where an ad script's error is noise. Its line says how
@@ -653,7 +687,7 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
 pub fn apply_events(report: &mut Report, records: &[Value]) {
     let (events, not_checked) = event_causes(records);
     // "R5*" is an R5 line about the page's own site.
-    let order = ["R1", "R2", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
+    let order = ["R1", "R2", "R10", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
     report.ranked.extend(events);
     report.ranked.sort_by_key(|c| {
         let rule = if c.rule == "R5" && c.line.starts_with(OWN_SITE) { "R5*" } else { c.rule };
@@ -924,13 +958,42 @@ mod tests {
         let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
         apply_events(&mut report, &records);
         let ranked: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
-        // (R8 lines follow: these records are sparse.)
+        // R10 comes first (the dump has no elements) and R8 lines follow
+        // (the records are sparse).
+        assert!(ranked[0].starts_with("R10 "), "{ranked:?}");
         assert_eq!(
-            ranked[..3],
+            ranked[1..4],
             [
                 "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 1 fetch/XHR to www.x.test",
                 "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
                 "R5 uncaught TypeError in https://ads.y.test/ad.js:1:5",
+            ]
+        );
+    }
+
+    /// yahoo with #777 merged: no uncaught error, but two TypeErrors caught
+    /// and passed to console.error, then a blank page. Named by where they
+    /// were thrown (the first `error_stack` frame), own site first.
+    #[test]
+    fn an_error_caught_and_logged_with_its_stack_is_r5() {
+        let logged = |t: f64, stack: &str| {
+            json!({"t_ms": t, "type": "console", "level": "error", "message": "<TypeError message len=46>",
+                   "location": {"url": "https://www.x.test/7730.js", "line": 52, "column": 1849},
+                   "stack": "    at https://www.x.test/7730.js:52:1854", "error_stack": stack})
+        };
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 1.0, "type": "console", "level": "error", "message": "<string len=5>",
+                   "location": {"url": "https://ads.y.test/a.js", "line": 1, "column": 1}}),
+            logged(7808.0, "    at https://www.x.test/7730.js:1:6198\n    at https://www.x.test/7730.js:1:6074"),
+            logged(9812.0, "    at d (https://www.x.test/7730.js:9:40)\n    at oQ (https://www.x.test/87c7.js:1:71835)"),
+            logged(9900.0, "    at d (https://www.x.test/7730.js:9:40)"),
+        ];
+        assert_eq!(
+            lines(&records)[..2],
+            [
+                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:1:6198; then 0 fetch/XHR to www.x.test",
+                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:9:40 (x2); then 0 fetch/XHR to www.x.test",
             ]
         );
     }

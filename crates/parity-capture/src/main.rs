@@ -1859,6 +1859,14 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
     }
 
     #[test]
+    fn a_page_with_nothing_to_read_in_the_first_viewport_is_r10() {
+        let (report, text) = report_for("blank", "<html><body><div style=\"height:10px\"></div></body></html>");
+        let causes = causes(&report);
+        assert_eq!(causes.len(), 1, "{text}");
+        assert!(causes[0].starts_with("R10 the first viewport has no text and no image ("), "{text}");
+    }
+
+    #[test]
     fn a_short_plain_page_fires_no_rule_and_says_what_it_did_not_check() {
         let (report, text) = report_for("plain", "<html><body><p>a</p><img src=\"data:,\" width=\"10\" height=\"10\"></body></html>");
         assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
