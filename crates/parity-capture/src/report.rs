@@ -355,21 +355,50 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     if scripts.is_empty() {
         not_checked.push("R3, R4: no `script` records on this build (dev-tools T3)".to_string());
     }
-    let mut starved: Vec<&&Value> = scripts
+    // A record is written when its script is over, so it ran over
+    // [t - ran, t] and waited over [t - ran - waited, t - ran]. A wait spent
+    // while other scripts ran is a queue, not starvation: only the idle part
+    // of the wait counts.
+    let run_span = |s: &Value| {
+        let end = ms(&s["t_ms"]).unwrap_or(0.0);
+        (end - ms(&s["ran_ms"]).unwrap_or(0.0), end)
+    };
+    let busy_during = |me: &Value, from: f64, to: f64| -> f64 {
+        scripts
+            .iter()
+            .filter(|o| !std::ptr::eq(**o, me))
+            .map(|o| {
+                let (a, b) = run_span(o);
+                (b.min(to) - a.max(from)).max(0.0)
+            })
+            .sum::<f64>()
+            .min(to - from)
+    };
+    let mut starved: Vec<(&Value, f64, f64)> = scripts
         .iter()
         .filter(|s| matches!(s["kind"].as_str(), Some("inserted" | "async")))
-        .filter(|s| ms(&s["waited_ms"]).is_some_and(|w| w >= STARVED_MS))
+        .filter_map(|s| {
+            let waited = ms(&s["waited_ms"])?;
+            let (start, _) = run_span(s);
+            let busy = busy_during(s, start - waited, start);
+            (waited - busy >= STARVED_MS).then_some((*s, waited, busy))
+        })
         .collect();
-    starved.sort_by(|a, b| ms(&b["waited_ms"]).partial_cmp(&ms(&a["waited_ms"])).unwrap_or(std::cmp::Ordering::Equal));
-    for s in starved.iter().take(PER_RULE) {
+    starved.sort_by(|a, b| (b.1 - b.2).partial_cmp(&(a.1 - a.2)).unwrap_or(std::cmp::Ordering::Equal));
+    for (s, waited, busy) in starved.iter().take(PER_RULE) {
+        let queued = if *busy >= 100.0 {
+            format!(" ({:.1} s of it behind other scripts running)", busy / 1000.0)
+        } else {
+            String::new()
+        };
         causes.push(Cause {
             rule: "R4",
             line: format!(
-                "{} script {} arrived in {:.0} ms and waited {:.1} s for a turn",
+                "{} script {} arrived in {:.0} ms and waited {:.1} s for a turn{queued}",
                 text(&s["kind"]),
                 text(&s["script"]),
                 ms(&s["fetch_ms"]).unwrap_or(0.0),
-                ms(&s["waited_ms"]).unwrap_or(0.0) / 1000.0
+                waited / 1000.0
             ),
         });
     }
@@ -494,11 +523,18 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
 
     // R8: the log silent for a while before the load finished.
     let finished = of("load_finished").next().and_then(|r| ms(&r["t_ms"]));
-    let times: Vec<f64> = records.iter().filter_map(|r| ms(&r["t_ms"])).collect();
+    // A script running is not silence: its start is a point too, and its run
+    // span is taken out of any gap it falls in.
+    let spans: Vec<(f64, f64)> = scripts.iter().map(|s| run_span(s)).collect();
+    let mut times: Vec<f64> = records.iter().filter_map(|r| ms(&r["t_ms"])).chain(spans.iter().map(|s| s.0)).collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mut gaps: Vec<(f64, f64)> = times
         .windows(2)
         .filter(|w| finished.is_none_or(|end| w[1] <= end))
-        .map(|w| (w[0], w[1] - w[0]))
+        .map(|w| {
+            let ran: f64 = spans.iter().map(|(a, b)| (b.min(w[1]) - a.max(w[0])).max(0.0)).sum();
+            (w[0], (w[1] - w[0] - ran).max(0.0))
+        })
         .filter(|(_, gap)| *gap >= SILENT_MS)
         .collect();
     gaps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -506,7 +542,7 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
         causes.push(Cause {
             rule: "R8",
             line: format!(
-                "event log silent {:.1} s from t={:.1} s before the load finished: no script ended, no request moved",
+                "event log silent {:.1} s from t={:.1} s before the load finished: no script ran, no request moved",
                 gap / 1000.0,
                 from / 1000.0
             ),
@@ -607,6 +643,35 @@ mod tests {
         );
     }
 
+    /// yahoo, 2026-10-24 (T3 + T4b): async scripts that waited behind parser
+    /// scripts read as starved. A wait covered by other scripts running is a
+    /// queue; only the idle part counts.
+    #[test]
+    fn an_async_script_queued_behind_running_scripts_is_not_starved() {
+        let script = |name: &str, kind: &str, end: f64, waited: f64, ran: f64| {
+            json!({"t_ms": end, "type": "script", "script": name, "kind": kind, "outcome": "ran",
+                   "fetch_ms": 50.0, "waited_ms": waited, "ran_ms": ran})
+        };
+        let records = vec![
+            // Parser scripts run 1.0..4.9 s and 9.0..11.0 s.
+            script("https://x.test/p1.js", "parser", 4900.0, 0.0, 3900.0),
+            script("https://x.test/p2.js", "parser", 11000.0, 0.0, 2000.0),
+            // Waited 1.0..4.9 s, all of it behind p1: a queue.
+            script("https://x.test/queued.js", "async", 5000.0, 3900.0, 100.0),
+            // Waited 3.0..11.0 s: 4.0 s behind p1, queued.js and p2
+            // (1.9 + 0.1 + 2.0), 4.0 s idle.
+            script("https://x.test/idle.js", "async", 11100.0, 8000.0, 100.0),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R4 async script https://x.test/idle.js arrived in 50 ms and waited 8.0 s for a turn (4.0 s of it behind other scripts running)",
+                // The idle part of that wait, once; p1's and p2's runs are not silence.
+                "R8 event log silent 4.0 s from t=5.0 s before the load finished: no script ran, no request moved",
+            ]
+        );
+    }
+
     #[test]
     fn scripts_that_never_finished_are_r3_but_nomodule_is_not() {
         let script = |name: &str, outcome: &str, reason: &str| {
@@ -663,7 +728,7 @@ mod tests {
             lines(&records),
             vec![
                 "R7 load fired 8.6 s after DOMContentLoaded; it waited for: https://x.test/otSDKStub.js, https://x.test/otBannerSdk.js",
-                "R8 event log silent 5.9 s from t=11.8 s before the load finished: no script ended, no request moved",
+                "R8 event log silent 5.9 s from t=11.8 s before the load finished: no script ran, no request moved",
             ]
         );
     }
