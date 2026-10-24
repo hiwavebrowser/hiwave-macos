@@ -333,6 +333,22 @@ const SILENT_MS: f64 = 3000.0;
 /// At most this many lines per rule.
 const PER_RULE: usize = 3;
 
+/// R5 lines about the page's own site start with this, and rank before R4.
+const OWN_SITE: &str = "the page's own script: ";
+
+/// The last two host labels (`www.yahoo.com` -> `yahoo.com`). Close enough
+/// for ranking; a two-label public suffix (`co.uk`) reads as one site.
+fn site_of(url: &str) -> Option<String> {
+    let host = url.split("://").nth(1)?.split(['/', ':', '?', '#']).next()?;
+    let labels: Vec<&str> = host.split('.').collect();
+    Some(labels[labels.len().saturating_sub(2)..].join("."))
+}
+
+/// The site of the URL in an R5 key (`uncaught X in <url>:line:col`).
+fn site_of_error(key: &str) -> Option<String> {
+    site_of(key.split(" in ").nth(1)?)
+}
+
 fn ms(v: &Value) -> Option<f64> {
     v.as_f64()
 }
@@ -525,8 +541,16 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
             None => errors.push((key, 1)),
         }
     }
+    // An error in the page's own site's script ranks first of the event
+    // causes (design note R5): yahoo's chunk 7730 SyntaxError is the app
+    // bundle failing, where an ad script's error is noise.
+    let site = of("navigation_start").next().and_then(|r| r["url"].as_str()).and_then(site_of);
+    errors.sort_by_key(|(key, _)| !(site.is_some() && site_of_error(key) == site));
     for (key, n) in errors.into_iter().take(PER_RULE) {
-        let line = if n > 1 { format!("{key} (x{n})") } else { key };
+        let mut line = if n > 1 { format!("{key} (x{n})") } else { key };
+        if site.is_some() && site_of_error(&line) == site {
+            line = format!("{OWN_SITE}{line}");
+        }
         causes.push(Cause { rule: "R5", line });
     }
 
@@ -610,9 +634,13 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
 /// note's order.
 pub fn apply_events(report: &mut Report, records: &[Value]) {
     let (events, not_checked) = event_causes(records);
-    let order = ["R1", "R2", "R9", "R4", "R3", "R6", "R5", "R7", "R8"];
+    // "R5*" is an R5 line about the page's own site.
+    let order = ["R1", "R2", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
     report.ranked.extend(events);
-    report.ranked.sort_by_key(|c| order.iter().position(|r| *r == c.rule).unwrap_or(order.len()));
+    report.ranked.sort_by_key(|c| {
+        let rule = if c.rule == "R5" && c.line.starts_with(OWN_SITE) { "R5*" } else { c.rule };
+        order.iter().position(|r| *r == rule).unwrap_or(order.len())
+    });
     report.not_checked.retain(|n| !n.starts_with("R3-R8"));
     report.not_checked.extend(not_checked);
 }
@@ -847,6 +875,38 @@ mod tests {
             vec![
                 "R5 uncaught TypeError in https://x.test/7730.js:3:12 (x2)",
                 "R5 uncaught TypeError (unhandled rejection) in https://x.test/7730.js:9:12",
+            ]
+        );
+    }
+
+    /// yahoo, 2026-10-24: the site's own chunk 7730 throws a SyntaxError
+    /// and the site makes no fetch of its own; that is ranked above the
+    /// script waits (design note R5), an ad script's error is not.
+    #[test]
+    fn an_error_in_the_pages_own_site_ranks_before_r4() {
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 900.0, "type": "script_error", "name": "TypeError", "message": null,
+                   "location": {"url": "https://ads.y.test/ad.js", "line": 1, "column": 5},
+                   "unhandled_rejection": false, "script": "https://ads.y.test/ad.js", "value": "error"}),
+            json!({"t_ms": 1000.0, "type": "script_error", "name": "SyntaxError", "message": null,
+                   "location": {"url": "https://www.x.test/chunks/7730.js", "line": 1, "column": 6278},
+                   "unhandled_rejection": false, "script": "https://www.x.test/chunks/7730.js", "value": "error"}),
+            json!({"t_ms": 5000.0, "type": "script", "script": "inline#1", "kind": "parser", "outcome": "ran", "ran_ms": 10.0}),
+            json!({"t_ms": 16745.0, "type": "script", "script": "https://x.test/67222.js", "kind": "inserted", "outcome": "ran",
+                   "fetch_ms": 1853.0, "waited_ms": 5444.0, "ran_ms": 11.0}),
+            json!({"t_ms": 16800.0, "type": "load_finished"}),
+        ];
+        let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+        apply_events(&mut report, &records);
+        let ranked: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
+        // (R8 lines follow: these records are sparse.)
+        assert_eq!(
+            ranked[..3],
+            [
+                "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278",
+                "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
+                "R5 uncaught TypeError in https://ads.y.test/ad.js:1:5",
             ]
         );
     }
