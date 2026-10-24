@@ -317,8 +317,13 @@ async fn execute(
     };
     let guard = inspector
         .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some(initiator))
-        .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
+        .map(|g| {
+            g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)")
+                .waits_on(&rustkit_net::policy::SlotWait::new())
+                .deadline(deadline)
+        });
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    match tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -499,8 +504,12 @@ async fn fetch_module(
     inspector: &Arc<Inspector>,
 ) -> Result<rustkit_bindings::FetchedModule, String> {
     let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-    let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+    let guard = inspector
+        .begin_request(&parsed, "GET", ResourceType::Module, Some("script"))
+        .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()).deadline(deadline));
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    let fetched =
+        tokio::time::timeout_at(deadline, policy.fetch_module_waited(loader, &parsed, document, wait.as_ref())).await;
     inspector::answer_module(guard, &fetched);
     match fetched {
         Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
@@ -789,6 +798,9 @@ struct FetchJob {
     job_id: u64,
     nav_id: u64,
     cancel: Arc<FetchCancel>,
+    /// Stamped when it gets one of the process's in-flight permits, when
+    /// the Inspector is recording it.
+    wait: Option<rustkit_net::policy::SlotWait>,
 }
 
 impl InsertedScripts {
@@ -1066,7 +1078,13 @@ fn enqueue_inserted(
             match Url::parse(&url) {
                 Ok(parsed) => {
                     let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"));
+                    let guard = inspector
+                        .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
+                        .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                    if let Some(w) = &wait {
+                        w.queued();
+                    }
                     let cancel = FetchCancel::new();
                     board.jobs.push(InsertedJob {
                         id,
@@ -1086,6 +1104,7 @@ fn enqueue_inserted(
                         job_id: id,
                         nav_id,
                         cancel,
+                        wait,
                     });
                 }
                 Err(_) => {
@@ -1161,6 +1180,9 @@ fn fetch_sender() -> &'static tokio::sync::mpsc::Sender<FetchJob> {
                         };
                         if job.cancel.is_cancelled() {
                             continue;
+                        }
+                        if let Some(w) = &job.wait {
+                            w.granted();
                         }
                         tokio::task::spawn_local(async move {
                             let _permit = permit;

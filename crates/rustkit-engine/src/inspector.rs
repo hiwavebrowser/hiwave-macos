@@ -318,6 +318,11 @@ pub enum InspectorEvent {
         decoded_size: Option<u64>,
         from_cache: bool,
         duration_ms: f64,
+        /// Of `duration_ms`, the time it waited for an in-flight slot (the
+        /// per-origin and per-page caps queue a script request; they do not
+        /// refuse it). `null` for a request no cap queues.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
     /// The request ended without a usable answer.
     Failure {
@@ -330,6 +335,10 @@ pub enum InspectorEvent {
         /// which; else `null`.
         #[serde(default)]
         blocked_by: Option<BlockedBy>,
+        /// As on `response`. A deadline that passes while the request is
+        /// still queued has the reason `in-flight cap`.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
 }
 
@@ -349,6 +358,10 @@ impl BlockedBy {
         }
     }
 }
+
+/// A failure's reason when its deadline passed while it was still queued
+/// behind an in-flight cap.
+pub const IN_FLIGHT_CAP: &str = "in-flight cap";
 
 /// Longest filter rule kept in `blocked_by`, in characters.
 const MAX_RULE_CHARS: usize = 256;
@@ -766,6 +779,8 @@ impl Inspector {
             dropped_reason: "abandoned (navigation or view closed)",
             budget: None,
             blocked_by: None,
+            slot: None,
+            deadline: None,
             done: false,
         })
     }
@@ -973,6 +988,10 @@ pub struct RequestGuard {
     budget: Option<(Instant, FailureStage, &'static str)>,
     /// The shield's list and rule, for the failure it ends in.
     blocked_by: Option<BlockedBy>,
+    /// Its wait for an in-flight slot, when a cap can queue it.
+    slot: Option<rustkit_net::policy::SlotWait>,
+    /// The deadline that ends it as `timeout` / `over_budget`, if known.
+    deadline: Option<Instant>,
     done: bool,
 }
 
@@ -987,6 +1006,50 @@ impl RequestGuard {
     pub fn blocked_by(mut self, reason: Option<&rustkit_net::BlockReason>) -> Self {
         self.blocked_by = reason.map(BlockedBy::from_reason);
         self
+    }
+
+    /// The request can be queued behind an in-flight cap: `slot` is what the
+    /// policy stamps (see [`rustkit_net::policy::SlotWait`]); the outcome
+    /// records `queued_ms` from it.
+    pub fn waits_on(mut self, slot: &rustkit_net::policy::SlotWait) -> Self {
+        self.slot = Some(slot.clone());
+        self
+    }
+
+    /// Its slot wait, if it has one: hand it to the policy.
+    pub fn slot(&self) -> Option<&rustkit_net::policy::SlotWait> {
+        self.slot.as_ref()
+    }
+
+    /// The deadline the caller races it against: a `timeout` or
+    /// `over_budget` failure is an `in-flight cap` if it was still queued
+    /// then.
+    pub fn deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = Some(deadline.into_std());
+        self
+    }
+
+    fn queued_ms(&self) -> Option<f64> {
+        self.slot.as_ref()?.waited().map(|d| round_ms(d.as_secs_f64() * 1000.0))
+    }
+
+    /// `reason`, unless a deadline (`timeout`, `over_budget`) ended the
+    /// request while it was still queued behind a cap: then `in-flight cap`.
+    fn deadline_reason<'a>(&self, stage: FailureStage, reason: &'a str) -> &'a str {
+        if !matches!(stage, FailureStage::Timeout | FailureStage::OverBudget) {
+            return reason;
+        }
+        let at = self.deadline.or(self.budget.map(|(at, _, _)| at));
+        let queued = match (&self.slot, at) {
+            (Some(slot), Some(at)) => slot.waiting_at(at),
+            (Some(slot), None) => slot.is_waiting(),
+            (None, _) => false,
+        };
+        if queued {
+            IN_FLIGHT_CAP
+        } else {
+            reason
+        }
     }
 
     /// The stage and reason recorded if this is dropped unanswered.
@@ -1037,6 +1100,7 @@ impl RequestGuard {
             decoded_size,
             from_cache,
             duration_ms: self.duration_ms(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1045,6 +1109,7 @@ impl RequestGuard {
     /// are scrubbed and it is capped.
     pub fn fail(mut self, stage: FailureStage, reason: &str) {
         self.done = true;
+        let reason = self.deadline_reason(stage, reason);
         let reason = self.inspector.scrub_text(&cap(reason, MAX_SHORT_CHARS).0);
         let event = InspectorEvent::Failure {
             id: self.id,
@@ -1052,6 +1117,7 @@ impl RequestGuard {
             reason,
             duration_ms: self.duration_ms(),
             blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1069,9 +1135,10 @@ impl Drop for RequestGuard {
         let event = InspectorEvent::Failure {
             id: self.id,
             stage,
-            reason: reason.to_string(),
+            reason: self.deadline_reason(stage, reason).to_string(),
             duration_ms: self.duration_ms(),
             blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }

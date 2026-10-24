@@ -54,8 +54,8 @@ field that is `null` today may hold a value later.
 | `relayout` | `cause` (engine words only, below), `took_ms` |
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
-| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
-| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`) |
+| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms`, `queued_ms` (see below) |
+| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`), `queued_ms` |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -185,7 +185,7 @@ engine read, `null` when it did not read the body.
 | `dns` | the host name did not resolve |
 | `connect` | no connection, or the connection broke mid-body |
 | `tls` | the TLS handshake failed |
-| `timeout` | the network did not answer in time (live script requests: 30 s) |
+| `timeout` | the network did not answer in time (live script requests: 30 s). Reason `in-flight cap` when the deadline passed while the request was still queued for a slot (see `queued_ms`) |
 | `http_error` | not usable HTTP (malformed, too many redirects) |
 | `policy` | refused by a rule: the shield, the private-network rule, mixed content, CSP, a malformed or oversized request, a request cap |
 | `cors` | a script request another origin did not allow (or a `same-origin` request to another origin) |
@@ -193,6 +193,15 @@ engine read, `null` when it did not read the body.
 | `decode` | the body arrived and was not usable: not UTF-8, an image that does not decode, an SVG that does not parse |
 | `cancelled` | abandoned before its budget ran out: the page navigated away or the view closed (reason `abandoned (navigation or view closed)`), or the navigation was superseded |
 | `over_budget` | the subresource phase's or the script budget ran out first, or the response was over the size cap |
+
+`queued_ms`: of `duration_ms`, how long the request waited for an in-flight
+slot. The caps queue a request and never refuse it: a script request (`fetch`,
+XHR, a module) waits for one of 6 per origin and 24 per page, and an inserted
+`<script src>` for one of the process's 8. `null` for a request no cap queues
+(the document, images, stylesheets, fonts, parser scripts) or one refused
+before it queued. A request still queued when its deadline passed is a
+`timeout` (or `over_budget`) with the reason `in-flight cap`, and its
+`queued_ms` is the whole wait.
 
 Not recorded as separate requests: CORS preflights and the hops of a script
 request's redirects (the policy follows them inside one request), `data:` URLs

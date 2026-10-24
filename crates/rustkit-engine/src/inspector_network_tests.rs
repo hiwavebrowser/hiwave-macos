@@ -510,6 +510,102 @@ var x = new XMLHttpRequest(); x.open('GET', '/ct1;p=JSESSIONSECRET'); x.send();
     assert!(all.contains(&format!("\"to\":\"http://127.0.0.1:{port}/\"")), "{all}");
 }
 
+/// Dev-tools T2 acceptance, one page: a request the shield refuses (with
+/// its list and rule), six that never answer (each `timeout`), and a
+/// seventh to the same origin queued behind the per-origin cap of six
+/// until the deadline: `timeout` with the reason `in-flight cap` and
+/// `queued_ms` about the whole wait. Takes the 30 s live request timeout.
+#[test]
+fn a_shield_block_a_timeout_and_a_cap_overflow_each_record_their_result() {
+    struct EasyListAds;
+    impl rustkit_net::InterceptHandler for EasyListAds {
+        fn intercept(&self, request: &rustkit_net::Request) -> rustkit_net::InterceptAction {
+            if request.url.path().starts_with("/ads/") {
+                rustkit_net::InterceptAction::BlockedBy(rustkit_net::BlockReason {
+                    list: "EasyList".into(),
+                    rule: Some("/ads/*".into()),
+                })
+            } else {
+                rustkit_net::InterceptAction::Allow
+            }
+        }
+    }
+    const HANG_MS: u64 = 60_000;
+    let server = serve(vec![
+        Route::html("/", "<html><body>fixture</body></html>"),
+        Route::ok("/ads/x.js", "text/javascript", ""),
+        Route::ok("/hang/0", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/1", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/2", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/3", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/4", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/5", "text/plain", "late").delay(HANG_MS),
+        Route::ok("/hang/6", "text/plain", "late").delay(HANG_MS),
+    ]);
+    let mut shield = rustkit_net::RequestInterceptor::new();
+    shield.add_handler(Arc::new(EasyListAds));
+    let (mut engine, view) = engine(EngineConfig::default(), Some(shield));
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/"))).unwrap();
+    engine
+        .execute_script(
+            view,
+            "fetch('/ads/x.js').catch(function () {});
+for (var i = 0; i < 7; i++) fetch('/hang/' + i).catch(function () {});
+0",
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(45) {
+        rt.block_on(engine.pump_live(view, 200));
+        let answered = records(&engine, view)
+            .iter()
+            .filter(|r| matches!(r.event, InspectorEvent::Failure { .. }))
+            .count();
+        if answered >= 8 {
+            break;
+        }
+    }
+    let records = records(&engine, view);
+    assert_each_request_answered_once(&records);
+    let local = |s: &str| s.replace(&format!("http://127.0.0.1:{}", server.port), "");
+    let mut urls = std::collections::BTreeMap::new();
+    let mut ended = Vec::new();
+    let mut queued = std::collections::BTreeMap::new();
+    for record in &records {
+        match &record.event {
+            InspectorEvent::Request { id, url, .. } => {
+                urls.insert(*id, local(url));
+            }
+            InspectorEvent::Failure { id, stage, reason, blocked_by, queued_ms, .. } => {
+                let by = blocked_by.as_ref().map(|b| format!(" by {} {}", b.list, b.rule.as_deref().unwrap_or("-")));
+                ended.push(format!("{} {} {}{}", urls[id], stage.as_str(), reason, by.unwrap_or_default()));
+                queued.insert(urls[id].clone(), *queued_ms);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sorted(ended),
+        vec![
+            "/ads/x.js policy blocked by the shield by EasyList /ads/*",
+            "/hang/0 timeout timed out",
+            "/hang/1 timeout timed out",
+            "/hang/2 timeout timed out",
+            "/hang/3 timeout timed out",
+            "/hang/4 timeout timed out",
+            "/hang/5 timeout timed out",
+            "/hang/6 timeout in-flight cap",
+        ]
+    );
+    let capped = queued["/hang/6"].expect("the capped request has queued_ms");
+    assert!(capped >= 25_000.0, "queued for the whole wait: {capped}");
+    for path in ["/hang/0", "/hang/1", "/hang/2", "/hang/3", "/hang/4"] {
+        let q = queued[path].expect("a script request has queued_ms");
+        assert!(q < 1_000.0, "{path} queued {q} ms");
+    }
+}
+
 /// What asked for a request: `fetch()` and XHR name themselves, and a
 /// `<script src>` page script inserted is `inserted_script`, apart from
 /// the markup's (`parser`).

@@ -5444,9 +5444,13 @@ impl Engine {
                                 "no network policy for this page".into(),
                             ))),
                             Some(policy) => {
-                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
                                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
                                 inspector::answer_module(guard, &fetched);
                                 match fetched {
