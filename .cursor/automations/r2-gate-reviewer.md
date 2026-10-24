@@ -26,6 +26,15 @@ Ignore everything else: feature → `master`, stacked bases (`athena/*`,
 `atlas/*`, etc.), and any other non-`develop` base that is not the
 `develop` → `master` case above.
 
+**`no-check` label.** Before the gate checks, read the PR's labels. If the PR
+carries the label `no-check`, it is a standing or parked PR: do not stamp PASS
+or FAIL, do not comment, and do not edit an earlier stamp. The one exception:
+if HEAD differs from the SHA in the latest `R2-STAMP`, remove `r2-pass` as on
+any new push, so a parked PR never shows a pass for a head no gate has checked.
+Do not add or remove any other label. Only the project lead adds or removes
+`no-check`. Removing the `no-check` label is itself an update: review the PR at
+its current HEAD then, as usual.
+
 ### Record HEAD first
 
 Before any gate check, record `HEAD` = the PR's current head SHA. Every stamp
@@ -35,7 +44,7 @@ must name that SHA. If HEAD moves while you wait on CI, re-record and re-check.
 
 Treat these pull_request checks as required (must be SUCCESS, not pending):
 
-- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`
+- `audit`, `f1-test-compile`, `selector-key`, `script-guards`, `unit-suites`, `render-suites`
 - `pr-swarm` (0–3), `pr-aggregate`
 
 Skipped on PRs and **not** failures: `nightly-swarm`, `nightly-aggregate`,

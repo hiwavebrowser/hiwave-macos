@@ -1,0 +1,12 @@
+<!doctype html><!-- :has() and the :not(:has()) inversion (ebay/github/x).
+ PASS: four 100x100 boxes green at pixels (60,60) (170,60) (280,60) (390,60). FAIL: any red. -->
+<html><head><style>
+body { margin: 0; } .p { position: absolute; top: 10px; width: 100px; height: 100px; background: red; }
+#p1:has(> .x) { background: green; }
+#p2 { background: green; } #p2:not(:has(> .x)) { background: red; }
+#p3:not(:has(> .x)) { background: green; }
+#p4 { background: green; } #p4:has(.none) { background: red; }
+</style></head><body>
+<div class="p" id="p1" style="left:10px"><i class="x"></i></div><div class="p" id="p2" style="left:120px"><i class="x"></i></div>
+<div class="p" id="p3" style="left:230px"><i class="y"></i></div><div class="p" id="p4" style="left:340px"><i class="y"></i></div>
+</body></html>

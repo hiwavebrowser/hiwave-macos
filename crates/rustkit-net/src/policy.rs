@@ -8,11 +8,12 @@
 //! resource caps. A denied request returns [`Denial`]; script only ever sees
 //! an error, never the denied response.
 //!
-//! Deliberate limits (stated, not half-built): script requests carry no
-//! cookies (there is no cookie jar to partition; `credentials` degrades to
-//! `omit` on the wire, though CORS is still checked as if the page had asked
-//! for credentials), responses arrive whole (no streaming bodies), and
-//! `WebSocket`/`EventSource`/`sendBeacon` are out of scope.
+//! Deliberate limits (stated, not half-built): only a request to the page's
+//! own origin sends and keeps cookies (unless it asked for `omit`); a
+//! cross-origin one carries none, whatever its `credentials`, though CORS is
+//! still checked as if the page had asked for credentials. Responses arrive
+//! whole (no streaming bodies), and `WebSocket`/`EventSource`/`sendBeacon`
+//! are out of scope.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,6 +108,11 @@ pub struct ScriptResponse {
 pub struct ModuleSource {
     pub final_url: Url,
     pub source: String,
+    /// The response's status (2xx) and `Content-Type`, for diagnostics.
+    pub status: u16,
+    pub content_type: Option<http::HeaderValue>,
+    /// Body bytes as received.
+    pub body_len: usize,
 }
 
 /// Why a request was refused. Script sees an error event / `TypeError`.
@@ -516,8 +522,8 @@ impl FetchPolicy {
 
     /// Fetch one module script (static import, `<script type=module src>`).
     ///
-    /// Module fetches are always CORS-mode with same-origin credentials (and
-    /// cookies are never sent), go through the same budgets, per-hop vet,
+    /// Module fetches are always CORS-mode with same-origin credentials (so
+    /// only a module from the page's own origin carries cookies), go through the same budgets, per-hop vet,
     /// shield and CSP (`script-src`) as every other governed request, and
     /// must answer 2xx with a JavaScript MIME type. `referrer` is the
     /// importing module's URL; it is not sent (Referer is page-scoped).
@@ -540,7 +546,14 @@ impl FetchPolicy {
         // Modules are always UTF-8, whatever the charset label says.
         let text = String::from_utf8_lossy(&r.body);
         let source = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
-        Ok(ModuleSource { final_url: r.url, source })
+        Ok(ModuleSource {
+            final_url: r.url,
+            source,
+            status: r.status,
+            // A header clone shares its bytes: nothing is allocated here.
+            content_type: r.headers.get(http::header::CONTENT_TYPE).cloned(),
+            body_len: r.body.len(),
+        })
     }
 
     fn validate_shape(&self, req: &ScriptRequest) -> Result<(), Denial> {
@@ -763,7 +776,13 @@ impl FetchPolicy {
             RequestDestination::Script => RequestDestination::Script,
             _ => RequestDestination::Fetch,
         };
-        request.credentials = CredentialsMode::Omit;
+        // Cookies go with a request to the page's own origin that asked for
+        // credentials, and nowhere else.
+        request.credentials = match req.credentials {
+            CredentialsMode::Omit => CredentialsMode::Omit,
+            _ if cross || hop.tainted => CredentialsMode::Omit,
+            _ => CredentialsMode::SameOrigin,
+        };
         request.timeout = Some(self.limits.timeout);
         request.referrer = Some(self.page_url.clone());
         // The shared cache is keyed by URL alone, so only a same-origin GET

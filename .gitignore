@@ -40,12 +40,14 @@ nul
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle, real_window and element_diff)
+# Tools (ignore all except parity_oracle, real_window, element_diff and inspector)
 tools/*
 !tools/parity_oracle/
 !tools/real_window/
 !tools/element_diff/
+!tools/inspector/
 tools/element_diff/out/
+tools/inspector/out/
 tools/real_window/out/
 
 # Keep work_orders, roadmap_index.json, and README.md tracked
@@ -64,6 +66,8 @@ parity-baseline/parity_test_results*.json
 parity-baseline/oracle_results.json
 trench/wpt/last-run.json
 progress_report.json
+/PARITY_PROGRESS.md
+parity-baseline/workorders/
 # Global, not per-directory. The old `scripts/__pycache__/` line was why
 # scripts/tests/__pycache__/ kept getting committed — a narrow ignore looks
 # like coverage and isn't. Five .pyc files reached master this way.
@@ -80,11 +84,21 @@ fastrender/
 # Rebuild with scripts/wpt_sync.sh; do not vendor the WPT tree into this repo.
 third_party/wpt/
 
-# Python test caches. NOTE: four .pyc files were committed by accident in #65 and are still TRACKED —
-# this rule stops new ones, it does not untrack those. They need `git rm --cached`, which is not on the
-# trench seat's allowlist.
+# Python test caches (the .pyc files committed in #65 are no longer tracked).
 scripts/tests/__pycache__/
 # Seat-control baselines are a per-machine DIAGNOSTIC, never a receipt.
 # They must not be committed and mistaken for the pinned macOS set.
 # See tools/parity_oracle/capture_seat_control.mjs.
 baselines/seat-control/
+
+# Generated capture output (scripts/multisurface_canary.sh, scripts/builtins_capture.sh).
+# The scripts recreate these; committed copies went stale and nothing read them.
+multisurface-captures/
+builtins-captures/*.layout.json
+# scripts/websuite_capture.sh frames (6.8 MB each). Nothing reads them back.
+websuite/captures/*.ppm
+
+# Per-session agent scratch directories. Put anything worth keeping in
+# trench/forensics or docs/ instead. (scratch_n41/ and scratch_n42/ are still
+# tracked because trench/forensics cites them.)
+/scratch_*/

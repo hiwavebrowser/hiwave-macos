@@ -11,11 +11,11 @@ mod platform;
 
 use std::sync::{Arc, Mutex};
 // Used only by the WRY-content IPC/nav block, which is compiled out of the
-// default macos+rustkit build. Deleting this as an "unused import" broke
-// `--features webview-fallback` with E0433 at the two should_block call
-// sites: a green default build says nothing about a cfg arm your target
-// omits. Gate must match those sites, not the default target.
-#[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+// macOS build (non-macOS only). Deleting this as an "unused import" breaks
+// that build with E0433 at the two should_block call sites: a green macOS
+// build says nothing about a cfg arm your target omits. Gate must match
+// those sites, not the default target.
+#[cfg(not(target_os = "macos"))]
 use hiwave_shield::ResourceType;
 use muda::{Menu, MenuEvent};
 use platform::get_platform_manager;
@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -42,17 +42,43 @@ const SHELF_HEIGHT_DEFAULT: u32 = 0;
 /// Expanded height when command palette/shelf is open
 const SHELF_HEIGHT_EXPANDED: u32 = 280;
 const SIDEBAR_WIDTH: f64 = 220.0;
+/// While a content load is in progress the loop wakes this soon after each
+/// slice, so the load keeps its pace and tao still takes events in between.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+const LOAD_WAKE: std::time::Duration = std::time::Duration::from_millis(1);
 
 mod ipc;
 mod state;
 mod webview;
+mod window_stall;
 
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod shield_adapter;
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+mod devtools_panel;
+
+/// Run `$body` with the RustKit content view bound to `$view` and give
+/// `true`; give `false` for WebKit content, whose Inspector is the injected
+/// script (`ui/inspector_inject.js`).
+macro_rules! with_rustkit_content {
+    ($content:expr, $view:ident => $body:expr) => {{
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        let handled = match *$content {
+            UnifiedContentWebView::RustKit(ref $view) => {
+                $body;
+                true
+            }
+            _ => false,
+        };
+        #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
+        let handled = false;
+        handled
+    }};
+}
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
@@ -219,6 +245,11 @@ enum UserEvent {
     ClearCellar,
     // Decay ticker
     DecayTick,
+    // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
+    WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -278,6 +309,12 @@ enum UserEvent {
     InspectorStopPicker,
     InspectorScrollToElement { path: String },
     InspectElement { path: String },
+    /// The panel asks for the DOM tree again.
+    InspectorRefreshTree,
+    /// The panel selected a node (a tree row, a breadcrumb).
+    InspectorSelect { path: String },
+    /// The panel expanded a node whose children the tree left out.
+    InspectorExpand { path: String },
     // Console events
     InspectorConsoleMessage(String),
     InspectorConsoleClear,
@@ -523,7 +560,7 @@ fn load_report_page(content: &impl ContentWebViewOps) {
 /// ~50 events/s; the rest stay trace). One clock for both wheel paths, the
 /// window loop's and the content view's. Restores the diagnosability #100
 /// accidentally removed when the #95 diagnostic line was replaced with wiring.
-#[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
 fn wheel_burst_started() -> bool {
     // `None` until the first wheel event: a clock started at that event made
     // the first burst of a session look like the middle of one, and it was
@@ -541,12 +578,7 @@ fn wheel_burst_started() -> bool {
 
 // The real-window driver's h6 check reads "wheel burst started" from the app
 // log after the first wheel it sends to a freshly launched app.
-#[cfg(all(
-    test,
-    target_os = "macos",
-    feature = "rustkit",
-    not(feature = "webview-fallback")
-))]
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod wheel_burst_tests {
     use super::wheel_burst_started;
 
@@ -588,15 +620,83 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
+/// Stack size of the calling thread, as the OS reports it. Logged at startup
+/// so a hand-test log shows the linker's main-thread stack took effect.
+#[cfg(target_os = "macos")]
+fn main_thread_stack_size() -> usize {
+    extern "C" {
+        fn pthread_self() -> *mut std::ffi::c_void;
+        fn pthread_get_stacksize_np(thread: *mut std::ffi::c_void) -> usize;
+    }
+    // SAFETY: both calls only read the calling thread's own attributes.
+    unsafe { pthread_get_stacksize_np(pthread_self()) }
+}
+
+/// The shipped app runs the page on the content thread (M4) unless
+/// `HIWAVE_CONTENT_THREAD` is set, to `0` for example, which keeps the page on
+/// the window thread. The engine's own default stays off, so parity-capture
+/// and the engine tests keep their board-comparable arm.
+#[cfg(target_os = "macos")]
+fn default_content_thread_on() {
+    if std::env::var_os("HIWAVE_CONTENT_THREAD").is_none() {
+        // main() has started no threads yet.
+        std::env::set_var("HIWAVE_CONTENT_THREAD", "1");
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    #[cfg(target_os = "macos")]
+    default_content_thread_on();
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
     info!("Starting HiWave...");
+    #[cfg(target_os = "macos")]
+    info!(
+        "Main thread stack: {} MiB",
+        main_thread_stack_size() / (1024 * 1024)
+    );
+    #[cfg(target_os = "macos")]
+    info!(
+        "Content thread: {}",
+        if rustkit_engine::content_thread_enabled() {
+            "on"
+        } else {
+            "off (HIWAVE_CONTENT_THREAD)"
+        }
+    );
 
     // Initialize application state
     let state = match AppState::with_defaults() {
@@ -687,7 +787,13 @@ fn main() {
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
-    // Sidebar width: 0.0 = closed, >0 = open with that width
+    // Sidebar width: 0.0 = closed, >0 = open with that width.
+    // The content view starts at the full window. A page with no inserted
+    // scripts reads that width, then hears one `resize` when chrome opens
+    // the sidebar. Creating it already inset made that first read the
+    // narrowed width, and chrome's initial width of 0 then dispatched a
+    // stale full-window resize. Bounds set while a load holds the engine
+    // are applied when it ends.
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
@@ -1018,6 +1124,9 @@ fn main() {
                         info!("Toggle focus mode response: {:?}", response);
                         let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
                     }
+                    IpcMessage::ToggleInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
+                    }
                     IpcMessage::GetFocusModeStatus => {
                         let response = ipc::commands::handle_message(&chrome_state, msg);
                         info!("Get focus mode status response: {:?}", response);
@@ -1192,7 +1301,7 @@ fn main() {
             .unwrap_or_else(|| NEW_TAB_URL.to_string())
     };
     // RustKit content webview (macOS with rustkit feature, default)
-    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
     let content_webview = {
         use webview_rustkit::RustKitView;
         use rustkit_viewhost::Bounds;
@@ -1211,13 +1320,30 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
-        rustkit_view.load_html_internal(ABOUT_HTML)
-            .expect("Failed to load initial HTML");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
+        // A restored tab is queued below as `UserEvent::Navigate`. With the
+        // content thread both loads return immediately, and a new-tab
+        // document queued first used to be applied after the restore had
+        // already taken the newer navigation id (10/26 launches). The
+        // restore is the first command; a late default document carries an
+        // older id and is dropped.
+        if is_new_tab_url(&initial_url) {
+            rustkit_view.load_html_internal(ABOUT_HTML)
+                .expect("Failed to load initial HTML");
+        }
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
     };
     
-    #[cfg(any(not(target_os = "macos"), feature = "webview-fallback"))]
+    #[cfg(not(target_os = "macos"))]
     let wry_content_webview = {
         let content_proxy = _content_proxy;
         let content_proxy2 = _content_proxy2;
@@ -1599,17 +1725,10 @@ fn main() {
         .expect("Failed to create Content WebView")
     };
 
-    // WebKit fallback content webview (macOS with webview-fallback feature)
-    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-    let content_webview: UnifiedContentWebView = {
-        info!("Creating WebKit content webview (fallback mode)");
-        Arc::new(wry_content_webview)
-    };
-    
     #[cfg(not(target_os = "macos"))]
     let content_webview = UnifiedContentWebView::Wry(Arc::new(wry_content_webview));
 
-    #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
     {
         if !is_new_tab_url(&initial_url) {
             // DEFERRED, not loaded here (2026-08-05). This call used to run
@@ -1631,16 +1750,6 @@ fn main() {
             let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
         }
         info!("Content WebView created (RustKit)");
-    }
-    
-    #[cfg(all(target_os = "macos", feature = "webview-fallback"))]
-    {
-        if !is_new_tab_url(&initial_url) {
-            if let Err(e) = content_webview.load_url(&initial_url) {
-                error!("Failed to load initial URL: {}", e);
-            }
-        }
-        info!("Content WebView created (WebKit fallback)");
     }
     
     #[cfg(not(target_os = "macos"))]
@@ -1772,36 +1881,14 @@ fn main() {
                         IpcMessage::CloseInspector => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
                         }
-                        IpcMessage::InspectorGetDomTree => {
-                            // This will be handled by evaluating script on content webview
-                            // and sending result back to inspector
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            // Send event to evaluate on content
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
+                        IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
                         }
-                        IpcMessage::InspectorGetElementStyles { path } => {
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("'", "\\'").replace("\\", "\\\\"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
+                        IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
+                        }
+                        IpcMessage::InspectorExpandNode { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
                         }
                         IpcMessage::InspectorHighlightElement { path } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
@@ -1820,36 +1907,6 @@ fn main() {
                         }
                         IpcMessage::InspectorConsoleEval { code } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
-                        }
-                        IpcMessage::InspectorRefresh => {
-                            // Refresh DOM tree by evaluating script on content
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
-                        }
-                        IpcMessage::InspectorSelectElement { path } => {
-                            // Get styles for the selected element
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("\\", "\\\\").replace("'", "\\'"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
                         }
                         IpcMessage::InspectorClose => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
@@ -2024,6 +2081,13 @@ fn main() {
     });
     info!("Started focus mode auto-trigger checker");
 
+    // How long the window thread goes without turning this loop, written to
+    // the log when asked for. The real-window responsiveness checks read it.
+    let stall_log = window_stall::enabled().then(|| {
+        let ping_proxy = proxy.clone();
+        window_stall::start(move || ping_proxy.send_event(UserEvent::WindowThreadPing).is_ok())
+    });
+
     // Last known cursor position in WINDOW logical coordinates. tao reports
     // MouseInput without a position, so the CursorMoved stream is what makes
     // a click locatable.
@@ -2035,6 +2099,10 @@ fn main() {
     // When the content page's next timer is due. The loop sleeps until
     // input otherwise, and a sleeping loop runs no timers.
     let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    // The Inspector's native path for RustKit content: picking, the
+    // selection and the console's place.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let mut devtools = devtools_panel::Devtools::default();
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2054,7 +2122,7 @@ fn main() {
                 // page content arrive here; flicks over UI chrome do not).
                 // Forward them to the engine; render happens on
                 // MainEventsCleared, which this event wakes.
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     if wheel_burst_started() {
                         info!(?delta, "wheel burst started (window loop)");
@@ -2098,7 +2166,7 @@ fn main() {
                 // rule the wheel path established. Translate window logical
                 // coordinates into the content view's viewport space, then
                 // ask the engine what link (if any) sits there.
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     let (cx, cy) = cursor_position.get();
                     let content_x = cx - *sidebar_width_for_events.lock().unwrap();
@@ -2136,9 +2204,17 @@ fn main() {
                         if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
                             info!(%tag, "Focused content element");
                         }
-                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
-                            info!(%url, "Link clicked");
-                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        // The content view already recorded this click when
+                        // the page runs on its own thread. Asking here races
+                        // that thread, and a miss is logged as a script
+                        // navigation. The click comes back as
+                        // NavigateRequested with the user as its origin.
+                        if !rustkit_engine::content_thread_enabled() {
+                            if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
+                            {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
                         }
                     }
                 }
@@ -2153,7 +2229,7 @@ fn main() {
                 // (Whether unfocused keys arrive at all on macOS is the
                 // diagnostic half — the wheel needed a live session to
                 // answer the same question.)
-                #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+                #[cfg(all(target_os = "macos", feature = "rustkit"))]
                 if key_event.state == tao::event::ElementState::Pressed {
                     if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                         use tao::keyboard::Key;
@@ -2317,148 +2393,207 @@ fn main() {
                     right_sidebar_open,
                 );
             }
-            #[cfg(all(target_os = "macos", feature = "rustkit", not(feature = "webview-fallback")))]
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
             Event::MainEventsCleared => {
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
-                    // The page's clock catches up before it hears any input:
-                    // a timer a click sets counts from the click, not from
-                    // the last time the loop woke.
-                    view.process_events();
-                    // Clicks come from the content NSView's own handlers in
-                    // VIEW-LOCAL coordinates — already viewport space, no
-                    // chrome-height/sidebar math and none of its staleness
-                    // bugs. The old window-loop MouseInput arm never fired:
-                    // events delivered to a child NSView do not surface as
-                    // tao window events (measured with a synthetic
-                    // sendEvent:, 2026-08-07).
-                    for click in rustkit_viewhost::drain_pending_clicks() {
-                        // The page hears the click before the browser
-                        // acts on it: mousedown on press; mouseup and click
-                        // on release, and only then focus and the link,
-                        // which a listener's preventDefault() cancels. Until
-                        // 2026-10-03 no event reached the page at all, so
-                        // every script-driven control was dead (Z lane I0).
-                        // Where the pointer is, and when it goes: what a
-                        // hover menu or a drag listens for.
-                        match click.input {
-                            rustkit_viewhost::PointerInput::Move => {
-                                view.mouse_move_at_point(click.x as f32, click.y as f32);
+                    // A load in progress gets one slice, then the loop goes back to
+                    // tao, which dispatches the clicks, keys and chrome messages that
+                    // came meanwhile (a load used to hold the window to its end). The
+                    // page's input waits in the viewhost queue for the new page.
+                    if view.step_load() {
+                        live_wake.set(Some(std::time::Instant::now() + LOAD_WAKE));
+                    } else {
+                        // The page's clock catches up before it hears any input:
+                        // a timer a click sets counts from the click, not from
+                        // the last time the loop woke.
+                        view.process_events();
+                        // Clicks come from the content NSView's own handlers in
+                        // VIEW-LOCAL coordinates — already viewport space, no
+                        // chrome-height/sidebar math and none of its staleness
+                        // bugs. The old window-loop MouseInput arm never fired:
+                        // events delivered to a child NSView do not surface as
+                        // tao window events (measured with a synthetic
+                        // sendEvent:, 2026-08-07).
+                        // One queue, drained in arrival order across clicks,
+                        // the wheel and keys (threads plan M2, #575): until
+                        // 2026-10-14 three queues were drained one after another,
+                        // so a click made after a wheel burst reached the page
+                        // before the burst, and a key typed before a click after
+                        // it. An event for a view that is gone was dropped by the
+                        // viewhost when the view was destroyed.
+                        for event in rustkit_viewhost::drain_input() {
+                            // When it arrived, for the W-gate's input-to-present
+                            // figure (logged by the presenter with the frame).
+                            view.note_input(event.at, event.seq);
+                            match event.kind {
+                            rustkit_viewhost::InputKind::Pointer(click) => {
+                            // The page hears the click before the browser
+                            // acts on it: mousedown on press; mouseup and click
+                            // on release, and only then focus and the link,
+                            // which a listener's preventDefault() cancels. Until
+                            // 2026-10-03 no event reached the page at all, so
+                            // every script-driven control was dead (Z lane I0).
+                            // Where the pointer is, and when it goes: what a
+                            // hover menu or a drag listens for.
+                            // The Inspector's select-element mode takes the
+                            // pointer instead: hover outlines, release picks.
+                            if devtools.picking() {
+                                let at = (click.x as f32, click.y as f32);
+                                match click.input {
+                                    rustkit_viewhost::PointerInput::Move => {
+                                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                                    }
+                                    rustkit_viewhost::PointerInput::Leave => {
+                                        devtools.pick_hover(view, &inspector_for_events, None)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button if !click.down => {
+                                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button => {}
+                                }
                                 continue;
                             }
-                            rustkit_viewhost::PointerInput::Leave => {
-                                view.mouse_leave();
+                            match click.input {
+                                rustkit_viewhost::PointerInput::Move => {
+                                    view.mouse_move_at_point(click.x as f32, click.y as f32);
+                                    continue;
+                                }
+                                rustkit_viewhost::PointerInput::Leave => {
+                                    view.mouse_leave();
+                                    continue;
+                                }
+                                rustkit_viewhost::PointerInput::Button => {}
+                            }
+                            if click.down {
+                                view.mouse_down_at_point(click.x as f32, click.y as f32);
                                 continue;
                             }
-                            rustkit_viewhost::PointerInput::Button => {}
+                            info!(x = click.x, y = click.y, "content click (view-local)");
+                            let outcome = view.click_at_point(click.x as f32, click.y as f32);
+                            // ENGINE focus is not APPKIT focus: without making
+                            // the content view the window's first responder,
+                            // macOS keeps delivering keys to the chrome WebView
+                            // — observed live as "text entry goes back up to
+                            // the URL bar". Any click on the page takes the
+                            // keyboard, focused element or not: the page's own
+                            // shortcuts are keys with nothing focused.
+                            view.grab_keyboard();
+                            if let Some(tag) = outcome.focused {
+                                info!(%tag, "Focused content element");
+                                view.relayout();
+                            }
+                            if let Some(url) = outcome.navigate {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
+                            }
+                            // The wheel, from the content view's own `scrollWheel:`.
+                            // The window-loop MouseWheel arm above stays as it was;
+                            // the view consumes the wheel, so only one of the two
+                            // fires for an event. Until 2026-10-06 the wheel reached
+                            // neither in the built app (hand-test item H6). A burst
+                            // arrives summed by the queue, pointer drift between
+                            // its steps included, so a drain costs one scroll per
+                            // burst and one present (#692), not one per step.
+                            rustkit_viewhost::InputKind::Wheel(scroll) => {
+                            if wheel_burst_started() {
+                                info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
+                            }
+                            if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
+                            }
+                            }
+                            rustkit_viewhost::InputKind::Key(key) => {
+                            if key.cmd {
+                                continue; // menu shortcuts are not text
+                            }
+                            // Esc leaves select-element mode; the page does not hear it.
+                            if devtools.picking() && key.mac_keycode == 53 {
+                                if !key.up {
+                                    devtools.stop_picker(view, &inspector_for_events);
+                                }
+                                continue;
+                            }
+                            // macOS keyCodes -> the Win32 VK numbering the edit
+                            // model speaks. Text keys carry their characters.
+                            let (vk, text): (u32, &str) = match key.mac_keycode {
+                                51 => (0x08, ""),   // delete (backspace)
+                                117 => (0x2E, ""),  // forward delete
+                                123 => (0x25, ""),  // left
+                                124 => (0x27, ""),  // right
+                                115 => (0x24, ""),  // home
+                                119 => (0x23, ""),  // end
+                                36 | 76 => (0x0D, ""), // return / keypad enter
+                                48 => (0x09, ""),   // tab
+                                53 => (0x1B, ""),   // escape
+                                116 => (0x21, ""),  // page up
+                                121 => (0x22, ""),  // page down
+                                126 => (0x26, ""),  // up
+                                125 => (0x28, ""),  // down
+                                _ => (0, key.text.as_str()),
+                            };
+                            if vk == 0 && text.is_empty() {
+                                continue;
+                            }
+                            if key.up {
+                                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                                continue;
+                            }
+                            if vk == 0x0D {
+                                if let Some(url) = view.form_submit_url() {
+                                    info!(%url, "Form submitted");
+                                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                    continue;
+                                }
+                            }
+                            let focused = view.has_focused_element();
+                            if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
+                                view.relayout();
+                            } else if !focused {
+                                // Nothing focused and the page did not take
+                                // the key: the keys that scroll, as in the
+                                // window-level arm (wheel sign convention).
+                                let dy: Option<f32> = match (vk, text) {
+                                    (0x28, _) => Some(-40.0),
+                                    (0x26, _) => Some(40.0),
+                                    (0x22, _) | (0, " ") => Some(-600.0),
+                                    (0x21, _) => Some(600.0),
+                                    (0x23, _) => Some(-f32::MAX),
+                                    (0x24, _) => Some(f32::MAX),
+                                    _ => None,
+                                };
+                                if let Some(dy) = dy {
+                                    view.scroll_by(0.0, dy);
+                                }
+                            }
+                            }
+                            }
                         }
-                        if click.down {
-                            view.mouse_down_at_point(click.x as f32, click.y as f32);
-                            continue;
-                        }
-                        info!(x = click.x, y = click.y, "content click (view-local)");
-                        let outcome = view.click_at_point(click.x as f32, click.y as f32);
-                        // ENGINE focus is not APPKIT focus: without making
-                        // the content view the window's first responder,
-                        // macOS keeps delivering keys to the chrome WebView
-                        // — observed live as "text entry goes back up to
-                        // the URL bar". Any click on the page takes the
-                        // keyboard, focused element or not: the page's own
-                        // shortcuts are keys with nothing focused.
-                        view.grab_keyboard();
-                        if let Some(tag) = outcome.focused {
-                            info!(%tag, "Focused content element");
-                            view.relayout();
-                        }
-                        if let Some(url) = outcome.navigate {
-                            info!(%url, "Link clicked");
+                        // Timers that came due, late fetches, and what the
+                        // input above started; then sleep until the next timer.
+                        let sleep = view.process_events();
+                        live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
+                        // A navigation the page started itself: `location.href
+                        // = url`, a script's `link.click()` or `form.submit()`,
+                        // a submit from a timer. Until 2026-10-06 these were
+                        // dropped: only the user's own click on a link or a
+                        // submit button went anywhere (hand tests H14, H16).
+                        if let Some((url, from_user)) = view.take_script_navigation() {
+                            if from_user {
+                                info!(%url, "Link clicked");
+                            } else {
+                                info!(%url, "Script navigation");
+                            }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
+                        // The page's console lines, and a new tree after it
+                        // changed; an open panel asks on its own clock.
+                        if let Some(at) = devtools.pump(view, &inspector_for_events) {
+                            live_wake.set(Some(live_wake.get().map_or(at, |wake| wake.min(at))));
+                        }
+                        view.render();
                     }
-                    // The wheel, from the content view's own `scrollWheel:`.
-                    // The window-loop MouseWheel arm above stays as it was;
-                    // the view consumes the wheel, so only one of the two
-                    // fires for an event. Until 2026-10-06 the wheel reached
-                    // neither in the built app (hand-test item H6).
-                    for scroll in rustkit_viewhost::drain_pending_scrolls() {
-                        if wheel_burst_started() {
-                            info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
-                        }
-                        if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
-                            trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                        }
-                    }
-                    for key in rustkit_viewhost::drain_pending_keys() {
-                        if key.cmd {
-                            continue; // menu shortcuts are not text
-                        }
-                        // macOS keyCodes -> the Win32 VK numbering the edit
-                        // model speaks. Text keys carry their characters.
-                        let (vk, text): (u32, &str) = match key.mac_keycode {
-                            51 => (0x08, ""),   // delete (backspace)
-                            117 => (0x2E, ""),  // forward delete
-                            123 => (0x25, ""),  // left
-                            124 => (0x27, ""),  // right
-                            115 => (0x24, ""),  // home
-                            119 => (0x23, ""),  // end
-                            36 | 76 => (0x0D, ""), // return / keypad enter
-                            48 => (0x09, ""),   // tab
-                            53 => (0x1B, ""),   // escape
-                            116 => (0x21, ""),  // page up
-                            121 => (0x22, ""),  // page down
-                            126 => (0x26, ""),  // up
-                            125 => (0x28, ""),  // down
-                            _ => (0, key.text.as_str()),
-                        };
-                        if vk == 0 && text.is_empty() {
-                            continue;
-                        }
-                        if key.up {
-                            view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
-                            continue;
-                        }
-                        if vk == 0x0D {
-                            if let Some(url) = view.form_submit_url() {
-                                info!(%url, "Form submitted");
-                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                                continue;
-                            }
-                        }
-                        let focused = view.has_focused_element();
-                        if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
-                            view.relayout();
-                        } else if !focused {
-                            // Nothing focused and the page did not take
-                            // the key: the keys that scroll, as in the
-                            // window-level arm (wheel sign convention).
-                            let dy: Option<f32> = match (vk, text) {
-                                (0x28, _) => Some(-40.0),
-                                (0x26, _) => Some(40.0),
-                                (0x22, _) | (0, " ") => Some(-600.0),
-                                (0x21, _) => Some(600.0),
-                                (0x23, _) => Some(-f32::MAX),
-                                (0x24, _) => Some(f32::MAX),
-                                _ => None,
-                            };
-                            if let Some(dy) = dy {
-                                view.scroll_by(0.0, dy);
-                            }
-                        }
-                    }
-                    // Timers that came due, late fetches, and what the
-                    // input above started; then sleep until the next timer.
-                    let sleep = view.process_events();
-                    live_wake.set(sleep.map(|d| std::time::Instant::now() + d));
-                    // A navigation the page started itself: `location.href
-                    // = url`, a script's `link.click()` or `form.submit()`,
-                    // a submit from a timer. Until 2026-10-06 these were
-                    // dropped: only the user's own click on a link or a
-                    // submit button went anywhere (hand tests H14, H16).
-                    if let Some(url) = view.take_script_navigation() {
-                        info!(%url, "Script navigation");
-                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                    }
-                    view.render();
                 }
             }
             Event::UserEvent(user_event) => {
@@ -2558,7 +2693,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_back() {
                                     info!("GoBack: nowhere to go");
@@ -2566,8 +2701,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("history.back();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("history.back();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -2582,7 +2715,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_forward() {
                                     info!("GoForward: nowhere to go");
@@ -2590,8 +2723,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("history.forward();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("history.forward();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -2606,7 +2737,7 @@ fn main() {
                             // WRY fallback (page JS does not execute in
                             // RustKit, so the old evaluate_script stub was a
                             // silent no-op — live finding 2026-08-07).
-                            #[cfg(all(feature = "rustkit", not(feature = "webview-fallback")))]
+                            #[cfg(feature = "rustkit")]
                             if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
                                 if !v.nav_reload() {
                                     info!("Reload: nowhere to go");
@@ -2614,8 +2745,6 @@ fn main() {
                             } else {
                                 let _ = content_for_events.evaluate_script("location.reload();");
                             }
-                            #[cfg(any(not(feature = "rustkit"), feature = "webview-fallback"))]
-                            let _ = content_for_events.evaluate_script("location.reload();");
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
@@ -2626,7 +2755,17 @@ fn main() {
                         info!("Stopping load");
                         #[cfg(target_os = "macos")]
                         {
-                            // TODO: Implement stop in RustKit
+                            // The load in progress, cancelled without the
+                            // engine it holds (M3b's canceller).
+                            #[cfg(feature = "rustkit")]
+                            if let UnifiedContentWebView::RustKit(ref v) = *content_for_events {
+                                if !v.stop_load() {
+                                    info!("Stop: nothing loading");
+                                }
+                            } else {
+                                let _ = content_for_events.evaluate_script("window.stop();");
+                            }
+                            #[cfg(not(feature = "rustkit"))]
                             let _ = content_for_events.evaluate_script("window.stop();");
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -4150,6 +4289,14 @@ fn main() {
                             let _ = settings_wv.evaluate_script(&script);
                         }
                     }
+                    UserEvent::WindowThreadPing => {
+                        if let Some((answered, clock)) = stall_log.as_ref() {
+                            answered.now(clock);
+                        }
+                    }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
+                    }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs
                         let state = state_for_events.lock().unwrap();
@@ -4380,6 +4527,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.open(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Inject inspector script into content webview if not already injected
                         let inject_script = format!(
                             "if (!window.__hiwaveInspector) {{ {} }}",
@@ -4419,6 +4569,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.close(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Clear highlight in content
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
@@ -4464,6 +4617,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorHighlightElement { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, Some(&path))) {
+                            return;
+                        }
                         let script = format!(
                             "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
                             path.replace("'", "\\'")
@@ -4471,11 +4627,17 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorClearHighlight => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, None)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
                         );
                     }
                     UserEvent::InspectorStartPicker => {
+                        if with_rustkit_content!(content_for_events, _view => devtools.start_picker(&inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
@@ -4484,6 +4646,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorStopPicker => {
+                        if with_rustkit_content!(content_for_events, view => devtools.stop_picker(view, &inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
@@ -4497,6 +4662,44 @@ fn main() {
                             path.replace("'", "\\'")
                         );
                         let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorRefreshTree => {
+                        if with_rustkit_content!(content_for_events, view => devtools.send_tree(view)) {
+                            return;
+                        }
+                        let _ = content_for_events.evaluate_script(r#"
+                            (function() {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({
+                                        cmd: 'inspector_dom_tree_result',
+                                        tree: tree
+                                    }));
+                                }
+                            })();
+                        "#);
+                    }
+                    UserEvent::InspectorSelect { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.select(view, &path)) {
+                            return;
+                        }
+                        let script = format!(r#"
+                            (function() {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_styles_result',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }})();
+                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorExpand { path } => {
+                        // The injected-script tree is sent whole; only
+                        // RustKit's is cut and expanded on demand.
+                        with_rustkit_content!(content_for_events, view => devtools.expand(view, &path));
                     }
                     UserEvent::InspectElement { path } => {
                         // Open inspector and select the element
@@ -4533,6 +4736,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorConsoleEval { code } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.eval(view, &code)) {
+                            return;
+                        }
                         // Execute JavaScript in content webview
                         let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
                         let script = format!(r#"

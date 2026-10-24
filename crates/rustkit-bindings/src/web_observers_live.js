@@ -21,7 +21,7 @@
     if (!document || !g.Element) return;
 
     function report(e) {
-        try { if (g.__rustkit_errors) g.__rustkit_errors.push(String(e)); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
     function requireCallback(ctor, cb) {
         if (typeof cb !== 'function') {
@@ -131,7 +131,9 @@
     function area(r) { return Math.max(0, r.w) * Math.max(0, r.h); }
     function rootBounds(io) {
         var base;
-        if (io.root && io.root.nodeType === 1) {
+        // The root element scrolls with the viewport and is clipped by it:
+        // as a root it is the viewport, now that it has a box of its own.
+        if (io.root && io.root.nodeType === 1 && io.root !== document.documentElement) {
             var b = io.root.getBoundingClientRect();
             base = { x: b.left, y: b.top, w: b.width, h: b.height };
         } else {

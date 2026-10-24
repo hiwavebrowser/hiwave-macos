@@ -1,0 +1,12 @@
+<!doctype html><!-- @supports, true and false, positive and `not`, incl. ebay/wikipedia's `@supports not selector(:popover-open)`.
+ PASS: all five 100x100 boxes at y=10 are green (pixels (60,60) (170,60) (280,60) (390,60) (500,60)). A red box names the branch the engine got wrong. -->
+<html><head><style>
+body { margin: 0; } div { position: absolute; top: 10px; width: 100px; height: 100px; }
+#a { left: 10px; background: red; } @supports (display: grid) { #a { background: green; } }
+#b { left: 120px; background: red; } @supports not (display: frobnicate) { #b { background: green; } }
+#c { left: 230px; background: green; } @supports (display: frobnicate) { #c { background: red; } }
+#d { left: 340px; background: green; } @supports not (display: block) { #d { background: red; } }
+#e { left: 450px; background: green; } @supports not selector(:popover-open) { #e { background: red; } [popover]:not(.\:popover-open) { display: none; } }
+</style></head><body>
+<div id="a"></div><div id="b"></div><div id="c"></div><div id="d"></div><div id="e"></div>
+</body></html>

@@ -1,93 +1,74 @@
 # Changelog
 
-All notable changes to HiWave will be documented in this file.
+Changes are tracked through merged pull requests into `develop`:
+<https://github.com/hiwavebrowser/hiwave-macos/pulls?q=is%3Apr+is%3Amerged>
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Releases are cut by promoting `develop` to `master` and tagging the result. The
+full notes for each release, with measurements and known issues, are on the
+[GitHub releases page](https://github.com/hiwavebrowser/hiwave-macos/releases).
+This file only summarizes them.
 
 ## [Unreleased]
 
-### Added
-- About page with donation links
-- Contributing guidelines
-- GitHub Actions CI/CD workflow
-- Comprehensive documentation
+Everything merged into `develop` since V1.4.0. See the merged pull requests
+linked above.
 
-### Changed
-- Improved README for public release
+## [V1.4.0] - 2026-10-24
 
-## [0.1.0-alpha] - 2024-XX-XX
+develop promoted to master on Friday 2026-10-23 ET.
 
-### Added
-- **Core Browsing**
-  - Tab management (create, close, switch, reorder)
-  - Address bar with URL/search detection
-  - Navigation (back, forward, reload)
-  - Keyboard shortcuts for all actions
+- Pages run on their own content thread (on by default): the window no longer
+  waits on page script; the address bar and Stop answer while a page loads.
+- HiWave Inspector: Elements and Console panels for RustKit pages, JavaScript
+  error stacks, shape-only privacy.
+- CSS `:has()`, `@supports`, `color-mix()`, `-webkit-line-clamp`, scoped
+  shadow DOM styles; clicks reach transformed consent dialogs.
+- Quiet real-site board 28/60 (V1.3.0: 27/60); campaign 26/26 at 1.1%.
 
-- **The Shelf**
-  - Drag-to-shelve tabs
-  - Visual decay indicators
-  - Workspace-scoped shelf view
-  - One-click restore
+## [V1.3.0] - 2026-10-12
 
-- **Workspaces**
-  - Create and manage workspaces
-  - Inline rename
-  - Tab count per workspace
-  - Quick switching via sidebar
+First weekly release (develop `16f97285` promoted by #660).
 
-- **Flow Shield**
-  - Built-in ad and tracker blocking
-  - Powered by Brave's adblock-rust
-  - Block count display
-  - Per-domain blocking
+- Pages scroll; Wikipedia articles render with tables and floats; github.com
+  settles instead of rebuilding forever; a runaway script is stopped after 15
+  seconds (was 60).
+- Layout: first slice of table layout, float line wrapping, auto margins on
+  flex items. SVG sprite sheets and `<use>`. `opacity` honoured as a group layer.
+- Quiet real-site board 27/60 (unchanged from V1.2.0).
 
-- **Flow Vault**
-  - Encrypted password storage (AES-256-GCM)
-  - Master password protection
-  - Add/search/copy credentials
+## [V1.2.0] - 2026-10-02
 
-- **UI/UX**
-  - Dark theme
-  - Sidebar with workspaces, shelf, and actions
-  - Command palette (Ctrl+K)
-  - Three mode selector (Essentials, Balanced, Zen)
-  - New tab page with keyboard reference
+develop promoted to master at `157767f` (#439).
 
-### Known Limitations
-- No bookmarks (planned)
-- No history (planned)
-- No Find in Page (planned)
-- No context menus (planned)
-- Vault auto-fill not implemented
-- Mode automation not fully implemented
+- JavaScript: DOM read, mutate, events and forms, plus common web globals.
+- CSS: cascade layers, nesting, `light-dark()`, elliptical corners, grid
+  template areas, generic font families and glyph fallback.
+- Web fonts painted with their own glyphs; rustls with HTTP/2; EasyList shield.
+- Builtins 26/26 at mean diff 1.107% vs Chrome 148; real-site board 27/60.
 
----
+## [V1.1.0] - 2026-09-24
 
-## Version History
+develop `6e508fd` promoted to master (#248), 53 merged PRs.
 
-| Version | Date | Highlights |
-|---------|------|------------|
-| 0.1.0-alpha | TBD | Initial alpha release |
+- Text and layout: kerning, Blink baseline seating, justify, multi-column,
+  grid and flex sizing fixes.
+- CSS: `!important` and `inherit`, radial-gradient sizes, rounded and
+  dashed/dotted borders.
+- `parity-capture --url` and the real-site board; stop, reload, back and
+  forward over session history.
+- Parity campaign 26/26 at 1.2566 average diff; WPT Tier-1 23/26.
 
----
+## [V1.0.001] - 2025-12-31
 
-## Roadmap Preview
+Updated about page.
 
-### 0.2.0 (Planned)
-- Find in Page (Ctrl+F)
-- Context menus
-- Basic bookmarks
-- Session restoration
+## [V1.0.0-alpha] - 2025-12-31
 
-### 0.3.0 (Planned)
-- History
-- Downloads manager
-- Import from Chrome/Firefox
-- Tab audio indicators
+First public release.
 
-### 1.0.0 (Future)
-- Feature complete
-- Stable for daily use
-- All major browsers import support
+[Unreleased]: https://github.com/hiwavebrowser/hiwave-macos/compare/V1.3.0...develop
+[V1.3.0]: https://github.com/hiwavebrowser/hiwave-macos/releases/tag/V1.3.0
+[V1.2.0]: https://github.com/hiwavebrowser/hiwave-macos/releases/tag/V1.2.0
+[V1.1.0]: https://github.com/hiwavebrowser/hiwave-macos/releases/tag/V1.1.0
+[V1.0.001]: https://github.com/hiwavebrowser/hiwave-macos/releases/tag/V1.0.001
+[V1.0.0-alpha]: https://github.com/hiwavebrowser/hiwave-macos/releases/tag/V1.0.0-alpha

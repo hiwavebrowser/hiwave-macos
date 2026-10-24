@@ -66,7 +66,7 @@ enum AtBlock {
     /// whose selector is the at-rule prelude, as before.
     Declarations,
     /// Nothing that styles an element in the static frame (`@keyframes`,
-    /// `@container`, `@supports not (...)`, unknown at-rules): skipped whole.
+    /// `@container`, an `@supports` that is false, unknown at-rules): skipped whole.
     Skip,
 }
 
@@ -79,11 +79,7 @@ fn at_block_kind(prelude: &str) -> AtBlock {
     let condition = at[name_end..].trim();
     match name.as_str() {
         "media" => AtBlock::Rules(Some(condition.to_string())),
-        // Only a negated condition is decided here: every positive feature
-        // query on the board's sites names something Chrome supports, and a
-        // property RustKit lacks is ignored at apply time anyway.
-        "supports" if condition.to_ascii_lowercase().starts_with("not") => AtBlock::Skip,
-        "supports" => AtBlock::Rules(None),
+        "supports" if supports_condition(condition) == Some(true) => AtBlock::Rules(None),
         "layer" if condition.is_empty() => AtBlock::Layer(anonymous_layer_name()),
         "layer" => AtBlock::Layer(condition.to_string()),
         "font-face" | "page" | "property" | "counter-style" | "font-palette-values" => {
@@ -91,6 +87,203 @@ fn at_block_kind(prelude: &str) -> AtBlock {
         }
         _ => AtBlock::Skip,
     }
+}
+
+/// Decide an `@supports` condition (CSS Conditional 3 §6.1, with
+/// `selector()` and `font-tech()`/`font-format()` from level 4) as Chrome
+/// does. `None` means the prelude does not parse, and the rule is dropped.
+///
+/// A declaration counts as supported unless it is plainly not: a property
+/// no Chromium build has, an empty value, or a `display`/`position` value
+/// outside the keywords. RustKit drops a property it lacks at apply time
+/// anyway, so a page's Chrome branch stays the one RustKit gets.
+fn supports_condition(s: &str) -> Option<bool> {
+    let s = s.trim();
+    if let Some(rest) = strip_keyword(s, "not") {
+        let (term, tail) = split_term(rest.trim_start())?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        return supports_in_parens(term).map(|v| !v);
+    }
+    let (mut all, mut any, mut op, mut rest) = (true, false, None, s);
+    loop {
+        let (term, tail) = split_term(rest)?;
+        let v = supports_in_parens(term)?;
+        (all, any) = (all && v, any || v);
+        let tail = tail.trim_start();
+        if tail.is_empty() {
+            return Some(if op == Some("or") { any } else { all });
+        }
+        let (kw, after) = match (strip_keyword(tail, "and"), strip_keyword(tail, "or")) {
+            (Some(a), _) => ("and", a),
+            (_, Some(a)) => ("or", a),
+            _ => return None,
+        };
+        // `and` and `or` never mix without parentheses.
+        if op.is_some_and(|o| o != kw) {
+            return None;
+        }
+        (op, rest) = (Some(kw), after.trim_start());
+    }
+}
+
+/// `s` without a leading case-insensitive keyword that whitespace follows.
+fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let head = s.get(..kw.len())?;
+    let rest = &s[kw.len()..];
+    (head.eq_ignore_ascii_case(kw) && rest.starts_with(char::is_whitespace)).then_some(rest)
+}
+
+/// Split one `( ... )` or `name( ... )` off the front of `s`.
+fn split_term(s: &str) -> Option<(&str, &str)> {
+    let open = s.find('(')?;
+    if !s[..open].chars().all(|c| c.is_alphanumeric() || c == '-') {
+        return None;
+    }
+    let (mut depth, mut quote, mut escaped) = (0usize, None, false);
+    for (i, c) in s.char_indices().skip_while(|&(i, _)| i < open) {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '"' | '\'' => quote = Some(c),
+                '(' => depth += 1,
+                ')' if depth == 1 => return Some((&s[..=i], &s[i + 1..])),
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// One `<supports-in-parens>`, or a `selector()`/`font-*()` function.
+fn supports_in_parens(term: &str) -> Option<bool> {
+    let open = term.find('(')?;
+    let name = term[..open].to_ascii_lowercase();
+    let arg = term[open + 1..term.len() - 1].trim();
+    Some(match name.as_str() {
+        "" => {
+            if let Some(v) = supports_condition(arg) {
+                v
+            } else if let Some((prop, value)) = arg.split_once(':') {
+                supports_declaration(prop.trim(), value.trim())
+            } else {
+                false // <general-enclosed>: valid, but false
+            }
+        }
+        // Chrome knows every selector a page tests for except other
+        // engines' prefixed pseudo-classes (`:-moz-focusring`).
+        "selector" => {
+            let a = arg.to_ascii_lowercase();
+            !a.is_empty() && !a.contains(":-moz-") && !a.contains(":-ms-")
+        }
+        "font-format" => matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "collection" | "opentype" | "truetype" | "woff" | "woff2"
+        ),
+        "font-tech" => matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "features-opentype" | "variations" | "palettes" | "color-colrv0" | "color-colrv1"
+        ),
+        _ => false,
+    })
+}
+
+fn supports_declaration(prop: &str, value: &str) -> bool {
+    let value = value
+        .trim_end_matches("!important")
+        .trim()
+        .to_ascii_lowercase();
+    if prop.starts_with("--") {
+        return prop.len() > 2;
+    }
+    let prop = prop.to_ascii_lowercase();
+    let ident = prop
+        .trim_start_matches('-')
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if value.is_empty() || prop.is_empty() || !ident {
+        return false;
+    }
+    // Other engines' prefixes, and properties Chromium never shipped.
+    if ["-moz-", "-ms-", "-o-", "-khtml-"]
+        .iter()
+        .any(|p| prop.starts_with(p))
+        || matches!(
+            prop.as_str(),
+            "margin-trim"
+                | "hanging-punctuation"
+                | "-webkit-touch-callout"
+                | "-webkit-overflow-scrolling"
+        )
+    {
+        return false;
+    }
+    if matches!(
+        value.as_str(),
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+    ) {
+        return true;
+    }
+    match prop.as_str() {
+        "display" => supports_display(&value),
+        "position" => matches!(
+            value.as_str(),
+            "static" | "relative" | "absolute" | "fixed" | "sticky"
+        ),
+        _ => true,
+    }
+}
+
+/// Chrome's `display` grammar: one legacy keyword, or up to one each of an
+/// outer type, an inner type and `list-item` (CSS Display 3 §2).
+fn supports_display(value: &str) -> bool {
+    const ONE: &[&str] = &[
+        "none",
+        "contents",
+        "inline-block",
+        "inline-flex",
+        "inline-grid",
+        "inline-table",
+        "table-row-group",
+        "table-header-group",
+        "table-footer-group",
+        "table-row",
+        "table-cell",
+        "table-column-group",
+        "table-column",
+        "table-caption",
+        "ruby-text",
+        "-webkit-box",
+        "-webkit-inline-box",
+        "-webkit-flex",
+        "-webkit-inline-flex",
+    ];
+    if ONE.contains(&value) {
+        return true;
+    }
+    let (mut outer, mut inner, mut item) = (false, None, false);
+    for t in value.split_whitespace() {
+        match t {
+            "block" | "inline" if !outer => outer = true,
+            "flow" | "flow-root" | "flex" | "grid" | "table" | "ruby" | "math"
+                if inner.is_none() =>
+            {
+                inner = Some(t)
+            }
+            "list-item" if !item => item = true,
+            _ => return false,
+        }
+    }
+    !item || matches!(inner, None | Some("flow" | "flow-root"))
 }
 
 /// A name for an anonymous `@layer { }` block. Each anonymous block is a
@@ -830,6 +1023,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn supports_blocks_apply_only_when_their_condition_holds() {
+        // #747's css_supports.html (#a-#e), then and/or/not, Tailwind v4's
+        // property-defaults query, and a group rule nested in a style rule.
+        // Before, every positive query applied and every `not` was skipped.
+        let css = r#"
+            @supports (display: grid) { .a { color: green } }
+            @supports not (display: frobnicate) { .b { color: green } }
+            @supports (display: frobnicate) { .c { color: red } }
+            @supports not (display: block) { .d { color: red } }
+            @supports not selector(:popover-open) { .e { color: red } }
+            @supports (display: grid) and (not (margin-trim: inline)) { .f { color: green } }
+            @supports (-moz-appearance: none) or (color: oklch(0 0 0)) { .g { color: green } }
+            @supports (display: grid) and (gap: 1px) or (color: red) { .h { color: red } }
+            @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) { .tw { color: green } }
+            .n { color: green; @supports (display: frobnicate) { color: red } }
+            .after { color: green }
+        "#;
+        let selectors: Vec<String> = parse_stylesheet(css)
+            .expect("parse")
+            .rules
+            .into_iter()
+            .map(|r| r.selector)
+            .collect();
+        assert_eq!(selectors, [".a", ".b", ".f", ".g", ".tw", ".n", ".after"]);
+    }
+
+    #[test]
+    fn supports_conditions_follow_the_grammar() {
+        assert_eq!(supports_condition("(display: block flow-root)"), Some(true));
+        assert_eq!(
+            supports_condition("(display: inline list-item flex)"),
+            Some(false)
+        );
+        assert_eq!(
+            supports_condition("(--x: {a}) and font-format(woff2)"),
+            Some(true)
+        );
+        assert_eq!(supports_condition("display: grid"), None);
+    }
     #[test]
     fn layer_blocks_name_their_rules_and_statements_declare_the_order() {
         let css = r#"

@@ -11,6 +11,42 @@
 
 mod dom;
 mod inner_text;
+
+thread_local! {
+    static LOCATION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static LOCATION_HOOK: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// `url`, `replace` (`location.replace` / reload).
+pub type LocationDiag = fn(&str, bool);
+
+pub fn set_location_armed(on: bool) {
+    LOCATION_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn set_location_hook(hook: Option<LocationDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    LOCATION_HOOK.store(ptr, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_location(url: &str, replace: bool) {
+    if !LOCATION_ARMED.with(std::cell::Cell::get) {
+        return;
+    }
+    let ptr = LOCATION_HOOK.load(std::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `LocationDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: LocationDiag = unsafe { std::mem::transmute(ptr) };
+    hook(url, replace);
+}
 mod net_bridge;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
@@ -41,7 +77,13 @@ mod form_controls_tests;
 #[cfg(test)]
 mod web_history_tests;
 #[cfg(test)]
+mod web_scripts_tests;
+#[cfg(test)]
+mod meta_refresh_noscript_tests;
+#[cfg(test)]
 mod geometry_tests;
+#[cfg(test)]
+mod range_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
@@ -70,7 +112,7 @@ mod web_crypto;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, SelectorMatchFn};
+pub use dom::{BoxGeometry, GeometrySource, HitTester, SelectorMatchFn};
 pub mod events;
 
 pub use events::{
@@ -109,6 +151,23 @@ pub enum BindingError {
 /// Unique identifier for an event listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListenerId(u64);
+
+/// An external classic script that script inserted
+/// ([`DomBindings::take_inserted_scripts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertedScript {
+    /// The element's raw NodeId.
+    pub node: usize,
+    /// Its absolute `src`.
+    pub url: String,
+    /// Not async (HTML §4.12.1.1: `async = false` cleared the element's
+    /// "force async"): it runs after the in-order scripts inserted before
+    /// it, not as soon as it arrives.
+    pub in_order: bool,
+    /// Where the page's script that inserted it was (its innermost frame
+    /// in a named script), when the runtime could place it.
+    pub inserted_by: Option<rustkit_js::ScriptPosition>,
+}
 
 impl ListenerId {
     fn new() -> Self {
@@ -364,22 +423,32 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 ///
 /// An exception thrown inside an event listener or a timer callback does
 /// not propagate to whoever fired it (in a browser it goes to
-/// `window.onerror`), so those are caught here and queued in
-/// `__rustkit_errors` for the engine to collect. The one thing that does
+/// `window.onerror`), so those are caught here and handed to the runtime's
+/// host natives (`__rk.reportError`, which page script cannot reach) for the
+/// engine to collect. The one thing that does
 /// propagate is Boa's loop-iteration limit, which a script cannot catch.
 ///
 /// Timers run on a virtual clock the engine advances (`__rustkit_run_timers`),
 /// so a page's `setTimeout(f, 2000)` runs without the load waiting 2s of wall
 /// time. Promise reactions run when the enclosing evaluation returns, not
 /// between two timer callbacks.
+/// The Web API members the bindings report as unimplemented when page
+/// script reaches them (`__rk.unsupported` in the bindings' scripts, a
+/// native page script cannot reach). Nothing else is ever reported.
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 5] = [
+    ("XMLHttpRequest", "open(async=false)"),
+    ("XMLHttpRequest", "responseXML"),
+    ("CustomElementRegistry", "define(extends)"),
+    ("ReadableStream", "getReader(byob)"),
+    ("DOMParser", "parseFromString(XML)"),
+];
+
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
-    var errors = [];
-    window.__rustkit_errors = errors;
+    // Described natively (no page code runs) and queued in the runtime.
+    var reportError = __rk.reportError;
     function report(e) {
-        var msg;
-        try { msg = String(e); } catch (_) { msg = '<unprintable exception>'; }
-        errors.push(msg);
+        try { reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -414,6 +483,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(document);
 
     var now = 0, nextId = 1, timers = [];
+    // Real time, for the live turn's slice. Taken now, before page script
+    // can replace `Date.now`.
+    var realNow = Date.now;
     window.__rustkit_fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         target.dispatchEvent({
@@ -464,9 +536,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // would pass `horizon` ms or `max` callbacks have run. The load's clock
     // has no frames, so an animation frame there is a 16 ms timer; the live
     // loop keeps them for its one round a turn (`timersOnly`).
-    function runTimers(horizon, max, timersOnly) {
+    //
+    // `until` (live loop only) is a time on the real clock: once a callback
+    // ends past it, the rest wait for the next turn, as when `max` is hit.
+    function runTimers(horizon, max, timersOnly, until) {
         var ran = 0;
-        while (ran < max) {
+        while (ran < max && !(until && realNow() >= until)) {
             var best = -1;
             for (var i = 0; i < timers.length; i++) {
                 var t = timers[i];
@@ -476,8 +551,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             }
             if (best < 0 || timers[best].due > horizon) break;
             var timer = timers[best];
-            now = timer.due;
-            if (timer.every) { timer.due += timer.every; timer.seq = nextId++; }
+            // A timer a cut-short live turn owed runs after the clock has
+            // moved on; the clock does not go back for it.
+            if (timer.due > now) now = timer.due;
+            // An interval that fell behind (a live turn held it back) is not
+            // caught up: its next run counts from now, as in a browser.
+            if (timer.every) {
+                timer.due += timer.every;
+                if (timer.due <= now) timer.due = now + timer.every;
+                timer.seq = nextId++;
+            }
             else timers.splice(best, 1);
             ran++;
             call(timer);
@@ -487,20 +570,46 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.__rustkit_run_timers = function (horizon, max) {
         return runTimers(horizon, max, false);
     };
+    // The load's clock, one callback at a time, so the host can publish a
+    // frame between them. A negative return is `-callbacks` and means the
+    // horizon still has timers due. Zero frame budget never stops early.
+    window.__rustkit_run_timers_framed = function (horizon, max, frameMs) {
+        var start = Date.now();
+        var ran = 0;
+        while (ran < max) {
+            var n = runTimers(horizon, 1, false);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+        }
+        return ran;
+    };
     // The live loop's clock: `delta` ms of real time have passed. Run what
     // came due and leave the clock there, so a timer set next (by a click,
     // say) counts from now and not from the last callback. With callbacks
-    // still owed (the cap), the clock stays behind and the next turn
-    // catches up.
+    // still owed (the cap, or the slice below), the clock moves on all the
+    // same: what is owed is overdue, and runs first on the next turn. (Left
+    // behind, the clock stood still under a `setTimeout(0)` chain, each new
+    // link due before every later timer and frame, which never ran.)
     //
     // A turn is one frame however long it took: after its timers, the
     // animation frame callbacks that are due run once, at the turn's time.
     // One asked for during the round is due a frame later. (As 16 ms timers
     // a turn of 3 s ran 187 of them back to back.)
-    window.__rustkit_advance_timers = function (delta, max) {
+    //
+    // `slice` ms of real time (0: no limit) bounds the turn's timers, as
+    // `max` does: a page that chains `setTimeout(0)` gets the window back
+    // between its callbacks, rather than once 1000 of them have run
+    // (seconds of them, until the watchdog stopped one part-way;
+    // 2026-10-22). The turn's frame still comes.
+    window.__rustkit_advance_timers = function (delta, max, slice) {
         var target = now + delta;
-        var ran = runTimers(target, max, true);
-        if (ran >= max) return ran;
+        var until = slice > 0 ? realNow() + slice : 0;
+        var ran = runTimers(target, max, true, until);
+        if (ran >= max) {
+            if (now < target) now = target;
+            return ran;
+        }
         if (now < target) now = target;
         var round = [];
         for (var i = 0; i < timers.length; i++) {
@@ -515,6 +624,51 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             call(round[j]);
         }
         return ran;
+    };
+    // Like `__rustkit_advance_timers`, but stop between callbacks once
+    // `frameMs` of wall time has passed so the host can publish a frame.
+    // A negative return is `-callbacks` and means timers are still due.
+    // Zero frame budget never stops early. Callbacks that finish inside
+    // the budget run in this call, and the clock and animation-frame round
+    // match `__rustkit_advance_timers`.
+    //
+    // The elapsed delta is applied even when a callback ran long enough to
+    // stop the turn. Leaving the clock at that callback's due time drops
+    // the time already spent, so the next interval waits a full extra
+    // period after Stop. Timers still due are at or before `target` and
+    // run on the next turn.
+    //
+    // A turn that yields still has its frame (#776): its animation-frame
+    // round runs before it returns. Returning first, a `setTimeout(0)`
+    // chain that outlasted every frame starved `requestAnimationFrame`.
+    window.__rustkit_advance_timers_framed = function (delta, max, frameMs) {
+        var target = now + delta;
+        var start = Date.now();
+        var ran = 0;
+        var yielded = false;
+        while (ran < max) {
+            var n = runTimers(target, 1, true);
+            if (n === 0) break;
+            ran += n;
+            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
+                yielded = true;
+                break;
+            }
+        }
+        if (now < target) now = target;
+        if (ran >= max) return yielded ? -ran : ran;
+        var round = [];
+        for (var i = 0; i < timers.length; i++) {
+            if (timers[i].frame && timers[i].due <= now) round.push(timers[i]);
+        }
+        for (var j = 0; j < round.length && ran < max; j++) {
+            var at = timers.indexOf(round[j]);
+            if (at < 0) continue;
+            timers.splice(at, 1);
+            ran++;
+            call(round[j]);
+        }
+        return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     window.__rustkit_next_timer = function () {
@@ -637,6 +791,59 @@ impl ScriptMutations {
     }
 }
 
+/// One script DOM write, per node (the incremental-restyle note's §3.1
+/// `MutationLog`). Recorded beside `DomDirty` and `ScriptMutations` by the
+/// same writes; the engine reads them to work out which nodes the writes can
+/// restyle. NodeIds are raw: a write to a node's data keeps its NodeId.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationRecord {
+    /// The node written to. For a [`MutationKind::ChildList`] record this is
+    /// the parent whose children changed.
+    pub node: usize,
+    pub kind: MutationKind,
+    /// The attribute set or removed (lowercased on an HTML element);
+    /// `checked` for a checkedness change.
+    pub attr: Option<String>,
+    /// The value before the write, kept for `class` and `id` only (`None`
+    /// also when the attribute was absent).
+    pub old: Option<String>,
+    /// [`MutationKind::ChildList`]: the node inserted, removed or moved
+    /// under `node`. `None` means all of `node`'s children were replaced
+    /// (`innerHTML`, `textContent`, `innerText` on an element).
+    pub child: Option<usize>,
+}
+
+/// The most records a [`MutationLog`] keeps between takes.
+pub const MUTATION_LOG_CAP: usize = 4096;
+
+/// The per-node script DOM writes since the last take, in write order.
+/// Past [`MUTATION_LOG_CAP`] records it gives up: `full` is set, the
+/// records are dropped, and the engine must treat the whole page as dirty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MutationLog {
+    pub records: Vec<MutationRecord>,
+    pub full: bool,
+}
+
+impl MutationLog {
+    /// Append one record, or overflow into `full`.
+    pub fn push(&mut self, record: MutationRecord) {
+        if self.full {
+            return;
+        }
+        if self.records.len() >= MUTATION_LOG_CAP {
+            self.full = true;
+            self.records = Vec::new();
+            return;
+        }
+        self.records.push(record);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty() && !self.full
+    }
+}
+
 /// DOM bindings context.
 pub struct DomBindings {
     runtime: RefCell<JsRuntime>,
@@ -651,11 +858,18 @@ pub struct DomBindings {
     dirty: Rc<Cell<DomDirty>>,
     /// What the writes behind `dirty` were (see `ScriptMutations`).
     mutations: Rc<RefCell<ScriptMutations>>,
+    /// The same writes per node (see `MutationLog`).
+    mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
 }
 
 impl DomBindings {
+    /// Install the test-only host re-entry probe on this page's runtime.
+    pub fn install_reentry_probe(&self) {
+        self.runtime.borrow_mut().install_reentry_probe();
+    }
+
     /// Create new DOM bindings.
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
@@ -667,13 +881,14 @@ impl DomBindings {
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(Cell::new(DomDirty::Clean));
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
-        dom::install(&mut runtime, &dom_host, &dirty, &mutations)?;
+        let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
+        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
-        runtime.evaluate_script(include_str!("web_components.js"))?;
+        runtime.evaluate_with_host(include_str!("web_components.js"))?;
         // attachShadow, ShadowRoot, slots, event retargeting (web_shadow.js).
         runtime.evaluate_script(include_str!("web_shadow.js"))?;
         // Reflected IDL attributes: link.href, script.type, img.alt, a.target, el.tabIndex, ... (web_reflect.js).
@@ -697,12 +912,14 @@ impl DomBindings {
         web_scroll::install(&mut runtime, &scroll)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
-        runtime.evaluate_script(include_str!("web_observers_live.js"))?;
+        runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
         // MutationObserver that records every DOM write and delivers in a microtask; replaces
         // the inert stub through the dom.rs write hook (web_mutation_observer.js).
-        runtime.evaluate_script(include_str!("web_mutation_observer.js"))?;
+        runtime.evaluate_with_host(include_str!("web_mutation_observer.js"))?;
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
-        runtime.evaluate_script(include_str!("web_messaging.js"))?;
+        runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
+        // Script elements script inserts are prepared and run (web_scripts.js).
+        runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -712,6 +929,7 @@ impl DomBindings {
             _ipc_queue: RefCell::new(Vec::new()),
             dirty,
             mutations,
+            mutation_log,
             scroll,
         })
     }
@@ -733,6 +951,13 @@ impl DomBindings {
     /// only. A `mark_dirty` from the embedder records nothing here.
     pub fn take_script_mutations(&self) -> ScriptMutations {
         self.mutations.take()
+    }
+
+    /// The writes since the last call, per node and in order (see
+    /// `MutationLog`), which are reset. Taken with `take_dirty`; a
+    /// `mark_dirty` from the embedder records nothing here.
+    pub fn take_mutation_log(&self) -> MutationLog {
+        self.mutation_log.take()
     }
 
     /// The `<input>`/`<textarea>` values script set since the last call, as
@@ -757,11 +982,68 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_submit_requests()
     }
 
+    /// Whether script has asked to navigate to a URL since the requests
+    /// were last taken. Takes nothing. A form submitted by script does not
+    /// count: the embedder may not follow it (only GET is wired).
+    pub fn navigation_requested(&self) -> bool {
+        self.dom_host.borrow().navigation_requested()
+    }
+
     /// The absolute URLs script asked to navigate to since the last call
     /// (`location.href = url`, `location.assign/replace`, `link.click()`),
     /// oldest first. Nothing navigates until the embedder does.
     pub fn take_navigation_requests(&self) -> Vec<String> {
+        self.take_navigation_requests_with_replace().into_iter().map(|(url, _)| url).collect()
+    }
+
+    /// [`Self::take_navigation_requests`], each with whether it replaces the
+    /// current history entry (`location.replace`, a reload, the document's
+    /// own URL again, a meta refresh) instead of adding one.
+    pub fn take_navigation_requests_with_replace(&self) -> Vec<(String, bool)> {
         self.dom_host.borrow_mut().take_navigation_requests()
+    }
+
+    /// The external classic scripts script inserted since the last call,
+    /// oldest first. The engine fetches each and runs it as that element's
+    /// script ([`Self::set_current_script`], then [`Self::fire_script_event`]).
+    pub fn take_inserted_scripts(&self) -> Vec<InsertedScript> {
+        self.dom_host.borrow_mut().take_inserted_scripts()
+    }
+
+    /// Back `document.cookie` with the browser's jar: `get` answers the
+    /// cookies script may read for this document, `set` stores one
+    /// assignment. Without this, `document.cookie` is a string that keeps
+    /// nothing (a document with no URL has no cookies).
+    pub fn set_cookie_access(
+        &self,
+        get: Box<dyn Fn() -> String>,
+        set: Box<dyn Fn(&str)>,
+    ) -> Result<(), BindingError> {
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function("__rustkit_cookie_get", 0, Box::new(move |_| JsValue::String(get())))?;
+        runtime.register_host_function(
+            "__rustkit_cookie_set",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(value)) = args.first() {
+                    set(value);
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_script(
+            r#"(function (g) {
+                var get = g.__rustkit_cookie_get, set = g.__rustkit_cookie_set;
+                delete g.__rustkit_cookie_get;
+                delete g.__rustkit_cookie_set;
+                Object.defineProperty(g.document, 'cookie', {
+                    get: function () { return get(); },
+                    set: function (v) { set(String(v)); },
+                    configurable: true, enumerable: true
+                });
+            })(globalThis);"#,
+        )?;
+        Ok(())
     }
 
     /// Tell script what the user typed into a control, so its `value`
@@ -871,7 +1153,7 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_encoding.js"))?;
 
         // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_script(include_str!("web_streams.js"))?;
+        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
 
         // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
         runtime.evaluate_script(include_str!("web_intl.js"))?;
@@ -1228,7 +1510,7 @@ impl DomBindings {
         "#;
 
         runtime.evaluate_script(input_element_js)?;
-        runtime.evaluate_script(PAGE_LIFECYCLE_JS)?;
+        runtime.evaluate_with_host(PAGE_LIFECYCLE_JS)?;
 
         debug!("Global objects injected");
         Ok(())
@@ -1247,7 +1529,32 @@ impl DomBindings {
     /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
     /// after a layout; script reads answer from the last one published.
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
-        self.dom_host.borrow_mut().geometry = geometry;
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.set_hit_tester(None);
+        host.geometry = geometry;
+    }
+
+    /// The layout hit test `elementFromPoint` uses. `None` falls back to
+    /// the published boxes. A point answers null until a layout exists.
+    pub fn set_hit_tester(&self, tester: Option<HitTester>) {
+        self.dom_host.borrow_mut().set_hit_tester(tester);
+    }
+
+    /// Publish a new layout without measuring it: `source` builds the maps
+    /// `set_geometry` and `set_computed_styles` take, and runs on the first
+    /// script read of geometry or computed style after this call, once. The
+    /// maps of the previous layout are dropped here, so no read sees them.
+    pub fn set_geometry_source(&self, source: GeometrySource) {
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry.clear();
+        host.computed.clear();
+        host.geometry_source = Some(source);
+    }
+
+    /// How many times a source from `set_geometry_source` was built.
+    pub fn geometry_builds(&self) -> u64 {
+        self.dom_host.borrow().geometry_builds
     }
 
     /// Publish the view's scroll offset and the furthest it can scroll, for
@@ -1259,6 +1566,8 @@ impl DomBindings {
         s.y = offset.1;
         s.max_x = max.0;
         s.max_y = max.1;
+        drop(s);
+        self.dom_host.borrow_mut().note_scroll(offset);
     }
 
     /// Where script last scrolled the window to since the last call, if it
@@ -1285,7 +1594,9 @@ impl DomBindings {
     /// Publish the computed style of each laid-out element (raw NodeId to
     /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
-        self.dom_host.borrow_mut().computed = styles;
+        let mut host = self.dom_host.borrow_mut();
+        host.geometry_source = None;
+        host.computed = styles;
     }
 
     /// Set the document.
@@ -1295,6 +1606,7 @@ impl DomBindings {
         self.window.borrow_mut().document = Some(document.clone());
         self.dirty.set(DomDirty::Clean);
         self.mutations.take();
+        self.mutation_log.take();
 
         // Sync to JS
         let title = document.title().unwrap_or_default();
@@ -1378,6 +1690,71 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Evaluate a page script as `path` (see
+    /// [`JsRuntime::evaluate_script_named`]).
+    pub fn evaluate_named(&self, script: &str, path: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_script_named(script, path)
+            .map_err(Into::into)
+    }
+
+    /// Hand the page's console calls to `handler`, with their positions
+    /// (see [`JsRuntime::set_console_handler`]).
+    pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Console arguments reach the handler as type and length only (see
+    /// [`JsRuntime::set_console_redaction`]).
+    pub fn set_console_redaction(&self, on: bool) {
+        self.runtime.borrow_mut().set_console_redaction(on);
+    }
+
+    /// Hand pending console calls to the console handler now.
+    pub fn flush_console(&self) {
+        self.runtime.borrow_mut().flush_console();
+    }
+
+    /// Diagnostics for an embedder that records them: describe each page
+    /// error ([`take_error_reports`](Self::take_error_reports)), with its
+    /// message text only when `keep_text` (see
+    /// [`JsRuntime::set_error_reports`]).
+    pub fn set_error_details(&self, on: bool, keep_text: bool) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().set_error_reports(on, keep_text);
+        Ok(())
+    }
+
+    /// Keep each named script's source so an error log can quote it. Off
+    /// drops what was kept. See [`JsRuntime::set_capture_script_sources`].
+    pub fn capture_script_sources(&self, on: bool) {
+        self.runtime.borrow_mut().set_capture_script_sources(on);
+    }
+
+    /// Source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.runtime.borrow().script_source(path)
+    }
+
+    /// Page errors since the last call (with
+    /// [`set_error_details`](Self::set_error_details) on): exceptions,
+    /// modules that threw after a top-level `await`, unhandled rejections.
+    pub fn take_error_reports(&self) -> Vec<rustkit_js::ErrorReport> {
+        self.runtime.borrow_mut().take_error_reports()
+    }
+
+    /// Unimplemented Web API members page script reached since the last
+    /// call: `(interface, member, times, first caller's position)`. Only
+    /// [`UNSUPPORTED_MEMBERS`] are ever returned.
+    pub fn take_unsupported_apis(&self) -> Vec<(String, String, u64, Option<rustkit_js::ScriptPosition>)> {
+        self.runtime
+            .borrow_mut()
+            .take_unsupported()
+            .into_iter()
+            .filter(|(i, m, _, _)| UNSUPPORTED_MEMBERS.contains(&(i.as_str(), m.as_str())))
+            .collect()
+    }
+
     /// Bound every loop a page script runs (see
     /// [`JsRuntime::set_loop_iteration_limit`]).
     pub fn set_loop_iteration_limit(&self, max_iterations: u64) {
@@ -1402,6 +1779,23 @@ impl DomBindings {
     /// call that ended it (see [`JsRuntime::take_deadline_overrun`]).
     pub fn take_deadline_overrun(&self) -> Option<std::time::Duration> {
         self.runtime.borrow_mut().take_deadline_overrun()
+    }
+
+    /// Let another thread stop this document's script through its view's
+    /// interrupt word (see [`JsRuntime::set_view_control`]).
+    pub fn set_view_control(&self, control: Option<std::sync::Arc<rustkit_js::ViewControl>>) {
+        self.runtime.borrow_mut().set_view_control(control);
+    }
+
+    /// Open a turn of script on `stamp`, stopped by the watchdog past
+    /// `budget` (see [`JsRuntime::begin_turn`]).
+    pub fn begin_turn(&self, stamp: &std::sync::Arc<rustkit_js::ThreadStamp>, budget: std::time::Duration) -> u64 {
+        self.runtime.borrow_mut().begin_turn(stamp, budget)
+    }
+
+    /// Close the turn [`DomBindings::begin_turn`] opened.
+    pub fn end_turn(&self, stamp: &rustkit_js::ThreadStamp) {
+        self.runtime.borrow_mut().end_turn(stamp);
     }
 
     /// Bound the number of microtask job iterations allowed per turn (see
@@ -1559,6 +1953,11 @@ impl DomBindings {
         self.runtime.borrow_mut().take_module_requests()
     }
 
+    /// Dynamic `import()` calls that rejected since the last call.
+    pub fn take_dynamic_import_failures(&self) -> Vec<rustkit_js::DynamicImportFailure> {
+        self.runtime.borrow_mut().take_dynamic_import_failures()
+    }
+
     /// Supply one requested module's source, or why there is none.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
         self.runtime.borrow_mut().supply_module(requested, outcome);
@@ -1569,11 +1968,15 @@ impl DomBindings {
         self.runtime.borrow_mut().poll_module(handle)
     }
 
-    /// Set `document.readyState` (`loading` / `interactive` / `complete`).
+    /// Set `document.readyState` (`loading` / `interactive` / `complete`)
+    /// and fire `readystatechange` on the document. That is the spec's
+    /// readiness update: the event comes before `DOMContentLoaded` and
+    /// before `window` `load`.
     pub fn set_ready_state(&self, state: &str) -> Result<(), BindingError> {
-        self.runtime
-            .borrow_mut()
-            .evaluate_script(&format!("document.readyState = {:?};", state))?;
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.readyState = {:?}; window.__rustkit_fire('document', 'readystatechange');",
+            state
+        ))?;
         Ok(())
     }
 
@@ -1609,17 +2012,68 @@ impl DomBindings {
         })
     }
 
+    /// [`Self::run_timers`], stopping between callbacks once `frame_ms` of
+    /// wall time has passed. `true` means the horizon still has timers due.
+    pub fn run_timers_for_frame(
+        &self,
+        horizon_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_run_timers_framed({}, {}, {})",
+            horizon_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
+        })
+    }
+
     /// Move the virtual clock on by `delta_ms` (the live loop's real elapsed
     /// time) and run the timers that came due, at most `max_callbacks` of
     /// them. Returns how many ran.
     pub fn advance_timers(&self, delta_ms: u64, max_callbacks: u32) -> Result<u32, BindingError> {
+        self.advance_timers_for(delta_ms, max_callbacks, None)
+    }
+
+    /// [`Self::advance_timers`], and once a callback ends `slice` after the
+    /// call began, no more run: the rest wait for the next call, and
+    /// [`Self::next_timer_delay`] says they are due.
+    pub fn advance_timers_for(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        slice: Option<std::time::Duration>,
+    ) -> Result<u32, BindingError> {
+        let slice_ms = slice.map_or(0, |slice| slice.as_millis().max(1) as u64);
         let ran = self.runtime.borrow_mut().evaluate_script(&format!(
-            "window.__rustkit_advance_timers({}, {})",
-            delta_ms, max_callbacks
+            "window.__rustkit_advance_timers({}, {}, {})",
+            delta_ms, max_callbacks, slice_ms
         ))?;
         Ok(match ran {
             JsValue::Number(n) => n as u32,
             _ => 0,
+        })
+    }
+
+    /// [`Self::advance_timers`], stopping between callbacks once `frame_ms`
+    /// of wall time has passed. `true` means timers were still due.
+    pub fn advance_timers_for_frame(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        let ran = self.runtime.borrow_mut().evaluate_script(&format!(
+            "window.__rustkit_advance_timers_framed({}, {}, {})",
+            delta_ms, max_callbacks, frame_ms
+        ))?;
+        Ok(match ran {
+            JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
+            JsValue::Number(n) => (n as u32, false),
+            _ => (0, false),
         })
     }
 
@@ -1629,7 +2083,7 @@ impl DomBindings {
         match self
             .runtime
             .borrow_mut()
-            .evaluate_script("window.__rustkit_next_timer()")
+            .evaluate_bookkeeping("window.__rustkit_next_timer()")
         {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
             _ => None,
@@ -1637,16 +2091,9 @@ impl DomBindings {
     }
 
     /// Exceptions thrown in listeners and timer callbacks since the last
-    /// call, as `String(error)` (`TypeError: x is not a function`).
+    /// call, as text (`TypeError: x is not a function`, `[object Object]`).
     pub fn take_reported_errors(&self) -> Vec<String> {
-        let drained = self
-            .runtime
-            .borrow_mut()
-            .evaluate_script("JSON.stringify(window.__rustkit_errors.splice(0))");
-        match drained {
-            Ok(JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        self.runtime.borrow_mut().take_reported_errors()
     }
 
     /// Drain the IPC message queue.
@@ -2379,6 +2826,88 @@ mod tests {
         assert!(bindings.take_reported_errors().is_empty(), "drained");
     }
 
+    /// Every member the bindings' scripts report is in
+    /// `UNSUPPORTED_MEMBERS`, and every listed member is reported somewhere.
+    #[test]
+    fn the_unsupported_list_matches_the_reporting_scripts() {
+        let sources = [
+            include_str!("web_xhr.js"),
+            include_str!("web_components.js"),
+            include_str!("web_streams.js"),
+            dom::WRAPPERS_JS_FOR_TESTS,
+        ]
+        .concat();
+        let mut reported: Vec<(String, String)> = sources
+            .split("__rk.unsupported('")
+            .skip(1)
+            .map(|rest| {
+                let (interface, rest) = rest.split_once("', '").unwrap();
+                (interface.to_string(), rest.split_once("')").unwrap().0.to_string())
+            })
+            .collect();
+        reported.sort();
+        reported.dedup();
+        let mut listed: Vec<(String, String)> =
+            UNSUPPORTED_MEMBERS.iter().map(|(i, m)| (i.to_string(), m.to_string())).collect();
+        listed.sort();
+        assert_eq!(reported, listed);
+    }
+
+    /// Page script reaches neither the reporter nor the table.
+    #[test]
+    fn page_script_cannot_report_or_read_unsupported_members() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rustkit_unsupported, typeof __rustkit_take_unsupported, typeof __rustkit_errors_with_stacks].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+        bindings
+            .evaluate("try { new DOMParser().parseFromString('<a/>', 'text/xml'); } catch (e) {}")
+            .unwrap();
+        let apis = bindings.take_unsupported_apis();
+        assert_eq!(apis.len(), 1);
+        assert_eq!((apis[0].0.as_str(), apis[0].1.as_str(), apis[0].2), ("DOMParser", "parseFromString(XML)", 1));
+    }
+
+    #[test]
+    fn a_listener_error_is_reported_as_text_and_as_a_report_without_page_text() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        bindings
+            .evaluate_named(
+                "window.addEventListener('load', function () { throw new Error('a\\u0000b'); });",
+                "inline#1",
+            )
+            .unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors(), vec!["Error: a\u{0}b".to_string()]);
+        let reports = bindings.take_error_reports();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let report = &reports[0];
+        assert_eq!((report.value, report.name, report.message.as_deref(), report.message_len), ("error", Some("Error"), None, Some(3)));
+        assert!(report.located);
+
+        bindings.set_error_details(false, false).unwrap();
+        bindings.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(bindings.take_reported_errors().len(), 1, "the script log keeps its text");
+        assert!(bindings.take_error_reports().is_empty(), "no reports while off");
+        assert_eq!(
+            report.frames,
+            vec![rustkit_js::ScriptPosition { path: "inline#1".into(), line: 1, column: 53 }]
+        );
+    }
+
+    /// Page script reaches none of the queues errors are reported through.
+    #[test]
+    fn page_script_cannot_reach_the_error_reporter() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings.set_error_details(true, false).unwrap();
+        let seen = bindings
+            .evaluate("[typeof __rk, typeof window.__rustkit_errors, typeof window.__rustkit_error_text].join()")
+            .unwrap();
+        assert!(matches!(seen, JsValue::String(ref s) if s == "undefined,undefined,undefined"), "{seen:?}");
+    }
+
     #[test]
     fn the_live_clock_advances_by_elapsed_time_and_reports_the_next_timer() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
@@ -2402,14 +2931,93 @@ mod tests {
             JsValue::String(s) if s == "b,a"
         ));
 
-        // The cap leaves the clock behind; the next turn catches up.
+        // The cap holds callbacks back; the clock moves on, so they are due.
         bindings
             .evaluate("var n = 0; var t = setInterval(function () { n++; }, 10);")
             .unwrap();
+        // What the cap held back is due now: the loop must not sleep on it.
         assert_eq!(bindings.advance_timers(100, 4).unwrap(), 4);
+        assert_eq!(bindings.next_timer_delay(), Some(0));
+        // The clock moved on to 100: the interval the cap held back runs once
+        // on the next turn, however little time it is given, and is not
+        // caught up (50 to 100 would be 6 runs): its next is 10 from now.
+        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 1);
         assert_eq!(bindings.next_timer_delay(), Some(10));
-        assert_eq!(bindings.advance_timers(0, 100).unwrap(), 0);
         assert_eq!(bindings.advance_timers(60, 100).unwrap(), 6);
+    }
+
+    /// A callback that runs past the frame budget must not swallow the
+    /// elapsed time the turn was given. The next timer is due from the
+    /// clock the turn reached, so Stop is not followed by a full extra period.
+    #[test]
+    fn a_frame_yield_still_advances_the_virtual_clock() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "setTimeout(function () { var end = Date.now() + 30; while (Date.now() < end) {} }, 0);
+                 setTimeout(function () {}, 200);",
+            )
+            .unwrap();
+        let (ran, yielded) = bindings.advance_timers_for_frame(80, 10, 16).unwrap();
+        assert!(yielded, "the long callback did not yield the frame");
+        assert_eq!(ran, 1);
+        assert_eq!(bindings.next_timer_delay(), Some(120));
+}
+
+    /// A turn cut short by its slice still moves the clock and has its
+    /// frame, so a `setTimeout(0)` chain that outlasts every slice does not
+    /// hold back a later timer or an animation frame.
+    #[test]
+    fn a_zero_delay_chain_cut_by_the_slice_lets_later_timers_and_frames_run() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var log = [], links = 0;
+                 function chain() { var t = Date.now(); while (Date.now() - t < 3) {} links++; setTimeout(chain, 0); }
+                 setTimeout(chain, 0);
+                 setTimeout(function () { log.push('later'); }, 30);
+                 requestAnimationFrame(function () { log.push('frame'); });",
+            )
+            .unwrap();
+        let slice = Some(std::time::Duration::from_millis(10));
+        for _ in 0..4 {
+            assert!(bindings.advance_timers_for(20, 1000, slice).unwrap() < 10);
+            // The chain is always owed.
+            assert_eq!(bindings.next_timer_delay(), Some(0));
+        }
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "frame,later"
+        ));
+    }
+
+    /// The same chain through the live loop's frame-sliced turn
+    /// (`advance_timers_for_frame`, the path the app runs): a turn that
+    /// yields its frame still has its animation frame and moves the clock,
+    /// so the later timer and the frame run under a chain that yields every
+    /// turn.
+    #[test]
+    fn a_zero_delay_chain_that_yields_every_frame_lets_later_timers_and_frames_run() {
+        let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        bindings
+            .evaluate(
+                "var log = [], links = 0;
+                 function chain() { var t = Date.now(); while (Date.now() - t < 3) {} links++; setTimeout(chain, 0); }
+                 setTimeout(chain, 0);
+                 setTimeout(function () { log.push('later'); }, 30);
+                 requestAnimationFrame(function () { log.push('frame'); });",
+            )
+            .unwrap();
+        for _ in 0..4 {
+            let (ran, yielded) = bindings.advance_timers_for_frame(20, 1000, 10).unwrap();
+            assert!(yielded, "the chain outlasts the frame");
+            assert!(ran < 10);
+            assert_eq!(bindings.next_timer_delay(), Some(0));
+        }
+        assert!(matches!(
+            bindings.evaluate("log.join(',')").unwrap(),
+            JsValue::String(s) if s == "frame,later"
+        ));
     }
 
     /// Chromium 143, a `requestAnimationFrame` loop across a task that holds
@@ -3214,15 +3822,17 @@ mod tests {
                  i.addEventListener('click', { handleEvent: function (e) { log.push(e.type, e.bubbles); } }); \
                  document.body.addEventListener('click', function (e) { log.push(e.target === i); }); \
                  i.click(); \
-                 log.push(window.__rustkit_errors.length, /missingFunction/.test(window.__rustkit_errors[0])); \
                  try { i.dispatchEvent('click'); } catch (e) { log.push(e instanceof TypeError); } \
                  try { Event('x'); } catch (e) { log.push(e instanceof TypeError); } \
                  log.push(i instanceof EventTarget, document instanceof EventTarget, \
                           Object.prototype.toString.call(new Event('x'))); \
                  log.join(',')"
             ),
-            "click,true,true,1,true,true,true,true,true,[object Event]"
+            "click,true,true,true,true,true,true,[object Event]"
         );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("missingFunction"), "{errors:?}");
     }
 
     // An `on<type>` content attribute is an event handler (HTML §8.1.8.1):
@@ -3275,11 +3885,13 @@ mod tests {
                 "var bad = document.getElementById('bad'), log = []; \
                  document.body.addEventListener('click', function () { log.push('bubbled'); }); \
                  bad.click(); bad.click(); \
-                 log.push(window.__rustkit_errors.length, /SyntaxError/.test(window.__rustkit_errors[0])); \
                  log.join(',')"
             ),
-            "bubbled,bubbled,1,true"
+            "bubbled,bubbled"
         );
+        let errors = b.take_reported_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("SyntaxError"), "{errors:?}");
     }
 
     const ROW: &str =

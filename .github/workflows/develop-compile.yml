@@ -27,20 +27,44 @@ permissions:
 jobs:
   compile:
     runs-on: macos-14
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: Swatinem/rust-cache@v2
       - name: All test targets must COMPILE on develop
         run: cargo test --workspace --no-run
+
+      # Added 2026-10-16: compiling is not running. PR CI runs each suite
+      # against develop as it was at the PR's last push; this runs them on the
+      # integrated develop head after every merge.
+      - name: Core suites must PASS on the integrated develop head
+        run: |
+          set -uo pipefail
+          status=0
+          for pkg in rustkit-layout rustkit-engine rustkit-js rustkit-bindings rustkit-renderer rustkit-image rustkit-viewhost; do
+            echo "::group::cargo test -p $pkg --lib"
+            cargo test -p "$pkg" --lib --no-fail-fast || status=1
+            echo "::endgroup::"
+          done
+          # `--lib` skips crates/rustkit-js/tests/, including
+          # vm_interrupt_promises.rs. Cookie coverage lives in rustkit-http's
+          # lib (there is no tests/*.rs cookie integration file); that crate
+          # is not in the package list above.
+          echo "::group::cargo test -p rustkit-js --tests"
+          cargo test -p rustkit-js --tests --no-fail-fast || status=1
+          echo "::endgroup::"
+          echo "::group::cargo test -p rustkit-http --lib"
+          cargo test -p rustkit-http --lib --no-fail-fast || status=1
+          echo "::endgroup::"
+          exit $status
 
       - name: Flag develop-broken
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          body="develop ${GITHUB_SHA} does not compile. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="develop ${GITHUB_SHA} does not compile or a core suite fails. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           gh label create develop-broken --color B60205 --force >/dev/null 2>&1 || true
           open=$(gh issue list --label develop-broken --state open --json number --jq '.[0].number')
           if [ -n "$open" ]; then

@@ -1111,6 +1111,11 @@ pub enum Display {
     /// Columns and column groups are never rendered; they only carry widths.
     TableColumn,
     TableColumnGroup,
+    /// `contents`: the element generates no box; its children take its
+    /// place. Only the UA style of `<slot>` sets it (author `display:
+    /// contents` is still unsupported, see `parse_display`), and the
+    /// engine's box-tree build removes such boxes, so layout never sees one.
+    Contents,
 }
 
 impl Display {
@@ -1857,6 +1862,16 @@ pub enum Visibility {
     Collapse,
 }
 
+/// `pointer-events` (CSS UI 4 §8.1; the SVG-only values count as `auto`).
+/// Inherited. A `none` box is no target of a hit test: the point goes to
+/// what is under it, and a descendant can set `auto` again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerEvents {
+    #[default]
+    Auto,
+    None,
+}
+
 /// Overflow behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
@@ -2475,8 +2490,71 @@ impl std::fmt::Debug for CustomProperties {
     }
 }
 
+impl ComputedStyle {
+    /// Take from `from` the properties that change what is painted and
+    /// nothing else: no box is sized, placed, created or dropped by them,
+    /// and no stacking context comes or goes. The list is deliberately
+    /// short (`opacity`, `transform`, `visibility` and background images
+    /// are not on it); a property left off costs a layout, never a wrong
+    /// frame.
+    pub fn copy_paint_only(&mut self, from: &ComputedStyle) {
+        self.color = from.color;
+        self.background_color = from.background_color;
+        self.border_top_color = from.border_top_color;
+        self.border_right_color = from.border_right_color;
+        self.border_bottom_color = from.border_bottom_color;
+        self.border_left_color = from.border_left_color;
+        self.text_decoration_line = from.text_decoration_line;
+        self.text_decoration_color = from.text_decoration_color;
+        self.text_decoration_style = from.text_decoration_style;
+        self.text_decoration_thickness = from.text_decoration_thickness.clone();
+        self.webkit_text_fill_color = from.webkit_text_fill_color;
+        self.box_shadows = from.box_shadows.clone();
+        self.transition_property = from.transition_property.clone();
+        self.transition_duration = from.transition_duration;
+        self.transition_timing_function = from.transition_timing_function.clone();
+        self.transition_delay = from.transition_delay;
+        // Custom properties are substituted into the values above and
+        // below at the cascade; nothing later reads them but script.
+        self.custom_properties = from.custom_properties.clone();
+    }
+
+    /// Whether the properties [`Self::copy_paint_only`] lists are the same
+    /// in both, custom properties aside (comparing those flattens both
+    /// sets, hundreds of entries on a themed page).
+    pub fn same_paint(&self, other: &ComputedStyle) -> bool {
+        self.color == other.color
+            && self.background_color == other.background_color
+            && self.border_top_color == other.border_top_color
+            && self.border_right_color == other.border_right_color
+            && self.border_bottom_color == other.border_bottom_color
+            && self.border_left_color == other.border_left_color
+            && self.text_decoration_line == other.text_decoration_line
+            && self.text_decoration_color == other.text_decoration_color
+            && self.text_decoration_style == other.text_decoration_style
+            && self.text_decoration_thickness == other.text_decoration_thickness
+            && self.webkit_text_fill_color == other.webkit_text_fill_color
+            && self.box_shadows == other.box_shadows
+            && self.transition_property == other.transition_property
+            && self.transition_duration == other.transition_duration
+            && self.transition_timing_function == other.transition_timing_function
+            && self.transition_delay == other.transition_delay
+    }
+
+    /// Whether `self` and `other` differ, if at all, only in the
+    /// properties [`Self::copy_paint_only`] lists.
+    pub fn differs_only_in_paint(&self, other: &ComputedStyle) -> bool {
+        // With `self`'s paint properties and its custom property set (the
+        // same `Arc`, so that comparison is a pointer check) the rest
+        // must be equal.
+        let mut masked = other.clone();
+        masked.copy_paint_only(self);
+        masked == *self
+    }
+}
+
 /// Computed style for an element.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
@@ -2607,10 +2685,20 @@ pub struct ComputedStyle {
     // Visual
     pub opacity: f32,
     pub visibility: Visibility,
+    pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
     pub text_overflow: TextOverflow,
+    /// The cascaded `display` was `-webkit-box` (`Some(false)`) or
+    /// `-webkit-inline-box` (`Some(true)`). `display` keeps its previous
+    /// value: the legacy flexbox is not laid out, except in the line-clamp
+    /// form, see [`ComputedStyle::line_clamp`]. Not inherited.
+    pub webkit_box: Option<bool>,
+    /// `-webkit-box-orient: vertical` (or `block-axis`). Not inherited.
+    pub webkit_box_orient_vertical: bool,
+    /// `-webkit-line-clamp: <integer>`; `None` is `none`. Not inherited.
+    pub webkit_line_clamp: Option<u32>,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
@@ -2719,6 +2807,35 @@ impl ComputedStyle {
         std::borrow::Cow::Owned(TransformList { ops })
     }
 
+    /// css-overflow-4 §4.2, the legacy form: a `display: -webkit-box` (or
+    /// `-webkit-inline-box`) with `-webkit-box-orient: vertical` and
+    /// `-webkit-line-clamp: N` shows only its first N line boxes. `Some(N)`
+    /// when all three are set; any of them alone does nothing, as in Chrome.
+    pub fn line_clamp(&self) -> Option<u32> {
+        match (
+            self.webkit_box,
+            self.webkit_box_orient_vertical,
+            self.webkit_line_clamp,
+        ) {
+            (Some(_), true, Some(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Run once the cascade is done: a line-clamped `-webkit-box` is laid
+    /// out as a block container (Chrome computes its display to
+    /// `flow-root`), so the clamp has line boxes to count. Every other
+    /// `-webkit-box` is left alone.
+    pub fn apply_line_clamp_display(&mut self) {
+        if let (Some(inline), Some(_)) = (self.webkit_box, self.line_clamp()) {
+            self.display = if inline {
+                Display::InlineBlock
+            } else {
+                Display::Block
+            };
+        }
+    }
+
     /// Create default style.
     pub fn new() -> Self {
         Self {
@@ -2786,6 +2903,7 @@ impl ComputedStyle {
             direction: parent.direction,
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
+            pointer_events: parent.pointer_events,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
 
@@ -3013,6 +3131,7 @@ impl Stylesheet {
 }
 
 pub mod background;
+mod color_mix;
 pub mod mask;
 pub use mask::Mask;
 
@@ -3213,6 +3332,10 @@ pub fn parse_color(value: &str) -> Option<Color> {
             _ => return None,
         };
         return Some(Color::new(r, g, b, a));
+    }
+
+    if value.starts_with("color-mix(") {
+        return color_mix::parse_color_mix(&value.to_lowercase());
     }
 
     // rgb() / rgba()
@@ -3653,6 +3776,29 @@ pub fn parse_border_spacing(value: &str) -> Option<(Length, Length)> {
     }
 }
 
+/// `display: -webkit-box` / `-webkit-inline-box`: `Some(inline)`, else
+/// `None` (see [`ComputedStyle::webkit_box`]).
+pub fn parse_webkit_box_display(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "-webkit-box" => Some(false),
+        "-webkit-inline-box" => Some(true),
+        _ => None,
+    }
+}
+
+/// `-webkit-line-clamp: none | <integer [1,∞]>`. `Some(None)` is `none`;
+/// `None` is an invalid value (the declaration is dropped).
+pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    match value.parse::<u32>() {
+        Ok(n) if n >= 1 => Some(Some(n)),
+        _ => None,
+    }
+}
+
 /// Parse display value.
 ///
 /// Besides the legacy single keywords, this takes css-display-3's
@@ -3778,6 +3924,52 @@ mod tests {
         ];
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
+        }
+    }
+
+    #[test]
+    fn webkit_line_clamp_needs_webkit_box_vertical_orient_and_a_count() {
+        assert_eq!(parse_webkit_box_display("-webkit-box"), Some(false));
+        assert_eq!(parse_webkit_box_display(" -WEBKIT-INLINE-BOX "), Some(true));
+        assert_eq!(parse_webkit_box_display("flex"), None);
+        assert_eq!(parse_webkit_line_clamp("2"), Some(Some(2)));
+        assert_eq!(parse_webkit_line_clamp("none"), Some(None));
+        for bad in ["0", "-1", "1.5", "2px", ""] {
+            assert_eq!(parse_webkit_line_clamp(bad), None, "{bad:?}");
+        }
+
+        let mut s = ComputedStyle::new();
+        s.webkit_box = Some(false);
+        s.webkit_box_orient_vertical = true;
+        s.webkit_line_clamp = Some(2);
+        assert_eq!(s.line_clamp(), Some(2));
+        s.display = Display::Flex;
+        s.apply_line_clamp_display();
+        assert_eq!(
+            s.display,
+            Display::Block,
+            "a clamped -webkit-box is a block container"
+        );
+        s.webkit_box = Some(true);
+        s.apply_line_clamp_display();
+        assert_eq!(s.display, Display::InlineBlock);
+
+        // Any one of the three missing: no clamp, display untouched.
+        for (webkit_box, vertical, count) in [
+            (None, true, Some(2)),
+            (Some(false), false, Some(2)),
+            (Some(false), true, None),
+        ] {
+            let mut s = ComputedStyle::new();
+            s.display = Display::Inline;
+            (
+                s.webkit_box,
+                s.webkit_box_orient_vertical,
+                s.webkit_line_clamp,
+            ) = (webkit_box, vertical, count);
+            assert_eq!(s.line_clamp(), None);
+            s.apply_line_clamp_display();
+            assert_eq!(s.display, Display::Inline);
         }
     }
 

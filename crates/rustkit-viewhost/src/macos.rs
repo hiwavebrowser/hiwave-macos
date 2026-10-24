@@ -33,91 +33,58 @@ pub struct MacOSViewHost {
     views: RwLock<HashMap<ViewId, Arc<Mutex<MacOSViewState>>>>,
 }
 
-/// A content-view click, in VIEW-LOCAL TOP-LEFT coordinates — exactly the
-/// viewport space the engine's hit testing speaks, no chrome/sidebar math.
+/// The inputs the content view records go to one ordered, view-tagged
+/// queue (`crate::input_queue`, threads plan M2): the app drains it with
+/// `drain_input`. The three drains below take ONE kind out and leave the
+/// rest queued, for the viewhost's own event tests; the app does not use
+/// them, since draining kind by kind is what lost the arrival order (#575).
 #[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy)]
-pub struct PendingClick {
-    pub x: f64,
-    pub y: f64,
-    pub down: bool,
-    pub input: PointerInput,
-}
+use crate::input_queue::{drain_input_kind, push_input, retire_view_input, InputKind};
+#[cfg(target_os = "macos")]
+use crate::input_queue::{PendingClick, PendingKey, PendingScroll, PointerInput};
 
-/// What a [`PendingClick`] records: a press or release of the primary
-/// button (`down` says which), the pointer moving over the view, or the
-/// pointer leaving it.
+/// The name of the ivar each `RustKitContentView` carries its [`ViewId`] in.
 #[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PointerInput {
-    Button,
-    Move,
-    Leave,
-}
-
-/// Clicks captured by the RustKit NSView, drained by the app each loop turn.
-///
-/// A queue, not a callback: the handlers run inside AppKit's event dispatch,
-/// and calling back into app/engine state from there is the re-entrancy trap
-/// #108 exists to prevent. Push under a short lock, drain on the main loop.
-#[cfg(target_os = "macos")]
-static PENDING_CLICKS: Mutex<Vec<PendingClick>> = Mutex::new(Vec::new());
+pub(crate) const VIEW_ID_IVAR: &str = "rkViewId";
 
 #[cfg(target_os = "macos")]
 pub fn drain_pending_clicks() -> Vec<PendingClick> {
-    PENDING_CLICKS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    drain_input_kind(|k| matches!(k, InputKind::Pointer(_)))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            InputKind::Pointer(c) => Some(c),
+            _ => None,
+        })
+        .collect()
 }
-
-/// A key event captured by the content view while it is first responder.
-///
-/// `text` carries the typed characters (empty for pure control keys);
-/// `mac_keycode` is the hardware-independent macOS keyCode for specials;
-/// `up` is a release.
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone)]
-pub struct PendingKey {
-    pub text: String,
-    pub mac_keycode: u16,
-    pub up: bool,
-    pub ctrl: bool,
-    pub cmd: bool,
-    pub shift: bool,
-    pub alt: bool,
-}
-
-#[cfg(target_os = "macos")]
-static PENDING_KEYS: Mutex<Vec<PendingKey>> = Mutex::new(Vec::new());
 
 #[cfg(target_os = "macos")]
 pub fn drain_pending_keys() -> Vec<PendingKey> {
-    PENDING_KEYS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    drain_input_kind(|k| matches!(k, InputKind::Key(_)))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            InputKind::Key(k) => Some(k),
+            _ => None,
+        })
+        .collect()
 }
-
-/// A wheel turn or trackpad swipe over the content view.
-///
-/// `dx`, `dy` are in CSS pixels with the sign hiwave-app's window-loop arm
-/// always used (tao's): `dy < 0` moves the page down, `dx > 0` moves it
-/// right. A wheel that reports lines is counted at 40px a line, as the
-/// window-loop arm counts it. `x`, `y` are where the pointer was, view-local
-/// top-left, for an inner scroller one day; a page scroll does not read them.
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PendingScroll {
-    pub x: f64,
-    pub y: f64,
-    pub dx: f64,
-    pub dy: f64,
-}
-
-/// Wheel events captured by the content view since the last turn of the
-/// loop, summed: a trackpad flick is ~50 events a second and the page needs
-/// where it ends up, not every step.
-#[cfg(target_os = "macos")]
-static PENDING_SCROLLS: Mutex<Vec<PendingScroll>> = Mutex::new(Vec::new());
 
 #[cfg(target_os = "macos")]
 pub fn drain_pending_scrolls() -> Vec<PendingScroll> {
-    PENDING_SCROLLS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    drain_input_kind(|k| matches!(k, InputKind::Wheel(_)))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            InputKind::Wheel(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The [`ViewId`] a content view was created with, from its ivar.
+#[cfg(target_os = "macos")]
+fn view_id_of(this: &objc::runtime::Object) -> ViewId {
+    let raw: u64 = unsafe { *this.get_ivar::<u64>(VIEW_ID_IVAR) };
+    ViewId::from_raw(raw)
 }
 
 /// The NSView subclass that hosts RustKit content.
@@ -144,6 +111,9 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         let superclass = Class::get("NSView").expect("NSView class");
         let mut decl =
             ClassDecl::new("RustKitContentView", superclass).expect("register RustKitContentView");
+        // Each view carries the ViewId it was created with, so what it
+        // records is tagged with the view it was delivered to.
+        decl.add_ivar::<u64>(VIEW_ID_IVAR);
 
         extern "C" fn record(this: &Object, event: id, down: bool, input: PointerInput) {
             if input == PointerInput::Button {
@@ -162,16 +132,10 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     down,
                     input,
                 };
-                if let Ok(mut q) = PENDING_CLICKS.lock() {
-                    // The page needs where the pointer is, not every point
-                    // it crossed since the last turn of the loop.
-                    if input == PointerInput::Move
-                        && q.last().is_some_and(|last| last.input == PointerInput::Move)
-                    {
-                        q.pop();
-                    }
-                    q.push(click);
-                }
+                // A move right after a move replaces it in the queue: the
+                // page needs where the pointer is, not every point it
+                // crossed since the last turn of the loop.
+                push_input(view_id_of(this), InputKind::Pointer(click));
             }
         }
         extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
@@ -237,17 +201,11 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     dx: -raw_dx * scale,
                     dy: raw_dy * scale,
                 };
-                if let Ok(mut q) = PENDING_SCROLLS.lock() {
-                    match q.last_mut() {
-                        Some(last) => {
-                            last.dx += scroll.dx;
-                            last.dy += scroll.dy;
-                            last.x = scroll.x;
-                            last.y = scroll.y;
-                        }
-                        None => q.push(scroll),
-                    }
-                }
+                // A wheel right after a wheel is summed into it in the
+                // queue: a trackpad flick is ~50 events a second and the
+                // page needs where it ends up, not every step. A click in
+                // between keeps its place after the steps before it.
+                push_input(view_id_of(this), InputKind::Wheel(scroll));
             }
         }
         extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool {
@@ -259,7 +217,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // and only one was wired.
             true
         }
-        extern "C" fn record_key(event: id, up: bool) {
+        extern "C" fn record_key(this: &Object, event: id, up: bool) {
             unsafe {
                 let chars: id = msg_send![event, characters];
                 let text = if chars != nil {
@@ -283,20 +241,18 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
                     alt: flags & (1 << 19) != 0,    // NSEventModifierFlagOption
                 };
-                if let Ok(mut q) = PENDING_KEYS.lock() {
-                    q.push(key);
-                }
+                push_input(view_id_of(this), InputKind::Key(key));
             }
         }
-        extern "C" fn key_down(_this: &Object, _sel: Sel, event: id) {
-            record_key(event, false);
+        extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+            record_key(this, event, false);
             // Deliberately NOT calling super: consuming here is what keeps a
             // keystroke from ALSO reaching whatever else might interpret it.
             // Cmd-shortcuts still work: the menu system sees key equivalents
             // before the responder chain does.
         }
-        extern "C" fn key_up(_this: &Object, _sel: Sel, event: id) {
-            record_key(event, true);
+        extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
+            record_key(this, event, true);
         }
         extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
             // A click on an inactive window should reach the page (this is
@@ -417,6 +373,9 @@ impl MacOSViewHost {
             return Err(ViewHostError::WindowCreation(
                 "Failed to create NSView".to_string(),
             ));
+        }
+        unsafe {
+            (*view).set_ivar::<u64>(VIEW_ID_IVAR, view_id.raw());
         }
 
         // Configure the view for layer-backed rendering
@@ -579,6 +538,11 @@ impl MacOSViewHost {
             // Convert from top-left origin to Cocoa's bottom-left origin
             let frame = Self::convert_to_cocoa_frame(bounds, parent_height);
             let _: () = msg_send![view, setFrame: frame];
+            let layer: id = msg_send![view, layer];
+            if layer != nil {
+                let masks: bool = true;
+                let _: () = msg_send![layer, setMasksToBounds: masks];
+            }
         }
 
         debug!(?view_id, ?bounds, "View bounds updated");
@@ -718,6 +682,9 @@ impl MacOSViewHost {
         unsafe {
             let _: () = msg_send![view, removeFromSuperview];
         }
+        // An input recorded for this view must not reach whatever view
+        // comes next.
+        retire_view_input(view_id);
 
         debug!(?view_id, "View destroyed");
         Ok(())

@@ -48,6 +48,8 @@ mod flex_auto_margin_relayout_tests;
 mod flex_item_min_height_tests;
 
 #[cfg(test)]
+mod fit_content_width_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 
 #[cfg(test)]
@@ -163,6 +165,14 @@ thread_local! {
 /// Falls back to the flat ratio only when shaping yields no usable metrics
 /// (missing font) -- same behaviour as before this existed.
 pub fn normal_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
+    // `font-size: 0` (the usual way to remove the spaces between
+    // inline-blocks): a face has no extents at size 0, so the line is as
+    // tall as its inline-blocks and no more. The shaper is not asked: it
+    // answers for a default size, and the line was 18px tall around a 10px
+    // inline-block where Chromium 143 has 10.
+    if font_size <= 0.0 {
+        return 0.0;
+    }
     let key = (
         style.font_family.clone(),
         font_size.to_bits(),
@@ -3452,8 +3462,44 @@ impl LayoutBox {
         // A non-atomic inline sits on the baseline as a line of text in its
         // own font (its rect is only the content area; the line sees the
         // line-height split).
-        if matches!(self.box_type, BoxType::Text(_) | BoxType::Inline) {
+        if matches!(self.box_type, BoxType::Text(_)) {
             return Some(Self::text_line_box_extents(&self.style));
+        }
+        // The atomic inlines inside it are on the same line, at any depth
+        // of inline boxes (CSS2 10.8: the line box holds every inline-level
+        // box on the line, not only the container's own children). Left
+        // out, `<a><img></a>` gave the line only the link's font: a linked
+        // 30px image under `font-size: 0` made a line 0 tall and the next
+        // block was laid over the image (16 at the default size).
+        if matches!(self.box_type, BoxType::Inline) {
+            let (mut above, mut below) = Self::text_line_box_extents(&self.style);
+            self.for_each_atomic_in_inline(&mut |atomic| {
+                if let Some((a, b)) = atomic.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            });
+            // The inline boxes inside it are on the line too, each as a
+            // line of text in its own font (CSS2 10.8.1 counts every
+            // inline box on the line). Left out, `<span><b style="font-
+            // size:16px">Hi</b></span>` under `font-size: 0` gave the line
+            // only the span's 0px font and the next block was laid over
+            // the text (develop's 16px strut hid it); the same for nav
+            // links whose font is restored inside a `font-size: 0` row.
+            for c in &self.children {
+                if c.style.display == rustkit_css::Display::None
+                    || c.float != Float::None
+                    || matches!(c.position, Position::Absolute | Position::Fixed)
+                    || !matches!(c.box_type, BoxType::Inline)
+                {
+                    continue;
+                }
+                if let Some((a, b)) = c.line_member_baseline_extents() {
+                    above = above.max(a);
+                    below = below.max(b);
+                }
+            }
+            return Some((above, below));
         }
         let h = self.dimensions.margin_box().height;
         let above = if matches!(self.box_type, BoxType::FormControl(_))
@@ -3474,6 +3520,74 @@ impl LayoutBox {
             return None;
         };
         Some((above, (h - above).max(0.0)))
+    }
+
+    /// Calls `f` with each atomic inline-level box (inline-block, image,
+    /// control) inside this inline box, through any depth of inline boxes.
+    fn for_each_atomic_in_inline(&self, f: &mut dyn FnMut(&LayoutBox)) {
+        for c in &self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                f(c);
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.for_each_atomic_in_inline(f);
+            }
+        }
+    }
+
+    /// An inline-block, inline-flex or inline-grid box, an image or a form
+    /// control: a box that sits on a line as one unit.
+    fn is_atomic_line_member(&self) -> bool {
+        self.style.display.is_atomic_inline()
+            || matches!(self.box_type, BoxType::Image { .. } | BoxType::FormControl(_))
+    }
+
+    /// The tallest margin box among the atomic inlines inside this inline
+    /// box (0 with none): the floor the block loops keep for a line's
+    /// height, as for an atomic inline that is their own child.
+    fn tallest_atomic_in_inline(&self) -> f32 {
+        let mut tallest = 0.0f32;
+        self.for_each_atomic_in_inline(&mut |atomic| {
+            tallest = tallest.max(atomic.dimensions.margin_box().height);
+        });
+        tallest
+    }
+
+    /// Seats the atomic inlines inside this inline box on the line's
+    /// baseline. An inline box lays its children out at its own top; once
+    /// the box is on the baseline, a box inside it whose baseline is its
+    /// bottom edge (or its last line) would hang below the line. One the
+    /// align pass does not seat (`vertical-align: top|bottom|middle`) goes
+    /// back to the line top, where it is left when it is the block's own
+    /// child.
+    fn seat_atomics_in_inline(&mut self, baseline_y: f32, line_top: f32) {
+        for c in &mut self.children {
+            if c.style.display == rustkit_css::Display::None
+                || c.float != Float::None
+                || matches!(c.position, Position::Absolute | Position::Fixed)
+            {
+                continue;
+            }
+            if c.is_atomic_line_member() {
+                let target = match c.line_member_baseline_extents() {
+                    Some((above, _)) => baseline_y - above,
+                    None => line_top,
+                };
+                let d = &c.dimensions;
+                let top = d.content.y - d.margin.top - d.border.top - d.padding.top;
+                let dy = target - top;
+                if dy.abs() > 0.01 {
+                    crate::flex::translate_subtree(c, 0.0, dy);
+                }
+            } else if matches!(c.box_type, BoxType::Inline) {
+                c.seat_atomics_in_inline(baseline_y, line_top);
+            }
+        }
     }
 
     fn inline_strut_descent(&self) -> f32 {
@@ -3717,8 +3831,14 @@ impl LayoutBox {
             );
             // Then apply flex layout algorithm. See the sibling call in
             // `layout_with_definite_height` for why no containing block goes
-            // over from here.
-            flex::layout_flex_container(self, &self.dimensions.clone());
+            // over from here. A percentage height resolved above is the
+            // column's definite main size; style alone cannot say so.
+            match definite_for_children {
+                Some(h) if flex::has_percentage(&self.style.height) => {
+                    flex::layout_flex_container_at_resolved_percent_height(self, h)
+                }
+                _ => flex::layout_flex_container(self, &self.dimensions.clone()),
+            }
         } else if self.style.display.is_grid() {
             // For grid containers, layout children normally first
             self.layout_block_children_with_collapse(
@@ -4307,6 +4427,15 @@ impl LayoutBox {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
                 }
+            }
+            // css-sizing-3 §3.2: `fit-content` is min(max-content,
+            // max(min-content, available)), the shrink-to-fit width, in
+            // every context; unlike `auto` it never fills a block. The
+            // `_` arm below read it as 0 (`Length::to_px`).
+            Length::FitContent => {
+                let available =
+                    (containing_block.content.width - total_margin_border_padding).max(0.0);
+                shrink_to_fit_content_width(self, available)
             }
             _ => {
                 let specified_width =
@@ -4941,6 +5070,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -5275,7 +5410,11 @@ impl LayoutBox {
         let x_height = fs * 0.5;
         for &i in &members {
             let c = &children[i];
-            let above = if matches!(c.box_type, BoxType::Text(_)) || seats_as_text(c) {
+            let above = if seats_as_text(c) {
+                // With the atomic inlines inside it, which sit on the same
+                // baseline (line_member_baseline_extents).
+                c.line_member_baseline_extents().map_or(text_extents(&c.style).0, |e| e.0)
+            } else if matches!(c.box_type, BoxType::Text(_)) {
                 text_extents(&c.style).0
             } else if matches!(c.box_type, BoxType::FormControl(_)) && !c.baseline_is_bottom_edge()
             {
@@ -5344,6 +5483,9 @@ impl LayoutBox {
             // line leaves the run where it is. Ledgered, not chased.
             if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
+            }
+            if seats_as_text(c) {
+                c.seat_atomics_in_inline(baseline_y, line_top);
             }
         }
     }
@@ -5955,6 +6097,12 @@ impl LayoutBox {
                         seam = Self::seam_edge(child, true);
                         continue;
                     }
+                    // The atomic inlines inside it are on this line too.
+                    // Not above: wrapped text inside one of them is counted
+                    // there as the inline's own lines, and both together
+                    // made a two-line `inline-block` heading in a link 130
+                    // tall for its 76.
+                    line_height = line_height.max(child.tallest_atomic_in_inline());
                 } else {
                     line_height = line_height.max(child_height);
                 }
@@ -6456,6 +6604,18 @@ impl LayoutBox {
                 ) {
                     self.dimensions.content.height = h;
                 }
+                // `-webkit-line-clamp: N` on an auto height: the box ends
+                // at its Nth line box; the rest is overflow.
+                if self.style.height == Length::Auto {
+                    if let Some(bottom) = self
+                        .style
+                        .line_clamp()
+                        .and_then(|n| self.line_clamp_bottom(n))
+                    {
+                        self.dimensions.content.height =
+                            (bottom - self.dimensions.content.y).max(0.0);
+                    }
+                }
             }
         }
 
@@ -6527,6 +6687,51 @@ impl LayoutBox {
         }
     }
 
+    /// css-overflow-4 §4.2 (legacy `-webkit-line-clamp`): the bottom of
+    /// this block's `n`th line box, counting the line boxes of its in-flow
+    /// descendants in block order; `None` when it has `n` or fewer. There
+    /// is no line box model, so the lines are recovered from what sits on
+    /// them: text fragments and atomic inlines. Those on one line overlap
+    /// vertically; consecutive lines only touch.
+    fn line_clamp_bottom(&self, n: u32) -> Option<f32> {
+        fn collect(b: &LayoutBox, bands: &mut Vec<(f32, f32)>) {
+            for c in &b.children {
+                if matches!(c.position, Position::Absolute | Position::Fixed)
+                    || c.float != Float::None
+                {
+                    continue;
+                }
+                match &c.box_type {
+                    BoxType::Text(_) => match c.text_line_fragments() {
+                        Some(f) => bands.extend(f.iter().map(|r| (r.y, r.y + r.height))),
+                        None => {
+                            let r = c.dimensions.content;
+                            bands.push((r.y, r.y + r.height));
+                        }
+                    },
+                    BoxType::LineBreak => {}
+                    _ if c.is_atomic_line_member() => {
+                        let r = c.dimensions.margin_box();
+                        bands.push((r.y, r.y + r.height));
+                    }
+                    _ => collect(c, bands),
+                }
+            }
+        }
+        let mut bands = Vec::new();
+        collect(self, &mut bands);
+        bands.retain(|(top, bottom)| bottom > top);
+        bands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut lines: Vec<(f32, f32)> = Vec::new();
+        for (top, bottom) in bands {
+            match lines.last_mut() {
+                Some(line) if top < line.1 - 0.5 => line.1 = line.1.max(bottom),
+                _ => lines.push((top, bottom)),
+            }
+        }
+        (n >= 1 && lines.len() > n as usize).then(|| lines[n as usize - 1].1)
+    }
+
     /// Convert a Length to pixels.
     fn length_to_px(&self, length: &Length, container_size: f32) -> f32 {
         let font_size = match &self.style.font_size {
@@ -6592,11 +6797,235 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, 0)
+        self.hit_test_internal(x, y, 0, false)
     }
 
-    /// Internal hit test that tracks depth.
-    fn hit_test_internal(&self, x: f32, y: f32, depth: u32) -> Option<HitTestResult> {
+    /// Hit test a point of the window (VIEWPORT coordinates) in a page
+    /// scrolled by `scroll`, when `self` is the root of the layout.
+    ///
+    /// The page's boxes are in document coordinates and move with the
+    /// scroll. A `position: fixed` box does not (the painter's
+    /// `PushViewportFixed` run), so it is tested with the viewport point,
+    /// wherever it sits in the tree: it is not inside its parent's box. A
+    /// fixed box with a negative `z-index` is under the page; the others
+    /// are over it, the highest `z-index` and then the latest first.
+    pub fn hit_test_scrolled(&self, viewport_x: f32, viewport_y: f32, scroll: (f32, f32)) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        self.hit_test_held_fixed(viewport_x, viewport_y, 0, &mut held);
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// `hit_test_scrolled` with the fixed boxes already found
+    /// (`held_fixed_paths` of this same layout). Finding them visits every
+    /// box, and every pointer move is a hit test: with the paths in hand a
+    /// hit test is those boxes and the pruned walk of the page.
+    pub fn hit_test_scrolled_with(
+        &self,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+        held_fixed: &[Vec<usize>],
+    ) -> Option<HitTestResult> {
+        let mut held = Vec::new();
+        for path in held_fixed {
+            let mut ancestors = Vec::with_capacity(path.len());
+            let mut at = self;
+            for &index in path {
+                let Some(child) = at.children.get(index) else {
+                    // Not this layout's paths: find the boxes again.
+                    return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+                };
+                ancestors.push(at);
+                at = child;
+            }
+            if at.position != Position::Fixed {
+                return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
+            }
+            // A fixed box in a fixed box is drawn in its ancestor's
+            // stacking context: the outermost one's `z-index` places both.
+            let z_index = ancestors
+                .iter()
+                .find(|a| a.position == Position::Fixed)
+                .map_or(at.z_index, |outer| outer.z_index);
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, true) {
+                hit.viewport_fixed = true;
+                for ancestor in ancestors.iter().rev() {
+                    ancestor.add_as_ancestor(&mut hit);
+                }
+                held.push((z_index, hit));
+            }
+        }
+        self.top_held_or_page(held, viewport_x, viewport_y, scroll)
+    }
+
+    /// The hit among those in held fixed boxes (in tree order, each with
+    /// its `z-index`) and the page under them.
+    fn top_held_or_page(
+        &self,
+        held: Vec<(i32, HitTestResult)>,
+        viewport_x: f32,
+        viewport_y: f32,
+        scroll: (f32, f32),
+    ) -> Option<HitTestResult> {
+        // `max_by_key` keeps the last of equals: the box painted last.
+        let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
+        match top {
+            Some((z_index, hit)) if z_index >= 0 => Some(hit),
+            Some((_, hit)) => page().or(Some(hit)),
+            None => page(),
+        }
+    }
+
+    /// A hit on this box, the root of the layout, for the root element
+    /// `node_id`, whether or not it is a target: what a point of the window
+    /// lands on when no box there is one (`body { pointer-events: none }`
+    /// under an open menu).
+    pub fn hit_as_root_element(&self, node_id: usize, x: f32, y: f32) -> Option<HitTestResult> {
+        let mut hit = self.as_hit(x, y, 0);
+        hit.node_id = Some(node_id);
+        hit.link_href = None;
+        Some(hit)
+    }
+
+    /// This box's transform in layout coordinates, about its
+    /// `transform-origin`, as the painter draws it (`PushTransform`, the
+    /// renderer's `affine_about_origin`): `None` when it has none.
+    fn own_transform(&self) -> Option<[f32; 6]> {
+        let transform = self.style.effective_transform();
+        if transform.is_identity() {
+            return None;
+        }
+        let border_box = self.dimensions.border_box();
+        let m = transform.to_matrix(border_box.width, border_box.height);
+        let origin = &self.style.transform_origin;
+        let ox = border_box.x + origin.x.to_px(16.0, 16.0, border_box.width);
+        let oy = border_box.y + origin.y.to_px(16.0, 16.0, border_box.height);
+        // T(origin) · m · T(-origin)
+        Some([
+            m[0],
+            m[1],
+            m[2],
+            m[3],
+            m[4] + ox - (m[0] * ox + m[2] * oy),
+            m[5] + oy - (m[1] * ox + m[3] * oy),
+        ])
+    }
+
+    /// Whether the boxes inside this one are in a transformed box, where a
+    /// fixed box moves with the page (the painter's `transformed_ancestors`).
+    fn transforms_descendants(&self) -> bool {
+        !self.style.effective_transform().is_identity()
+    }
+
+    /// Whether a point in this box can land on it: not when it is not
+    /// shown, and not when it is `pointer-events: none`. Both inherit and
+    /// a descendant can undo either, so its children are tested all the same.
+    fn is_hit_target(&self) -> bool {
+        self.style.visibility == rustkit_css::Visibility::Visible
+            && self.style.pointer_events == rustkit_css::PointerEvents::Auto
+    }
+
+    /// The fixed boxes under this one that the scroll does not move (the
+    /// ones `hit_test_held_fixed` tests), in tree order, each as the child
+    /// indices that lead to it from here. The engine asks once per layout
+    /// and hands them to `hit_test_scrolled_with`, so a page with none
+    /// pays for no walk and a page with some pays for it once.
+    pub fn held_fixed_paths(&self) -> Vec<Vec<usize>> {
+        let mut paths = Vec::new();
+        self.collect_held_fixed(&mut Vec::new(), &mut paths);
+        paths
+    }
+
+    fn collect_held_fixed(&self, at: &mut Vec<usize>, paths: &mut Vec<Vec<usize>>) {
+        if self.transforms_descendants() {
+            return;
+        }
+        for (index, child) in self.children.iter().enumerate() {
+            at.push(index);
+            if child.position == Position::Fixed {
+                paths.push(at.clone());
+            }
+            // A fixed box inside this one is held too: the window, not
+            // its fixed ancestor, is its containing block, so it can lie
+            // outside that ancestor's box (a 0x0 fixed container holding
+            // a full-window overlay).
+            child.collect_held_fixed(at, paths);
+            at.pop();
+        }
+    }
+
+    /// Collect a hit at the point, with its `z-index`, for each fixed box
+    /// the scroll does not move, in tree order. A fixed box inside another
+    /// is one of them (`collect_held_fixed`), placed by the outermost
+    /// one's `z-index` (`outer_z`).
+    fn hit_test_held_fixed(&self, x: f32, y: f32, depth: u32, hits: &mut Vec<(i32, HitTestResult)>) {
+        self.hit_test_held_fixed_in(x, y, depth, None, hits)
+    }
+
+    fn hit_test_held_fixed_in(
+        &self,
+        x: f32,
+        y: f32,
+        depth: u32,
+        outer_z: Option<i32>,
+        hits: &mut Vec<(i32, HitTestResult)>,
+    ) {
+        if self.transforms_descendants() {
+            return;
+        }
+        let first = hits.len();
+        for child in &self.children {
+            let fixed = child.position == Position::Fixed;
+            if fixed {
+                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, true) {
+                    hit.viewport_fixed = true;
+                    hits.push((outer_z.unwrap_or(child.z_index), hit));
+                }
+            }
+            let outer_z = outer_z.or(fixed.then_some(child.z_index));
+            child.hit_test_held_fixed_in(x, y, depth + 1, outer_z, hits);
+        }
+        for (_, hit) in &mut hits[first..] {
+            self.add_as_ancestor(hit);
+        }
+    }
+
+    /// Add this box to the path of a hit in one of its descendants.
+    fn add_as_ancestor(&self, result: &mut HitTestResult) {
+        result.ancestors.push(HitTestAncestor {
+            box_type: self.box_type.clone(),
+            border_box: self.dimensions.border_box(),
+            content_box: self.dimensions.content,
+            z_index: self.z_index,
+            position: self.position,
+        });
+        // Nearest link wins: only fill in from an ancestor if no
+        // closer box already supplied one.
+        if result.link_href.is_none() {
+            result.link_href = self.link_href.clone();
+        }
+        // Same for the node: an anonymous box (a line, a text run
+        // laid out without one) is hit on behalf of its nearest
+        // ancestor that has a DOM node, or a click on it reaches no
+        // element at all.
+        if result.node_id.is_none() {
+            result.node_id = self.node_id;
+        }
+    }
+
+    /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
+    /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
+    /// those with the viewport point).
+    fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
+        // A transformed box and its descendants are drawn moved
+        // (`PushTransform`): the point is taken back to where they are
+        // laid out. A box squashed flat (`scale(0)`) is drawn nowhere.
+        let (x, y) = match self.own_transform() {
+            Some(m) => invert_affine(m).map(|inv| apply_affine(inv, x, y))?,
+            None => (x, y),
+        };
+
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -6606,38 +7035,36 @@ impl LayoutBox {
         }
 
         // Check children in reverse paint order (topmost first)
+        let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
         let paint_order = self.get_paint_order();
         for child in paint_order.iter().rev() {
-            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1) {
+            if skip_held_fixed && child.position == Position::Fixed {
+                continue;
+            }
+            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1, skip_held_fixed) {
                 // Found a hit in a child - add ourselves to the path
-                result.ancestors.push(HitTestAncestor {
-                    box_type: self.box_type.clone(),
-                    border_box: self.dimensions.border_box(),
-                    content_box: self.dimensions.content,
-                    z_index: self.z_index,
-                    position: self.position,
-                });
-                // Nearest link wins: only fill in from an ancestor if no
-                // closer box already supplied one.
-                if result.link_href.is_none() {
-                    result.link_href = self.link_href.clone();
-                }
-                // Same for the node: an anonymous box (a line, a text run
-                // laid out without one) is hit on behalf of its nearest
-                // ancestor that has a DOM node, or a click on it reaches no
-                // element at all.
-                if result.node_id.is_none() {
-                    result.node_id = self.node_id;
-                }
+                self.add_as_ancestor(&mut result);
                 return Some(result);
             }
         }
 
+        // No child was hit, so we are the target, if we can be one: a
+        // see-through overlay or a closed menu leaves the point to
+        // whatever is under it.
+        if !self.is_hit_target() {
+            return None;
+        }
+
+        Some(self.as_hit(x, y, depth))
+    }
+
+    /// This box as the target of a hit at the point.
+    fn as_hit(&self, x: f32, y: f32, depth: u32) -> HitTestResult {
+        let border_box = self.dimensions.border_box();
         // Detect if element is scrollable by checking overflow style
         let is_scrollable = self.detect_overflow();
 
-        // No child was hit, so we are the target
-        Some(HitTestResult {
+        HitTestResult {
             box_type: self.box_type.clone(),
             border_box,
             content_box: self.dimensions.content,
@@ -6651,7 +7078,8 @@ impl LayoutBox {
             is_scrollable,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
-        })
+            viewport_fixed: false,
+        }
     }
 
     /// Detect if this element has overflow and should be scrollable.
@@ -6696,6 +7124,14 @@ impl LayoutBox {
 
     /// Internal hit test that collects all results.
     fn hit_test_all_internal(&self, x: f32, y: f32, depth: u32, results: &mut Vec<HitTestResult>) {
+        // Where `hit_test_internal` looks: a transformed box where it is drawn.
+        let (x, y) = match self.own_transform() {
+            Some(m) => match invert_affine(m) {
+                Some(inv) => apply_affine(inv, x, y),
+                None => return,
+            },
+            None => (x, y),
+        };
         let border_box = self.dimensions.border_box();
 
         if !border_box.contains(x, y) {
@@ -6717,6 +7153,7 @@ impl LayoutBox {
             is_scrollable: false,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            viewport_fixed: false,
         });
 
         // Check all children
@@ -6724,6 +7161,22 @@ impl LayoutBox {
             child.hit_test_all_internal(x, y, depth + 1, results);
         }
     }
+}
+
+/// A point under a 2D affine `[a, b, c, d, e, f]` (the painter's layout).
+fn apply_affine(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// The inverse of a 2D affine, or `None` when it has none (it squashes
+/// the plane onto a line or a point).
+fn invert_affine(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
 /// Result of a hit test operation.
@@ -6760,6 +7213,10 @@ pub struct HitTestResult {
     /// `link_href` this is NOT inherited from ancestors: the caller wants
     /// the element actually under the cursor.
     pub node_id: Option<usize>,
+    /// The hit is in a `position: fixed` box the page's scroll does not
+    /// move (`LayoutBox::hit_test_scrolled`): its boxes are where the
+    /// window shows them, with no scroll to add.
+    pub viewport_fixed: bool,
 }
 
 impl HitTestResult {
@@ -7290,6 +7747,16 @@ pub enum DisplayCommand {
     PushOpacity(f32),
     /// End the innermost opacity scope.
     PopOpacity,
+
+    /// Start of a `position: fixed` box whose containing block is the
+    /// viewport. What follows, up to the matching `PopViewportFixed`, does
+    /// not move when the page scrolls. The pair draws nothing and the list
+    /// stays in document coordinates: whoever draws a scrolled page undoes
+    /// the scroll for this run (`Renderer::set_scroll_offset`). Runs do
+    /// not nest: a fixed box inside one is already held.
+    PushViewportFixed,
+    /// End of a `PushViewportFixed` run.
+    PopViewportFixed,
 
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
@@ -8023,6 +8490,11 @@ fn parse_length(value: &str) -> Option<f32> {
 /// A display list of paint commands.
 #[derive(Debug, Clone)]
 pub struct DisplayList {
+    /// In document coordinates, for a page that is not scrolled. Whatever
+    /// draws a scrolled page draws this same list with the renderer's
+    /// scroll offset set (`Renderer::set_scroll_offset`), which moves the
+    /// list and holds the `PushViewportFixed` runs still; a point is
+    /// tested with `LayoutBox::hit_test_scrolled`.
     pub commands: Vec<DisplayCommand>,
     /// Root element font size for rem unit calculations
     root_font_size: f32,
@@ -8041,6 +8513,12 @@ pub struct DisplayList {
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
     /// exactly these clips before painting and re-pushes them after.
     escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// Whether the box being painted is inside a `PushViewportFixed` run.
+    in_viewport_fixed: bool,
+    /// How many ancestors of the box being painted have a `transform`. A
+    /// transformed box is the containing block of the fixed boxes inside
+    /// it (css-transforms-1 §3), so those move with it and with the page.
+    transformed_ancestors: u32,
     /// `text-overflow: ellipsis` scope of the nearest block container being
     /// painted (css-overflow-3 §5.1). Inline boxes, anonymous blocks and
     /// text runs paint inside it; a nested block container replaces it with
@@ -8145,6 +8623,8 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -8164,6 +8644,8 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            in_viewport_fixed: false,
+            transformed_ancestors: 0,
             ellipsis: None,
         }
     }
@@ -8241,6 +8723,18 @@ impl DisplayList {
             None
         };
 
+        // A fixed box is held against the page's scroll with everything
+        // it paints. The run opens after the clips it escapes are popped
+        // and closes before they are pushed again: those belong to boxes
+        // that scroll.
+        let viewport_fixed = layout_box.position == Position::Fixed
+            && !self.in_viewport_fixed
+            && self.transformed_ancestors == 0;
+        if viewport_fixed {
+            self.in_viewport_fixed = true;
+            self.commands.push(DisplayCommand::PushViewportFixed);
+        }
+
         // Check if this creates a new stacking context
         let creates_context = layout_box
             .stacking_context
@@ -8284,6 +8778,7 @@ impl DisplayList {
                 matrix,
                 origin: (origin_x, origin_y),
             });
+            self.transformed_ancestors += 1;
         }
 
         // Render this box
@@ -8386,6 +8881,7 @@ impl DisplayList {
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
+            self.transformed_ancestors -= 1;
         }
 
         if fades {
@@ -8394,6 +8890,11 @@ impl DisplayList {
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        if viewport_fixed {
+            self.commands.push(DisplayCommand::PopViewportFixed);
+            self.in_viewport_fixed = false;
         }
 
         // Restore the clips this box's subtree was scoped out of; an escaping
@@ -9294,6 +9795,10 @@ impl DisplayList {
                 Length::Px(px) => *px,
                 _ => 16.0,
             };
+            // Text at `font-size: 0` has no glyphs to paint.
+            if font_size <= 0.0 {
+                return;
+            }
 
             let x = layout_box.dimensions.content.x;
             let content_y = layout_box.dimensions.content.y;
@@ -18461,5 +18966,102 @@ mod mask_paint_tests {
             ]
         );
         assert!(matches!(cmds[0], DisplayCommand::PushClip(_)));
+    }
+}
+
+#[cfg(test)]
+mod overlay_hit_tests {
+    //! A click lands on what is drawn under it: a transformed box where it
+    //! is painted, and a fixed box wherever the window puts it, even
+    //! outside its fixed ancestor's box (consent dialogs, 2026-10-21).
+    use super::*;
+    use rustkit_css::{TransformList, TransformOp};
+
+    fn boxed(node: usize, x: f32, y: f32, w: f32, h: f32) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.dimensions.content = Rect::new(x, y, w, h);
+        b.node_id = Some(node);
+        b
+    }
+
+    fn page() -> LayoutBox {
+        boxed(1, 0.0, 0.0, 800.0, 600.0)
+    }
+
+    #[test]
+    fn a_translated_box_is_hit_where_it_is_painted() {
+        // `top: 50%; left: 50%; transform: translate(-50%, -50%)`.
+        let mut root = page();
+        let mut dialog = boxed(2, 400.0, 300.0, 400.0, 200.0);
+        dialog.position = Position::Fixed;
+        dialog.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Percent(-50.0), Length::Percent(-50.0))],
+        };
+        dialog.children.push(boxed(3, 420.0, 440.0, 120.0, 40.0));
+        root.children.push(dialog);
+
+        let at = |x, y| root.hit_test_scrolled(x, y, (0.0, 0.0)).and_then(|h| h.node_id);
+        // The button is painted at (220, 340)..(340, 380).
+        assert_eq!(at(280.0, 360.0), Some(3));
+        // Where it is laid out, nothing of the dialog is drawn.
+        assert_eq!(at(480.0, 460.0), Some(1));
+        // The same with the paths the engine keeps.
+        let held = root.held_fixed_paths();
+        assert_eq!(
+            root.hit_test_scrolled_with(280.0, 360.0, (0.0, 0.0), &held).and_then(|h| h.node_id),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn hit_test_all_finds_a_translated_box_where_it_is_painted() {
+        let mut root = page();
+        let mut moved = boxed(2, 400.0, 300.0, 100.0, 100.0);
+        moved.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Px(-300.0), Length::Px(-200.0))],
+        };
+        root.children.push(moved);
+        let nodes = |x, y| root.hit_test_all(x, y).iter().map(|h| h.node_id).collect::<Vec<_>>();
+        assert_eq!(nodes(150.0, 150.0), vec![Some(1), Some(2)]);
+        assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
+    }
+
+    #[test]
+    fn a_box_scaled_to_nothing_is_not_hit() {
+        let mut root = page();
+        let mut gone = boxed(2, 0.0, 0.0, 200.0, 200.0);
+        gone.style.transform = TransformList { ops: vec![TransformOp::Scale(0.0, 0.0)] };
+        root.children.push(gone);
+        assert_eq!(root.hit_test(50.0, 50.0).and_then(|h| h.node_id), Some(1));
+    }
+
+    #[test]
+    fn a_fixed_box_in_a_zero_size_fixed_box_is_hit() {
+        let mut root = page();
+        let mut container = boxed(2, 0.0, 100.0, 0.0, 0.0);
+        container.position = Position::Fixed;
+        container.z_index = 10;
+        let mut overlay = boxed(3, 0.0, 0.0, 800.0, 600.0);
+        overlay.position = Position::Fixed;
+        overlay.children.push(boxed(4, 300.0, 280.0, 120.0, 40.0));
+        container.children.push(overlay);
+        // Page content under the overlay, painted before it.
+        root.children.push(boxed(5, 0.0, 0.0, 800.0, 600.0));
+        root.children.push(container);
+
+        let held = root.held_fixed_paths();
+        assert_eq!(held, vec![vec![1], vec![1, 0]]);
+        for hit in [
+            root.hit_test_scrolled(350.0, 300.0, (0.0, 200.0)),
+            root.hit_test_scrolled_with(350.0, 300.0, (0.0, 200.0), &held),
+        ] {
+            let hit = hit.expect("a hit");
+            assert_eq!(hit.node_id, Some(4));
+            assert!(hit.viewport_fixed);
+            // Its path runs through the overlay and the container.
+            assert_eq!(hit.ancestors.len(), 3);
+        }
+        // Elsewhere on the overlay: the overlay, not the page under it.
+        assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
 }

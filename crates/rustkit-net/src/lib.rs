@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -199,6 +199,23 @@ impl Request {
     }
 }
 
+/// Whether `request` sends and keeps cookies: a navigation always; any
+/// other request as its credentials mode says, `SameOrigin` judged against
+/// the document that made it (one with no document is its own origin).
+fn sends_cookies(request: &Request) -> bool {
+    match request.credentials {
+        CredentialsMode::Omit => false,
+        CredentialsMode::Include => true,
+        CredentialsMode::SameOrigin => {
+            request.destination == RequestDestination::Document
+                || request
+                    .referrer
+                    .as_ref()
+                    .is_none_or(|page| page.origin() == request.url.origin())
+        }
+    }
+}
+
 /// Credentials mode for requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CredentialsMode {
@@ -366,6 +383,14 @@ pub struct Response {
     pub headers: HeaderMap,
     pub content_type: Option<Mime>,
     pub content_length: Option<u64>,
+    /// Answered from the loader's memory cache, without a request.
+    pub from_cache: bool,
+    /// Body bytes as transferred, before `Content-Encoding` was undone;
+    /// `None` when nothing was transferred (cache, `data:`).
+    pub encoded_body_size: Option<u64>,
+    /// Redirects followed to get here: each URL that redirected, and its
+    /// status.
+    pub redirect_chain: Vec<(Url, StatusCode)>,
     body: ResponseBody,
 }
 
@@ -570,14 +595,25 @@ impl ResourceLoader {
                 _ => rustkit_http::AddressPolicy::Any,
             },
         };
-        if matches!(policy, rustkit_http::AddressPolicy::Any) {
+        let cookies = sends_cookies(&request);
+        if matches!(policy, rustkit_http::AddressPolicy::Any) && cookies {
             return self.fetch_with(request, &self.client, true).await;
         }
         // The shared cache is keyed by URL alone and would answer a private
         // URL without connecting.
         let use_cache = !policy::url_host_is_private(&request.url);
-        let client = self.client.clone().with_address_policy(policy);
+        let mut client = self.client.clone().with_address_policy(policy);
+        if !cookies {
+            client = client.with_cookies(None);
+        }
         self.fetch_with(request, &client, use_cache).await
+    }
+
+    /// The jar every request with credentials sends and keeps cookies
+    /// with (`None` with cookies disabled). `document.cookie` reads and
+    /// writes it too.
+    pub fn cookie_jar(&self) -> Option<Arc<rustkit_http::CookieJar>> {
+        self.client.cookie_jar().cloned()
     }
 
     /// One hop of a governed (script-initiated) request: the same pipeline as
@@ -594,12 +630,16 @@ impl ResourceLoader {
         use_cache: bool,
     ) -> Result<Response, NetError> {
         let policy = self.replay_proxy_address_policy().unwrap_or(address_policy);
-        let client = self
+        let mut client = self
             .client
             .clone()
             .with_address_policy(policy)
             .with_follow_redirects(false)
             .with_max_body(max_body);
+        // The policy says which hops carry cookies (`credentials`).
+        if !sends_cookies(&request) {
+            client = client.with_cookies(None);
+        }
         self.fetch_with(request, &client, use_cache).await
     }
 
@@ -609,7 +649,46 @@ impl ResourceLoader {
         client: &HttpClient,
         use_cache: bool,
     ) -> Result<Response, NetError> {
+        let mut trace = FetchTrace::begin(&request);
+        let result = self.fetch_with_inner(request, client, use_cache).await;
+        trace.finish(&result);
+        result
+    }
+
+    async fn fetch_with_inner(
+        &self,
+        request: Request,
+        client: &HttpClient,
+        use_cache: bool,
+    ) -> Result<Response, NetError> {
         debug!(url = %request.url, method = %request.method, "Fetching resource");
+
+        // data: URLs (RFC 2397) carry their own body — answer them here instead
+        // of sending them to the HTTP client, which rejects them for having no
+        // host. Sites inline small stylesheets, fonts, images and scripts this
+        // way (facebook ships a base64 `data:text/css` sheet). First, before
+        // the replay proxy and the interceptor: a `data:` URL is not a
+        // request, so the shield never sees one (it logged "Failed to create
+        // request" for each of reddit's `data:` scripts) and cannot block it.
+        if request.url.scheme() == "data" {
+            let (content_type, body) = decode_data_url(request.url.as_str())?;
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::try_from(content_type.as_str()) {
+                headers.insert(HeaderName::from_static("content-type"), v);
+            }
+            return Ok(Response {
+                request_id: request.id,
+                url: request.url.clone(),
+                status: StatusCode::OK,
+                headers,
+                content_type: content_type.parse::<Mime>().ok(),
+                content_length: Some(body.len() as u64),
+                from_cache: false,
+                encoded_body_size: None,
+                redirect_chain: Vec::new(),
+                body: ResponseBody::Full(Bytes::from(body)),
+            });
+        }
 
         // If replay_proxy is configured, rewrite outbound socket request to proxy on first entry
         if let Some(ref proxy) = self.config.replay_proxy {
@@ -654,27 +733,6 @@ impl ResourceLoader {
             }
         }
         
-        // data: URLs (RFC 2397) carry their own body — answer them here instead
-        // of sending them to the HTTP client, which rejects them for having no
-        // host. Sites inline small stylesheets, fonts, images and scripts this
-        // way (facebook ships a base64 `data:text/css` sheet).
-        if request.url.scheme() == "data" {
-            let (content_type, body) = decode_data_url(request.url.as_str())?;
-            let mut headers = HeaderMap::new();
-            if let Ok(v) = HeaderValue::try_from(content_type.as_str()) {
-                headers.insert(HeaderName::from_static("content-type"), v);
-            }
-            return Ok(Response {
-                request_id: request.id,
-                url: request.url.clone(),
-                status: StatusCode::OK,
-                headers,
-                content_type: content_type.parse::<Mime>().ok(),
-                content_length: Some(body.len() as u64),
-                body: ResponseBody::Full(Bytes::from(body)),
-            });
-        }
-
         // Check cache for GET requests
         let cache_key = if use_cache && request.method == Method::GET && self.cache.enabled() {
             let key = CacheKey::new(&request.url);
@@ -694,6 +752,9 @@ impl ResourceLoader {
                     headers: cached.headers,
                     content_type,
                     content_length: Some(cached.body.len() as u64),
+                    from_cache: true,
+                    encoded_body_size: None,
+                    redirect_chain: Vec::new(),
                     body: ResponseBody::Full(cached.body),
                 });
             }
@@ -826,6 +887,9 @@ impl ResourceLoader {
             headers: http_response.headers,
             content_type,
             content_length,
+            from_cache: false,
+            encoded_body_size: Some(http_response.encoded_body_size),
+            redirect_chain: http_response.redirect_chain,
             body: ResponseBody::Full(http_response.body),
         })
     }
@@ -907,6 +971,89 @@ pub struct FetchOptions {
     pub redirect: Option<String>,
 }
 
+/// `method`, `url`, `status` (`-` when unknown), `disposition`
+/// (`issued`, `response`, `blocked`, `timeout`, `error`, `cancelled`).
+pub type FetchDiag = fn(&str, &str, &str, &str);
+
+static FETCH_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static FETCH_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The engine installs this once. A null hook, or [`set_fetch_diag_armed`]
+/// left false, means [`ResourceLoader::fetch`] does no extra work.
+pub fn set_fetch_diag(hook: Option<FetchDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    FETCH_HOOK.store(ptr, Ordering::Relaxed);
+}
+
+/// Arm the fetch log. Off by default, so a fetch allocates nothing for it.
+pub fn set_fetch_diag_armed(on: bool) {
+    FETCH_ARMED.store(on, Ordering::Relaxed);
+}
+
+fn note_fetch(method: &str, url: &str, status: &str, disposition: &str) {
+    let ptr = FETCH_HOOK.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `FetchDiag` function pointer, or null (returned
+    // above). The engine installs one static function for the process.
+    let hook: FetchDiag = unsafe { std::mem::transmute(ptr) };
+    hook(method, url, status, disposition);
+}
+
+struct FetchTrace {
+    method: String,
+    url: String,
+    finished: bool,
+}
+
+impl FetchTrace {
+    fn begin(request: &Request) -> Self {
+        if !FETCH_ARMED.load(Ordering::Relaxed) || FETCH_HOOK.load(Ordering::Relaxed).is_null() {
+            return Self {
+                method: String::new(),
+                url: String::new(),
+                finished: true,
+            };
+        }
+        let method = request.method.as_str().to_string();
+        let url = request.url.to_string();
+        note_fetch(&method, &url, "-", "issued");
+        Self {
+            method,
+            url,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, result: &Result<Response, NetError>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let (status, disposition) = match result {
+            Ok(response) => (response.status.as_u16().to_string(), "response"),
+            Err(NetError::Blocked) => ("-".to_string(), "blocked"),
+            Err(NetError::Timeout(_)) => ("-".to_string(), "timeout"),
+            Err(NetError::Cancelled) => ("-".to_string(), "cancelled"),
+            Err(_) => ("-".to_string(), "error"),
+        };
+        note_fetch(&self.method, &self.url, &status, disposition);
+    }
+}
+
+impl Drop for FetchTrace {
+    fn drop(&mut self) {
+        if self.finished || self.method.is_empty() {
+            return;
+        }
+        note_fetch(&self.method, &self.url, "-", "cancelled");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,6 +1115,60 @@ mod tests {
         assert!(!config.user_agent.contains("Chrome"), "never Chrome's UA");
         assert!(config.cookies_enabled);
     }
+
+    /// #707: wrong gate either leaks cookies cross-origin or drops them on
+    /// navigations / same-origin challenge hops.
+    #[test]
+    fn sends_cookies_follows_credentials_mode_and_origin() {
+        let page = Url::parse("https://news.example/story").unwrap();
+        let same = Url::parse("https://news.example/api").unwrap();
+        let cross = Url::parse("https://tracker.example/pixel").unwrap();
+
+        let mut omit = Request::get(same.clone());
+        omit.credentials = CredentialsMode::Omit;
+        omit.destination = RequestDestination::Document;
+        omit.referrer = Some(page.clone());
+        assert!(!sends_cookies(&omit), "Omit never sends, even for a navigation");
+
+        let mut include = Request::get(cross.clone());
+        include.credentials = CredentialsMode::Include;
+        include.destination = RequestDestination::Image;
+        include.referrer = Some(page.clone());
+        assert!(sends_cookies(&include), "Include always sends");
+
+        let mut nav = Request::get(cross.clone());
+        nav.credentials = CredentialsMode::SameOrigin;
+        nav.destination = RequestDestination::Document;
+        nav.referrer = Some(page.clone());
+        assert!(
+            sends_cookies(&nav),
+            "a Document navigation sends cookies even when the next hop is cross-origin"
+        );
+
+        let mut same_origin = Request::get(same.clone());
+        same_origin.credentials = CredentialsMode::SameOrigin;
+        same_origin.destination = RequestDestination::Script;
+        same_origin.referrer = Some(page.clone());
+        assert!(sends_cookies(&same_origin), "SameOrigin + matching referrer");
+
+        let mut cross_sub = Request::get(cross);
+        cross_sub.credentials = CredentialsMode::SameOrigin;
+        cross_sub.destination = RequestDestination::Script;
+        cross_sub.referrer = Some(page);
+        assert!(
+            !sends_cookies(&cross_sub),
+            "SameOrigin must not leak cookies to a foreign origin"
+        );
+
+        let mut no_referrer = Request::get(same);
+        no_referrer.credentials = CredentialsMode::SameOrigin;
+        no_referrer.destination = RequestDestination::Other;
+        no_referrer.referrer = None;
+        assert!(
+            sends_cookies(&no_referrer),
+            "no document referrer is treated as the request's own origin"
+        );
+    }
 }
 
 /// Largest `data:` payload the loader will decode (bytes, after decoding).
@@ -981,6 +1182,9 @@ pub fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), NetError> {
         .filter(|s| s.eq_ignore_ascii_case("data:"))
         .map(|_| &url[5..])
         .ok_or_else(|| NetError::InvalidUrl("not a data: URL".into()))?;
+    // Fetch's data: URL processor serializes the URL without its fragment:
+    // `data:text/javascript,f()#x` is the script `f()`.
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (meta, payload) = rest
         .split_once(',')
         .ok_or_else(|| NetError::InvalidUrl("data: URL has no ','".into()))?;
@@ -1057,6 +1261,11 @@ mod data_url_tests {
         // Unpadded base64 and whitespace inside the payload are accepted.
         assert_eq!(decode_data_url("data:;base64,aGk").unwrap().1, b"hi");
         assert_eq!(decode_data_url("data:;base64,aG k=").unwrap().1, b"hi");
+        // The fragment is not the payload (Fetch: serialize, exclude fragment).
+        let url = Url::parse("data:text/javascript,log.push('frag')#ignored").unwrap();
+        assert_eq!(decode_data_url(url.as_str()).unwrap().1, b"log.push('frag')");
+        assert_eq!(decode_data_url("data:;base64,aGk=#x").unwrap().1, b"hi");
+        assert_eq!(decode_data_url("data:text/plain,a%23b#c").unwrap().1, b"a#b");
     }
 
     #[test]
@@ -1076,6 +1285,34 @@ mod data_url_tests {
         assert!(resp.ok());
         assert_eq!(resp.content_type.as_ref().map(|m| m.essence_str().to_string()), Some("text/css".into()));
         assert_eq!(rt.block_on(resp.text()).unwrap(), "body{color:red}");
+    }
+
+    /// A `data:` URL is not a request: it never reaches the interceptor (the
+    /// shield), so a rule cannot block it and the shield has nothing to log.
+    #[test]
+    fn a_data_url_never_reaches_the_interceptor() {
+        struct Refuse(Arc<std::sync::atomic::AtomicUsize>);
+        impl InterceptHandler for Refuse {
+            fn intercept(&self, _: &Request) -> InterceptAction {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                InterceptAction::Block
+            }
+        }
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut interceptor = RequestInterceptor::new();
+        interceptor.add_handler(Arc::new(Refuse(asked.clone())));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let loader = ResourceLoader::with_interceptor(LoaderConfig::default(), Some(interceptor)).unwrap();
+        for (url, want) in [
+            ("data:text/javascript,window.STICKY_CANARY=%22on%22", "window.STICKY_CANARY=\"on\""),
+            ("data:text/javascript;base64,bGV0IGE9MTs=", "let a=1;"),
+        ] {
+            let mut request = Request::get(Url::parse(url).unwrap());
+            request.destination = RequestDestination::Script;
+            let resp = rt.block_on(loader.fetch(request)).expect("data: is answered, not blocked");
+            assert_eq!(rt.block_on(resp.text()).unwrap(), want);
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
 

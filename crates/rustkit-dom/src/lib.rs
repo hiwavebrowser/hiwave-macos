@@ -14,6 +14,7 @@
 pub mod events;
 pub mod forms;
 pub mod images;
+pub mod shadow;
 
 pub use events::{
     AddEventListenerOptions, DomEvent, Event, EventDispatcher, EventId, EventListenerCallback,
@@ -27,12 +28,56 @@ pub use images::{
     CrossOrigin, FaviconLink, ImageDecoding, ImageElement, ImageElementManager, ImageLoading,
     ImageLoadingState, PictureElement, PictureSource,
 };
+pub use shadow::{is_valid_custom_element_name, ShadowRootInit, ShadowRootMode};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use thiserror::Error;
 use tracing::debug;
+
+thread_local! {
+    static REMOVAL_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+static REMOVAL_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// `parent tag`, `parent id` (empty when the element has none), subtree size.
+pub type RemovalDiag = fn(&str, &str, usize);
+
+/// The walk in [`Node::remove_from_parent`] runs only while this is set.
+pub fn set_removal_armed(on: bool) {
+    REMOVAL_ARMED.with(|cell| cell.set(on));
+}
+
+pub fn removal_armed() -> bool {
+    REMOVAL_ARMED.with(Cell::get)
+}
+
+pub fn set_removal_hook(hook: Option<RemovalDiag>) {
+    let ptr = match hook {
+        Some(hook) => hook as *mut (),
+        None => std::ptr::null_mut(),
+    };
+    REMOVAL_HOOK.store(ptr, Ordering::Relaxed);
+}
+
+/// A parent lost `nodes` descendants at once (innerHTML, textContent) or one
+/// child whose own subtree is that large. No-op unless armed and `nodes` > 50.
+pub fn note_large_clear(tag: &str, id: &str, nodes: usize) {
+    if nodes <= 50 || !removal_armed() {
+        return;
+    }
+    let ptr = REMOVAL_HOOK.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: stored from a `RemovalDiag` function pointer. The engine
+    // installs one static function for the process.
+    let hook: RemovalDiag = unsafe { std::mem::transmute(ptr) };
+    hook(tag, id, nodes);
+}
 
 /// Errors that can occur in DOM operations.
 #[derive(Error, Debug)]
@@ -105,6 +150,10 @@ pub struct Node {
     next_sibling: RefCell<Option<Weak<Node>>>,
     /// Event target mixin for event handling.
     pub event_target: EventTarget,
+    /// Shadow DOM: on a shadow host, its shadow root (owned); on a shadow
+    /// root, its host (weak, so host and root do not keep each other
+    /// alive). `None` on every other node (see `shadow.rs`).
+    shadow: RefCell<Option<shadow::ShadowLink>>,
 }
 
 impl Node {
@@ -118,6 +167,7 @@ impl Node {
             prev_sibling: RefCell::new(None),
             next_sibling: RefCell::new(None),
             event_target: EventTarget::new(),
+            shadow: RefCell::new(None),
         })
     }
 
@@ -216,8 +266,28 @@ impl Node {
         self.children.borrow_mut().push(child);
     }
 
+    /// This node plus every descendant.
+    pub fn subtree_len(&self) -> usize {
+        1 + self
+            .children
+            .borrow()
+            .iter()
+            .map(|child| child.subtree_len())
+            .sum::<usize>()
+    }
+
     /// Remove this node from its parent.
     pub fn remove_from_parent(self: &Rc<Self>) {
+        if removal_armed() {
+            let nodes = self.subtree_len();
+            if nodes > 50 {
+                if let Some(parent) = self.parent() {
+                    let tag = parent.tag_name().unwrap_or("-");
+                    let id = parent.get_attribute("id").unwrap_or("");
+                    note_large_clear(tag, id, nodes);
+                }
+            }
+        }
         if let Some(parent) = self.parent() {
             // Update sibling links
             if let Some(prev) = self.previous_sibling() {
@@ -277,6 +347,19 @@ pub struct Document {
     elements_by_id: RefCell<HashMap<String, Rc<Node>>>,
     /// Next node ID.
     next_id: Cell<usize>,
+    /// How many shadow roots were ever attached in this document. Zero
+    /// means no node has a shadow root, so tree walks can skip the shadow
+    /// checks entirely.
+    shadow_roots: Cell<usize>,
+    /// Custom element names `customElements.define` has defined, for
+    /// `:defined` (see `shadow.rs`, `define_custom_element`).
+    defined_custom_elements: RefCell<std::collections::HashSet<String>>,
+    /// The page's load has settled its custom element definitions (once
+    /// per document; see `shadow.rs`, `settle_custom_element_definitions`).
+    custom_element_definitions_settled: Cell<bool>,
+    /// The names that settle found present and undefined, minus any
+    /// defined since: `:defined` for the cascade only.
+    settled_custom_elements: RefCell<std::collections::HashSet<String>>,
 }
 
 /// Sink for building a Document from HTML parsing.
@@ -284,6 +367,9 @@ struct DocumentSink {
     doc: Document,
     /// Stack of open elements during parsing.
     open_elements: Vec<Rc<Node>>,
+    /// A `<template shadowrootmode>` was seen: declarative shadow roots
+    /// are attached once the parse is done (`shadow::attach_declarative`).
+    saw_declarative_shadow: bool,
 }
 
 impl DocumentSink {
@@ -291,6 +377,7 @@ impl DocumentSink {
         Self {
             doc: Document::new(),
             open_elements: vec![],
+            saw_declarative_shadow: false,
         }
     }
 
@@ -332,6 +419,9 @@ impl rustkit_html::TreeSink for DocumentSink {
         let mut attributes = HashMap::new();
         for (key, value) in attrs {
             attributes.insert(key, value);
+        }
+        if name == "template" && attributes.contains_key("shadowrootmode") {
+            self.saw_declarative_shadow = true;
         }
 
         let node = self.create_node(NodeType::Element {
@@ -478,6 +568,10 @@ impl Document {
             nodes: RefCell::new(nodes),
             elements_by_id: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
+            shadow_roots: Cell::new(0),
+            defined_custom_elements: RefCell::new(std::collections::HashSet::new()),
+            custom_element_definitions_settled: Cell::new(false),
+            settled_custom_elements: RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -489,6 +583,11 @@ impl Document {
         let sink = rustkit_html::parse(html, sink).map_err(|e| DomError::ParseError(e.to_string()))?;
 
         debug!(node_count = sink.doc.nodes.borrow().len(), "HTML parsed");
+        // Declarative shadow DOM is a document-parser feature: the fragment
+        // parser (`parse_fragment`, behind innerHTML) leaves the templates.
+        if sink.saw_declarative_shadow {
+            shadow::attach_declarative(&sink.doc);
+        }
         Ok(sink.doc)
     }
 
@@ -634,6 +733,7 @@ impl Document {
             }
         }
         *new.parent.borrow_mut() = parent;
+        shadow::move_link(&old, &new);
 
         self.nodes.borrow_mut().insert(id, new.clone());
         let mut by_id = self.elements_by_id.borrow_mut();

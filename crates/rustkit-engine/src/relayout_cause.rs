@@ -69,6 +69,51 @@ impl RelayoutCause {
     }
 }
 
+/// The HTML element names a `relayout` record may name (plus `svg` and
+/// `math`). A custom element's name, or any other tag, is page text and is
+/// recorded as `other`.
+const HTML_ELEMENTS: [&str; 115] = [
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo",
+    "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col",
+    "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+    "em", "embed", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+    "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input", "ins",
+    "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta", "meter",
+    "nav", "noscript", "object", "ol", "optgroup", "option", "output", "p", "picture", "pre",
+    "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "search", "section", "select",
+    "slot", "small", "source", "span", "strong", "style", "sub", "summary", "sup", "table",
+    "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "u", "ul", "var", "video", "wbr", "svg", "math", "center",
+];
+
+impl RelayoutCause {
+    /// The cause as an Inspector `relayout` record shows it: engine words
+    /// and numbers only. A script write is its kind and, when it was to an
+    /// element, the element's tag if it is one of [`HTML_ELEMENTS`] (else
+    /// `other`); never its `id`, class or attributes, which page script
+    /// chooses. (The `relayout cause=` log line keeps the `tag#id` label.)
+    pub fn record_label(&self) -> String {
+        match self {
+            RelayoutCause::ScriptMutation { kind, node } if node.is_empty() => {
+                format!("script_mutation({})", kind.as_str())
+            }
+            RelayoutCause::ScriptMutation { kind, node } => {
+                // `node` is `tag#id` or `tag`: the tag is what precedes the
+                // first `#`. A tag that itself holds a `#` reads as the name
+                // before it, which is still only ever a listed name.
+                let tag = node.split('#').next().unwrap_or("");
+                let tag = HTML_ELEMENTS
+                    .iter()
+                    .find(|known| known.eq_ignore_ascii_case(tag))
+                    .copied()
+                    .unwrap_or("other");
+                format!("script_mutation({}@{tag})", kind.as_str())
+            }
+            cause => cause.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for RelayoutCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -185,6 +230,9 @@ pub struct RelayoutStats {
     pub mutations: CauseCounts,
     /// Relayouts whose build took the kept box tree.
     pub trees_reused: u32,
+    /// Relayouts that kept the laid-out tree: the build changed only what
+    /// is painted, so the layout pass was skipped.
+    pub layouts_skipped: u32,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.
@@ -244,9 +292,144 @@ pub(crate) fn last_build_reused_tree() -> bool {
     LAST_BUILD_REUSED_TREE.with(|c| c.get())
 }
 
+/// The stages a relayout is timed by, in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// The box tree from the DOM (`build_layout_tree`), or a pointer
+    /// restyle's subtree builds.
+    Build,
+    /// Laying the tree out (`layout_compute`).
+    Layout,
+    /// The display list from the laid-out tree (`build_display_list`).
+    DisplayList,
+    /// The geometry and computed-style maps script reads.
+    Snapshot,
+    /// Drawing the display list (`render`).
+    Render,
+}
+
+/// Milliseconds one relayout spent in each stage. A stage that ran more
+/// than once (a pointer restyle that fell back to a full build) is summed;
+/// one that did not run is 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StageMs {
+    pub build: f64,
+    pub layout: f64,
+    pub display_list: f64,
+    pub snapshot: f64,
+    pub render: f64,
+}
+
+impl StageMs {
+    fn add(&mut self, stage: Stage, ms: f64) {
+        let slot = match stage {
+            Stage::Build => &mut self.build,
+            Stage::Layout => &mut self.layout,
+            Stage::DisplayList => &mut self.display_list,
+            Stage::Snapshot => &mut self.snapshot,
+            Stage::Render => &mut self.render,
+        };
+        *slot += ms;
+    }
+}
+
+impl fmt::Display for StageMs {
+    /// `build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.1 render_ms=3.0`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1}",
+            self.build, self.layout, self.display_list, self.snapshot, self.render
+        )
+    }
+}
+
+thread_local! {
+    /// The stage times of the relayout running on this thread.
+    /// `Engine::relayout` clears it before its build and takes it after
+    /// its paint; a render outside a relayout adds to it and is cleared
+    /// unread.
+    static STAGE_MS: std::cell::Cell<StageMs> = const {
+        std::cell::Cell::new(StageMs {
+            build: 0.0,
+            layout: 0.0,
+            display_list: 0.0,
+            snapshot: 0.0,
+            render: 0.0,
+        })
+    };
+}
+
+/// Times one stage until it is dropped: two `Instant` reads and a
+/// thread-local add, nothing else.
+pub(crate) struct StageTimer {
+    stage: Stage,
+    started: std::time::Instant,
+}
+
+pub(crate) fn time_stage(stage: Stage) -> StageTimer {
+    StageTimer {
+        stage,
+        started: std::time::Instant::now(),
+    }
+}
+
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        STAGE_MS.with(|c| {
+            let mut stages = c.get();
+            stages.add(self.stage, ms);
+            c.set(stages);
+        });
+        // The same figure goes to the window-hold breakdown (W-gate).
+        crate::wgate::add(
+            match self.stage {
+                Stage::Build => crate::wgate::HoldStage::Build,
+                Stage::Layout => crate::wgate::HoldStage::Layout,
+                Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
+                Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
+                Stage::Render => crate::wgate::HoldStage::Render,
+            },
+            ms,
+        );
+    }
+}
+
+/// The stage times since the last take, and a fresh start.
+pub(crate) fn take_stage_ms() -> StageMs {
+    STAGE_MS.with(|c| c.replace(StageMs::default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_timers_add_up_per_stage_until_taken() {
+        take_stage_ms();
+        drop(time_stage(Stage::Build));
+        {
+            let _t = time_stage(Stage::Render);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let taken = take_stage_ms();
+        assert!(taken.render >= 2.0, "{taken}");
+        assert_eq!(taken.layout, 0.0);
+        assert_eq!(take_stage_ms(), StageMs::default(), "a take clears them");
+        let shown = StageMs {
+            build: 1.0,
+            layout: 2.04,
+            display_list: 0.5,
+            snapshot: 0.0,
+            render: 3.0,
+        }
+        .to_string();
+        assert_eq!(
+            shown,
+            "build_ms=1.0 layout_ms=2.0 display_list_ms=0.5 snapshot_ms=0.0 render_ms=3.0"
+        );
+    }
 
     #[test]
     fn the_summary_url_drops_the_query_and_fragment() {
@@ -255,13 +438,29 @@ mod tests {
             url("https://example.com:8443/a/b?token=secret#frag"),
             "https://example.com:8443/a/b"
         );
+        assert_eq!(
+            url("http://user:pass@example.com/path?q=1"),
+            "http://example.com/path",
+            "userinfo must not reach the log"
+        );
+        assert_eq!(
+            url("wss://chat.example/socket?token=x"),
+            "wss://chat.example/socket"
+        );
+        assert_eq!(url("ws://chat.example/socket"), "ws://chat.example/socket");
         assert_eq!(url("about:blank"), "about:blank");
+        assert_eq!(
+            url("about:a-very-long-about-path-that-exceeds-thirty-two-chars"),
+            "about:a-very-long-about-path-that-exce",
+            "about: keeps at most 32 path characters"
+        );
         assert_eq!(
             url("data:text/html,<p>a long inline document body here</p>"),
             "data:"
         );
         assert_eq!(url("file:///Users/someone/page.html"), "file:");
         assert_eq!(url("blob:https://a.example/0b5e-uuid"), "blob:");
+        assert_eq!(url("javascript:alert(1)"), "javascript:");
     }
 
     #[test]
@@ -333,6 +532,21 @@ mod tests {
                 "other(embedder)",
             ]
         );
+    }
+
+    /// Fourth R1 hold @ 47fc7abb: a record names no id, and a tag only
+    /// when it is a listed HTML element.
+    #[test]
+    fn the_record_label_holds_no_page_text() {
+        let write = |kind, node: &str| RelayoutCause::ScriptMutation { kind, node: node.into() }.record_label();
+        assert_eq!(write(MutationKind::Attribute, "div#sid=COOKIEVALUE"), "script_mutation(attribute@div)");
+        assert_eq!(write(MutationKind::Style, "P#x"), "script_mutation(style@p)");
+        assert_eq!(write(MutationKind::ChildList, "x-cookievalue#el"), "script_mutation(child_list@other)");
+        assert_eq!(write(MutationKind::FormValue, "my-widget"), "script_mutation(form_value@other)");
+        assert_eq!(write(MutationKind::Text, ""), "script_mutation(text)");
+        assert_eq!(RelayoutCause::ImageLoaded { count: 2 }.record_label(), "image_loaded(count=2)");
+        assert_eq!(RelayoutCause::Other("embedder").record_label(), "other(embedder)");
+        assert_eq!(RelayoutCause::Timer.record_label(), "timer");
     }
 
     #[test]

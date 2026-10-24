@@ -291,3 +291,110 @@ fn a_new_document_starts_its_own_counts() {
     assert_eq!(s.by_first_cause.to_string(), "{initial_load:1}");
     assert!(s.mutations.is_empty());
 }
+
+/// Collects what a `fmt` subscriber writes, for reading the log lines back.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Log lines that contain `needle` while `run` ran on this thread.
+fn capture_lines(needle: &str, run: impl FnOnce()) -> Vec<String> {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    log.lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `relayout cause=` lines logged while `run` ran on this thread.
+pub(crate) fn relayout_lines(run: impl FnOnce()) -> Vec<String> {
+    capture_lines("relayout cause=", run)
+}
+
+/// The number after `name=` in a log line.
+pub(crate) fn field_ms(line: &str, name: &str) -> Option<f64> {
+    let at = line.find(&format!(" {name}="))? + name.len() + 2;
+    line[at..].split_whitespace().next()?.parse().ok()
+}
+
+#[test]
+fn every_relayout_line_carries_the_five_stage_times() {
+    let (mut engine, view) = engine_and_view();
+    let lines = relayout_lines(|| {
+        engine
+            .load_html(view, "<style>p{color:red}</style><p>hello</p>")
+            .expect("load_html");
+        engine.relayout(view).expect("relayout");
+    });
+    assert_eq!(lines.len(), 2, "one line per relayout: {lines:#?}");
+    for line in &lines {
+        let took = field_ms(line, "took_ms").expect("took_ms");
+        let mut sum = 0.0;
+        for stage in [
+            "build_ms",
+            "layout_ms",
+            "display_list_ms",
+            "snapshot_ms",
+            "render_ms",
+        ] {
+            let ms = field_ms(line, stage).unwrap_or_else(|| panic!("{stage} missing: {line}"));
+            assert!(ms >= 0.0, "{stage} in {line}");
+            sum += ms;
+        }
+        // Each is rounded to 0.1 ms: five roundings, and the stages run
+        // inside the relayout that took_ms times.
+        assert!(sum <= took + 0.3, "stages sum past took_ms: {line}");
+    }
+}
+
+/// #655: navigation summaries must go through `summary_url`, not the raw
+/// document URL — query/tokens and userinfo must not land in the log.
+#[test]
+fn a_navigation_summary_scrubs_the_outgoing_url() {
+    let (mut engine, view) = engine_and_view();
+    engine
+        .load_html(view, "<div id=a></div>")
+        .expect("load_html");
+    // A URL a real navigation would store: credentials and a token in the
+    // query. The summary path must scrub both before logging.
+    engine.views.get_mut(&view).expect("view").url = Some(
+        Url::parse("https://user:pass@example.com/secret?token=leak-me#frag").unwrap(),
+    );
+    engine
+        .execute_script(view, "document.getElementById('a').textContent = 'x';")
+        .expect("script");
+
+    let lines = capture_lines("relayout summary url=", || {
+        engine.load_html(view, "<p>next</p>").expect("navigate away");
+    });
+    assert_eq!(lines.len(), 1, "one summary for the outgoing document: {lines:#?}");
+    let line = &lines[0];
+    assert!(
+        line.contains("relayout summary url=https://example.com/secret "),
+        "origin+path only: {line}"
+    );
+    for leak in ["token=", "leak-me", "user:", "pass@", "#frag"] {
+        assert!(
+            !line.contains(leak),
+            "summary must not contain {leak:?}: {line}"
+        );
+    }
+}
