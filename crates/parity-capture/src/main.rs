@@ -8,6 +8,7 @@
 //! Unlike hiwave-smoke, this does NOT require a display and can run in CI.
 
 mod inspector;
+mod report;
 
 use clap::Parser;
 use rustkit_engine::inspector::{CollectingSink, JsonLinesSink};
@@ -162,6 +163,16 @@ struct Args {
     /// (stripped by default).
     #[arg(long)]
     diagnostics_keep_query: bool,
+
+    /// Write the page report (JSON): page state, covering boxes, content
+    /// per viewport band and a ranked "most likely cause" list, from the
+    /// final layout (dev-tools T4).
+    #[arg(long, value_name = "FILE")]
+    report: Option<String>,
+
+    /// Write the page report as one page of text.
+    #[arg(long, value_name = "FILE")]
+    report_text: Option<String>,
 
     /// Run the page's inline classic scripts after loading an --html-file
     /// (fixture mode otherwise runs none), as a host does for a built-in
@@ -801,6 +812,54 @@ fn write_diagnostics(
                 }
             }
             Err(e) => error!("Failed to build diagnostics: {:?}", e),
+        }
+    }
+    if args.report.is_some() || args.report_text.is_some() {
+        write_report(engine, view_id, args, &opts);
+    }
+}
+
+/// The most elements the page report reads. A consent dialog is often the
+/// last thing in the body, so the report reads past the dump's default cap.
+const REPORT_MAX_ELEMENTS: usize = 20_000;
+
+/// `--report` and `--report-text`.
+fn write_report(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    args: &Args,
+    opts: &rustkit_engine::DiagnosticsOptions,
+) {
+    use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
+    let opts = DiagnosticsOptions { max_elements: opts.max_elements.max(REPORT_MAX_ELEMENTS), ..opts.clone() };
+    let dump = match engine.all_element_diagnostics(view_id, &opts).map(serde_json::to_value) {
+        Ok(Ok(dump)) => dump,
+        Ok(Err(e)) => return error!("Failed to serialise the report's diagnostics: {:?}", e),
+        Err(e) => return error!("Failed to build the report's diagnostics: {:?}", e),
+    };
+    let (w, h) = (
+        dump["page"]["viewport"][0].as_f64().unwrap_or(0.0) as f32,
+        dump["page"]["viewport"][1].as_f64().unwrap_or(0.0) as f32,
+    );
+    let centre = engine
+        .element_diagnostics(view_id, &DiagnosticTarget::Point { x: w / 2.0, y: h / 2.0 }, &opts)
+        .ok()
+        .flatten()
+        .and_then(|r| serde_json::to_value(r).ok());
+    let mut page = report::page_report(&dump, centre.as_ref());
+    if dump["truncated"].as_bool() == Some(true) {
+        page.not_checked.push(format!("elements past the first {} (the page has {})", opts.max_elements, page.elements));
+    }
+    if let Some(ref path) = args.report {
+        match serde_json::to_string_pretty(&page).map(|json| fs::write(path, json)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Failed to write the report: {:?}", e),
+            Err(e) => error!("Failed to serialise the report: {:?}", e),
+        }
+    }
+    if let Some(ref path) = args.report_text {
+        if let Err(e) = fs::write(path, report::report_text(&page)) {
+            error!("Failed to write the report text: {:?}", e);
         }
     }
 }
@@ -1685,5 +1744,81 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(got, "page");
+    }
+
+    /// `--report` and `--report-text` on a fixture: the report JSON and text.
+    fn report_for(name: &str, html: &str) -> (serde_json::Value, String) {
+        let dir = std::env::temp_dir().join(format!("parity-capture-report-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("page.html");
+        fs::write(&page, html).unwrap();
+        let (json, text) = (dir.join("report.json"), dir.join("report.txt"));
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            page.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+            "--report-text",
+            text.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let report = serde_json::from_str(&fs::read_to_string(&json).expect("report written")).unwrap();
+        let text = fs::read_to_string(&text).expect("report text written");
+        let _ = fs::remove_dir_all(&dir);
+        (report, text)
+    }
+
+    fn causes(report: &serde_json::Value) -> Vec<String> {
+        report["ranked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| format!("{} {}", c["rule"].as_str().unwrap(), c["line"].as_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_fixed_dialog_over_a_locked_body_is_the_first_cause() {
+        let (report, text) = report_for(
+            "lock",
+            "<html><head><style>body { margin: 0; overflow: hidden } .story { height: 3000px }
+#consent { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; background: white }</style></head>
+<body><div class=\"story\"><p>story</p></div><div id=\"consent\" class=\"ot-sdk banner\"><p>cookies</p></div></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec![
+                "R1 scroll locked (body overflow-y:hidden) by overlay: fixed div#consent.ot-sdk.banner (z 9999) covers 100% of the viewport",
+                // The fixture's story is one empty 3000px box.
+                "R9 below the fold is empty from y=800 (document 3016px tall): no text or image starts in 800..1600",
+            ],
+            "{text}"
+        );
+        assert!(text.contains("1. [R1] scroll locked"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_viewport_band_below_content_is_r9() {
+        let (report, text) = report_for(
+            "band",
+            "<html><body style=\"margin: 0\"><p>top</p><div style=\"height: 2400px\"></div><p>end</p></body></html>",
+        );
+        assert_eq!(
+            causes(&report),
+            vec!["R9 below the fold is empty from y=800 (document 2500px tall): no text or image starts in 800..1600"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_plain_page_fires_no_rule_and_says_what_it_did_not_check() {
+        let (report, text) = report_for("plain", "<html><body><p>a</p><img src=\"data:,\" width=\"10\" height=\"10\"></body></html>");
+        assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
+        assert!(text.contains("(no rule fired)"), "{text}");
+        assert!(report["not_checked"][0].as_str().unwrap().contains("T4b"), "{report}");
     }
 }
