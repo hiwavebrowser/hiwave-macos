@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-10-10T00:12:12.056412",
-  "commit": "1d3ebe72ec613922ca012e211205d9a324ec584f",
+  "timestamp": "2026-10-24T01:15:56.122349",
+  "commit": "200cb6031cd78022851a749951d8c40e67c6003f",
   "branch": "master",
   "total": 26,
   "passed": 26,
   "failed": 0,
   "not_measured": 0,
   "measured": 26,
-  "average_diff": 1.1066149924700948,
+  "average_diff": 1.107506168351505,
   "worst_case": {
     "name": "article-typography",
     "diff": 4.7859375
@@ -25,7 +25,7 @@
     },
     {
       "name": "about",
-      "diff": 3.671666666666667,
+      "diff": 3.6939583333333332,
       "threshold": 15,
       "passed": true,
       "type": "builtins",
@@ -85,7 +85,7 @@
     },
     {
       "name": "new_tab",
-      "diff": 1.11748046875,
+      "diff": 1.118359375,
       "threshold": 15,
       "passed": true,
       "type": "builtins",
