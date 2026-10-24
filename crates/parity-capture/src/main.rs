@@ -1811,11 +1811,12 @@ mod tests {
             "fixed-body",
             "<html><head><style>body { margin: 0; position: fixed; overflow: hidden; width: 100% }
 p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white }</style></head>
-<body><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><div id=\"bar\"><p>cookies</p></div></body></html>",
+<body><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p><div style=\"position: fixed; left: 0; right: 0; bottom: 0; height: 160px; z-index: 50; background: white\"><p>cookies</p></div></body></html>",
         );
+        // No id or class: named by its structural selector's last steps.
         assert_eq!(
             causes(&report),
-            vec!["R1 scroll locked (body overflow-y:hidden) by overlay: fixed div#bar (z 50) covers 20% of the viewport"],
+            vec!["R1 scroll locked (body overflow-y:hidden) by overlay: fixed body:nth-child(2) > div:nth-child(7) (z 50) covers 20% of the viewport"],
             "{text}"
         );
         assert_eq!(report["covering"], serde_json::json!([]), "{text}");

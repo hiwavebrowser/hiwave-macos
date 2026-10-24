@@ -91,9 +91,18 @@ fn rect(element: &Value) -> Option<(f64, f64, f64, f64)> {
     Some((b["x"].as_f64()?, b["y"].as_f64()?, b["w"].as_f64()?, b["h"].as_f64()?))
 }
 
-/// `tag#id.class.class`, capped.
+/// `tag#id.class.class`, capped. An element with neither is named by the
+/// last two steps of its structural selector (`body > div:nth-child(41)`).
 fn label(element: &Value) -> String {
     let identity = &element["identity"];
+    let plain = identity["id"].as_str().is_none()
+        && identity["classes"].as_array().is_none_or(|classes| classes.is_empty());
+    if plain {
+        let steps: Vec<&str> = structural(element).split(" > ").collect();
+        if steps.len() >= 2 {
+            return steps[steps.len() - 2..].join(" > ");
+        }
+    }
     let mut out = identity["tag"].as_str().unwrap_or("?").to_string();
     if let Some(id) = identity["id"].as_str() {
         out.push('#');
