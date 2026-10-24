@@ -247,6 +247,10 @@ struct CaptureResult {
     /// `--inspector-out`
     #[serde(skip_serializing_if = "Option::is_none", default)]
     inspector: Option<inspector::InspectorOutput>,
+    /// `--report`: the layout half, built while the view exists; the event
+    /// rules are added once the load's records are in (`run_capture`).
+    #[serde(skip)]
+    page_report: Option<report::Report>,
     /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
     /// Absent means an older capture tool. `false` is the flag-off worker.
     #[serde(default)]
@@ -338,6 +342,7 @@ impl CaptureResult {
             diagnostics: None,
             diagnostics_path: None,
             inspector: None,
+            page_report: None,
             content_thread: false,
         }
     }
@@ -506,13 +511,20 @@ const PRODUCT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7
 /// The capture, then its Inspector event log and summary, whichever way
 /// the capture ended.
 fn run_capture(args: &Args) -> CaptureResult {
-    let wants_events = args.event_log.is_some() || args.event_summary;
+    let wants_report = args.report.is_some() || args.report_text.is_some();
+    let wants_events = args.event_log.is_some() || args.event_summary || wants_report;
     let sink = wants_events.then(CollectingSink::default);
     let mut inspector: Option<Arc<Inspector>> = None;
     let mut result = capture(args, sink.as_ref(), &mut inspector);
     result.content_thread = std::thread::current().name() == Some("page");
     if let Some(sink) = sink {
         let records = sink.records();
+        if let Some(mut page) = result.page_report.take() {
+            let json: Vec<serde_json::Value> =
+                records.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
+            report::apply_events(&mut page, &json);
+            write_report_files(args, &page);
+        }
         if let Some(ref path) = args.event_log {
             match write_event_log(path, &records) {
                 Ok(()) => result.event_log_path = Some(path.clone()),
@@ -815,7 +827,7 @@ fn write_diagnostics(
         }
     }
     if args.report.is_some() || args.report_text.is_some() {
-        write_report(engine, view_id, args, &opts);
+        result.page_report = layout_report(engine, view_id, &opts);
     }
 }
 
@@ -823,19 +835,24 @@ fn write_diagnostics(
 /// last thing in the body, so the report reads past the dump's default cap.
 const REPORT_MAX_ELEMENTS: usize = 20_000;
 
-/// `--report` and `--report-text`.
-fn write_report(
+/// The layout half of `--report`, from the final layout.
+fn layout_report(
     engine: &rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
-    args: &Args,
     opts: &rustkit_engine::DiagnosticsOptions,
-) {
+) -> Option<report::Report> {
     use rustkit_engine::{DiagnosticTarget, DiagnosticsOptions};
     let opts = DiagnosticsOptions { max_elements: opts.max_elements.max(REPORT_MAX_ELEMENTS), ..opts.clone() };
     let dump = match engine.all_element_diagnostics(view_id, &opts).map(serde_json::to_value) {
         Ok(Ok(dump)) => dump,
-        Ok(Err(e)) => return error!("Failed to serialise the report's diagnostics: {:?}", e),
-        Err(e) => return error!("Failed to build the report's diagnostics: {:?}", e),
+        Ok(Err(e)) => {
+            error!("Failed to serialise the report's diagnostics: {:?}", e);
+            return None;
+        }
+        Err(e) => {
+            error!("Failed to build the report's diagnostics: {:?}", e);
+            return None;
+        }
     };
     let (w, h) = (
         dump["page"]["viewport"][0].as_f64().unwrap_or(0.0) as f32,
@@ -850,6 +867,11 @@ fn write_report(
     if dump["truncated"].as_bool() == Some(true) {
         page.not_checked.push(format!("elements past the first {} (the page has {})", opts.max_elements, page.elements));
     }
+    Some(page)
+}
+
+/// `--report` and `--report-text`.
+fn write_report_files(args: &Args, page: &report::Report) {
     if let Some(ref path) = args.report {
         match serde_json::to_string_pretty(&page).map(|json| fs::write(path, json)) {
             Ok(Ok(())) => {}
@@ -1841,6 +1863,8 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         let (report, text) = report_for("plain", "<html><body><p>a</p><img src=\"data:,\" width=\"10\" height=\"10\"></body></html>");
         assert_eq!(causes(&report), Vec::<String>::new(), "{text}");
         assert!(text.contains("(no rule fired)"), "{text}");
-        assert!(report["not_checked"][0].as_str().unwrap().contains("T4b"), "{report}");
+        // develop has no T2/T3 records: those rules are named as skipped.
+        let skipped: Vec<&str> = report["not_checked"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+        assert!(skipped.iter().any(|n| n.starts_with("R3, R4")) && skipped.iter().any(|n| n.starts_with("R7")), "{skipped:?}");
     }
 }

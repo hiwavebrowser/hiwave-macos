@@ -323,6 +323,210 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     }
 }
 
+/// An `inserted` or `async` script that waited at least this long between
+/// its body arriving and running was starved of turns (R4).
+const STARVED_MS: f64 = 3000.0;
+/// `load` this long after `DOMContentLoaded` is late (R7).
+const LATE_LOAD_MS: f64 = 5000.0;
+/// No record for this long before the load finished is a silent gap (R8).
+const SILENT_MS: f64 = 3000.0;
+/// At most this many lines per rule.
+const PER_RULE: usize = 3;
+
+fn ms(v: &Value) -> Option<f64> {
+    v.as_f64()
+}
+
+fn text(v: &Value) -> &str {
+    v.as_str().unwrap_or("-")
+}
+
+/// The event-log rules (R3-R8) over the load's records, as the JSON Lines
+/// sink writes them. Fields are read by name, so a build without T2's or
+/// T3's records skips those rules and says so (the second list).
+pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
+    let of = |kind: &'static str| records.iter().filter(move |r| r["type"] == kind);
+    let mut causes = Vec::new();
+    let mut not_checked = Vec::new();
+    let scripts: Vec<&Value> = of("script").collect();
+    let has_lifecycle = of("lifecycle").next().is_some();
+
+    // R4: scripts starved of turns, and script requests never answered.
+    if scripts.is_empty() {
+        not_checked.push("R3, R4: no `script` records on this build (dev-tools T3)".to_string());
+    }
+    let mut starved: Vec<&&Value> = scripts
+        .iter()
+        .filter(|s| matches!(s["kind"].as_str(), Some("inserted" | "async")))
+        .filter(|s| ms(&s["waited_ms"]).is_some_and(|w| w >= STARVED_MS))
+        .collect();
+    starved.sort_by(|a, b| ms(&b["waited_ms"]).partial_cmp(&ms(&a["waited_ms"])).unwrap_or(std::cmp::Ordering::Equal));
+    for s in starved.iter().take(PER_RULE) {
+        causes.push(Cause {
+            rule: "R4",
+            line: format!(
+                "{} script {} arrived in {:.0} ms and waited {:.1} s for a turn",
+                text(&s["kind"]),
+                text(&s["script"]),
+                ms(&s["fetch_ms"]).unwrap_or(0.0),
+                ms(&s["waited_ms"]).unwrap_or(0.0) / 1000.0
+            ),
+        });
+    }
+    let answered: std::collections::HashSet<u64> = records
+        .iter()
+        .filter(|r| r["type"] == "response" || r["type"] == "failure")
+        .filter_map(|r| r["id"].as_u64())
+        .collect();
+    let open_scripts: Vec<&Value> = of("request")
+        .filter(|r| matches!(r["resource_type"].as_str(), Some("script" | "module")))
+        .filter(|r| r["id"].as_u64().is_some_and(|id| !answered.contains(&id)))
+        .collect();
+    if let Some(first) = open_scripts.first() {
+        causes.push(Cause {
+            rule: "R4",
+            line: format!(
+                "{} script request(s) still open when the capture ended, first {} at t={:.1} s",
+                open_scripts.len(),
+                text(&first["url"]),
+                ms(&first["t_ms"]).unwrap_or(0.0) / 1000.0
+            ),
+        });
+    }
+
+    // R3: scripts that never finished.
+    for s in scripts
+        .iter()
+        .filter(|s| matches!(s["outcome"].as_str(), Some("skipped" | "over_budget" | "stopped" | "fetch_failed")))
+        .filter(|s| s["reason"] != "nomodule")
+        .take(PER_RULE)
+    {
+        causes.push(Cause {
+            rule: "R3",
+            line: format!(
+                "{} script {} {} ({})",
+                text(&s["kind"]),
+                text(&s["script"]),
+                text(&s["outcome"]),
+                text(&s["reason"])
+            ),
+        });
+    }
+
+    // R6: requests the shield blocked, then other failures; scripts and
+    // stylesheets first.
+    let urls: std::collections::HashMap<u64, (&str, &str)> = of("request")
+        .filter_map(|r| Some((r["id"].as_u64()?, (text(&r["url"]), text(&r["resource_type"])))))
+        .collect();
+    let mut failures: Vec<&Value> = of("failure").collect();
+    let weight = |f: &Value| {
+        let blocked = !f["blocked_by"].is_null();
+        let kind = f["id"].as_u64().and_then(|id| urls.get(&id)).map(|u| u.1).unwrap_or("");
+        (!blocked, !matches!(kind, "script" | "module" | "stylesheet"))
+    };
+    failures.sort_by_key(|f| weight(f));
+    if !records.iter().any(|r| r.get("blocked_by").is_some()) {
+        not_checked.push("R6 shield list/rule: no `blocked_by` field on this build (dev-tools T2)".to_string());
+    }
+    for f in failures.iter().filter(|f| f["stage"] != "cancelled").take(PER_RULE) {
+        let (url, kind) = f["id"].as_u64().and_then(|id| urls.get(&id)).copied().unwrap_or(("-", "-"));
+        let line = match f["blocked_by"].as_object() {
+            Some(b) => format!(
+                "shield blocked {kind} {url} ({} {})",
+                b.get("list").and_then(Value::as_str).unwrap_or("-"),
+                b.get("rule").and_then(Value::as_str).unwrap_or("-")
+            ),
+            None => format!("{kind} {url} failed: {} ({})", text(&f["stage"]), text(&f["reason"])),
+        };
+        causes.push(Cause { rule: "R6", line });
+    }
+
+    // R5: uncaught errors, grouped by name and place.
+    let mut errors: Vec<(String, usize)> = Vec::new();
+    for e in of("script_error") {
+        let at = &e["location"];
+        let key = format!(
+            "uncaught {}{} in {}",
+            if e["name"].as_str().unwrap_or("").is_empty() { text(&e["value"]) } else { text(&e["name"]) },
+            if e["unhandled_rejection"] == true { " (unhandled rejection)" } else { "" },
+            if at.is_null() {
+                text(&e["script"]).to_string()
+            } else {
+                format!("{}:{}:{}", text(&at["url"]), at["line"], at["column"])
+            }
+        );
+        match errors.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, n)) => *n += 1,
+            None => errors.push((key, 1)),
+        }
+    }
+    for (key, n) in errors.into_iter().take(PER_RULE) {
+        let line = if n > 1 { format!("{key} (x{n})") } else { key };
+        causes.push(Cause { rule: "R5", line });
+    }
+
+    // R7: load long after DOMContentLoaded, and what it waited for.
+    if !has_lifecycle {
+        not_checked.push("R7: no `lifecycle` records on this build (dev-tools T3)".to_string());
+    }
+    let at = |event: &str| of("lifecycle").find(|r| r["event"] == event).and_then(|r| ms(&r["t_ms"]));
+    if let (Some(dcl), Some(load)) = (at("DOMContentLoaded"), at("load")) {
+        if load - dcl >= LATE_LOAD_MS {
+            let held = of("lifecycle")
+                .find(|r| r["event"] == "load")
+                .map(|r| {
+                    r["held_by"]
+                        .as_array()
+                        .map(|a| a.iter().take(PER_RULE).map(|s| text(s).to_string()).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            causes.push(Cause {
+                rule: "R7",
+                line: format!(
+                    "load fired {:.1} s after DOMContentLoaded; it waited for: {}",
+                    (load - dcl) / 1000.0,
+                    if held.is_empty() { "no script (see R8)".to_string() } else { held }
+                ),
+            });
+        }
+    }
+
+    // R8: the log silent for a while before the load finished.
+    let finished = of("load_finished").next().and_then(|r| ms(&r["t_ms"]));
+    let times: Vec<f64> = records.iter().filter_map(|r| ms(&r["t_ms"])).collect();
+    let mut gaps: Vec<(f64, f64)> = times
+        .windows(2)
+        .filter(|w| finished.is_none_or(|end| w[1] <= end))
+        .map(|w| (w[0], w[1] - w[0]))
+        .filter(|(_, gap)| *gap >= SILENT_MS)
+        .collect();
+    gaps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (from, gap) in gaps.into_iter().take(PER_RULE) {
+        causes.push(Cause {
+            rule: "R8",
+            line: format!(
+                "event log silent {:.1} s from t={:.1} s before the load finished: no script ended, no request moved",
+                gap / 1000.0,
+                from / 1000.0
+            ),
+        });
+    }
+    (causes, not_checked)
+}
+
+/// Add the event-log rules to a layout report: layout causes keep the top
+/// (R1, R2), then an empty band (R9), then the event causes in the design
+/// note's order.
+pub fn apply_events(report: &mut Report, records: &[Value]) {
+    let (events, not_checked) = event_causes(records);
+    let order = ["R1", "R2", "R9", "R4", "R3", "R6", "R5", "R7", "R8"];
+    report.ranked.extend(events);
+    report.ranked.sort_by_key(|c| order.iter().position(|r| *r == c.rule).unwrap_or(order.len()));
+    report.not_checked.retain(|n| !n.starts_with("R3-R8"));
+    report.not_checked.extend(not_checked);
+}
+
 /// The report as one page of text.
 pub fn report_text(report: &Report) -> String {
     let mut out = String::new();
@@ -371,4 +575,121 @@ pub fn report_text(report: &Report) -> String {
         out.push_str(&format!("  {n}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lines(records: &[Value]) -> Vec<String> {
+        event_causes(records).0.iter().map(|c| format!("{} {}", c.rule, c.line)).collect()
+    }
+
+    /// yahoo, 2026-10-24 (T3 binary): the ad loader arrived in 196 ms and
+    /// waited 24.5 s for a turn; a page chunk's request never answered.
+    #[test]
+    fn a_starved_inserted_script_and_an_open_script_request_are_r4() {
+        let records = vec![
+            json!({"seq": 1, "t_ms": 5000.0, "type": "request", "id": 7, "url": "https://x.test/chunk.js", "resource_type": "script"}),
+            json!({"seq": 2, "t_ms": 5766.0, "type": "lifecycle", "event": "DOMContentLoaded", "held_by": [], "held_by_count": 0}),
+            json!({"seq": 3, "t_ms": 5766.0, "type": "lifecycle", "event": "load", "held_by": [], "held_by_count": 0}),
+            json!({"seq": 4, "t_ms": 5881.0, "type": "load_finished"}),
+            json!({"seq": 5, "t_ms": 32229.0, "type": "script", "script": "https://s.test/benji.js", "kind": "inserted",
+                   "outcome": "ran", "reason": null, "fetch_ms": 196.0, "waited_ms": 24519.0, "held": null}),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R4 inserted script https://s.test/benji.js arrived in 196 ms and waited 24.5 s for a turn",
+                "R4 1 script request(s) still open when the capture ended, first https://x.test/chunk.js at t=5.0 s",
+            ]
+        );
+    }
+
+    #[test]
+    fn scripts_that_never_finished_are_r3_but_nomodule_is_not() {
+        let script = |name: &str, outcome: &str, reason: &str| {
+            json!({"t_ms": 1.0, "type": "script", "script": name, "kind": "parser", "outcome": outcome, "reason": reason})
+        };
+        let records = vec![
+            script("inline#1", "skipped", "nomodule"),
+            script("https://x.test/big.js", "skipped", "too large to run inside the script budget"),
+            script("inline#3", "stopped", "script budget"),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R3 parser script https://x.test/big.js skipped (too large to run inside the script budget)",
+                "R3 parser script inline#3 stopped (script budget)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shield_block_comes_before_other_failures_and_cancels_are_left_out() {
+        let records = vec![
+            json!({"t_ms": 1.0, "type": "request", "id": 1, "url": "https://x.test/a.png", "resource_type": "image"}),
+            json!({"t_ms": 1.0, "type": "request", "id": 2, "url": "https://ads.test/gpt.js", "resource_type": "script"}),
+            json!({"t_ms": 1.0, "type": "request", "id": 3, "url": "https://x.test/b.js", "resource_type": "script"}),
+            json!({"t_ms": 2.0, "type": "failure", "id": 1, "stage": "timeout", "reason": "timed out", "blocked_by": null}),
+            json!({"t_ms": 2.0, "type": "failure", "id": 2, "stage": "policy", "reason": "blocked",
+                   "blocked_by": {"list": "EasyList", "rule": "||ads.test^"}}),
+            json!({"t_ms": 2.0, "type": "failure", "id": 3, "stage": "cancelled", "reason": "abandoned", "blocked_by": null}),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R6 shield blocked script https://ads.test/gpt.js (EasyList ||ads.test^)",
+                "R6 image https://x.test/a.png failed: timeout (timed out)",
+            ]
+        );
+    }
+
+    /// cnn, 2026-10-24 (T3 binary): load 8.6 s after DOMContentLoaded, and
+    /// the log silent from 11.85 s to 17.76 s.
+    #[test]
+    fn a_late_load_is_r7_and_a_silent_stretch_before_it_is_r8() {
+        let records = vec![
+            json!({"t_ms": 9751.0, "type": "lifecycle", "event": "DOMContentLoaded", "held_by": [], "held_by_count": 0}),
+            json!({"t_ms": 11846.0, "type": "response", "id": 9}),
+            json!({"t_ms": 17758.0, "type": "request", "id": 10, "url": "https://x.test/f", "resource_type": "fetch"}),
+            json!({"t_ms": 18397.0, "type": "lifecycle", "event": "load",
+                   "held_by": ["https://x.test/otSDKStub.js", "https://x.test/otBannerSdk.js"], "held_by_count": 2}),
+            json!({"t_ms": 19151.0, "type": "load_finished"}),
+            json!({"t_ms": 30000.0, "type": "relayout"}),
+        ];
+        assert_eq!(
+            lines(&records),
+            vec![
+                "R7 load fired 8.6 s after DOMContentLoaded; it waited for: https://x.test/otSDKStub.js, https://x.test/otBannerSdk.js",
+                "R8 event log silent 5.9 s from t=11.8 s before the load finished: no script ended, no request moved",
+            ]
+        );
+    }
+
+    /// T1's `script_error`: grouped by name and place, a rejection marked.
+    #[test]
+    fn uncaught_errors_are_r5_grouped_by_place() {
+        let error = |line: u32, rejection: bool| {
+            json!({"t_ms": 1.0, "type": "script_error", "name": "TypeError", "message": null,
+                   "location": {"url": "https://x.test/7730.js", "line": line, "column": 12},
+                   "unhandled_rejection": rejection, "script": "https://x.test/7730.js", "value": "error"})
+        };
+        assert_eq!(
+            lines(&[error(3, false), error(3, false), error(9, true)]),
+            vec![
+                "R5 uncaught TypeError in https://x.test/7730.js:3:12 (x2)",
+                "R5 uncaught TypeError (unhandled rejection) in https://x.test/7730.js:9:12",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_build_without_t2_or_t3_records_says_which_rules_it_skipped() {
+        let (causes, skipped) = event_causes(&[json!({"t_ms": 1.0, "type": "load_finished"})]);
+        assert!(causes.is_empty());
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped[0].starts_with("R3, R4") && skipped[1].starts_with("R6") && skipped[2].starts_with("R7"));
+    }
 }
