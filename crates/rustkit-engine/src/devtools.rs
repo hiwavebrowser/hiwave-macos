@@ -397,7 +397,7 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
         stack,
     };
     Some(match &record.event {
-        InspectorEvent::Console { level, message, truncated, location } => {
+        InspectorEvent::Console { level, message, truncated, location, .. } => {
             let level = match level {
                 ConsoleLevel::Log => "log",
                 ConsoleLevel::Info => "info",

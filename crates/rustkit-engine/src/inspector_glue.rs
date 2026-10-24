@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use rustkit_bindings::DomBindings;
 
-use crate::inspector::{cap, ConsoleLevel, Inspector, InspectorEvent, SourceLocation, MAX_MESSAGE_CHARS, MAX_STACK_CHARS};
+use crate::inspector::{cap, ConsoleLevel, Inspector, InspectorEvent, MAX_MESSAGE_CHARS};
 use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
 
 /// Set up a document's new bindings for a listening Inspector: console
@@ -33,7 +33,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
         bindings.set_console_redaction(!inspector.keeps_console_text());
     }
     let sink = inspector.clone();
-    bindings.set_console_handler(Box::new(move |level, message, at| {
+    bindings.set_console_handler(Box::new(move |level, message, at, stack| {
         crate::console_log::console_message(level, message, at);
         if !sink.is_active() {
             return;
@@ -56,7 +56,7 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             let column = if at.column > method_len { at.column - method_len } else { at.column };
             sink.frame_location(&at.path, at.line, column)
         });
-        sink.console(level, message, location);
+        sink.console_with_stacks(level, message, location, stack);
     }));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
@@ -93,6 +93,7 @@ pub(crate) fn engine_error(inspector: &Inspector, failure: &EngineFailure, scrip
         script: inspector.url_text(script),
         value: "engine".to_string(),
         message_len: length,
+        inserted_by: None,
     });
 }
 
@@ -100,28 +101,40 @@ pub(crate) fn engine_error(inspector: &Inspector, failure: &EngineFailure, scrip
 /// module's own late error.
 pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorReport, script: &str) {
     inspector.emit_with(|inspector| {
-        let frames: Vec<SourceLocation> = report
+        let location = report
             .frames
             .iter()
-            .filter_map(|f| inspector.frame_location(&f.path, f.line, f.column))
+            .find_map(|f| inspector.frame_location(&f.path, f.line, f.column))
+            .filter(|_| report.located);
+        let named: Vec<_> = report
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(i, at)| (report.functions.get(i).and_then(|f| f.as_deref()), at))
             .collect();
-        let location = frames.first().filter(|_| report.located).cloned();
-        let stack = (!frames.is_empty()).then(|| {
-            let lines: Vec<String> = frames
-                .iter()
-                .map(|f| format!("    at {}:{}:{}", f.url, f.line, f.column))
-                .collect();
-            cap(&lines.join("\n"), MAX_STACK_CHARS).0
-        });
+        let stack = inspector.stack_text(&named);
         InspectorEvent::ScriptError {
             name: report.name.unwrap_or("").to_string(),
-            message: report.message.as_deref().map(|m| cap(m, MAX_MESSAGE_CHARS).0),
+            // The runtime keeps text for the console mirror too; the
+            // Inspector keeps it only when its own setting asks.
+            message: report
+                .message
+                .as_deref()
+                .filter(|_| inspector.keeps_error_text())
+                .map(|m| cap(m, MAX_MESSAGE_CHARS).0),
             location,
             stack,
             unhandled_rejection: report.rejection,
             script: inspector.url_text(report.module.as_deref().unwrap_or(script)),
             value: report.value.to_string(),
             message_len: report.message_len.map(|n| n as u64),
+            // Like `location`: an `eval` or `on*` throw does not borrow
+            // its outer script's inserter.
+            inserted_by: report
+                .frames
+                .first()
+                .filter(|_| report.located)
+                .and_then(|f| inspector.inserted_by(&f.path)),
         }
     });
 }

@@ -262,7 +262,7 @@ fn the_panel_shows_text_and_urls_as_shapes() {
     let snapshot = InspectorSnapshot {
         records: vec![
             record(0, InspectorEvent::NavigationStart { url: Some("https://news.test/a?q=private#top".into()) }),
-            record(1, InspectorEvent::Console { level: ConsoleLevel::Log, message: "<string len=5>".into(), truncated: false, location: at }),
+            record(1, InspectorEvent::Console { level: ConsoleLevel::Log, message: "<string len=5>".into(), truncated: false, location: at, stack: None, error_stack: None }),
         ],
         next_seq: 2,
         dropped: 0,
@@ -295,7 +295,7 @@ fn console_lines_from_inspector_records() {
     let snapshot = InspectorSnapshot {
         records: vec![
             record(0, InspectorEvent::NavigationStart { url: Some("https://news.test/".into()) }),
-            record(1, InspectorEvent::Console { level: ConsoleLevel::Warn, message: "<string len=5>".into(), truncated: false, location: at.clone() }),
+            record(1, InspectorEvent::Console { level: ConsoleLevel::Warn, message: "<string len=5>".into(), truncated: false, location: at.clone(), stack: None, error_stack: None }),
             record(2, InspectorEvent::FirstLayout),
             record(3, InspectorEvent::ScriptError {
                 name: "TypeError".into(),
@@ -306,6 +306,7 @@ fn console_lines_from_inspector_records() {
                 script: "inline#1".into(),
                 value: "error".into(),
                 message_len: Some(12),
+                inserted_by: None,
             }),
             record(4, InspectorEvent::UnsupportedApi { interface: "Window".into(), member: "fetchLater".into(), location: None }),
             record(5, InspectorEvent::LoadFinished { url: None, scripts_over_budget: 2 }),
@@ -375,7 +376,7 @@ fn payloads_serialize_in_the_panels_field_names() {
     assert!(html["childrenOmitted"].is_u64() && html["path"].as_str().unwrap().starts_with("rk:"));
 
     let c = devtools_console_entries(&InspectorSnapshot {
-        records: vec![record(9, InspectorEvent::Console { level: ConsoleLevel::Log, message: "m".into(), truncated: true, location: None })],
+        records: vec![record(9, InspectorEvent::Console { level: ConsoleLevel::Log, message: "m".into(), truncated: true, location: None, stack: None, error_stack: None })],
         next_seq: 10,
         dropped: 0,
     });
