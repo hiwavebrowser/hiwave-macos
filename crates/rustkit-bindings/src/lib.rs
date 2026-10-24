@@ -164,6 +164,9 @@ pub struct InsertedScript {
     /// "force async"): it runs after the in-order scripts inserted before
     /// it, not as soon as it arrives.
     pub in_order: bool,
+    /// Where the page's script that inserted it was (its innermost frame
+    /// in a named script), when the runtime could place it.
+    pub inserted_by: Option<rustkit_js::ScriptPosition>,
 }
 
 impl ListenerId {

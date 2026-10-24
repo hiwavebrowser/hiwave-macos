@@ -1441,12 +1441,12 @@ pub(crate) fn install(
     // `inserted_script(id, url, in_order)`: script inserted this element
     // with this absolute `src`; `in_order` when it is not async (it runs
     // after the in-order scripts inserted before it). Nothing is fetched
-    // here; the engine takes the queue.
+    // here; the engine takes the queue, with where the page inserted it.
     let h = host.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_with_caller(
         "__rustkit_dom_inserted_script",
         3,
-        Box::new(move |args| {
+        Box::new(move |args, caller| {
             if let (Some(JsValue::Number(id)), Some(JsValue::String(url))) = (args.first(), args.get(1)) {
                 let in_order = matches!(args.get(2), Some(JsValue::Boolean(true)));
                 let mut host = h.borrow_mut();
@@ -1456,6 +1456,7 @@ pub(crate) fn install(
                         node: *id as usize,
                         url: url.clone(),
                         in_order,
+                        inserted_by: caller,
                     });
                 }
             }
