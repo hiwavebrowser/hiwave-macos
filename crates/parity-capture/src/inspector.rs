@@ -67,11 +67,14 @@ pub fn render_inspector(
         .create_headless_view(Bounds { x: 0, y: 0, width: size.0, height: size.1 })
         .map_err(|e| format!("view: {e:?}"))?;
     let ms = |t: std::time::Instant| t.elapsed().as_millis() as u64;
+    // `load_html` runs the page's script; its time is part of the load.
     engine.load_html(view, &page).map_err(|e| format!("load: {e:?}"))?;
     let load_ms = ms(started);
-    let started = std::time::Instant::now();
-    engine.run_inline_scripts(view).map_err(|e| format!("inspector script: {e:?}"))?;
-    let script_ms = ms(started);
+    let log = engine.script_log(view).unwrap_or_default();
+    if let Some(failed) = log.iter().find(|r| r.outcome != rustkit_engine::ScriptOutcome::Ran) {
+        return Err(format!("inspector script: {} {:?}", failed.source, failed.outcome));
+    }
+    let script_ms = log.iter().map(|r| r.elapsed_ms).sum();
     let started = std::time::Instant::now();
     engine.render_view(view).map_err(|e| format!("render: {e:?}"))?;
     let paint_ms = ms(started);

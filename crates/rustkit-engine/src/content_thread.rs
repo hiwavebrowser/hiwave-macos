@@ -416,11 +416,10 @@ mod tests {
 
     #[test]
     fn load_html_runs_the_documents_inline_scripts() {
-        // RED on develop ff6ad36a (dev-tools lane probe, 2026-10-25): the
-        // app loads New Tab, About and the report page (Chart.js inline)
-        // with `load_html`, which reaches `Engine::load_html_as`. That sets
-        // up the bindings and lays out but runs no `<script>`; only the
-        // Inspector page calls `run_inline_scripts` after it. No fix here.
+        // Red on develop ff6ad36a (dev-tools lane, 2026-10-25): the app
+        // loads New Tab, About and the report page (Chart.js inline) with
+        // `load_html`, which reaches `Engine::load_html_as`. That set up the
+        // bindings and laid out but ran no `<script>`.
         let page = page();
         let mut loaded = page.load_html(
             "<p id=\"t\">before</p><script>document.getElementById('t').textContent = 'ran';</script>",
@@ -432,6 +431,47 @@ mod tests {
             .expect("eval reply")
             .expect("eval");
         assert!(text.contains("ran"), "the inline script did not run: {text}");
+    }
+
+    #[test]
+    fn load_html_fires_domcontentloaded_and_load_after_its_scripts() {
+        // The report page draws its charts from a `DOMContentLoaded`
+        // listener, so the lifecycle events matter as much as the scripts.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\"></p><script>\
+             var seen = [document.readyState];\
+             document.addEventListener('DOMContentLoaded', function () { seen.push('dcl:' + document.readyState); });\
+             window.addEventListener('load', function () { seen.push('load:' + document.readyState); });\
+             </script><script>seen.push('second');</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut seen = page.eval("seen.join(',')");
+        let seen = wait_recv(&mut seen, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            seen.contains("loading,second,dcl:interactive,load:complete"),
+            "scripts in order, then DOMContentLoaded, then load: {seen}"
+        );
+    }
+
+    #[test]
+    fn about_page_script_runs_and_sets_the_version_line() {
+        // about.html (New Tab / About in RustKit content mode) exposes
+        // `hiwaveAbout.setVersion`, which the shell calls with the version.
+        let page = page();
+        let mut loaded = page.load_html(include_str!("../../hiwave-app/src/ui/about.html"));
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut version = page.eval(
+            "window.hiwaveAbout.setVersion('v9.8.7'); document.getElementById('versionBadge').textContent",
+        );
+        let version = wait_recv(&mut version, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("the about page's script defined hiwaveAbout");
+        assert!(version.contains("v9.8.7"), "version line: {version}");
     }
 
     #[test]

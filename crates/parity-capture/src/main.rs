@@ -163,9 +163,10 @@ struct Args {
     #[arg(long)]
     diagnostics_keep_query: bool,
 
-    /// Run the page's inline classic scripts after loading an --html-file
-    /// (fixture mode otherwise runs none), as a host does for a built-in
-    /// page it loads directly.
+    /// Turn script on for an --html-file load, so the load runs the page's
+    /// inline classic scripts (fixture mode otherwise runs none), as for a
+    /// built-in page a host loads directly. A script that throws fails the
+    /// capture.
     #[arg(long)]
     run_inline_scripts: bool,
 
@@ -651,9 +652,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
         }
+        // With script on, `load_html` ran the inline scripts.
         if args.run_inline_scripts {
-            if let Err(e) = engine.run_inline_scripts(view_id) {
-                return result.failed("error", format!("Inline script failed: {:?}", e));
+            let log = engine.script_log(view_id).unwrap_or_default();
+            if let Some(failed) = log.iter().find(|r| r.outcome != rustkit_engine::ScriptOutcome::Ran) {
+                return result.failed(
+                    "error",
+                    format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
+                );
             }
         }
     }

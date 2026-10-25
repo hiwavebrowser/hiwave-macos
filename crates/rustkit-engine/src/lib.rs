@@ -7147,7 +7147,9 @@ impl Engine {
     /// Load HTML content directly into a view.
     ///
     /// This is used for loading inline HTML content like the Chrome UI,
-    /// without making an HTTP request.
+    /// without making an HTTP request. With JavaScript on, the document's
+    /// inline classic scripts run in order, then `DOMContentLoaded` and
+    /// `load` fire, before `PageLoaded`.
     pub fn load_html(&mut self, id: EngineViewId, html: &str) -> Result<(), EngineError> {
         self.load_html_as(id, html, None)
     }
@@ -7304,6 +7306,12 @@ impl Engine {
         // Layout and render
         self.relayout_for(id, RelayoutCause::InitialLoad)?;
 
+        // The document's inline scripts, then `DOMContentLoaded` and `load`,
+        // as a URL load runs them. Script failures are the page's: they go
+        // to the script log, not to this load's result.
+        self.run_html_load_scripts(id);
+        self.flush_script_dom_writes(id, None)?;
+
         // Finish navigation
         let view = self
             .views
@@ -7330,6 +7338,166 @@ impl Engine {
         });
 
         Ok(())
+    }
+
+    /// The script phase of [`Engine::load_html_as`]: the document's inline
+    /// classic scripts in document order, then `DOMContentLoaded` and
+    /// `load`, as [`Engine::run_page_scripts`] runs them for a URL load:
+    /// the same `inline#n` names, script budget and script log. An inline
+    /// HTML load has no network, so an external or module script is logged
+    /// as skipped, and the page's timers are left to the live loop. Does
+    /// nothing when JavaScript is off.
+    fn run_html_load_scripts(&mut self, id: EngineViewId) {
+        let (bindings, mut log, document, inspector) = match self.views.get_mut(&id) {
+            Some(view) => match (view.bindings.take(), view.document.clone()) {
+                (Some(bindings), Some(document)) => (
+                    bindings,
+                    std::mem::take(&mut view.script_log),
+                    document,
+                    view.inspector.clone(),
+                ),
+                (bindings, _) => {
+                    view.bindings = bindings;
+                    return;
+                }
+            },
+            None => return,
+        };
+        let loop_limit = self.config.script_loop_iteration_limit;
+        bindings.set_loop_iteration_limit(loop_limit);
+        bindings.set_max_job_iterations(loop_limit.min(100_000));
+        let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
+        let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+
+        // Counted as `fetch_page_scripts` counts them, so `inline#n` names
+        // the same element on either path.
+        let mut scripts: Vec<(String, usize, Result<String, ScriptOutcome>)> = Vec::new();
+        let mut index = 0usize;
+        document.traverse(|node| {
+            if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
+                return;
+            }
+            let Some(timing) = script_timing(node) else { return };
+            index += 1;
+            let external = node.get_attribute("src").is_some();
+            let label = if external { format!("external#{index}") } else { format!("inline#{index}") };
+            let body = match timing {
+                Err(outcome) => Err(outcome),
+                Ok(_) if external || is_module_script(node) => {
+                    Err(ScriptOutcome::Skipped("an inline HTML load runs inline classic scripts only"))
+                }
+                Ok(_) => Ok(node.text_content()),
+            };
+            scripts.push((label, node.id.raw(), body));
+        });
+
+        let poisoned = Cell::new(false);
+        let strip = |e: rustkit_bindings::BindingError| {
+            let message = e.to_string();
+            message
+                .strip_prefix("JS error: Execution error: ")
+                .map(str::to_string)
+                .unwrap_or(message)
+        };
+        let run = |source: String, bytes: usize, f: &dyn Fn() -> Result<(), String>| {
+            let started = std::time::Instant::now();
+            let (caught, stopped) = with_script_js(&bindings, || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            });
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let outcome = if stopped {
+                log_script_stopped(&source, elapsed_ms, take_script_js_overrun());
+                ScriptOutcome::OverBudget
+            } else {
+                match caught {
+                    Ok(Ok(())) => ScriptOutcome::Ran,
+                    Ok(Err(message)) => ScriptOutcome::Threw(message),
+                    Err(_) => {
+                        poisoned.set(true);
+                        ScriptOutcome::EngineFailed(EngineFailure::Panic)
+                    }
+                }
+            };
+            ScriptRecord { source, bytes, elapsed_ms, outcome }
+        };
+
+        let _ = bindings.set_ready_state("loading");
+        let mut carried: Vec<String> = Vec::new();
+        for (label, node_id, body) in scripts {
+            let text = match body {
+                Ok(text) => text,
+                Err(outcome) => {
+                    let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    inspector_glue::log_script(&mut log, &inspector, record);
+                    continue;
+                }
+            };
+            if poisoned.get() || script_js_exhausted() || text.len() > MAX_PAGE_SCRIPT_BYTES {
+                let outcome = if poisoned.get() {
+                    ScriptOutcome::Skipped("JS engine panicked earlier on this page")
+                } else if text.len() > MAX_PAGE_SCRIPT_BYTES {
+                    ScriptOutcome::Skipped("too large to run inside the script budget")
+                } else {
+                    ScriptOutcome::OverBudget
+                };
+                log.push(ScriptRecord { source: label, bytes: text.len(), elapsed_ms: 0, outcome });
+                continue;
+            }
+            info!(source = %label, bytes = text.len(), "Running inline script of an HTML load");
+            let record = run(label.clone(), text.len(), &|| {
+                let _ = bindings.set_current_script(Some(node_id));
+                let result = bindings.evaluate_named(&text, &label).map(|_| ()).map_err(strip);
+                let _ = bindings.set_current_script(None);
+                result
+            });
+            inspector_glue::log_script(&mut log, &inspector, record);
+            inspector_glue::drain_script_reports(&bindings, &inspector, &mut carried, &label);
+        }
+
+        let steps: [(&str, &dyn Fn() -> Result<(), String>); 2] = [
+            ("event:DOMContentLoaded", &|| {
+                bindings.set_ready_state("interactive").map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded")
+                    .map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded")
+                    .map_err(strip)
+            }),
+            ("event:load", &|| {
+                bindings.set_ready_state("complete").map_err(strip)?;
+                bindings
+                    .fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load")
+                    .map_err(strip)
+            }),
+        ];
+        for (source, step) in steps {
+            if poisoned.get() {
+                break;
+            }
+            // What the scripts wrote is laid out before the step, so its
+            // listeners read fresh geometry.
+            self.refresh_layout_for_script(id, &bindings);
+            let record = run(source.to_string(), 0, step);
+            if record.outcome != ScriptOutcome::Ran {
+                inspector_glue::log_script(&mut log, &inspector, record);
+            }
+            for message in carried.drain(..) {
+                log.push(ScriptRecord {
+                    source: source.to_string(),
+                    bytes: 0,
+                    elapsed_ms: 0,
+                    outcome: ScriptOutcome::Threw(message),
+                });
+            }
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, source);
+        }
+
+        if let Some(view) = self.views.get_mut(&id) {
+            log.append(&mut view.script_log);
+            view.script_log = log;
+            view.bindings = Some(bindings);
+        }
     }
 
     /// Record why the next relayout of `id` happens. Causes noted before one
