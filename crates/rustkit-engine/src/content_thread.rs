@@ -415,6 +415,26 @@ mod tests {
     }
 
     #[test]
+    fn load_html_runs_the_documents_inline_scripts() {
+        // RED on develop ff6ad36a (dev-tools lane probe, 2026-10-25): the
+        // app loads New Tab, About and the report page (Chart.js inline)
+        // with `load_html`, which reaches `Engine::load_html_as`. That sets
+        // up the bindings and lays out but runs no `<script>`; only the
+        // Inspector page calls `run_inline_scripts` after it. No fix here.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\">before</p><script>document.getElementById('t').textContent = 'ran';</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut text = page.eval("document.getElementById('t').textContent");
+        let text = wait_recv(&mut text, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(text.contains("ran"), "the inline script did not run: {text}");
+    }
+
+    #[test]
     fn stop_during_a_script_returns_and_a_later_eval_runs() {
         let page = page();
         let mut loaded = page.load_html("<p id=\"t\">x</p>");
