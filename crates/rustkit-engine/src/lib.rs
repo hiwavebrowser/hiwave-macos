@@ -330,6 +330,8 @@ pub use devtools::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
+mod devtools_service;
+pub use devtools_service::{ask_console as devtools_ask_console, DevtoolsCount, DevtoolsCounters};
 #[cfg(test)]
 mod consent_click_tests;
 use presenter::Presenter;

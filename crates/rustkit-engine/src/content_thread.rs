@@ -24,7 +24,9 @@ use url::Url;
 
 use crate::nav_cancel::NavCanceller;
 use crate::page_protocol::{adopt, coalesce};
-use crate::{EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
+use crate::devtools_service::{ask_console as devtools_ask_console, DevtoolsCount, DevtoolsCounters};
+use crate::inspector::Inspector;
+use crate::{DevtoolsAnswer, DevtoolsQuery, EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
 
 /// `HIWAVE_CONTENT_THREAD=1` (or true/on/yes). Anything else, including an
 /// unset variable, leaves the page on the window thread.
@@ -67,6 +69,9 @@ struct Boot {
     control: Arc<ViewControl>,
     canceller: NavCanceller,
     images: Arc<ImageManager>,
+    /// The view's Inspector, for reads the page need not answer.
+    inspector: Arc<Inspector>,
+    devtools_counters: Arc<DevtoolsCounters>,
     #[allow(dead_code)]
     view: EngineViewId,
     thread: std::thread::ThreadId,
@@ -128,6 +133,9 @@ impl ContentThread {
                     let canceller = engine
                         .nav_canceller(view)
                         .ok_or_else(|| "view has no canceller".to_string())?;
+                    let inspector = engine
+                        .inspector(view)
+                        .ok_or_else(|| "view has no inspector".to_string())?;
                     let mut endpoint = adopt(engine, view, cmd_rx, ev_tx);
                     endpoint.set_settle_keys(true);
                     endpoint.set_wake_window(true);
@@ -135,6 +143,8 @@ impl ContentThread {
                         control,
                         canceller,
                         images,
+                        inspector,
+                        devtools_counters: endpoint.devtools_counters(),
                         view,
                         thread: std::thread::current().id(),
                     }));
@@ -311,6 +321,27 @@ impl ContentThread {
     /// Queue a command. Does not signal cancel and does not wait.
     pub fn enqueue(&self, cmd: PageCmd) {
         let _ = self.cmd.send(cmd);
+    }
+
+    /// Ask a developer-tools question. Console reads are answered by the
+    /// devtools thread from the view's Inspector, without the page (T6a);
+    /// the rest are page commands. Before the page has booted every
+    /// question is a page command, answered once it runs.
+    pub fn devtools_ask(&self, query: DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> {
+        if let (DevtoolsQuery::Console { since }, Some(Ok(boot))) = (&query, self.boot()) {
+            return devtools_ask_console(boot.inspector, *since, Some(boot.devtools_counters));
+        }
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::Devtools { query, reply });
+        rx
+    }
+
+    /// What devtools has cost the page so far; zero before it has booted.
+    pub fn devtools_counters(&self) -> DevtoolsCount {
+        self.boot()
+            .and_then(|boot| boot.ok())
+            .map(|boot| boot.devtools_counters.read())
+            .unwrap_or_default()
     }
 }
 
@@ -525,6 +556,45 @@ mod tests {
             "{:?}",
             console.entries
         );
+    }
+
+    #[test]
+    fn an_open_panel_on_an_idle_page_costs_the_page_no_devtools_commands() {
+        // T6a (T6-design.md): every console read the open panel made was a
+        // page command, four a second on an idle page (#785's 250 ms
+        // CONSOLE_POLL). The reads now come from the view's Inspector on
+        // the devtools thread, and the console still updates.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p id=t>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Attach(true)), DevtoolsAnswer::Done);
+        let before = page.devtools_counters();
+        let (mut since, mut lines) = (0, Vec::new());
+        let start = Instant::now();
+        let mut logged_late = false;
+        while start.elapsed() < Duration::from_secs(2) {
+            if !logged_late && start.elapsed() >= Duration::from_secs(1) {
+                logged_late = true;
+                let mut done = page.eval("console.log('late'); 1");
+                assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+            }
+            // The panel's clock (devtools_panel.rs, CONSOLE_POLL).
+            let mut rx = page.devtools_ask(DevtoolsQuery::Console { since });
+            let Some(DevtoolsAnswer::Console(console)) = wait_recv(&mut rx, Duration::from_secs(5)) else {
+                panic!("the console read was not answered");
+            };
+            since = console.next_seq;
+            lines.extend(console.entries.into_iter().map(|e| e.message));
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let cost = page.devtools_counters();
+        assert_eq!(
+            cost.page_commands - before.page_commands,
+            0,
+            "devtools page commands in 2 s on an idle page with the panel open"
+        );
+        assert!(lines.iter().any(|m| m == "<string len=4>"), "the late line never reached the panel: {lines:?}");
     }
 
     /// Events until `nav_id` fails or `budget` runs out.

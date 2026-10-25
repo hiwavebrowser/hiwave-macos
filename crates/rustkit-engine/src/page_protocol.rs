@@ -19,6 +19,8 @@ use rustkit_viewhost::Bounds;
 use tokio::sync::oneshot;
 use url::Url;
 
+use crate::devtools_service::DevtoolsCounters;
+
 use crate::{
     ClickOutcome, DevtoolsConsole, DevtoolsElement, DevtoolsNode, Engine, EngineEvent,
     EngineViewId, FrameCommit, InputMark, LivePump,
@@ -308,6 +310,8 @@ pub struct PageEndpoint {
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
+    /// What devtools costs this page (`devtools_service`).
+    devtools_counters: Arc<DevtoolsCounters>,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
@@ -330,6 +334,7 @@ pub(crate) fn adopt(
         wake_window: false,
         last_focused: None,
         failed_nav: 0,
+        devtools_counters: Arc::default(),
     }
 }
 
@@ -361,6 +366,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         wake_window: false,
         last_focused: None,
         failed_nav: 0,
+        devtools_counters: Arc::default(),
     };
     (handle, endpoint)
 }
@@ -521,6 +527,7 @@ impl PageEndpoint {
                 let _ = reply.send(result);
             }
             PageCmd::Devtools { query, reply } => {
+                self.devtools_counters.page_command();
                 let (answer, frame_changed) = devtools_answer(&mut self.engine, self.view, query);
                 let wake = devtools_wakes_window(&answer, frame_changed);
                 let _ = reply.send(answer);
@@ -535,6 +542,7 @@ impl PageEndpoint {
                 // No event carries the answer: wake the content thread's
                 // window so it reads it now, when there is something to read.
                 if self.wake_window && wake {
+                    self.devtools_counters.window_wake();
                     crate::script_net::poke_live_turn();
                 }
             }
@@ -888,6 +896,17 @@ impl PageEndpoint {
 
     pub(crate) fn set_wake_window(&mut self, wake: bool) {
         self.wake_window = wake;
+    }
+
+    /// What devtools has cost this page so far.
+    pub fn devtools_counters(&self) -> Arc<DevtoolsCounters> {
+        Arc::clone(&self.devtools_counters)
+    }
+
+    /// The page's Inspector, for reads the page need not answer
+    /// (`devtools_service`).
+    pub fn inspector(&self) -> Option<Arc<crate::inspector::Inspector>> {
+        self.engine.inspector(self.view)
     }
 
     /// Commands waiting on the channel, with adjacent resizes, renders and

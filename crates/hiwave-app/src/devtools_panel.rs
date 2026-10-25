@@ -13,7 +13,9 @@
 //! shipped default), so nothing here waits: a question is sent, and the
 //! answer is acted on by [`Devtools::pump`], which the event loop calls on
 //! every live wake. On the same-thread path the answer is ready when the
-//! question returns and the next pump takes it.
+//! question returns and the next pump takes it. Console reads are not page
+//! questions: the devtools thread answers them from the view's Inspector
+//! (`rustkit_engine::devtools_ask_console`, T6a).
 
 use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsQuery};
@@ -34,7 +36,8 @@ fn run(panel: &WebView, script: &str) {
     let _ = panel.evaluate_script(script);
 }
 
-/// How often an open panel asks the page for new console lines.
+/// How often an open panel asks for new console lines (the devtools
+/// thread answers, not the page).
 const CONSOLE_POLL: Duration = Duration::from_millis(250);
 
 /// When the open panel asks the page for new console lines: on its own

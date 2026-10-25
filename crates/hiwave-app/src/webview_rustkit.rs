@@ -1059,13 +1059,30 @@ impl RustKitView {
 
     // The developer tools (`devtools_panel`): on-demand, bounded questions
     // about the page's last committed DOM and layout, answered on the
-    // page's own thread. Nothing here waits for the answer.
+    // page's own thread, and console reads, answered by the devtools thread
+    // from the view's Inspector without the page (T6a). Nothing here waits
+    // for the answer.
 
-    /// Ask the page a developer-tools question. The answer arrives on the
-    /// receiver: before this returns on the same-thread path, after the
-    /// page's current turn on the content thread. A closed receiver means
-    /// no answer (a closed view, or a load holding the same-thread page).
+    /// Ask a developer-tools question. The answer arrives on the receiver:
+    /// from the devtools thread for a console read; otherwise before this
+    /// returns on the same-thread path, after the page's current turn on
+    /// the content thread. A closed receiver means no answer (a closed
+    /// view, or a load holding the same-thread page).
     pub fn devtools_ask(&self, query: rustkit_engine::DevtoolsQuery) -> oneshot::Receiver<rustkit_engine::DevtoolsAnswer> {
+        if let Some(thread) = self.content.as_ref().filter(|_| self.is_open()) {
+            return thread.devtools_ask(query);
+        }
+        if let rustkit_engine::DevtoolsQuery::Console { since } = query {
+            let inspector = self
+                .endpoint
+                .as_ref()
+                .filter(|_| self.is_open())
+                .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()));
+            if let Some(inspector) = inspector {
+                // On the window thread already: no wake to post.
+                return rustkit_engine::devtools_ask_console(inspector, since, None);
+            }
+        }
         let (reply, rx) = oneshot::channel();
         self.submit(PageCmd::Devtools { query, reply });
         rx
