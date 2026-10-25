@@ -108,6 +108,11 @@ pub enum PageCmd {
         query: DevtoolsQuery,
         reply: oneshot::Sender<DevtoolsAnswer>,
     },
+    /// Test hook: hold the page thread in a host-side wait for this many
+    /// ms, as a long script would (T6b: devtools reads are answered
+    /// meanwhile).
+    #[cfg(test)]
+    Block(u64),
 }
 
 /// What the Inspector asks the page. Node ids are the document's raw
@@ -115,7 +120,8 @@ pub enum PageCmd {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DevtoolsQuery {
     /// Record the page's console, errors and load events for the panel
-    /// (on), or stop and forget them (off).
+    /// (on), or go back to the view's default (off), keeping what was
+    /// recorded for the panel's next opening (T6b).
     Attach(bool),
     /// Outline this element on the page, or nothing.
     Highlight(Option<usize>),
@@ -546,6 +552,8 @@ impl PageEndpoint {
                     crate::script_net::poke_live_turn();
                 }
             }
+            #[cfg(test)]
+            PageCmd::Block(ms) => std::thread::sleep(std::time::Duration::from_millis(ms)),
         }
     }
 

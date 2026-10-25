@@ -445,12 +445,31 @@ fn load_html_is_a_navigation_with_no_url() {
     );
 }
 
-// ---- Off by default, and free when off ----
+// ---- A tab ring by default; free when off ----
+
+/// The engine config with the tab ring off (`HIWAVE_DEVTOOLS_RING=0`).
+fn ring_off() -> EngineConfig {
+    EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() }
+}
+
+#[test]
+fn a_tab_keeps_a_small_ring_from_the_start() {
+    // T6b (Atlas 10-24, Q1): a panel opened late has the history.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let kept: Vec<String> = records(&engine, view).iter().map(|r| describe(r, server.port)).collect();
+    assert_eq!(only(&kept, &["console"]).len(), 5, "{kept:?}");
+    assert_eq!(InspectorConfig::tab().capacity, crate::inspector::TAB_RING_CAPACITY);
+}
 
 #[test]
 fn with_nobody_listening_nothing_is_recorded() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -465,7 +484,7 @@ fn with_nobody_listening_nothing_is_recorded() {
 #[test]
 fn a_sink_alone_turns_recording_on() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");

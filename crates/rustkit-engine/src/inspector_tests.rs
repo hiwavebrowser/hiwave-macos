@@ -75,6 +75,7 @@ fn the_inspector_can_be_shared_across_threads() {
 fn records_serialize_with_a_stable_field_order() {
     let record = InspectorRecord {
         seq: 7,
+        doc: 2,
         t_ms: 1.5,
         event: InspectorEvent::ScriptError {
             name: "TypeError".into(),
@@ -90,7 +91,7 @@ fn records_serialize_with_a_stable_field_order() {
     };
     assert_eq!(
         serde_json::to_string(&record).unwrap(),
-        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12,"inserted_by":null}"#
+        r#"{"seq":7,"doc":2,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12,"inserted_by":null}"#
     );
     let back: InspectorRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
@@ -139,7 +140,7 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
     let path = dir.join("events.jsonl");
     let mut sink = RollingFileSink::new(&path, 300, 2).unwrap();
     for i in 0..40 {
-        sink.record(&InspectorRecord { seq: i, t_ms: 0.0, event: console("0123456789") });
+        sink.record(&InspectorRecord { seq: i, doc: 0, t_ms: 0.0, event: console("0123456789") });
     }
     sink.flush();
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -181,7 +182,7 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     ]
     .into_iter()
     .enumerate()
-    .map(|(i, event)| InspectorRecord { seq: i as u64, t_ms: 0.0, event })
+    .map(|(i, event)| InspectorRecord { seq: i as u64, doc: 0, t_ms: 0.0, event })
     .collect();
     let unsupported = vec![UnsupportedApiCount {
         interface: "XMLHttpRequest".into(),

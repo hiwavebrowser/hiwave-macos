@@ -24,7 +24,9 @@ use url::Url;
 
 use crate::nav_cancel::NavCanceller;
 use crate::page_protocol::{adopt, coalesce};
-use crate::devtools_service::{ask_console as devtools_ask_console, DevtoolsCount, DevtoolsCounters};
+use crate::devtools_service::{
+    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+};
 use crate::inspector::Inspector;
 use crate::{DevtoolsAnswer, DevtoolsQuery, EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
 
@@ -331,9 +333,19 @@ impl ContentThread {
         if let (DevtoolsQuery::Console { since }, Some(Ok(boot))) = (&query, self.boot()) {
             return devtools_ask_console(boot.inspector, *since, Some(boot.devtools_counters));
         }
+        // An open panel is woken when the view records, not on a clock (T6b).
+        if let (DevtoolsQuery::Attach(on), Some(Ok(boot))) = (&query, self.boot()) {
+            devtools_watch(&boot.inspector, &boot.devtools_counters, *on);
+        }
         let (reply, rx) = oneshot::channel();
         let _ = self.cmd.send(PageCmd::Devtools { query, reply });
         rx
+    }
+
+    /// The view's Inspector, once the page has booted. Read its
+    /// [`Inspector::watermark`] to know whether there is anything new.
+    pub fn devtools_inspector(&self) -> Option<Arc<Inspector>> {
+        self.boot().and_then(|boot| boot.ok()).map(|boot| boot.inspector)
     }
 
     /// What devtools has cost the page so far; zero before it has booted.
@@ -595,6 +607,117 @@ mod tests {
             "devtools page commands in 2 s on an idle page with the panel open"
         );
         assert!(lines.iter().any(|m| m == "<string len=4>"), "the late line never reached the panel: {lines:?}");
+    }
+
+    /// The panel's console read, through the routing the window uses.
+    fn read_console(page: &ContentThread, since: u64, budget: Duration) -> Option<crate::DevtoolsConsole> {
+        let mut rx = page.devtools_ask(crate::DevtoolsQuery::Console { since });
+        match wait_recv(&mut rx, budget) {
+            Some(crate::DevtoolsAnswer::Console(console)) => Some(console),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_console_read_is_answered_while_the_page_thread_is_blocked() {
+        // T6b (T6-design.md): the panel stays usable when the page is hung.
+        // The page thread sits in a 3 s host-side wait; the console read
+        // is answered from the view's Inspector meanwhile.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut logged = page.eval("console.log('before'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        page.enqueue(PageCmd::Block(3_000));
+        std::thread::sleep(Duration::from_millis(100));
+        let asked = Instant::now();
+        let console = read_console(&page, 0, Duration::from_secs(1)).expect("no console answer while the page was blocked");
+        assert!(asked.elapsed() < Duration::from_secs(1), "the read waited for the page");
+        assert!(
+            console.entries.iter().any(|e| e.message == "<string len=6>"),
+            "the line logged before the block is missing: {:?}",
+            console.entries
+        );
+    }
+
+    #[test]
+    fn an_open_panel_is_woken_when_the_view_records_and_not_otherwise() {
+        // T6b: no CONSOLE_POLL. With the panel watching, an idle page posts
+        // no window wakes; a console line posts one, and the next is not
+        // posted until the panel has read.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        // What the page recorded before the panel opened: read it once.
+        std::thread::sleep(Duration::from_millis(200));
+        let inspector = page.devtools_inspector().expect("booted");
+        let since = read_console(&page, 0, Duration::from_secs(5)).expect("first read").next_seq;
+        std::thread::sleep(Duration::from_millis(200));
+        let idle_from = page.devtools_counters();
+        std::thread::sleep(Duration::from_secs(1));
+        let idle = page.devtools_counters();
+        assert_eq!(idle.window_wakes - idle_from.window_wakes, 0, "window wakes in 1 s on an idle page");
+        assert_eq!(idle.page_commands - idle_from.page_commands, 0);
+        // Three lines, no read: one wake.
+        let mut done = page.eval("console.log('a'); console.log('b'); console.log('c'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while page.devtools_counters().window_wakes == idle.window_wakes && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let woken = page.devtools_counters();
+        assert_eq!(woken.window_wakes - idle.window_wakes, 1, "one wake for unread lines");
+        assert!(inspector.watermark() > since);
+        // The panel reads (its answer wakes the window once more), then a
+        // new line wakes it again.
+        let console = read_console(&page, since, Duration::from_secs(5)).expect("read");
+        assert_eq!(console.entries.len(), 3, "{:?}", console.entries);
+        std::thread::sleep(Duration::from_millis(200));
+        let read = page.devtools_counters();
+        let mut done = page.eval("console.log('d'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(page.devtools_counters().window_wakes - read.window_wakes, 1, "a new line after a read wakes");
+        assert_eq!(page.devtools_counters().page_commands, idle.page_commands, "no console read reached the page");
+    }
+
+    #[test]
+    fn the_panel_reopens_with_history_marked_by_document() {
+        // T6b: closing the panel no longer forgets, and records carry their
+        // document, so a panel opened after a navigation shows both pages'
+        // lines and can tell them apart.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        let _ = wait_recv(&mut attached, Duration::from_secs(5));
+        let mut loaded = page.load_html("<p>one</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut logged = page.eval("console.log('one'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let mut detached = page.devtools_ask(DevtoolsQuery::Attach(false));
+        assert_eq!(wait_recv(&mut detached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut loaded = page.load_html("<p>two</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut logged = page.eval("console.log('second'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let console = read_console(&page, 0, Duration::from_secs(5)).expect("read");
+        let doc_of = |len: usize| {
+            let shape = format!("<string len={len}>");
+            console.entries.iter().find(|e| e.message == shape).map(|e| e.doc)
+        };
+        let (first, second) = (doc_of(3), doc_of(6));
+        assert!(first.is_some(), "the first page's line was forgotten: {:?}", console.entries);
+        assert!(second.is_some(), "the second page's line is missing: {:?}", console.entries);
+        assert!(second > first, "documents not told apart: {first:?} vs {second:?}");
     }
 
     /// Events until `nav_id` fails or `budget` runs out.

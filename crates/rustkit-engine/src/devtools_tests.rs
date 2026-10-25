@@ -286,7 +286,7 @@ fn only_a_new_document_resets_the_panel() {
 }
 
 fn record(seq: u64, event: InspectorEvent) -> InspectorRecord {
-    InspectorRecord { seq, t_ms: 0.0, event }
+    InspectorRecord { seq, doc: 0, t_ms: 0.0, event }
 }
 
 #[test]
@@ -337,21 +337,29 @@ fn console_lines_from_inspector_records() {
 }
 
 #[test]
-fn console_records_only_once_attached_and_reads_since() {
+fn console_reads_since_and_closing_forgets_nothing() {
+    // T6b: the tab ring records before the panel opens, and closing the
+    // panel keeps what was recorded (it used to empty the buffer).
     let (mut engine, view) = page("<html><body><p>hi</p></body></html>");
+    let console_levels = |c: &crate::DevtoolsConsole| -> Vec<&'static str> {
+        c.entries.iter().filter(|e| e.kind == "console").map(|e| e.level).collect()
+    };
     engine.execute_script(view, "console.log('before')").unwrap();
-    assert!(engine.devtools_console(view, 0).unwrap().entries.is_empty(), "nothing recorded while closed");
+    assert_eq!(console_levels(&engine.devtools_console(view, 0).unwrap()), ["log"], "the tab ring records while closed");
     engine.devtools_attach(view, true).unwrap();
     engine.execute_script(view, "console.log('one'); console.error('two')").unwrap();
     let c = engine.devtools_console(view, 0).unwrap();
-    let levels: Vec<&str> = c.entries.iter().map(|e| e.level).collect();
-    assert_eq!(levels, ["log", "error"]);
+    assert_eq!(console_levels(&c), ["log", "log", "error"]);
     engine.execute_script(view, "console.info('three')").unwrap();
     let next = engine.devtools_console(view, c.next_seq).unwrap();
-    assert_eq!(next.entries.iter().map(|e| e.level).collect::<Vec<_>>(), ["info"]);
+    assert_eq!(console_levels(&next), ["info"]);
     engine.devtools_attach(view, false).unwrap();
     engine.execute_script(view, "console.log('after')").unwrap();
-    assert!(engine.devtools_console(view, 0).unwrap().entries.is_empty(), "closing empties and stops");
+    assert_eq!(
+        console_levels(&engine.devtools_console(view, 0).unwrap()),
+        ["log", "log", "error", "info", "log"],
+        "closing forgets nothing"
+    );
 }
 
 #[test]
@@ -383,7 +391,7 @@ fn payloads_serialize_in_the_panels_field_names() {
     let c = serde_json::to_value(c).unwrap();
     assert_eq!(c["nextSeq"], 10);
     assert_eq!(c["pageChanged"], false);
-    assert_eq!(c["entries"][0], serde_json::json!({"id": 9, "level": "log", "kind": "console", "message": "m …", "stack": []}));
+    assert_eq!(c["entries"][0], serde_json::json!({"id": 9, "doc": 0, "level": "log", "kind": "console", "message": "m …", "stack": []}));
 }
 
 #[test]

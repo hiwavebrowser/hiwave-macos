@@ -1073,19 +1073,40 @@ impl RustKitView {
             return thread.devtools_ask(query);
         }
         if let rustkit_engine::DevtoolsQuery::Console { since } = query {
-            let inspector = self
+            if let Some(inspector) = self.devtools_inspector() {
+                // On the window thread already: no wake to post.
+                return rustkit_engine::devtools_ask_console(inspector, since, None);
+            }
+        }
+        // An open panel is woken when the view records (T6b).
+        if let rustkit_engine::DevtoolsQuery::Attach(on) = query {
+            let page = self
                 .endpoint
                 .as_ref()
                 .filter(|_| self.is_open())
-                .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()));
-            if let Some(inspector) = inspector {
-                // On the window thread already: no wake to post.
-                return rustkit_engine::devtools_ask_console(inspector, since, None);
+                .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| Some((e.inspector()?, e.devtools_counters()))));
+            if let Some((inspector, counters)) = page {
+                rustkit_engine::devtools_watch(&inspector, &counters, on);
             }
         }
         let (reply, rx) = oneshot::channel();
         self.submit(PageCmd::Devtools { query, reply });
         rx
+    }
+
+    /// The view's Inspector, for reads that need not ask the page. Only
+    /// its atomic [`watermark`](rustkit_engine::Inspector::watermark) is
+    /// read on the window thread: sinks run under its lock.
+    pub fn devtools_inspector(&self) -> Option<std::sync::Arc<rustkit_engine::Inspector>> {
+        if !self.is_open() {
+            return None;
+        }
+        if let Some(thread) = self.content.as_ref() {
+            return thread.devtools_inspector();
+        }
+        self.endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()))
     }
 
     /// Run the console's `code` in the page: the value, or the error.

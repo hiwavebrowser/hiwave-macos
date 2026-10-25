@@ -31,12 +31,19 @@
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
 //! script is running. Reading runs no script.
 //!
+//! An open devtools panel is not polled for (T6b): every record moves the
+//! view's [`Inspector::watermark`], and while a panel watches the view the
+//! devtools thread is signalled after the lock is released. Each record
+//! carries its document ([`InspectorRecord::doc`]), and records outlive a
+//! navigation and the panel closing until the ring drops them.
+//!
 //! [`Engine::inspector`]: crate::Engine::inspector
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -45,6 +52,9 @@ use url::Url;
 
 /// Events a view's ring buffer holds by default.
 pub const DEFAULT_CAPACITY: usize = 4096;
+/// Events each tab keeps from the moment it is made, so an Inspector panel
+/// opened late has the history (T6b; Atlas 10-24, Q1).
+pub const TAB_RING_CAPACITY: usize = 512;
 /// Longest console message kept, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 1024;
 /// Longest error stack kept, in characters.
@@ -90,6 +100,23 @@ impl Default for InspectorConfig {
             keep_url_query: false,
             keep_console_text: false,
             keep_error_text: false,
+        }
+    }
+}
+
+impl InspectorConfig {
+    /// A tab's: a [`TAB_RING_CAPACITY`] ring from the moment the view is
+    /// made, so the panel has history when it opens. `HIWAVE_DEVTOOLS_RING=0`
+    /// (or false/off/no) leaves it off until a panel attaches.
+    pub fn tab() -> Self {
+        let off = matches!(
+            std::env::var("HIWAVE_DEVTOOLS_RING").ok().as_deref(),
+            Some("0" | "false" | "off" | "no")
+        );
+        Self {
+            buffer: !off,
+            capacity: TAB_RING_CAPACITY,
+            ..Self::default()
         }
     }
 }
@@ -354,6 +381,10 @@ impl InspectorEvent {
 pub struct InspectorRecord {
     /// 0-based, per view, never reused.
     pub seq: u64,
+    /// The document it belongs to: 0 before the view's first navigation,
+    /// then each navigation's start begins the next.
+    #[serde(default)]
+    pub doc: u32,
     /// Milliseconds since the current navigation started (monotonic clock).
     pub t_ms: f64,
     #[serde(flatten)]
@@ -389,7 +420,11 @@ pub struct UnsupportedApiCount {
 
 struct State {
     buffer: bool,
+    /// Whether the view's config keeps the ring on with no panel.
+    buffer_default: bool,
     capacity: usize,
+    /// [`InspectorRecord::doc`] of the next record.
+    doc: u32,
     records: VecDeque<InspectorRecord>,
     next_seq: u64,
     dropped: u64,
@@ -416,7 +451,46 @@ pub struct Inspector {
     keep_url_query: bool,
     keep_console_text: bool,
     keep_error_text: bool,
+    /// The `seq` the next record gets, readable without the lock.
+    watermark: AtomicU64,
+    /// A panel watches this view: tell the devtools thread about records.
+    watched: AtomicBool,
     state: Mutex<State>,
+}
+
+/// The state, locked. Dropping it releases the lock first, then tells the
+/// devtools thread when records were pushed under it and a panel watches.
+struct Locked<'a> {
+    inspector: &'a Inspector,
+    guard: Option<MutexGuard<'a, State>>,
+    seq_at_lock: u64,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.take() else { return };
+        let next_seq = guard.next_seq;
+        drop(guard);
+        if next_seq != self.seq_at_lock {
+            self.inspector.watermark.store(next_seq, Ordering::Release);
+            if self.inspector.watched.load(Ordering::Acquire) {
+                crate::devtools_service::records_arrived();
+            }
+        }
+    }
 }
 
 impl Inspector {
@@ -426,9 +500,13 @@ impl Inspector {
             keep_url_query: config.keep_url_query,
             keep_console_text: config.keep_console_text,
             keep_error_text: config.keep_error_text,
+            watermark: AtomicU64::new(0),
+            watched: AtomicBool::new(false),
             state: Mutex::new(State {
                 buffer: config.buffer,
+                buffer_default: config.buffer,
                 capacity: config.capacity.max(1),
+                doc: 0,
                 records: VecDeque::new(),
                 next_seq: 0,
                 dropped: 0,
@@ -451,10 +529,35 @@ impl Inspector {
         self.active.load(Ordering::Relaxed)
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
+    fn state(&self) -> Locked<'_> {
         // A sink that panicked leaves the lock poisoned; the buffer is
         // still consistent (records are pushed whole).
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Locked {
+            inspector: self,
+            seq_at_lock: guard.next_seq,
+            guard: Some(guard),
+        }
+    }
+
+    /// The `seq` the next record will get. One atomic load: the window
+    /// thread reads it to know whether there is anything new, without the
+    /// lock (sinks run under it).
+    pub fn watermark(&self) -> u64 {
+        self.watermark.load(Ordering::Acquire)
+    }
+
+    /// Whether the devtools thread is told about this view's records.
+    pub(crate) fn set_watched(&self, on: bool) {
+        self.watched.store(on, Ordering::Release);
+    }
+
+    /// The panel closed: recording goes back to the view's default, and
+    /// nothing recorded is dropped (T6b: the panel reopens with history).
+    pub fn detach_panel(&self) {
+        let mut state = self.state();
+        state.buffer = state.buffer_default;
+        self.refresh_active(&state);
     }
 
     fn refresh_active(&self, state: &State) {
@@ -537,6 +640,7 @@ impl Inspector {
     fn push_locked(state: &mut State, event: InspectorEvent) {
         let record = InspectorRecord {
             seq: state.next_seq,
+            doc: state.doc,
             t_ms: round_ms(state.navigation_started.elapsed().as_secs_f64() * 1000.0),
             event,
         };
@@ -562,6 +666,7 @@ impl Inspector {
         let url = url.map(|u| self.url(u));
         let mut state = self.state();
         state.navigation_started = Instant::now();
+        state.doc += 1;
         state.unsupported.clear();
         state.laid_out = false;
         state.painted = false;

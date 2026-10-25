@@ -143,6 +143,9 @@ pub struct DevtoolsElement {
 pub struct DevtoolsConsoleEntry {
     /// The record's `seq`.
     pub id: u64,
+    /// The document it was logged in (`InspectorRecord::doc`): the panel
+    /// keeps old documents' lines, marked, until the ring drops them.
+    pub doc: u32,
     /// `log`, `info`, `warn`, `error` or `debug`.
     pub level: &'static str,
     /// The Inspector event it came from (`console`, `script_error`, ...).
@@ -391,6 +394,7 @@ fn frame(loc: &Option<SourceLocation>) -> Vec<DevtoolsFrame> {
 fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
     let entry = |level, message: String, stack| DevtoolsConsoleEntry {
         id: record.seq,
+        doc: record.doc,
         level,
         kind: record.event.kind(),
         message,
@@ -463,11 +467,16 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
 impl Engine {
     /// Start (or stop) recording view `id`'s console, errors and load
     /// events for the panel. On: the ring buffer records and the current
-    /// document's console is hooked now, not at its next commit. Off: the
-    /// buffer is emptied and recording costs one atomic load again.
+    /// document's console is hooked now, not at its next commit. Off:
+    /// recording goes back to the view's default and nothing recorded is
+    /// dropped, so the panel reopens with its history (T6b).
     pub fn devtools_attach(&mut self, id: EngineViewId, on: bool) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        view.inspector.set_buffer_enabled(on);
+        if on {
+            view.inspector.set_buffer_enabled(true);
+        } else {
+            view.inspector.detach_panel();
+        }
         if on {
             if let Some(bindings) = view.bindings.as_ref() {
                 inspector_glue::attach(bindings, &view.inspector);
