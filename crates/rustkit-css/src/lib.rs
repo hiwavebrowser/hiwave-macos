@@ -2699,6 +2699,27 @@ pub struct ComputedStyle {
     pub webkit_box_orient_vertical: bool,
     /// `-webkit-line-clamp: <integer>`; `None` is `none`. Not inherited.
     pub webkit_line_clamp: Option<u32>,
+    /// css-contain-3 §6.1 `container-type`. Not inherited.
+    pub container_type: ContainerType,
+    /// css-contain-3 §6.2 `container-name`; empty is `none`. Not inherited.
+    pub container_name: Vec<String>,
+    /// A `width` (bit 1), `min-width` (2) or `max-width` (4) value that
+    /// `Length` cannot carry (`min-content`, `-webkit-max-content`,
+    /// `MAX-CONTENT`, ...); layout keeps the previous value. `@container`
+    /// treats the box's width as unknown. Not inherited.
+    pub width_keywords: u8,
+    /// A `writing-mode` other than `horizontal-tb` was declared. Layout
+    /// does not honour it yet, but `@container` treats the box's width as
+    /// unknown (its inline size is the physical height). Not inherited.
+    pub writing_mode_declared: bool,
+    /// `columns` or `column-width` other than `auto` was declared. Layout
+    /// does not split into columns for them yet, but `@container` treats a
+    /// child's width as unknown. Not inherited.
+    pub columns_declared: bool,
+    /// An author `display: contents`, which layout does not honour yet
+    /// (only `<slot>` gets `Display::Contents`): the box is still laid out,
+    /// but `@container` treats it as having no size. Not inherited.
+    pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
@@ -2946,6 +2967,10 @@ pub struct Rule {
     /// Media query lists of the enclosing `@media` blocks, outermost first;
     /// the rule applies only where all of them match (`Rule::applies_at`).
     pub media: Vec<String>,
+    /// Preludes of the enclosing `@container` blocks, outermost first; the
+    /// rule applies to an element only where each holds for its query
+    /// container.
+    pub container: Vec<String>,
     /// Full dotted name of the rule's cascade layer; `None` when unlayered.
     pub layer: Option<String>,
     /// The layer's rank in the document's layer order (`assign_layer_order`):
@@ -3089,6 +3114,7 @@ impl Stylesheet {
             .into_iter()
             .map(|r| Rule {
                 media: r.media,
+                container: r.container,
                 layer: r.layer,
                 layer_order: UNLAYERED,
                 selector: match encode_selector_escapes(&r.selector) {
@@ -3784,6 +3810,58 @@ pub fn parse_webkit_box_display(value: &str) -> Option<bool> {
         "-webkit-inline-box" => Some(true),
         _ => None,
     }
+}
+
+/// css-contain-3 §6.1 `container-type`: what an `@container` query may ask
+/// of the element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    /// `normal`: a container for style queries only, not for size queries.
+    #[default]
+    Normal,
+    /// `inline-size`: its inline size can be queried.
+    InlineSize,
+    /// `size`: its inline and block sizes can be queried.
+    Size,
+}
+
+/// `container-type: normal | size | inline-size`; `None` when invalid.
+pub fn parse_container_type(value: &str) -> Option<ContainerType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(ContainerType::Normal),
+        "inline-size" => Some(ContainerType::InlineSize),
+        "size" => Some(ContainerType::Size),
+        _ => None,
+    }
+}
+
+/// `container-name: none | <custom-ident>+`; `None` when invalid.
+pub fn parse_container_name(value: &str) -> Option<Vec<String>> {
+    let names: Vec<&str> = value.split_whitespace().collect();
+    if names.len() == 1 && names[0].eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let reserved = |n: &str| {
+        ["none", "and", "or", "not", "initial", "inherit", "unset", "default"]
+            .iter()
+            .any(|r| n.eq_ignore_ascii_case(r))
+    };
+    let ident = |n: &str| {
+        let body = n.strip_prefix('-').unwrap_or(n);
+        body.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '-' || !c.is_ascii())
+            && n.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii())
+    };
+    (!names.is_empty() && names.iter().all(|n| ident(n) && !reserved(n)))
+        .then(|| names.iter().map(|n| n.to_string()).collect())
+}
+
+/// The `container` shorthand: `<container-name> [ / <container-type> ]?`.
+pub fn parse_container(value: &str) -> Option<(Vec<String>, ContainerType)> {
+    let (name, kind) = match value.split_once('/') {
+        Some((n, t)) => (n, parse_container_type(t)?),
+        None => (value, ContainerType::Normal),
+    };
+    Some((parse_container_name(name)?, kind))
 }
 
 /// `-webkit-line-clamp: none | <integer [1,∞]>`. `Some(None)` is `none`;

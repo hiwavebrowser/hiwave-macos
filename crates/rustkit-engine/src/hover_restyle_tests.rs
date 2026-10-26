@@ -573,3 +573,64 @@ fn zz_timing_of_a_hover_on_a_large_page() {
         );
     }
 }
+
+/// #782 R2 (fix 3): a pointer restyle builds only the changed element and
+/// the elements above it; their siblings got empty placeholder boxes, so
+/// the `@container` walk never saw an earlier sibling's float and answered
+/// the hovered element's query as if there were none. The full build
+/// answers it false (since #782 HOLD 4 a float makes every later container
+/// in its formatting context unknown), so the short path painted a colour
+/// a full relayout does not. Chromium 148 paints red here (the container is
+/// 300px, and the walk declines it as a trade-off); what this test holds
+/// is that the short path agrees with the full relayout.
+#[test]
+fn a_hover_restyle_sees_an_earlier_siblings_float_in_a_container_query() {
+    const FLOAT_PAGE: &str = "<style>\
+        body{margin:0;font:16px/20px sans-serif}\
+        .f{float:left;width:20px;height:20px;background:gray}\
+        .pf::before{content:'';float:left;width:20px;height:20px}\
+        .q{container-type:inline-size}\
+        .h:hover{color:blue}\
+        @container (min-width: 100px) { .h:hover{color:red} }\
+        </style>\
+        <div class=f></div>\
+        <div class=q><span id=h class=h>hover me with some words</span></div>\
+        <div style='overflow:hidden'><div class=pf></div>\
+        <div class=q><span id=g class=h>and me with some words</span></div></div>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 600,
+        })
+        .expect("view");
+    engine.load_html(view, FLOAT_PAGE).expect("load_html");
+    let colour = |engine: &mut Engine, id: &str| {
+        let value = engine
+            .execute_script(
+                view,
+                &format!("String(getComputedStyle(document.getElementById('{id}')).color)"),
+            )
+            .expect("script");
+        value
+            .strip_prefix("String(\"")
+            .and_then(|v| v.strip_suffix("\")"))
+            .unwrap_or(&value)
+            .to_string()
+    };
+    // The auto-width container starts a context beside the float, so the
+    // full build calls its width unknown (#782 HOLD 4; Chrome: 380px, red).
+    // #h: an earlier sibling element floats; #g: an earlier sibling's
+    // `::before` does.
+    for (id, at) in [("h", (60.0, 8.0)), ("g", (60.0, 28.0))] {
+        hover(&mut engine, view, NOWHERE);
+        let before = skipped(&engine, view);
+        hover(&mut engine, view, at);
+        assert_eq!(skipped(&engine, view), before + 1, "#{id}: colour is paint");
+        let short = painted(&engine, view);
+        assert_eq!(colour(&mut engine, id), "rgb(0, 0, 255)", "#{id}: the container query is false after a float");
+        assert_same(&short, &painted_by_a_full_relayout(&mut engine, view), id);
+    }
+}

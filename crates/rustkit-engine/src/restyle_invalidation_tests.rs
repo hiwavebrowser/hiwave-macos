@@ -189,8 +189,7 @@ fn check(page: &str, script: &str) -> (DirtySet, ById) {
     check_after(page, "", script)
 }
 
-/// [`check`], after a `setup` script that writes nothing to the DOM
-/// (`load_html` runs no page script).
+/// [`check`], after a `setup` script that writes nothing to the DOM.
 fn check_after(page: &str, setup: &str, script: &str) -> (DirtySet, ById) {
     let (mut engine, view) = load(page);
     if !setup.is_empty() {

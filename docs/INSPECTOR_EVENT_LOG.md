@@ -56,6 +56,8 @@ field that is `null` today may hold a value later.
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
 | `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms`, `queued_ms` (see below) |
 | `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`), `queued_ms` |
+| `script` | `script`, `kind`, `outcome`, `reason`, `bytes`, `queued_ms`, `fetch_ms`, `waited_ms`, `ran_ms`, `event`, `held`: one page script's life, recorded when it is over (see Scripts) |
+| `lifecycle` | `event` (`DOMContentLoaded`, `load`), `held_by`, `held_by_count`: recorded as the event fires (see Scripts) |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -212,6 +214,54 @@ A previous page's live script requests are dropped when the new document is
 committed, so their `cancelled` failures come after the new page's
 `navigation_start` (and its document request), before its `navigation_commit`.
 If the new document cannot be fetched, the old page and its requests stay.
+
+### Scripts
+
+Every page `<script>` the load path handles, and every `<script src>` page
+script inserts, ends in exactly one `script` record: after it ran (and after
+its console lines and errors), when the engine gave up on it, or as
+`cancelled` when its document was left first (a navigation, a cancelled
+load, a closed view). A navigation away while the page's own scripts are
+still being fetched leaves those with no `script` record; their requests'
+`failure` records (`cancelled`) carry it. Lifecycle
+steps, timers and callbacks are not scripts here; their errors stay
+`script_error`s.
+
+| field | meaning |
+|---|---|
+| `script` | its URL (as Privacy reduces it), `inline#n`, or `unparseable#n` for a `src` that is not a URL (n: its place among the document's scripts, or an inserted script's node id; the text itself is never recorded) |
+| `kind` | `parser` (a parser-blocking classic script), `defer`, `async`, `module`, `inserted` |
+| `outcome` | `ran`; `threw` (its `script_error` is above it); `skipped`; `fetch_failed`; `over_budget` (not started: the script budget was already spent); `stopped` (started, and stopped by the script budget's deadline); `engine_failed`; `cancelled` (its document was left before it ended) |
+| `reason` | for every outcome but `ran` and `threw`, in the engine's words: `nomodule`, `too large to run inside the script budget`, `unparseable src`, `JS engine panicked earlier on this page`, `HTTP <status>`, `network` (the request's `failure` has the stage), `script budget`, `script budget spent before it started`, `JS engine panic`, `navigation or view closed` |
+| `bytes` | source bytes; 0 when nothing arrived |
+| `queued_ms` | `inserted` only: from the page inserting it to the engine taking it from the insertion queue, which starts its request. A large value means the page inserted it long before the engine next drained the queue |
+| `fetch_ms` | from its request starting to its body or failure arriving; `null` for an inline script |
+| `waited_ms` | from its body arriving to the engine starting it (or giving up on it): time spent behind other scripts, or waiting for a turn |
+| `ran_ms` | parse, compile and run, its microtasks included (Boa does not separate them) |
+| `event` | the event its element heard, or will hear: `load` or `error` (modules and inserted scripts; a parser classic script fires none). When the script budget is spent the event is owed to the next turn that has budget, ahead of any other script, and the record already names it |
+| `held` | the first lifecycle event that had not fired when it ended: `DOMContentLoaded` (it ended before that fired), `load` (it ended between the two), or `null` (after `load`, or `cancelled`). An order, not a cause: see below |
+
+The engine runs `async` page scripts after the deferred ones and before
+`DOMContentLoaded` (Chrome runs them as they arrive and does not hold
+`DOMContentLoaded` for them), so they read `held: DOMContentLoaded`.
+Inserted scripts never hold `DOMContentLoaded`, yet one that ends before it
+fired reads `held: DOMContentLoaded` too: `held` says when a script ended,
+not that the event waited for it. A `lifecycle` record marks each event as
+it fires; `load`'s `held_by` names the scripts that ended between the two
+(first 16, in the order they ended) and `held_by_count` how many there
+were. Same caveat: a script in `held_by` ended in that window, which is a
+lead, not proof it held `load`. On a yielding load (the app) `load` fires
+in a live turn once the inserted chain is idle, so there the scripts in
+`held_by` are the chain that held it. The engine knows which events have
+fired with nobody listening, so a panel attached after `DOMContentLoaded`
+still reads the later scripts right; `held_by` lists only the scripts that
+ended after it attached.
+
+Cost: with nobody listening, each script costs one atomic load plus the
+clock reads its times need (two per external page script, one when page
+script inserts a script, one when its body arrives). Listening, one record
+per script. The lifecycle flags cost one lock per navigation and per
+lifecycle event either way.
 
 ### Unsupported APIs
 
