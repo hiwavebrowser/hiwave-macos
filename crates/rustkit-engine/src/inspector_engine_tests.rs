@@ -192,6 +192,10 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
             if *from_cache { " cache" } else { "" }
         ),
         InspectorEvent::Failure { id, stage, reason, .. } => format!("failure #{id} {} {reason}", stage.as_str()),
+        InspectorEvent::Script { script, kind, outcome, held, .. } => {
+            format!("script {kind} {} {outcome} held={}", local(script), held.as_deref().unwrap_or("-"))
+        }
+        InspectorEvent::Lifecycle { event, held_by_count, .. } => format!("lifecycle {event} held_by={held_by_count}"),
     }
 }
 
@@ -260,6 +264,9 @@ fn a_page_load_is_recorded_in_order() {
             "console Warn <string len=5> @inline#1:4:9",
             "console Error <string len=4> @inline#1:5:9",
             "console Debug <string len=4> @inline#1:6:9",
+            "script parser inline#1 ran held=DOMContentLoaded",
+            "lifecycle DOMContentLoaded held_by=0",
+            "lifecycle load held_by=0",
             "load_finished over_budget=0",
         ]
     );

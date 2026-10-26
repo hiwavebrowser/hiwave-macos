@@ -351,6 +351,8 @@ mod inspector_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_network_tests;
 #[cfg(all(test, feature = "headless"))]
+mod script_lifecycle_tests;
+#[cfg(all(test, feature = "headless"))]
 mod relayout_cause_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod decode_pool_tests;
@@ -1291,10 +1293,57 @@ const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
-/// `(label, node id, fetched source or why not, is a module script)`. A
-/// module's label is the URL it was finally served from (`inline#n` for an
-/// inline one).
-type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool);
+/// `(label, node id, fetched source or why not, is a module script, its
+/// Inspector facts)`. A module's label is the URL it was finally served
+/// from (`inline#n` for an inline one).
+type FetchedScript = (String, usize, Result<(ScriptTiming, String), ScriptOutcome>, bool, ScriptFetched);
+
+/// What the Inspector's `script` record says about how a page script was
+/// loaded (`inspector::ScriptEnd`).
+#[derive(Debug, Clone, Copy)]
+struct ScriptFetched {
+    /// `parser`, `defer`, `async` or `module`.
+    kind: &'static str,
+    /// How long its fetch took; `None` for an inline script.
+    fetch: Option<std::time::Duration>,
+    /// When its body or failure arrived; `None` for an inline script.
+    arrived: Option<std::time::Instant>,
+}
+
+impl ScriptFetched {
+    /// Record the end of the script `record` is about. `began`: when it
+    /// started running, if it did.
+    fn ended(
+        &self,
+        inspector: &Inspector,
+        record: &ScriptRecord,
+        began: Option<std::time::Instant>,
+        event: Option<&'static str>,
+    ) {
+        if !inspector.is_active() {
+            return;
+        }
+        let at = began.unwrap_or_else(std::time::Instant::now);
+        inspector.script_ended(inspector::ScriptEnd {
+            source: &record.source,
+            kind: self.kind,
+            outcome: &record.outcome,
+            started: began.is_some(),
+            bytes: record.bytes,
+            queued: None,
+            fetch: self.fetch,
+            waited: self.arrived.map(|arrived| at.saturating_duration_since(arrived)),
+            ran_ms: record.elapsed_ms,
+            event,
+        });
+    }
+
+    /// Record that the script labelled `source` will not run: its load was
+    /// cancelled first.
+    fn cancelled(&self, inspector: &Inspector, source: &str) {
+        inspector.script_cancelled(source, self.kind, None);
+    }
+}
 
 /// What happened to one piece of page script on the load path.
 #[derive(Debug, Clone, PartialEq)]
@@ -4195,6 +4244,7 @@ impl Engine {
             // fire `load` without them, so a live run never showed
             // `source=event:load`.
             info!(source = "event:load", "Running page lifecycle step");
+            inspector.lifecycle("load");
             let step_started = std::time::Instant::now();
             let (caught, load_stopped) = with_script_js(&bindings, || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -5389,7 +5439,8 @@ impl Engine {
             Inline(String),
             External(Url),
         }
-        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool)> = Vec::new();
+        let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool, &'static str)> =
+            Vec::new();
         let mut index = 0usize;
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
@@ -5397,9 +5448,17 @@ impl Engine {
             }
             let Some(timing) = script_timing(node) else { return };
             index += 1;
+            let kind = match timing {
+                _ if is_module_script(node) => "module",
+                Ok(ScriptTiming::Defer) => "defer",
+                Ok(ScriptTiming::Async) => "async",
+                _ => "parser",
+            };
             let src = node.get_attribute("src").map(str::trim);
             let label = match src {
-                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string()),
+                // Not the text itself: what does not parse cannot be reduced
+                // to origin and path, and its query may carry a session.
+                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| format!("unparseable#{index}")),
                 None => format!("inline#{index}"),
             };
             let entry = timing.and_then(|timing| match src {
@@ -5409,7 +5468,7 @@ impl Engine {
                     .map_err(|_| ScriptOutcome::Skipped("unparseable src")),
                 None => Ok((timing, Body::Inline(node.text_content()))),
             });
-            entries.push((label, node.id.raw(), entry, is_module_script(node)));
+            entries.push((label, node.id.raw(), entry, is_module_script(node), kind));
         });
         // A document with no scripts still has a lifecycle: `load` fires and
         // the timers run (a `<meta http-equiv=refresh>`'s among them).
@@ -5426,7 +5485,7 @@ impl Engine {
         let base = base.clone();
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
         Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module)| {
+            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
@@ -5434,6 +5493,8 @@ impl Engine {
                 let inspector = inspector.clone();
                 async move {
                     let mut label = label;
+                    let external = matches!(entry, Ok((_, Body::External(_))));
+                    let fetch_started = std::time::Instant::now();
                     let result = match entry {
                         Err(outcome) => Err(outcome),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
@@ -5515,7 +5576,12 @@ impl Engine {
                             fetch.await
                         }
                     };
-                    (label, node_id, result, is_module)
+                    let fetched = ScriptFetched {
+                        kind,
+                        fetch: external.then(|| fetch_started.elapsed()),
+                        arrived: external.then(std::time::Instant::now),
+                    };
+                    (label, node_id, result, is_module, fetched)
                 }
             }))
             .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
@@ -5734,9 +5800,9 @@ impl Engine {
         // document order with them), async (stable within each). A module
         // whose fetch failed keeps its place so its `error` event fires in
         // order; a classic script failure is only logged.
-        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool);
+        type Job = (String, u8, Result<String, ScriptOutcome>, usize, bool, ScriptFetched);
         let mut runnable: Vec<Job> = Vec::new();
-        for (label, node_id, result, is_module) in fetched {
+        for (label, node_id, result, is_module, facts) in fetched {
             match result {
                 Ok((timing, text)) => {
                     let key = match timing {
@@ -5744,16 +5810,17 @@ impl Engine {
                         ScriptTiming::Defer => 1,
                         ScriptTiming::Async => 2,
                     };
-                    runnable.push((label, key, Ok(text), node_id, is_module));
+                    runnable.push((label, key, Ok(text), node_id, is_module, facts));
                 }
-                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true)),
+                Err(outcome) if is_module => runnable.push((label, 1, Err(outcome), node_id, true, facts)),
                 Err(outcome) => {
                     let record = ScriptRecord { source: label, bytes: 0, elapsed_ms: 0, outcome };
+                    facts.ended(&inspector, &record, None, None);
                     inspector_glue::log_script(log, &inspector, record);
                 }
             }
         }
-        runnable.sort_by_key(|(_, key, _, _, _)| *key);
+        runnable.sort_by_key(|(_, key, _, _, _, _)| *key);
 
         // A panic inside the JS engine leaves its state unknowable: record
         // it and run nothing more on this page.
@@ -5836,7 +5903,15 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
-        for (index, (label, _, source, node_id, is_module)) in runnable.into_iter().enumerate() {
+        let mut jobs = runnable.into_iter().enumerate();
+        // A cancelled load runs none of the rest; each still gets its one
+        // Inspector record.
+        let cancel_rest = |jobs: &mut dyn Iterator<Item = (usize, Job)>| {
+            for (_, (label, _, _, _, _, facts)) in jobs {
+                facts.cancelled(&inspector, &label);
+            }
+        };
+        while let Some((index, (label, _, source, node_id, is_module, facts))) = jobs.next() {
             // Between scripts, on the same cadence as a live turn: the load
             // stays pending and the poll loop publishes the frame.
             if frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
@@ -5850,6 +5925,8 @@ impl Engine {
             let _ = index;
             if nav_cancel::cancelled(watch) {
                 debug!(source = %label, "Navigation cancelled: the rest of its scripts do not run");
+                facts.cancelled(&inspector, &label);
+                cancel_rest(&mut jobs);
                 return;
             }
             let text = match source {
@@ -5857,18 +5934,20 @@ impl Engine {
                 Err(outcome) => {
                     // A module script that could not be fetched: logged, and
                     // its element hears `error`.
-                    log.push(ScriptRecord {
+                    let record = ScriptRecord {
                         source: label,
                         bytes: 0,
                         elapsed_ms: 0,
                         outcome,
-                    });
+                    };
+                    facts.ended(&inspector, &record, None, Some("error"));
+                    log.push(record);
                     let _ = bindings.fire_script_event(node_id, "error");
                     continue;
                 }
             };
             if poisoned.get() || script_js_exhausted() {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
@@ -5877,7 +5956,9 @@ impl Engine {
                     } else {
                         ScriptOutcome::OverBudget
                     },
-                });
+                };
+                facts.ended(&inspector, &record, None, None);
+                log.push(record);
                 continue;
             }
             // Boa cannot be interrupted mid-script, so the budget can only
@@ -5885,12 +5966,14 @@ impl Engine {
             // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
             // and hung the capture. A script that big is not started.
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
-                log.push(ScriptRecord {
+                let record = ScriptRecord {
                     source: label,
                     bytes: text.len(),
                     elapsed_ms: 0,
                     outcome: ScriptOutcome::Skipped("too large to run inside the script budget"),
-                });
+                };
+                facts.ended(&inspector, &record, None, None);
+                log.push(record);
                 continue;
             }
             if is_module {
@@ -5943,7 +6026,13 @@ impl Engine {
                                     ),
                                 )
                                 .await;
-                                let Some(found) = found else { return };
+                                let Some(found) = found else {
+                                    // Cancelled while its imports were fetched:
+                                    // the graph never runs.
+                                    facts.cancelled(&inspector, &label);
+                                    cancel_rest(&mut jobs);
+                                    return;
+                                };
                                 modules_fetched.set(count);
                                 if found.poisoned {
                                     poisoned.set(true);
@@ -6022,6 +6111,7 @@ impl Engine {
                     elapsed_ms,
                     outcome,
                 };
+                facts.ended(&inspector, &record, Some(module_started), event);
                 inspector_glue::log_script(log, &inspector, record);
                 inspector_glue::drain_script_reports(bindings, &inspector, &mut carried, &label);
                 if let Some(event) = event {
@@ -6050,6 +6140,7 @@ impl Engine {
                 crate::console_log::alias(&name, &label);
                 Some(name)
             };
+            let began = std::time::Instant::now();
             let record = run(label, text.len(), &|label| {
                 let name = external.as_deref().unwrap_or(label);
                 // `document.currentScript` is this element while it runs.
@@ -6058,6 +6149,7 @@ impl Engine {
                 let _ = bindings.set_current_script(None);
                 result
             });
+            facts.ended(&inspector, &record, Some(began), None);
             let source = record.source.clone();
             inspector_glue::log_script(log, &inspector, record);
             // What its listeners threw (a synchronous `click()`, an `on*`
@@ -6195,6 +6287,7 @@ impl Engine {
             }
             info!(%source, "Running page lifecycle step");
             load_phase(source);
+            inspector.lifecycle(if index == 0 { "DOMContentLoaded" } else { "load" });
             let step_started = std::time::Instant::now();
             let record = run(source.to_string(), 0, &|_| step());
             info!(

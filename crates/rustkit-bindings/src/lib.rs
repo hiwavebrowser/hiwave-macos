@@ -167,6 +167,9 @@ pub struct InsertedScript {
     /// Where the page's script that inserted it was (its innermost frame
     /// in a named script), when the runtime could place it.
     pub inserted_by: Option<rustkit_js::ScriptPosition>,
+    /// When the page inserted it. The engine takes the queue later, at its
+    /// next drain; the gap is the script's `queued_ms` in the Inspector.
+    pub inserted_at: std::time::Instant,
 }
 
 impl ListenerId {
