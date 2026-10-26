@@ -1,10 +1,7 @@
-# Parity develop: 87eb73c8 (2026-10-19T09:45:21.831648)
+# Parity develop: ff6ad36a (2026-10-26T09:51:19.001221)
 
-vs previous develop run 81ef8b34 (2026-10-12T11:47:36.446561)
+vs previous develop run 87eb73c8 (2026-10-19T09:45:21.831648)
 
-avg 1.1066 -> 1.1075 (+0.0009); passed 26/26 -> 26/26
+avg 1.1075 -> 1.1075 (+0.0000); passed 26/26 -> 26/26
 
-| case | before | after | change |
-|---|---:|---:|---:|
-| about | 3.6717 | 3.6940 | +0.0223 UP |
-| new_tab | 1.1175 | 1.1184 | +0.0009 UP |
+All cases byte-flat.
