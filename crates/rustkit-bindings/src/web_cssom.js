@@ -9,9 +9,13 @@
 // engine's style pipeline reads on the next relayout: that is how CSS-in-JS
 // libraries (emotion, styled-components) inject styles.
 //
-// Stated limits: adoptedStyleSheets and constructed sheets are not applied by
-// the engine (it reads only <style>/<link>); `disabled` is recorded but not
-// honoured; a <link>'s sheet has no rules (the bindings never see its text);
+// Constructed sheets adopted by the document or a shadow root are published
+// to the engine (`__rkSetAdoptedStyles`) and applied on the next layout,
+// after that tree's `<style>` and `<link>` sheets. `disabled` is honoured
+// at publish time (an empty string). A later `replaceSync`, `insertRule`,
+// `deleteRule`, or declaration edit republishes every root that adopted
+// the sheet. A `<link>`'s sheet has no rules (the bindings never see its
+// text);
 // at-rules (@media, @font-face, ...) are CSSRule objects with their text only,
 // no nested cssRules; CSS.supports checks property names against the list the
 // engine applies and validates values only for display and position.
@@ -270,6 +274,7 @@
         if (!sheet) return;
         if (isStyle(sheet)) write(sheet, sheet._rules.map(sourceOf).join('\n'));
         fill(sheet._list, sheet._rules);
+        refreshAdopted(sheet);
     }
     function write(sheet, text) { sheet._text = text; sheet._owner.textContent = text; }
     function checkIndex(sheet, index, max) {
@@ -306,6 +311,7 @@
             if (!this._constructed) throw domError("Can't call replaceSync on non-constructed CSSStyleSheets.", 'NotAllowedError');
             this._rules = parseSheet(String(text), this, true);
             fill(this._list, this._rules);
+            refreshAdopted(this);
         },
         replace: function (text) {
             try { this.replaceSync(text); } catch (e) { return Promise.reject(e); }
@@ -354,20 +360,62 @@
         }
         return fill(Object.create(StyleSheetList.prototype), els.map(ownSheet).filter(Boolean));
     });
+    // Document and ShadowRoot share one list. web_shadow.js installs a
+    // placeholder on ShadowRoot first; this replaces it so both validate
+    // constructed sheets and publish their text.
     var adopted = new WeakMap();
-    getter(g.Document.prototype, 'adoptedStyleSheets', function () {
+    var adopters = new WeakMap();
+    function sheetCss(sheet) {
+        if (!sheet || sheet.disabled) return '';
+        return (sheet._rules || []).map(sourceOf).join('\n');
+    }
+    function publishAdopted(node) {
+        var list = adopted.get(node) || [];
+        var texts = [];
+        for (var i = 0; i < list.length; i++) texts.push(sheetCss(list[i]));
+        if (typeof g.__rkSetAdoptedStyles === 'function') g.__rkSetAdoptedStyles(node, JSON.stringify(texts));
+    }
+    function forgetAdopter(node, list) {
+        for (var i = 0; i < list.length; i++) {
+            var nodes = adopters.get(list[i]);
+            if (!nodes) continue;
+            var at = nodes.indexOf(node);
+            if (at >= 0) nodes.splice(at, 1);
+        }
+    }
+    function rememberAdopter(node, list) {
+        for (var i = 0; i < list.length; i++) {
+            var nodes = adopters.get(list[i]);
+            if (!nodes) { nodes = []; adopters.set(list[i], nodes); }
+            if (nodes.indexOf(node) < 0) nodes.push(node);
+        }
+    }
+    function setAdopted(node, v) {
+        if (v == null || typeof v[Symbol.iterator] !== 'function') throw new TypeError('adoptedStyleSheets must be an array');
+        var list = Array.from(v);
+        for (var i = 0; i < list.length; i++) {
+            var s = list[i];
+            if (!(s instanceof CSSStyleSheet)) throw new TypeError("Failed to set 'adoptedStyleSheets': element is not a CSSStyleSheet.");
+            if (!s._constructed) throw domError("Can't adopt non-constructed stylesheets.", 'NotAllowedError');
+        }
+        forgetAdopter(node, adopted.get(node) || []);
+        adopted.set(node, list);
+        rememberAdopter(node, list);
+        publishAdopted(node);
+    }
+    function refreshAdopted(sheet) {
+        if (!sheet || !sheet._constructed) return;
+        var nodes = adopters.get(sheet);
+        if (!nodes) return;
+        for (var i = 0; i < nodes.length; i++) publishAdopted(nodes[i]);
+    }
+    function adoptedGetter() {
         var a = adopted.get(this);
         if (!a) { a = []; adopted.set(this, a); }
         return a;
-    }, function (v) {
-        if (v == null || typeof v[Symbol.iterator] !== 'function') throw new TypeError('adoptedStyleSheets must be an array');
-        var list = Array.from(v);
-        list.forEach(function (s) {
-            if (!(s instanceof CSSStyleSheet)) throw new TypeError("Failed to set 'adoptedStyleSheets': element is not a CSSStyleSheet.");
-            if (!s._constructed) throw domError("Can't adopt non-constructed stylesheets.", 'NotAllowedError');
-        });
-        adopted.set(this, list);
-    });
+    }
+    getter(g.Document.prototype, 'adoptedStyleSheets', adoptedGetter, function (v) { setAdopted(this, v); });
+    if (g.ShadowRoot) getter(g.ShadowRoot.prototype, 'adoptedStyleSheets', adoptedGetter, function (v) { setAdopted(this, v); });
 
     // ---- CSS namespace: supports() and escape()
     // The properties rustkit-engine's apply_style_property has an arm for,
