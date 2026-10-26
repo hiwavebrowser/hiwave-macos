@@ -24,7 +24,7 @@
 //! second from the service thread.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -103,7 +103,9 @@ struct ConsoleRead {
 /// An open panel's view: when it records past what the panel has read, the
 /// service wakes the window once, and not again until the panel reads.
 struct Watch {
-    inspector: Arc<Inspector>,
+    /// Weak: a closed tab's ring is freed even if its panel never said it
+    /// closed (T6 R1 condition 3). A dead watch is dropped.
+    inspector: Weak<Inspector>,
     counters: Arc<DevtoolsCounters>,
     /// The `next_seq` of the panel's last read.
     read_to: u64,
@@ -153,34 +155,51 @@ impl Service {
         let logged = counters_logged();
         let mut next_log = Instant::now() + Duration::from_secs(1);
         loop {
-            let (reads, records) = {
+            let reads = {
                 let mut inbox = self.inbox();
-                while inbox.reads.is_empty() && !inbox.records {
-                    if !logged {
+                // Before sleeping, re-read every watched view's watermark
+                // under this mutex: a push whose `watched` load raced the
+                // panel opening sent no signal (T6 R1 condition 1). The
+                // 1 s timeout is the backstop for anything else missed.
+                while inbox.reads.is_empty() && !inbox.records && !unread(&inbox) {
+                    #[cfg(test)]
+                    before_wait();
+                    if inbox.watches.is_empty() && !logged {
+                        // No panel open: nothing to miss, no clock.
                         inbox = self.ready.wait(inbox).unwrap_or_else(|e| e.into_inner());
                         continue;
                     }
-                    let wait = next_log.saturating_duration_since(Instant::now());
+                    let wait = if logged {
+                        next_log.saturating_duration_since(Instant::now()).min(BACKSTOP)
+                    } else {
+                        BACKSTOP
+                    };
                     inbox = self.ready.wait_timeout(inbox, wait).unwrap_or_else(|e| e.into_inner()).0;
-                    if Instant::now() >= next_log {
+                    inbox.watches.retain(|w| w.inspector.strong_count() > 0);
+                    if logged && Instant::now() >= next_log {
                         break;
                     }
                 }
-                (std::mem::take(&mut inbox.reads), std::mem::take(&mut inbox.records))
+                inbox.records = false;
+                std::mem::take(&mut inbox.reads)
             };
             for read in reads {
-                let inspector = Arc::clone(&read.inspector);
+                let inspector = Arc::downgrade(&read.inspector);
                 let next_seq = answer(read);
                 let mut inbox = self.inbox();
-                if let Some(watch) = inbox.watches.iter_mut().find(|w| Arc::ptr_eq(&w.inspector, &inspector)) {
+                if let Some(watch) = inbox.watches.iter_mut().find(|w| Weak::ptr_eq(&w.inspector, &inspector)) {
                     watch.read_to = watch.read_to.max(next_seq);
                     watch.woken = false;
                 }
             }
-            if records {
+            {
+                // Every pass looks (cheap: one atomic load per open panel),
+                // so a wake found by the re-read or the backstop is posted.
                 let mut inbox = self.inbox();
+                inbox.watches.retain(|w| w.inspector.strong_count() > 0);
                 for watch in inbox.watches.iter_mut().filter(|w| !w.woken) {
-                    if watch.inspector.watermark() > watch.read_to {
+                    let Some(inspector) = watch.inspector.upgrade() else { continue };
+                    if inspector.watermark() > watch.read_to {
                         watch.woken = true;
                         watch.counters.window_wake();
                         crate::script_net::poke_live_turn();
@@ -201,6 +220,32 @@ impl Service {
     }
 }
 
+/// The longest the service sleeps while a panel is open, whatever it was
+/// told: a missed signal costs at most this (T6 R1 condition 1).
+const BACKSTOP: Duration = Duration::from_secs(1);
+
+/// A watched view recorded past what its panel read, and no wake is out.
+fn unread(inbox: &Inbox) -> bool {
+    inbox.watches.iter().filter(|w| !w.woken).any(|w| {
+        w.inspector
+            .upgrade()
+            .is_some_and(|inspector| inspector.watermark() > w.read_to)
+    })
+}
+
+/// Test hook run on the service thread after the watermark re-read and
+/// before the wait, with the inbox locked (so it must not signal).
+#[cfg(test)]
+pub(crate) static BEFORE_WAIT: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn before_wait() {
+    let hook = BEFORE_WAIT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// A watched view recorded. The Inspector calls this after its lock is
 /// released, and only while a panel watches the view.
 pub(crate) fn records_arrived() {
@@ -215,11 +260,12 @@ pub(crate) fn records_arrived() {
 pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: bool) {
     let service = service();
     let mut inbox = service.inbox();
-    inbox.watches.retain(|w| !Arc::ptr_eq(&w.inspector, inspector));
+    let weak = Arc::downgrade(inspector);
+    inbox.watches.retain(|w| !Weak::ptr_eq(&w.inspector, &weak) && w.inspector.strong_count() > 0);
     let watched = on && service.start(&mut inbox);
     if watched {
         inbox.watches.push(Watch {
-            inspector: Arc::clone(inspector),
+            inspector: weak,
             counters: Arc::clone(counters),
             read_to: 0,
             woken: false,
@@ -233,7 +279,9 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
 
 /// Answer `read`; returns the `next_seq` it answered up to.
 fn answer(read: ConsoleRead) -> u64 {
-    let console = devtools_console_entries(&read.inspector.snapshot_since(read.since));
+    let mut console = devtools_console_entries(&read.inspector.snapshot_since(read.since));
+    console.page_crashed = read.inspector.page_crashed();
+    guard(&read.inspector, &mut console);
     let next_seq = console.next_seq;
     let answer = DevtoolsAnswer::Console(console);
     let wake = devtools_wakes_window(&answer, false);
@@ -243,6 +291,19 @@ fn answer(read: ConsoleRead) -> u64 {
         crate::script_net::poke_live_turn();
     }
     next_seq
+}
+
+/// The second guard (T6 R1 condition 7). Redaction happens when a record is
+/// made (`inspector.rs`); this only re-applies the URL rule to what is
+/// served, so a record pushed past it (`Inspector::emit` takes a built
+/// event as it is) still leaves without a query string or fragment.
+fn guard(inspector: &Inspector, console: &mut crate::DevtoolsConsole) {
+    for entry in &mut console.entries {
+        entry.message = inspector.scrub_text(&entry.message);
+        for frame in &mut entry.stack {
+            frame.file = inspector.url_text(&frame.file);
+        }
+    }
 }
 
 /// The console lines `inspector` recorded since `since`, answered on the
@@ -272,4 +333,114 @@ pub fn ask_console(
         answer(read);
     }
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inspector::{ConsoleLevel, InspectorConfig, InspectorEvent, SourceLocation, TAB_RING_CAPACITY};
+
+    fn tab() -> Arc<Inspector> {
+        Inspector::new(&InspectorConfig { buffer: true, capacity: TAB_RING_CAPACITY, ..Default::default() })
+    }
+
+    fn until(budget: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done()
+    }
+
+    fn read(inspector: &Arc<Inspector>, since: u64) -> crate::DevtoolsConsole {
+        match ask_console(Arc::clone(inspector), since, None).blocking_recv() {
+            Ok(DevtoolsAnswer::Console(console)) => console,
+            other => panic!("no console answer: {other:?}"),
+        }
+    }
+
+    /// T6 R1 condition 1: a record pushed after the service last looked
+    /// and before it sleeps, with no signal (its push read `watched` as
+    /// it was being set), still wakes the window: the 1 s backstop.
+    #[test]
+    fn a_push_between_the_re_read_and_the_wait_still_wakes_the_panel() {
+        let inspector = tab();
+        let counters = Arc::new(DevtoolsCounters::default());
+        watch(&inspector, &counters, true);
+        inspector.console(ConsoleLevel::Log, "a", None);
+        assert!(until(Duration::from_secs(3), || counters.read().window_wakes == 1), "first line: no wake");
+        let late = Arc::clone(&inspector);
+        *BEFORE_WAIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(move || {
+            late.set_watched(false);
+            late.console(ConsoleLevel::Log, "b", None);
+            late.set_watched(true);
+        }));
+        // The panel reads; the service then re-reads, runs the hook, waits.
+        assert_eq!(read(&inspector, 0).next_seq, 1);
+        assert!(
+            until(Duration::from_secs(3), || counters.read().window_wakes == 2),
+            "the unsignalled line never woke the panel (wakes {:?}, watermark {})",
+            counters.read(),
+            inspector.watermark()
+        );
+        watch(&inspector, &counters, false);
+    }
+
+    /// T6 R1 condition 3: twenty tabs with an open panel each, full rings,
+    /// closed without the panel saying so. The service keeps no ring alive.
+    #[test]
+    fn closed_tabs_free_their_rings_with_the_panel_still_open() {
+        let counters = Arc::new(DevtoolsCounters::default());
+        let mut weak = Vec::new();
+        let mut ring_bytes = 0usize;
+        for _ in 0..20 {
+            let inspector = tab();
+            watch(&inspector, &counters, true);
+            for i in 0..TAB_RING_CAPACITY {
+                inspector.console(ConsoleLevel::Log, &format!("line {i}"), None);
+            }
+            let snapshot = inspector.snapshot_since(0);
+            assert_eq!(snapshot.records.len(), TAB_RING_CAPACITY);
+            ring_bytes += snapshot.records.iter().map(|r| serde_json::to_vec(r).map_or(0, |v| v.len())).sum::<usize>();
+            weak.push(Arc::downgrade(&inspector));
+        }
+        // Let the service look at every view at least once.
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = weak.iter().filter(|w| w.strong_count() > 0).count();
+        eprintln!(
+            "T6 condition 3: 20 tabs x {TAB_RING_CAPACITY} records; ring payload {} KiB total ({} KiB per tab, \
+             {} B per record struct); alive after close: {alive}",
+            ring_bytes / 1024,
+            ring_bytes / 1024 / 20,
+            std::mem::size_of::<crate::inspector::InspectorRecord>()
+        );
+        assert_eq!(alive, 0, "the devtools service kept closed tabs' rings alive");
+        assert!(until(Duration::from_secs(3), || {
+            service().inbox().watches.iter().all(|w| !weak.iter().any(|d| Weak::ptr_eq(d, &w.inspector)))
+        }));
+    }
+
+    /// T6 R1 condition 7: redaction is at record time; what the service
+    /// serves passes the URL rule again. `emit` takes a built event as it
+    /// is, so this one reaches the ring with its query and fragment.
+    #[test]
+    fn the_service_strips_a_query_that_got_past_record_time_redaction() {
+        let inspector = tab();
+        inspector.emit(InspectorEvent::Console {
+            level: ConsoleLevel::Error,
+            message: "see https://a.test/x?token=secret#frag".into(),
+            truncated: false,
+            location: Some(SourceLocation { url: "https://a.test/app.js?token=secret#frag".into(), line: 3, column: 9 }),
+            stack: None,
+            error_stack: None,
+        });
+        let console = read(&inspector, 0);
+        let served = serde_json::to_string(&console.entries).unwrap();
+        assert!(!served.contains("secret") && !served.contains("frag"), "{served}");
+        assert!(served.contains("https://a.test/app.js"), "{served}");
+        assert!(served.contains("https://a.test/x"), "{served}");
+    }
 }

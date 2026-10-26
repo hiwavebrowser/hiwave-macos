@@ -113,6 +113,10 @@ pub enum PageCmd {
     /// meanwhile).
     #[cfg(test)]
     Block(u64),
+    /// Test hook: panic the page thread while it holds the view's
+    /// Inspector lock (T6 R1 condition 2).
+    #[cfg(test)]
+    PanicHoldingInspector,
 }
 
 /// What the Inspector asks the page. Node ids are the document's raw
@@ -554,6 +558,12 @@ impl PageEndpoint {
             }
             #[cfg(test)]
             PageCmd::Block(ms) => std::thread::sleep(std::time::Duration::from_millis(ms)),
+            #[cfg(test)]
+            PageCmd::PanicHoldingInspector => {
+                if let Some(inspector) = self.engine.inspector(self.view) {
+                    inspector.panic_holding_lock();
+                }
+            }
         }
     }
 

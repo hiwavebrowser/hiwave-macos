@@ -197,6 +197,30 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     );
 }
 
+/// T6 R1 condition 6: a request's answer belongs to the document that made
+/// the request, even when it arrives after the next navigation started.
+#[test]
+fn a_network_answer_is_stamped_with_the_document_its_request_started_in() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/feed.json").unwrap();
+    inspector.navigation_started(Some(&url::Url::parse("https://a.test/one").unwrap()));
+    let answered = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    let failed = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    let dropped = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    inspector.navigation_started(Some(&url::Url::parse("https://a.test/two").unwrap()));
+    answered.response(200, None, None, None, false);
+    failed.fail(FailureStage::Connect, "reset");
+    drop(dropped);
+    inspector.emit(console("on two"));
+    let records = inspector.snapshot_since(0).records;
+    let doc_of = |kind: &str| -> Vec<u32> { records.iter().filter(|r| r.event.kind() == kind).map(|r| r.doc).collect() };
+    let request_doc = doc_of("request")[0];
+    assert_eq!(doc_of("request"), vec![request_doc; 3]);
+    assert_eq!(doc_of("response"), vec![request_doc], "{records:?}");
+    assert_eq!(doc_of("failure"), vec![request_doc; 2], "{records:?}");
+    assert_eq!(doc_of("console"), vec![request_doc + 1]);
+}
+
 #[test]
 fn a_request_guard_answers_once_and_a_dropped_one_fails() {
     let inspector = buffered(16);

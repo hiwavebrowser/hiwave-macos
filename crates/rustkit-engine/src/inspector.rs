@@ -54,7 +54,9 @@ use url::Url;
 pub const DEFAULT_CAPACITY: usize = 4096;
 /// Events each tab keeps from the moment it is made, so an Inspector panel
 /// opened late has the history (T6b; Atlas 10-24, Q1).
-pub const TAB_RING_CAPACITY: usize = 512;
+/// 2048: one yahoo load writes about 562 records with T3, so 512 lost its
+/// `navigation_start` (Atlas 10-26).
+pub const TAB_RING_CAPACITY: usize = 2048;
 /// Longest console message kept, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 1024;
 /// Longest error stack kept, in characters.
@@ -442,7 +444,10 @@ struct State {
     /// The last request id given out (per view, never reused).
     last_request_id: u64,
     /// Requests recorded and not yet answered.
-    open_requests: std::collections::HashSet<u64>,
+    /// Open request ids and the document each started in: the answer is
+    /// stamped with that one, not the document current when it arrives
+    /// (T6 R1 condition 6).
+    open_requests: std::collections::HashMap<u64, u32>,
 }
 
 /// A view's recorder and ring buffer. See the module docs.
@@ -485,8 +490,11 @@ impl Drop for Locked<'_> {
         let next_seq = guard.next_seq;
         drop(guard);
         if next_seq != self.seq_at_lock {
-            self.inspector.watermark.store(next_seq, Ordering::Release);
-            if self.inspector.watched.load(Ordering::Acquire) {
+            // SeqCst with `set_watched`: a push that reads `watched` false
+            // has its watermark seen by the devtools thread's re-read
+            // before it sleeps (T6 R1 condition 1).
+            self.inspector.watermark.store(next_seq, Ordering::SeqCst);
+            if self.inspector.watched.load(Ordering::SeqCst) {
                 crate::devtools_service::records_arrived();
             }
         }
@@ -518,7 +526,7 @@ impl Inspector {
                 aliases: Vec::new(),
                 inserters: Vec::new(),
                 last_request_id: 0,
-                open_requests: std::collections::HashSet::new(),
+                open_requests: std::collections::HashMap::new(),
             }),
         })
     }
@@ -544,12 +552,28 @@ impl Inspector {
     /// thread reads it to know whether there is anything new, without the
     /// lock (sinks run under it).
     pub fn watermark(&self) -> u64 {
-        self.watermark.load(Ordering::Acquire)
+        self.watermark.load(Ordering::SeqCst)
     }
 
     /// Whether the devtools thread is told about this view's records.
     pub(crate) fn set_watched(&self, on: bool) {
-        self.watched.store(on, Ordering::Release);
+        self.watched.store(on, Ordering::SeqCst);
+    }
+
+    /// The page thread panicked while it held this view's lock (a sink or
+    /// a push unwound). What was recorded is still read (`state` recovers
+    /// with `into_inner`); the panel says the page crashed (T6 R1
+    /// condition 2).
+    pub fn page_crashed(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
+    /// Test hook: panic on this thread while holding the lock, as a page
+    /// thread whose sink panicked would.
+    #[cfg(test)]
+    pub(crate) fn panic_holding_lock(&self) {
+        let _held = self.state.lock();
+        panic!("page thread panicked holding the Inspector lock (test)");
     }
 
     /// The panel closed: recording goes back to the view's default, and
@@ -638,9 +662,15 @@ impl Inspector {
     }
 
     fn push_locked(state: &mut State, event: InspectorEvent) {
+        let doc = state.doc;
+        Self::push_locked_in(state, doc, event);
+    }
+
+    /// Push `event` as a record of document `doc`.
+    fn push_locked_in(state: &mut State, doc: u32, event: InspectorEvent) {
         let record = InspectorRecord {
             seq: state.next_seq,
-            doc: state.doc,
+            doc,
             t_ms: round_ms(state.navigation_started.elapsed().as_secs_f64() * 1000.0),
             event,
         };
@@ -834,7 +864,8 @@ impl Inspector {
         let mut state = self.state();
         state.last_request_id += 1;
         let id = state.last_request_id;
-        state.open_requests.insert(id);
+        let doc = state.doc;
+        state.open_requests.insert(id, doc);
         Self::push_locked(&mut state, InspectorEvent::Request { id, url, method, resource_type, initiator });
         drop(state);
         Some(RequestGuard {
@@ -855,9 +886,10 @@ impl Inspector {
 
     fn finish_request(&self, id: u64, event: InspectorEvent) {
         let mut state = self.state();
-        let was_open = state.open_requests.remove(&id);
-        debug_assert!(was_open, "request {id} answered twice, or never recorded");
-        Self::push_locked(&mut state, event);
+        let started_in = state.open_requests.remove(&id);
+        debug_assert!(started_in.is_some(), "request {id} answered twice, or never recorded");
+        let doc = started_in.unwrap_or(state.doc);
+        Self::push_locked_in(&mut state, doc, event);
     }
 
     /// The document's redirects, as `navigation_redirect` events.

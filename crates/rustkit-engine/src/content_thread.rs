@@ -644,6 +644,36 @@ mod tests {
     }
 
     #[test]
+    fn a_page_thread_panic_holding_the_inspector_lock_does_not_blank_the_panel() {
+        // T6 R1 condition 2: the page thread panics while it holds the
+        // view's Inspector lock, with the panel open. The panel still reads
+        // what was recorded, and is told the page crashed.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('before'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let inspector = page.devtools_inspector().expect("booted");
+        assert!(!inspector.page_crashed());
+        page.enqueue(PageCmd::PanicHoldingInspector);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !inspector.page_crashed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(inspector.page_crashed(), "the page thread never panicked");
+        let console = read_console(&page, 0, Duration::from_secs(2)).expect("no console answer after the crash");
+        assert!(console.page_crashed, "the answer does not say the page crashed");
+        assert!(
+            console.entries.iter().any(|e| e.message == "<string len=6>"),
+            "the panel lost what was recorded before the crash: {:?}",
+            console.entries
+        );
+    }
+
+    #[test]
     fn an_open_panel_is_woken_when_the_view_records_and_not_otherwise() {
         // T6b: no CONSOLE_POLL. With the panel watching, an idle page posts
         // no window wakes; a console line posts one, and the next is not

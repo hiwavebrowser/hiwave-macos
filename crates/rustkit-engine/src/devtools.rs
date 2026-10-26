@@ -177,6 +177,9 @@ pub struct DevtoolsConsole {
     /// The document laid out for the first time or finished loading since
     /// `since` (or a new one committed): the panel's tree is stale.
     pub tree_stale: bool,
+    /// The page thread panicked holding the view's Inspector lock; the
+    /// lines are what it recorded before (T6 R1 condition 2).
+    pub page_crashed: bool,
 }
 
 /// `tag#id.class.class`.
@@ -461,6 +464,7 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
                 InspectorEvent::NavigationCommit { .. } | InspectorEvent::FirstLayout | InspectorEvent::LoadFinished { .. }
             )
         }),
+        page_crashed: false,
     }
 }
 

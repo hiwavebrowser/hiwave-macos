@@ -82,6 +82,8 @@ pub struct Devtools {
     selected: Option<usize>,
     /// The next Inspector record the console has not shown.
     console_seq: u64,
+    /// "page crashed" is on the console (T6 R1 condition 2).
+    crash_shown: bool,
     asked: Vec<Asked>,
 }
 
@@ -103,6 +105,7 @@ impl Devtools {
     pub fn open(&mut self, view: &RustKitView, _panel: &WebView) {
         self.open = true;
         self.console_seq = 0;
+        self.crash_shown = false;
         self.ask(view, Want::Ack, DevtoolsQuery::Attach(true));
         // The element first: its breadcrumb is what the tree keeps open.
         if let Some(n) = self.selected {
@@ -241,7 +244,14 @@ impl Devtools {
                 }
             }
         }
-        let watermark = view.devtools_inspector().map(|inspector| inspector.watermark());
+        let inspector = view.devtools_inspector();
+        // A page thread that panicked holding the Inspector lock records
+        // nothing more; its history still reads, and the panel says so.
+        if !self.crash_shown && inspector.as_ref().is_some_and(|i| i.page_crashed()) {
+            self.crash_shown = true;
+            run(panel, "window.hiwaveInspector && window.hiwaveInspector.addConsoleResult('page crashed', true)");
+        }
+        let watermark = inspector.map(|inspector| inspector.watermark());
         if console_due(watermark, self.console_seq, self.waiting_for(Want::Console)) {
             let since = self.console_seq;
             self.ask(view, Want::Console, DevtoolsQuery::Console { since });
