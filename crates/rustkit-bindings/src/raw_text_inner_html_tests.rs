@@ -58,6 +58,60 @@ fn a_textareas_inner_html_decodes_references_but_makes_no_elements() {
     assert_eq!(out, "1|<b>1 < 2</b>");
 }
 
+// In foreign content `title`, `script` and `style` are ordinary SVG
+// elements: the fragment parser keeps its data state, so tags still parse.
+#[test]
+fn an_svg_titles_inner_html_still_parses_elements() {
+    let b = bound();
+    let out = ev(
+        &b,
+        "var t = document.createElementNS('http://www.w3.org/2000/svg', 'title'); \
+         t.innerHTML = '<tspan>a</tspan>'; \
+         t.childNodes.length + '|' + t.firstChild.nodeType",
+    );
+    assert_eq!(out, "1|1");
+}
+
+// The parser gives every element the HTML namespace, so a `title` that came
+// from markup inside `<svg>` is told apart by its ancestors.
+#[test]
+fn a_parsed_svg_titles_inner_html_still_parses_elements() {
+    let b = bound();
+    let out = ev(
+        &b,
+        "document.body.innerHTML = '<svg><title>t</title></svg>'; \
+         var t = document.body.firstChild.firstChild; \
+         t.innerHTML = '<tspan>a</tspan>'; \
+         t.childNodes.length + '|' + t.firstChild.nodeType",
+    );
+    assert_eq!(out, "1|1");
+}
+
+// `foreignObject` is an HTML integration point: a textarea under it is HTML.
+#[test]
+fn a_textarea_inside_foreign_object_is_still_rcdata() {
+    let b = bound();
+    let out = ev(
+        &b,
+        "document.body.innerHTML = '<svg><foreignObject><textarea></textarea></foreignObject></svg>'; \
+         var t = document.body.firstChild.firstChild.firstChild; \
+         t.innerHTML = '<b>x</b>'; \
+         t.childNodes.length + '|' + t.firstChild.nodeType + '|' + t.textContent",
+    );
+    assert_eq!(out, "1|3|<b>x</b>");
+}
+
+#[test]
+fn a_plaintexts_inner_html_is_one_text_node() {
+    let b = bound();
+    let out = ev(
+        &b,
+        "var p = document.createElement('plaintext'); p.innerHTML = '<b>1 &lt; 2</b>'; \
+         p.childNodes.length + '|' + p.textContent",
+    );
+    assert_eq!(out, "1|<b>1 &lt; 2</b>");
+}
+
 #[test]
 fn a_divs_inner_html_still_parses_elements() {
     let b = bound();
