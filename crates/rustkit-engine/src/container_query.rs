@@ -21,7 +21,12 @@
 //! since only layout knows where it ends), an auto-width box that starts a
 //! formatting context is narrowed by it, and so is one the walk cannot see
 //! (`flow-root`, `contain`, `overflow-y`), so any width, `min-width` or
-//! `max-width` there other than a length is unknown too.
+//! `max-width` there other than a length is unknown too. A float counts
+//! whether it is an element or a floated `::before`, `::after` or
+//! `::first-letter`, and inside an inline box or `display: contents`
+//! element, which never start a context (#782 HOLD 5). An absolute or
+//! fixed `border-box` container with percentage padding is unknown: the
+//! padding resolves against its containing block, not its parent.
 //!
 //! Everything else is unknown, and a query on an unknown container does not
 //! hold, which is how the engine treated every `@container` rule before:
@@ -75,6 +80,8 @@ struct Frame {
 struct State {
     viewport: (f32, f32),
     frames: Vec<Frame>,
+    /// Some rule floats a `::first-letter` (see `first_letter_floats`).
+    first_letter_floats: bool,
 }
 
 thread_local! {
@@ -89,9 +96,15 @@ pub(crate) struct DocumentScope {
 impl DocumentScope {
     /// Installs the walk's state when there is a viewport and some rule
     /// carries a container condition; otherwise every such rule stays out.
-    pub(crate) fn install(viewport: Option<(f32, f32)>, any_container_rule: bool) -> Self {
+    /// `first_letter_floats`: some rule floats a `::first-letter`.
+    pub(crate) fn install(
+        viewport: Option<(f32, f32)>,
+        any_container_rule: bool,
+        first_letter_floats: bool,
+    ) -> Self {
         let state = viewport.filter(|_| any_container_rule).map(|(w, h)| State {
             viewport: (w, h),
+            first_letter_floats,
             frames: vec![Frame {
                 width: Some(w),
                 container: None,
@@ -149,18 +162,77 @@ impl ElementScope {
             // it (text, padding, `::before`, `max-height`, negative margins
             // all move it), so there is no exception for that (#782 HOLD 4).
             if style.float != Float::None && style.display != Display::None {
-                for f in state.frames.iter_mut().rev() {
-                    f.floats = true;
-                    if f.new_context {
-                        break;
-                    }
-                }
+                mark_float(&mut state.frames);
             }
             state.frames.push(frame);
             true
         });
         Self { pushed }
     }
+}
+
+/// Records a float in the innermost frame's formatting context, up to the
+/// context's root.
+fn mark_float(frames: &mut [Frame]) {
+    for f in frames.iter_mut().rev() {
+        f.floats = true;
+        if f.new_context {
+            break;
+        }
+    }
+}
+
+/// Whether the walk is running (a viewport and some `@container` rule), so
+/// that callers can skip work done only for it.
+pub(crate) fn active() -> bool {
+    STATE.with(|s| s.borrow().is_some())
+}
+
+/// The walk is running and some rule floats a `::first-letter`, so an
+/// element's `::first-letter` rules are worth matching for it.
+pub(crate) fn wants_first_letter() -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.first_letter_floats))
+}
+
+/// A rule that may float a `::first-letter` (or `:first-letter`): one of
+/// its members names it and it declares a `float` other than `none`.
+pub(crate) fn floats_first_letter(rule: &rustkit_css::Rule) -> bool {
+    rule.selector.contains(":first-letter")
+        && rule.declarations.iter().any(|d| {
+            d.property == "float"
+                && matches!(&d.value, rustkit_css::PropertyValue::Specified(v)
+                    if !v.trim().eq_ignore_ascii_case("none"))
+        })
+}
+
+/// A matched `::first-letter` rule floats the element's first letter: it is
+/// recorded like a floated `::before` (#782 HOLD 5, q6). The engine does
+/// not lay out `::first-letter`; whether the element has a first letter at
+/// all is not checked (a false float only makes more widths unknown).
+pub(crate) fn note_first_letter_float() {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            mark_float(&mut state.frames);
+        }
+    });
+}
+
+/// A floated pseudo-element of the element whose frame is innermost
+/// (#782 HOLD 5, q4-q6): `::before`, `::after` and `::first-letter` push no
+/// frame, so their `float` is recorded here, from the element's own frame
+/// up to its context's root, as an element child's would be. For `::before`
+/// (and `::first-letter`, treated alike) this narrows the element's later
+/// children; for `::after`, called after them, the element's later
+/// siblings when the element does not start its own context.
+pub(crate) fn note_pseudo(style: &ComputedStyle) {
+    if style.float == Float::None || style.display == Display::None {
+        return;
+    }
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            mark_float(&mut state.frames);
+        }
+    });
 }
 
 impl Drop for ElementScope {
@@ -253,12 +325,17 @@ fn frame_for(
 }
 
 /// The box starts a block formatting context that floats do not leave (a
-/// subset; missing some only makes more widths unknown).
+/// subset; missing some only makes more widths unknown). `overflow` and
+/// `container-type` do that only for a block-level or atomic box: on a
+/// non-atomic inline box or a `display: contents` element a float inside
+/// still belongs to the outer context (#782 HOLD 5, q1-q3). Floats and
+/// absolute boxes are blockified, so they always do.
 fn starts_context(style: &ComputedStyle) -> bool {
-    style.container_type != ContainerType::Normal
-        || style.float != Float::None
-        || matches!(style.position, Position::Absolute | Position::Fixed)
-        || !matches!(style.overflow_x, Overflow::Visible | Overflow::Clip)
+    let boxed = style.display != Display::Inline && !style.display_contents_declared;
+    out_of_flow(style)
+        || (boxed
+            && (style.container_type != ContainerType::Normal
+                || !matches!(style.overflow_x, Overflow::Visible | Overflow::Clip)))
 }
 
 fn font_px(style: &ComputedStyle) -> f32 {
@@ -388,6 +465,18 @@ fn content_width(
         && [&style.width, &style.min_width, &style.max_width]
             .iter()
             .any(|l| !matches!(l, Length::Auto) && !absolute_length(l))
+    {
+        return None;
+    }
+    // An absolute or fixed box's percentage padding resolves against its
+    // containing block, which only layout knows, not against the parent:
+    // with `border-box` its content width is then unknown (#782 HOLD 5, q7).
+    // A float's containing block is its parent, so it is fine.
+    if matches!(style.position, Position::Absolute | Position::Fixed)
+        && style.box_sizing == BoxSizing::BorderBox
+        && [&style.padding_left, &style.padding_right]
+            .iter()
+            .any(|l| !absolute_length(l))
     {
         return None;
     }

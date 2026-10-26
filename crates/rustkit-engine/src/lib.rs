@@ -8389,6 +8389,9 @@ impl Engine {
         let _container_queries = container_query::DocumentScope::install(
             viewport,
             stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty())),
+            stylesheets
+                .iter()
+                .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -9656,6 +9659,20 @@ impl Engine {
                         parent_style,
                         Some(&tag_lower),
                     );
+                // A floated `::first-letter` narrows later boxes like a
+                // floated `::before` (#782 HOLD 5); only the walk asks.
+                if container_query::wants_first_letter()
+                    && self.first_letter_floats(
+                        &tag_lower,
+                        attributes,
+                        stylesheets,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
+                    container_query::note_first_letter_float();
+                }
 
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
@@ -9670,6 +9687,7 @@ impl Engine {
                         Some(&layout_box.style),
                     )
                 })
+                .inspect(container_query::note_pseudo)
                 .and_then(Self::pseudo_element_box)
                 {
                     layout_box.children.push(before_box);
@@ -9882,6 +9900,7 @@ impl Engine {
                         Some(&layout_box.style),
                     )
                 })
+                .inspect(container_query::note_pseudo)
                 .and_then(Self::pseudo_element_box)
                 {
                     layout_box.children.push(after_box);
@@ -10115,6 +10134,46 @@ impl Engine {
             None,
         )?;
         Self::pseudo_element_box(style)
+    }
+
+    /// Whether a rule that floats `::first-letter` (`floats_first_letter`)
+    /// matches this element and holds where it is (`@container`). Fail-safe
+    /// for the `@container` walk: a later `float: none` is not weighed.
+    #[allow(clippy::too_many_arguments)]
+    fn first_letter_floats(
+        &self,
+        tag_name: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        ancestors: &[Ancestor],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+    ) -> bool {
+        stylesheets
+            .iter()
+            .flat_map(|s| s.rules.iter())
+            .filter(|r| container_query::floats_first_letter(r))
+            .any(|rule| {
+                let Some((base, bare, members)) =
+                    pseudo_list_base(&rule.selector, "::first-letter", ":first-letter")
+                else {
+                    return false;
+                };
+                (bare || self.rule_may_match(&base, tag_name, attributes))
+                    && SelectorMatcher
+                        .matched_specificity(
+                            &SelectorMatcher.prepared_selector(&base),
+                            &members,
+                            members[0].1,
+                            tag_name,
+                            attributes,
+                            ancestors,
+                            siblings_before,
+                            sib,
+                        )
+                        .is_some()
+                    && container_query::applies(&rule.container)
+            })
     }
 
     /// The cascade half of `create_pseudo_element`: the pseudo-element's
