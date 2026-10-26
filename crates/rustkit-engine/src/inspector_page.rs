@@ -189,33 +189,6 @@ pub fn inspector_select_script(node_id: usize) -> String {
 }
 
 impl Engine {
-    /// Run the document's inline classic scripts in order, as a host does
-    /// for a built-in page it loaded with [`Engine::load_html`] (which runs
-    /// none). External, module and data (`application/json`) scripts are
-    /// skipped. Returns how many ran; a script that throws is an error and
-    /// stops the rest. JavaScript must be enabled on the engine.
-    pub fn run_inline_scripts(&mut self, id: EngineViewId) -> Result<usize, EngineError> {
-        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let document = view
-            .document
-            .clone()
-            .ok_or_else(|| EngineError::RenderError("No document available".into()))?;
-        let scripts: Vec<String> = document
-            .get_elements_by_tag_name("script")
-            .iter()
-            .filter(|s| s.get_attribute("src").is_none())
-            .filter(|s| {
-                let t = s.get_attribute("type").unwrap_or("").trim().to_ascii_lowercase();
-                matches!(t.as_str(), "" | "text/javascript" | "application/javascript")
-            })
-            .map(|s| s.text_content())
-            .collect();
-        for script in &scripts {
-            self.execute_script(id, script)?;
-        }
-        Ok(scripts.len())
-    }
-
     /// Click to inspect, without the window: the element of `target` under
     /// viewport point (`x`, `y`) in CSS px, found by the diagnostics point
     /// lookup (`elementFromPoint` rules: text selects its element, a point

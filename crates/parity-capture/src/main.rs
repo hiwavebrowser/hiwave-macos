@@ -174,9 +174,10 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     report_text: Option<String>,
 
-    /// Run the page's inline classic scripts after loading an --html-file
-    /// (fixture mode otherwise runs none), as a host does for a built-in
-    /// page it loads directly.
+    /// Turn script on for an --html-file load, so the load runs the page's
+    /// inline classic scripts (fixture mode otherwise runs none), as for a
+    /// built-in page a host loads directly. A script that throws fails the
+    /// capture.
     #[arg(long)]
     run_inline_scripts: bool,
 
@@ -720,9 +721,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
         }
+        // With script on, `load_html` ran the inline scripts.
         if args.run_inline_scripts {
-            if let Err(e) = engine.run_inline_scripts(view_id) {
-                return result.failed("error", format!("Inline script failed: {:?}", e));
+            let log = engine.script_log(view_id).unwrap_or_default();
+            if let Some(failed) = inline_script_failure(&log) {
+                return result.failed(
+                    "error",
+                    format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
+                );
             }
         }
     }
@@ -1518,6 +1524,15 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
     Some(stats)
 }
 
+/// The first script of an `--html-file` load that failed: it threw, the
+/// engine failed, or the budget stopped it. A script the HTML load does not
+/// run (an external `<script src>`, a module, `nomodule`) is not a failure.
+fn inline_script_failure(log: &[ScriptRecord]) -> Option<&ScriptRecord> {
+    log.iter().find(|r| {
+        matches!(r.outcome, ScriptOutcome::Threw(_) | ScriptOutcome::EngineFailed(_) | ScriptOutcome::OverBudget)
+    })
+}
+
 /// The engine configuration a capture runs with: the parity defaults, plus
 /// whatever the command line overrides.
 fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
@@ -1540,6 +1555,30 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// #799 review (3): `--run-inline-scripts` fails a capture only on a
+    /// script that threw, failed the engine or ran out of budget. An external
+    /// `<script src>` or a module the HTML load skips is not one.
+    #[test]
+    fn run_inline_scripts_fails_only_on_scripts_that_failed() {
+        let log_of = |html: &str| {
+            let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+            let view = engine
+                .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+                .expect("view");
+            engine.load_html(view, html).expect("load_html");
+            engine.script_log(view).unwrap_or_default().to_vec()
+        };
+        let skipped = log_of(
+            "<html><body><script src=\"/app.js\"></script>\
+<script type=\"module\">window.m = 1;</script><script>var ok = 1;</script></body></html>",
+        );
+        assert!(skipped.iter().any(|r| matches!(r.outcome, ScriptOutcome::Skipped(_))), "{skipped:?}");
+        assert!(inline_script_failure(&skipped).is_none(), "{skipped:?}");
+        let threw = log_of("<html><body><script src=\"/app.js\"></script><script>throw new Error('x');</script></body></html>");
+        let failed = inline_script_failure(&threw).expect("a thrown script fails the capture");
+        assert_eq!(failed.source, "inline#2", "{threw:?}");
+    }
 
     fn parsed(extra: &[&str]) -> Args {
         let mut argv = vec!["parity-capture", "--url", "https://example.test/"];
