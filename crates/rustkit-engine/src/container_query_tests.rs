@@ -238,3 +238,51 @@ fn container_query_is_false_after_any_float_and_for_aspect_ratio_or_dialog() {
         .collect();
     assert_eq!(fired, ["k1=10"]);
 }
+
+/// #782 R1 HOLD @ 73558160 (review 5651507176): three more ways the walk
+/// thought a container wider than Chromium lays it out. Each row is its own
+/// block formatting context (`.r`). Controls first: k1 and k2 are plain
+/// 600px containers asked for 400px and 590px (10 in Chromium). Then 0 in
+/// Chromium (its container width in brackets):
+/// k3 (q1) a float inside an `overflow: hidden` inline span (300), k4 (q2)
+/// inside a `container-type` inline span (300), k5 (q3) inside a
+/// `display: contents; overflow: hidden` div (300): none of these start a
+/// formatting context, so the float narrows the later container. k6 (q4) a
+/// floated `::before` of the container's parent (300), k7 (q5) a floated
+/// `::after` of an earlier sibling (300), k8 (q6) a floated `::first-letter`
+/// of an earlier sibling (556.7, asked for 590px). k9 (q7) an absolute
+/// border-box container, 500px with `padding-left: 10%` of the 800px
+/// viewport, not of the 600px row (420, asked for 430px).
+const HOLD5_PAGE: &str = r#"<!DOCTYPE html><html><head><style>
+body { margin: 0 } .r { overflow: hidden; width: 600px }
+.fl { float: left; width: 300px; height: 50px }
+.pb::before { content: ""; float: left; width: 300px; height: 50px }
+.pa::after { content: ""; float: left; width: 300px; height: 50px }
+.fx { height: 20px; font: 16px/20px sans-serif }
+.fx::first-letter { float: left; font-size: 60px; line-height: 60px }
+@container (min-width: 400px) { .a { height: 10px } }
+@container (min-width: 590px) { .b { height: 10px } }
+@container (min-width: 430px) { .c { height: 10px } }
+</style></head><body>
+<div class="r"><div style="container-type:inline-size"><div id="k1" class="a"></div></div></div>
+<div class="r"><div style="container-type:inline-size"><div id="k2" class="b"></div></div></div>
+<div class="r"><span style="overflow:hidden"><b class="fl"></b></span><div style="container-type:inline-size"><div id="k3" class="a"></div></div></div>
+<div class="r"><span style="container-type:inline-size"><b class="fl"></b></span><div style="container-type:inline-size"><div id="k4" class="a"></div></div></div>
+<div class="r"><div style="display:contents;overflow:hidden"><div class="fl"></div></div><div style="container-type:inline-size"><div id="k5" class="a"></div></div></div>
+<div class="r"><div class="pb"><div style="container-type:inline-size"><div id="k6" class="a"></div></div></div></div>
+<div class="r"><div class="pa"></div><div style="container-type:inline-size"><div id="k7" class="a"></div></div></div>
+<div class="r"><div class="fx">Hello</div><div style="container-type:inline-size"><div id="k8" class="b"></div></div></div>
+<div class="r"><div style="position:absolute;box-sizing:border-box;width:500px;padding-left:10%;container-type:inline-size"><div id="k9" class="c"></div></div></div>
+</body></html>"#;
+
+#[test]
+fn container_query_sees_floats_in_inline_boxes_and_pseudos_and_abs_percent_padding() {
+    let heights = offset_heights(HOLD5_PAGE, 800, 600, 9);
+    let fired: Vec<String> = heights
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h != "0")
+        .map(|(i, h)| format!("k{}={h}", i + 1))
+        .collect();
+    assert_eq!(fired, ["k1=10", "k2=10"]);
+}
