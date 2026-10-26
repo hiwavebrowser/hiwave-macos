@@ -643,6 +643,28 @@ mod tests {
     }
 
     #[test]
+    fn a_205_navigation_leaves_the_page_as_it_is_and_reports_no_failure() {
+        // #730 follow-up (e) / #780: HTML aborts 204 *and* 205 the same way.
+        // Only 204 was pinned; a wrong status match would wipe the shown
+        // document or report Failed on Reset Content.
+        let port = serve_empty("HTTP/1.1 205 Reset Content");
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/ping")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 0, "a 205 was reported as a failure: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the window was never told the 205 navigation ended: {events:?}"
+        );
+        let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
+        let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
+        assert!(text.contains("shown"), "the 205 replaced the document on screen: {text}");
+    }
+
+    #[test]
     fn a_failed_navigation_is_reported_failed_once() {
         // #730 follow-up (e): an empty error response failed in the engine
         // (one Failed) and again in end_uncommitted_nav (a second).
