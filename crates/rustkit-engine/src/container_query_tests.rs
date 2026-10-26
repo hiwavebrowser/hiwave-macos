@@ -319,3 +319,23 @@ fn container_query_r2_unknown_parts_min_max_height_and_none_limits() {
         ["k9=10", "k11=10", "k17=10", "k18=10", "k21=10", "k22=10", "k24=10"]
     );
 }
+
+const GRAMMAR_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-10-26/css_container_query_grammar.html");
+
+/// #782 R1 (review 5654936187): invalid not/and/or grammar never applies,
+/// and min()/max() read every argument. Expected rows are Chromium 148's.
+#[test]
+fn container_query_grammar_drops_invalid_not_and_or() {
+    let heights = offset_heights(GRAMMAR_PAGE, 800, 600, 26);
+    let fired: Vec<usize> = heights
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h != "0")
+        .map(|(i, _)| i + 1)
+        .collect();
+    assert_eq!(
+        fired,
+        [7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 25, 26]
+    );
+}

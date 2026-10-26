@@ -647,6 +647,51 @@ mod tests {
         super::container_condition_matches(cond, width, height, U)
     }
 
+    /// #782 R1 (review 5654936187): `not` takes one parenthesized query,
+    /// each `and`/`or` leg is one parenthesized query, and `not(`/`and(`
+    /// are function tokens, not keywords. Chromium 148 drops each of the
+    /// six invalid rules below (they are absent from `cssRules`) except
+    /// `not(...)`, which it keeps as an unknown general-enclosed part; none
+    /// applies. On a 300px container each would be true if misparsed.
+    /// Rows match docs/diagnostics/2026-10-26/css_container_query_grammar.html.
+    #[test]
+    fn invalid_not_and_or_grammar_never_applies() {
+        assert!(!c("not (width > 400px) or (width > 500px)", 300.0, None));
+        assert!(!c("(width > 100px) and not (width > 400px)", 300.0, None));
+        assert!(!c("(width > 100px) or not (width > 400px)", 300.0, None));
+        assert!(!c("not not (width > 100px)", 300.0, None));
+        assert!(!c("not(width > 400px)", 300.0, None));
+        assert!(!c("(width > 100px) and(width < 400px)", 300.0, None));
+        assert!(!c("(width > 100px) or (width < 400px) and (width > 200px)", 300.0, None));
+        // Valid controls.
+        assert!(c("not (width > 400px)", 300.0, None));
+        assert!(c("(width > 100px) and (width < 400px)", 300.0, None));
+        assert!(c("(width > 400px) or (width > 100px)", 300.0, None));
+        assert!(c("((width > 100px) and (width < 400px))", 300.0, None));
+        assert!(c("(not (width > 400px))", 300.0, None));
+        assert!(c("(width > 100px) and ((width < 400px) or (width > 900px))", 300.0, None));
+        assert!(c("(width > 100px) and (not (width > 400px))", 300.0, None));
+        assert!(c("(width > 100px) and (width < 400px) and (width > 200px)", 300.0, None));
+        assert!(c("not ((width > 400px) or (width > 500px))", 300.0, None));
+        assert!(c("not   (width > 400px)", 300.0, None));
+        assert!(c("NOT (width > 400px)", 300.0, None));
+        assert!(c("(width > 100px) AND (width < 400px)", 300.0, None));
+        // `)and` is fine: the keyword only needs whitespace after it.
+        assert!(c("(width > 100px)and (width < 400px)", 300.0, None));
+    }
+
+    /// min()/max() take any number of arguments; the third one counts.
+    #[test]
+    fn container_min_max_read_every_argument() {
+        assert!(!c("(max-width: min(500px, 400px, 100px))", 300.0, None));
+        assert!(!c("(min-width: max(100px, 200px, 400px))", 300.0, None));
+        assert!(c("(max-width: min(500px, 400px))", 300.0, None));
+        assert!(c("(min-width: max(100px, 200px))", 300.0, None));
+        assert!(c("(min-width: clamp(100px, 200px, 400px))", 300.0, None));
+        assert!(c("(max-width: min(500px, 40em, 20rem))", 300.0, None));
+        assert!(!c("(max-width: min(500px, 40em, 10rem))", 300.0, None));
+    }
+
     #[test]
     fn container_conditions_read_the_container_size() {
         assert!(c("(width >= 200px)", 300.0, None));
