@@ -7311,7 +7311,12 @@ impl Engine {
         // The document's inline scripts, then `DOMContentLoaded` and `load`,
         // as a URL load runs them. Script failures are the page's: they go
         // to the script log, not to this load's result.
-        self.run_html_load_scripts(id);
+        // A navigation away while they run: the rest of them and the
+        // lifecycle events do not run, and this load fails as cancelled.
+        if self.run_html_load_scripts(id, &watch) {
+            self.load_cancelled(id, watch.nav_id);
+            return Ok(());
+        }
         self.flush_script_dom_writes(id, None)?;
 
         // Finish navigation
@@ -7331,7 +7336,14 @@ impl Engine {
             });
         }
 
-        view.inspector.emit(InspectorEvent::LoadFinished { url: None, scripts_over_budget: 0 });
+        view.inspector.emit(InspectorEvent::LoadFinished {
+            url: None,
+            scripts_over_budget: view
+                .script_log
+                .iter()
+                .filter(|r| r.outcome == ScriptOutcome::OverBudget)
+                .count() as u32,
+        });
 
         let _ = self.event_tx.send(EngineEvent::PageLoaded {
             view_id: id,
@@ -7349,7 +7361,7 @@ impl Engine {
     /// HTML load has no network, so an external or module script is logged
     /// as skipped, and the page's timers are left to the live loop. Does
     /// nothing when JavaScript is off.
-    fn run_html_load_scripts(&mut self, id: EngineViewId) {
+    fn run_html_load_scripts(&mut self, id: EngineViewId, watch: &NavWatch) -> bool {
         let (bindings, mut log, document, inspector) = match self.views.get_mut(&id) {
             Some(view) => match (view.bindings.take(), view.document.clone()) {
                 (Some(bindings), Some(document)) => (
@@ -7360,10 +7372,10 @@ impl Engine {
                 ),
                 (bindings, _) => {
                     view.bindings = bindings;
-                    return;
+                    return false;
                 }
             },
-            None => return,
+            None => return false,
         };
         let loop_limit = self.config.script_loop_iteration_limit;
         bindings.set_loop_iteration_limit(loop_limit);
@@ -7425,7 +7437,17 @@ impl Engine {
 
         let _ = bindings.set_ready_state("loading");
         let mut carried: Vec<String> = Vec::new();
-        for (label, node_id, body) in scripts {
+        let mut cancelled = false;
+        for (index, (label, node_id, body)) in scripts.into_iter().enumerate() {
+            #[cfg(test)]
+            load_phase(&format!("html-script:{index}"));
+            #[cfg(not(test))]
+            let _ = index;
+            if nav_cancel::cancelled(Some(watch)) {
+                debug!(source = %label, "Navigation cancelled: the rest of its scripts do not run");
+                cancelled = true;
+                break;
+            }
             let text = match body {
                 Ok(text) => text,
                 Err(outcome) => {
@@ -7474,7 +7496,11 @@ impl Engine {
             }),
         ];
         for (source, step) in steps {
-            if poisoned.get() {
+            if poisoned.get() || cancelled {
+                break;
+            }
+            if nav_cancel::cancelled(Some(watch)) {
+                cancelled = true;
                 break;
             }
             // What the scripts wrote is laid out before the step, so its
@@ -7500,6 +7526,7 @@ impl Engine {
             view.script_log = log;
             view.bindings = Some(bindings);
         }
+        cancelled
     }
 
     /// Record why the next relayout of `id` happens. Causes noted before one
