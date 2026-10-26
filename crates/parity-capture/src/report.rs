@@ -686,11 +686,19 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
 /// note's order.
 pub fn apply_events(report: &mut Report, records: &[Value]) {
     let (events, not_checked) = event_causes(records);
-    // "R5*" is an R5 line about the page's own site.
-    let order = ["R1", "R2", "R10", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
+    // "R5*" is an R5 line about the page's own site. "R5!" is an uncaught
+    // one when the first viewport is blank (R10): the cause goes above the
+    // symptom (Atlas 10-26; yahoo's chunk 7730 SyntaxError under R10).
+    let order = ["R5!", "R1", "R2", "R10", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
+    let blank = report.ranked.iter().any(|c| c.rule == "R10");
+    let uncaught = format!("{OWN_SITE}uncaught ");
     report.ranked.extend(events);
     report.ranked.sort_by_key(|c| {
-        let rule = if c.rule == "R5" && c.line.starts_with(OWN_SITE) { "R5*" } else { c.rule };
+        let rule = match c.rule {
+            "R5" if blank && c.line.starts_with(&uncaught) => "R5!",
+            "R5" if c.line.starts_with(OWN_SITE) => "R5*",
+            rule => rule,
+        };
         order.iter().position(|r| *r == rule).unwrap_or(order.len())
     });
     report.not_checked.retain(|n| !n.starts_with("R3-R8"));
@@ -958,17 +966,55 @@ mod tests {
         let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
         apply_events(&mut report, &records);
         let ranked: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
-        // R10 comes first (the dump has no elements) and R8 lines follow
-        // (the records are sparse).
-        assert!(ranked[0].starts_with("R10 "), "{ranked:?}");
+        // The dump has no elements, so R10 fires; the own-site uncaught error
+        // is its cause and goes above it. R8 lines follow (the records are
+        // sparse).
+        assert!(ranked[1].starts_with("R10 "), "{ranked:?}");
         assert_eq!(
-            ranked[1..4],
+            [ranked[0].as_str(), ranked[2].as_str(), ranked[3].as_str()],
             [
                 "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 1 fetch/XHR to www.x.test",
                 "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
                 "R5 uncaught TypeError in https://ads.y.test/ad.js:1:5",
             ]
         );
+    }
+
+    /// Atlas 10-26: an uncaught own-site error ranks above R10 (cause over
+    /// symptom); an ad script's error, an own-site error the page caught and
+    /// logged, and an own-site error on a page that painted do not.
+    #[test]
+    fn an_uncaught_own_site_error_ranks_above_a_blank_first_viewport() {
+        let nav = json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"});
+        let uncaught = |url: &str| {
+            json!({"t_ms": 1000.0, "type": "script_error", "name": "SyntaxError", "message": null,
+                   "location": {"url": url, "line": 1, "column": 6278},
+                   "unhandled_rejection": false, "script": url, "value": "error"})
+        };
+        let logged = json!({"t_ms": 1200.0, "type": "console", "level": "error",
+                            "message": "<TypeError message len=46>",
+                            "error_stack": "    at f (https://www.x.test/app.js:3:9)"});
+        let ranked = |records: &[Value], painted: bool| {
+            let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+            if painted {
+                report.ranked.retain(|c| c.rule != "R10");
+            }
+            apply_events(&mut report, records);
+            report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect::<Vec<_>>()
+        };
+        let own = uncaught("https://www.x.test/chunks/7730.js");
+        let own_line = "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 0 fetch/XHR to www.x.test";
+        let blank = ranked(&[nav.clone(), own.clone()], false);
+        assert_eq!(blank[0], own_line, "{blank:?}");
+        assert!(blank[1].starts_with("R10 "), "{blank:?}");
+        let ad = ranked(&[nav.clone(), uncaught("https://ads.y.test/ad.js")], false);
+        assert!(ad[0].starts_with("R10 "), "{ad:?}");
+        let caught = ranked(&[nav.clone(), logged], false);
+        assert!(caught[0].starts_with("R10 "), "{caught:?}");
+        // No R10: the own-site error keeps its R5* place.
+        let painted = ranked(&[nav, own], true);
+        assert!(painted.iter().all(|l| !l.starts_with("R10 ")), "{painted:?}");
+        assert!(painted.contains(&own_line.to_string()), "{painted:?}");
     }
 
     /// yahoo with #777 merged: no uncaught error, but two TypeErrors caught
