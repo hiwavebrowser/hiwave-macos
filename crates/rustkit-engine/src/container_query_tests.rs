@@ -286,3 +286,36 @@ fn container_query_sees_floats_in_inline_boxes_and_pseudos_and_abs_percent_paddi
         .collect();
     assert_eq!(fired, ["k1=10", "k2=10"]);
 }
+
+/// #782 R2 (review on 5c3b1ae7), fixes 1, 2 and 4 and the `(width)` nit,
+/// on docs/diagnostics/2026-10-26/css_container_query_r2.html. Chromium
+/// 148 applies k1, k9, k11, k17, k18, k21, k22 and k24:
+/// - k1-k7, k13-k15, k23 (fix 1): `not` over a part the evaluator does not
+///   know (`style()`, `30ch`, `hover`) was true, and media-only features
+///   (`hover`, `color`, `prefers-color-scheme`, `min-device-width`)
+///   answered for a container; an unknown part anywhere makes the whole
+///   condition false. k1 `not style(--x)` holds in Chromium, which answers
+///   style queries; here it stays false.
+/// - k8/k9: `(width)` is false on a 0px container, true on a 300px one.
+/// - k10-k12: em is the container's font size (40px, 20px); vw the
+///   viewport's, not the container's.
+/// - k16-k18 (fix 2): a size container's height is clamped by max-height
+///   (200 -> 30) and min-height (10 -> 30; 200 -> 40, min wins).
+/// - k19-k21 (fix 4): `max-width: none` / `max-height: none` after a
+///   500px / 30px limit removes it (800px wide, 200px tall).
+const R2_PAGE: &str = include_str!("../../../docs/diagnostics/2026-10-26/css_container_query_r2.html");
+
+#[test]
+fn container_query_r2_unknown_parts_min_max_height_and_none_limits() {
+    let heights = offset_heights(R2_PAGE, 800, 600, 24);
+    let fired: Vec<String> = heights
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| *h != "0")
+        .map(|(i, h)| format!("k{}={h}", i + 1))
+        .collect();
+    assert_eq!(
+        fired,
+        ["k9=10", "k11=10", "k17=10", "k18=10", "k21=10", "k22=10", "k24=10"]
+    );
+}
