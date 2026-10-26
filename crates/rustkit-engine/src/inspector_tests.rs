@@ -9,6 +9,8 @@ fn console(message: &str) -> InspectorEvent {
         message: message.into(),
         truncated: false,
         location: None,
+        stack: None,
+        error_stack: None,
     }
 }
 
@@ -83,11 +85,12 @@ fn records_serialize_with_a_stable_field_order() {
             script: "https://a.test/s.js".into(),
             value: "error".into(),
             message_len: Some(12),
+            inserted_by: None,
         },
     };
     assert_eq!(
         serde_json::to_string(&record).unwrap(),
-        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12}"#
+        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12,"inserted_by":null}"#
     );
     let back: InspectorRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
@@ -162,7 +165,7 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
 fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let records: Vec<InspectorRecord> = [
         console("a"),
-        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None },
+        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None, stack: None, error_stack: None },
         InspectorEvent::ScriptError {
             name: "Error".into(),
             message: None,
@@ -172,6 +175,7 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
             script: "inline#1".into(),
             value: "error".into(),
             message_len: Some(1),
+            inserted_by: None,
         },
         InspectorEvent::UnsupportedApi { interface: "XMLHttpRequest".into(), member: "open(async=false)".into(), location: None },
     ]

@@ -288,9 +288,30 @@ pub struct ScriptPosition {
     pub column: u32,
 }
 
+/// One of the page's frames on a stack: its position, and the function's
+/// name only when error text is kept ([`JsRuntime::set_error_reports`]; a
+/// name is the page's text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFrame {
+    pub function: Option<String>,
+    pub at: ScriptPosition,
+}
+
+/// The stacks of a `console.error` call (with error reports on; empty
+/// otherwise), innermost first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleStacks {
+    /// The page's frames that made the call.
+    pub caller: Vec<ScriptFrame>,
+    /// The first error argument's own frames: where it was made (a page
+    /// that catches an error and logs it, as frameworks do, logs this).
+    pub error: Vec<ScriptFrame>,
+}
+
 /// Console output handler: the level, the arguments formatted and joined,
-/// and the calling script's position when the caller was in a named script.
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
+/// the calling script's position when the caller was in a named script,
+/// and a `console.error`'s stacks.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
 
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no
@@ -315,6 +336,10 @@ pub struct ErrorReport {
     /// The page's frames, innermost first: only positions in scripts the
     /// engine evaluated, never a function name.
     pub frames: Vec<ScriptPosition>,
+    /// Each of `frames`' function names, in step with it, only with error
+    /// text kept (else empty); `None` for top-level code or a function
+    /// with no name.
+    pub functions: Vec<Option<String>>,
     /// The first of `frames` is where it was thrown. Not so when the
     /// innermost page code is in no script of its own (`eval` code, an
     /// `on*` attribute's handler): it then has no position, and is never
@@ -336,6 +361,10 @@ pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
 /// `undefined`. That keeps every Boa-managed value on the Boa side: a host
 /// function can capture Rust state freely but can never hold a JS object.
 pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
+
+/// A [`HostFunction`] that is also told where in the page's script it was
+/// called from ([`JsRuntime::register_host_function_with_caller`]).
+pub type HostFunctionWithCaller = Box<dyn Fn(&[JsValue], Option<ScriptPosition>) -> JsValue>;
 
 fn stack_addr() -> usize {
     let slot = 0u8;
@@ -1050,10 +1079,10 @@ impl JsRuntime {
         {
             let shapes = self.console_shape_handler.clone();
             let logs = self.diag.take_console();
-            for (level, msg, shape, at) in logs {
-                handler(level, &msg, at.as_ref());
+            for (level, msg, shape, at, stack) in logs {
+                handler(level, &msg, at.as_ref(), &stack);
                 if let (Some(shapes), Some(shape)) = (&shapes, shape) {
-                    shapes(level, &shape, at.as_ref());
+                    shapes(level, &shape, at.as_ref(), &stack);
                 }
             }
         }
@@ -1124,6 +1153,29 @@ impl JsRuntime {
         length: usize,
         function: HostFunction,
     ) -> Result<(), JsError> {
+        self.register_native(name, length, Box::new(move |args, _| function(args)), false)
+    }
+
+    /// [`register_host_function`](Self::register_host_function), also
+    /// handing `function` the position of the page's innermost frame that
+    /// led to the call (the embedder's own frames and those in no named
+    /// script passed over; one walk of the VM's frames per call).
+    pub fn register_host_function_with_caller(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+    ) -> Result<(), JsError> {
+        self.register_native(name, length, function, true)
+    }
+
+    fn register_native(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+        with_caller: bool,
+    ) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
             use boa_engine::{JsString, NativeFunction};
@@ -1160,7 +1212,11 @@ impl JsRuntime {
                         return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
                     }
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
-                    Ok(to_boa_value(function(&args)))
+                    let caller = match with_caller {
+                        true => diag::caller_position(context, true),
+                        false => None,
+                    };
+                    Ok(to_boa_value(function(&args, caller)))
                 })
             };
             self.context
@@ -1170,7 +1226,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
-            let _ = (name, length, function);
+            let _ = (name, length, function, with_caller);
             Err(JsError::NotInitialized)
         }
     }
@@ -1648,7 +1704,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
 
@@ -1699,7 +1755,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
         runtime
@@ -1745,7 +1801,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime
@@ -1838,7 +1894,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 
@@ -1860,7 +1916,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime
@@ -1889,7 +1945,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime.set_console_redaction(true);
@@ -1920,11 +1976,11 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let texts = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             texts.lock().unwrap().push(format!("text {msg}"));
         }));
         let shapes = received.clone();
-        runtime.set_console_shape_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_shape_handler(Box::new(move |_level, msg, _at, _stack| {
             shapes.lock().unwrap().push(format!("shape {msg}"));
         }));
         runtime.evaluate_script("console.log('SECRET', 1); console.warn({a: 'SECRET'});").unwrap();
@@ -1940,7 +1996,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         let module = runtime.begin_module("https://a.test/m.js", "for (let i = 0; i < 5000; i++) console.log(i);");
@@ -1959,7 +2015,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime.evaluate_script_named("1;\neval(\"console.log('in eval')\");", "inline#1").unwrap();
@@ -1998,7 +2054,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+        runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
         runtime.set_error_reports(true, false);
         let body = "{ console.log(\"c\"); throw new Error(\"x\"); }";
         let script = format!("1;\neval('{}');\n{call};", declare.replace("BODY", body));
@@ -2048,7 +2104,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             let body = "{\nconsole.log('c');\n  throw new Error('x'); }";
             let script = format!("{};\n{call};", declare.replace("BODY", body));
@@ -2069,7 +2125,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             assert!(runtime.evaluate_script_named(script, "inline#1").is_err());
             let reports = runtime.take_error_reports();
