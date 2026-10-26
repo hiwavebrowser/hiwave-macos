@@ -1464,6 +1464,31 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `set_adopted(gen, id, json)`: CSS text of `node`'s adoptedStyleSheets,
+    // a JSON array of strings in array order. An empty string is a disabled
+    // sheet. The next layout applies them. Nothing is injected into the tree.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_adopted",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(json) = string_arg(args, 2) else {
+                return JsValue::Null;
+            };
+            let Ok(texts) = serde_json::from_str::<Vec<String>>(json) else {
+                return JsValue::Null;
+            };
+            node.set_adopted_styles(texts);
+            d.set(d.get().max(DomDirty::Style));
+            JsValue::Null
+        }),
+    )?;
+
     // Its listener and handler errors go to the host natives (`__rk`).
     runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
@@ -1485,10 +1510,10 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit
+        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -3414,6 +3439,13 @@ const WRAPPERS_JS: &str = r#"
         // `document.currentScript` while an inserted inline script runs;
         // answers what it was.
         current: function (el) { var was = currentScript; currentScript = el; return was; }
+    };
+    // web_cssom.js publishes constructed-sheet text through this. The
+    // wrapper's slot is private to this closure.
+    g.__rkSetAdoptedStyles = function (node, json) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setAdopted(s.gen, s.id, String(json));
     };
 
     // For node_apis.js, which runs next and deletes it.
