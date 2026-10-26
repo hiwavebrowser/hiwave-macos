@@ -406,8 +406,11 @@ impl LiveWake {
 }
 
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due, a request is out or the engine wakes the loop, never sooner
-/// than the last turn took.
+/// timer is due, a request is out or the engine wakes the loop. Timer and
+/// request waits are never shorter than the last turn took (nor
+/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
+/// once, as the app's poke does, so a page that keeps waking the loop gets
+/// back-to-back turns.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
