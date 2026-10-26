@@ -689,6 +689,8 @@ struct InsertedJob {
     /// body or failure was stored.
     requested_at: std::time::Instant,
     arrived_at: Option<std::time::Instant>,
+    /// Records its `cancelled` end when the job is dropped unrun.
+    inspector: Arc<Inspector>,
 }
 
 /// How many inserted-script fetches may be on the wire at once. Script
@@ -750,6 +752,7 @@ fn cancel_inserted_jobs(board: &mut InsertedBoard) {
         if let Some(guard) = job.guard {
             guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
         }
+        job.inspector.script_cancelled(&job.url, "inserted", Some(job.queued));
     }
     board.owed.clear();
     board.notify.notify_waiters();
@@ -1086,6 +1089,7 @@ fn enqueue_inserted(
                         queued,
                         requested_at: taken_at,
                         arrived_at: None,
+                        inspector: Arc::clone(inspector),
                     });
                     started.push(FetchJob {
                         loader: Arc::clone(loader),
@@ -1102,7 +1106,9 @@ fn enqueue_inserted(
                     board.jobs.push(InsertedJob {
                         id,
                         node,
-                        url,
+                        // Not the text itself: what does not parse cannot be
+                        // reduced to origin and path for the log.
+                        url: format!("unparseable#{node}"),
                         nav_id,
                         in_order,
                         ready_seq,
@@ -1112,6 +1118,7 @@ fn enqueue_inserted(
                         queued,
                         requested_at: taken_at,
                         arrived_at: Some(taken_at),
+                        inspector: Arc::clone(inspector),
                     });
                 }
             }

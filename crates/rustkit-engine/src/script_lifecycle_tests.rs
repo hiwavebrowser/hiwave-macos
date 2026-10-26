@@ -183,3 +183,117 @@ fn with_nobody_listening_no_script_record_is_built() {
     assert!(!inspector.is_active());
     assert!(inspector.snapshot_since(0).records.is_empty());
 }
+
+/// #797 R2 (1): a `src` that is not a URL (a port past 65535) cannot be
+/// reduced to origin and path, so it is recorded as `unparseable#n`, never
+/// as its text: the query carries a session.
+#[test]
+fn an_unparseable_src_is_recorded_by_label_not_by_its_text() {
+    let page = r#"<html><head>
+<script src="https://cdn.example:99999/a.js?session=SECRET"></script>
+<script>
+var s = document.createElement('script');
+s.src = 'https://cdn.example:99999/b.js?session=SECRET';
+document.head.appendChild(s);
+</script>
+</head><body>hi</body></html>"#;
+    let (engine, view, server) = load(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&json(&records)).unwrap();
+    assert!(!all.contains("SECRET"), "{all}");
+    let log = format!("{:?}", engine.script_log(view).unwrap());
+    assert!(!log.contains("SECRET"), "{log}");
+    let lines = lifecycle_lines(&records, server.port);
+    assert!(
+        lines.contains(&"script parser unparseable#1 skipped (unparseable src) held=DOMContentLoaded event=-".to_string()),
+        "{lines:#?}"
+    );
+}
+
+/// #797 R2 (2), load path: a navigation cancel between two scripts gives
+/// the rest one `cancelled` record each, and no lifecycle event fires.
+#[test]
+fn a_cancel_between_scripts_records_the_rest_as_cancelled() {
+    let page = r#"<html><head>
+<script>var one = 1;</script>
+<script>var two = 2;</script>
+<script type="module" src="/m.js"></script>
+</head><body>hi</body></html>"#;
+    let server = serve(vec![Route::html("/", page), Route::ok("/m.js", "text/javascript", "window.m = 1;")]);
+    let (mut engine, view) = engine(EngineConfig::default());
+    let canceller = engine.nav_canceller(view).unwrap();
+    nav_cancel::LOAD_PHASE_HOOK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |phase: &str| {
+            if phase == "script:1" {
+                assert!(canceller.cancel_current());
+            }
+        }))
+    });
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    nav_cancel::LOAD_PHASE_HOOK.with(|h| *h.borrow_mut() = None);
+    assert_eq!(
+        lifecycle_lines(&records(&engine, view), server.port),
+        vec![
+            "script parser inline#1 ran held=DOMContentLoaded event=-",
+            "script parser inline#2 cancelled (navigation or view closed) held=- event=-",
+            "script module /m.js cancelled (navigation or view closed) held=- event=-",
+        ]
+    );
+}
+
+/// #797 R2 (2), inserted path: a script whose fetch is still out when the
+/// page navigates away gets one `cancelled` record, not none.
+#[test]
+fn an_inserted_script_still_fetching_at_navigation_is_cancelled() {
+    let page = r#"<html><body><p>first</p><script>
+setTimeout(function () {
+  var s = document.createElement('script');
+  s.src = '/slow.js';
+  document.head.appendChild(s);
+}, 0);
+</script></body></html>"#;
+    let server = serve(vec![
+        Route::html("/", page),
+        Route::ok("/slow.js", "text/javascript", "window.slow = 1;").delay(2000),
+        Route::html("/next", "<html><body>next</body></html>"),
+    ]);
+    let (mut engine, view) = engine(EngineConfig { script_budget_ms: 200, ..EngineConfig::default() });
+    let rt = runtime();
+    rt.block_on(engine.load_url(view, server.url("/"))).expect("first load");
+    rt.block_on(engine.load_url(view, server.url("/next"))).expect("second load");
+    let slow: Vec<_> = json(&records(&engine, view))
+        .into_iter()
+        .filter(|r| r["type"] == "script" && r["script"].as_str().is_some_and(|s| s.ends_with("/slow.js")))
+        .collect();
+    assert_eq!(slow.len(), 1, "{slow:#?}");
+    assert_eq!(slow[0]["outcome"], "cancelled", "{slow:#?}");
+    assert_eq!(slow[0]["kind"], "inserted", "{slow:#?}");
+    assert!(slow[0]["held"].is_null() && slow[0]["queued_ms"].is_f64(), "{slow:#?}");
+}
+
+/// Prometheus #797 R1 (1) with R2 (3): the lifecycle flags are kept with
+/// nobody listening, so a panel attached after `DOMContentLoaded` reads a
+/// later script as ending before `load`, not before `DOMContentLoaded`.
+#[test]
+fn a_panel_attached_after_dom_content_loaded_reads_held_load() {
+    let inspector = Inspector::new(&InspectorConfig::default());
+    assert!(!inspector.is_active());
+    inspector.navigation_started(None);
+    inspector.lifecycle("DOMContentLoaded");
+    inspector.set_buffer_enabled(true);
+    inspector.script_ended(inspector::ScriptEnd {
+        source: "inline#3",
+        kind: "parser",
+        outcome: &ScriptOutcome::Ran,
+        started: true,
+        bytes: 1,
+        queued: None,
+        fetch: None,
+        waited: None,
+        ran_ms: 0,
+        event: None,
+    });
+    let records = json(&inspector.snapshot_since(0).records);
+    let script = records.iter().find(|r| r["type"] == "script").expect("script record");
+    assert_eq!(script["held"], "load", "{records:#?}");
+}

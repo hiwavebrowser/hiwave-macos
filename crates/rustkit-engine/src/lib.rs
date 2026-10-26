@@ -1335,6 +1335,12 @@ impl ScriptFetched {
             event,
         });
     }
+
+    /// Record that the script labelled `source` will not run: its load was
+    /// cancelled first.
+    fn cancelled(&self, inspector: &Inspector, source: &str) {
+        inspector.script_cancelled(source, self.kind, None);
+    }
 }
 
 /// What happened to one piece of page script on the load path.
@@ -5448,7 +5454,9 @@ impl Engine {
             };
             let src = node.get_attribute("src").map(str::trim);
             let label = match src {
-                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| s.to_string()),
+                // Not the text itself: what does not parse cannot be reduced
+                // to origin and path, and its query may carry a session.
+                Some(s) => base.join(s).map(|u| u.to_string()).unwrap_or_else(|_| format!("unparseable#{index}")),
                 None => format!("inline#{index}"),
             };
             let entry = timing.and_then(|timing| match src {
@@ -5893,7 +5901,15 @@ impl Engine {
         // What listeners reported while a script ran, for the script log at
         // the next lifecycle step.
         let mut carried: Vec<String> = Vec::new();
-        for (index, (label, _, source, node_id, is_module, facts)) in runnable.into_iter().enumerate() {
+        let mut jobs = runnable.into_iter().enumerate();
+        // A cancelled load runs none of the rest; each still gets its one
+        // Inspector record.
+        let cancel_rest = |jobs: &mut dyn Iterator<Item = (usize, Job)>| {
+            for (_, (label, _, _, _, _, facts)) in jobs {
+                facts.cancelled(&inspector, &label);
+            }
+        };
+        while let Some((index, (label, _, source, node_id, is_module, facts))) = jobs.next() {
             // Between scripts, on the same cadence as a live turn: the load
             // stays pending and the poll loop publishes the frame.
             if frame_at.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
@@ -5907,6 +5923,8 @@ impl Engine {
             let _ = index;
             if nav_cancel::cancelled(watch) {
                 debug!(source = %label, "Navigation cancelled: the rest of its scripts do not run");
+                facts.cancelled(&inspector, &label);
+                cancel_rest(&mut jobs);
                 return;
             }
             let text = match source {
@@ -6006,7 +6024,13 @@ impl Engine {
                                     ),
                                 )
                                 .await;
-                                let Some(found) = found else { return };
+                                let Some(found) = found else {
+                                    // Cancelled while its imports were fetched:
+                                    // the graph never runs.
+                                    facts.cancelled(&inspector, &label);
+                                    cancel_rest(&mut jobs);
+                                    return;
+                                };
                                 modules_fetched.set(count);
                                 if found.poisoned {
                                     poisoned.set(true);

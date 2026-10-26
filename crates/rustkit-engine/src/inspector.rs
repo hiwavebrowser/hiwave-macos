@@ -328,7 +328,8 @@ pub enum InspectorEvent {
     /// One page script's life, recorded when it is over: run, thrown,
     /// stopped, or given up on.
     Script {
-        /// The script's URL (as `request` shows it) or `inline#n`.
+        /// The script's URL (as `request` shows it), `inline#n`, or
+        /// `unparseable#n` for a `src` that is not a URL.
         script: String,
         /// `parser` (a parser-blocking classic `<script>`), `defer`,
         /// `async`, `module`, or `inserted` (a `<script src>` page script
@@ -336,7 +337,8 @@ pub enum InspectorEvent {
         kind: String,
         /// `ran`, `threw`, `skipped`, `fetch_failed`, `over_budget` (not
         /// started: the script budget was spent), `stopped` (started, and
-        /// stopped by the script budget), `engine_failed`.
+        /// stopped by the script budget), `engine_failed`, `cancelled` (its
+        /// document was left first).
         outcome: String,
         /// Why, in the engine's words, for every outcome but `ran` and
         /// `threw`.
@@ -354,10 +356,12 @@ pub enum InspectorEvent {
         waited_ms: Option<f64>,
         /// Running it: parse, compile and run, its microtasks included.
         ran_ms: f64,
-        /// The event its element heard: `load` or `error`.
+        /// The event its element heard, or will hear when it is owed to a
+        /// later turn past a spent budget: `load` or `error`.
         event: Option<String>,
-        /// The lifecycle event that waited for it: `DOMContentLoaded`,
-        /// `load`, or `null` (it ended after `load`).
+        /// The first lifecycle event that had not fired when it ended:
+        /// `DOMContentLoaded`, `load`, or `null` (after `load`, or
+        /// cancelled). When it ended, not that the event waited for it.
         held: Option<String>,
     },
     /// The document's `DOMContentLoaded` or `window` `load` is firing.
@@ -634,6 +638,10 @@ impl Inspector {
     /// record its start.
     pub fn navigation_started(&self, url: Option<&Url>) {
         if !self.is_active() {
+            // The lifecycle flags are kept unlistened (see `lifecycle`).
+            let mut state = self.state();
+            state.dom_content_loaded = false;
+            state.loaded = false;
             return;
         }
         let url = url.map(|u| self.url(u));
@@ -654,10 +662,18 @@ impl Inspector {
     /// The document is firing `DOMContentLoaded` or `load` (`event`).
     /// From here on a script that ends is not that event's to wait for.
     pub fn lifecycle(&self, event: &'static str) {
+        // Kept with nobody listening too (one lock, twice a document): a
+        // panel attached after `DOMContentLoaded` must not read the scripts
+        // that end later as ending before it.
+        let mut state = self.state();
         if !self.is_active() {
+            if event == "load" {
+                state.loaded = true;
+            } else {
+                state.dom_content_loaded = true;
+            }
             return;
         }
-        let mut state = self.state();
         let (held_by, held_by_count) = if event == "load" {
             state.loaded = true;
             (std::mem::take(&mut state.held_load), std::mem::take(&mut state.held_load_count))
@@ -724,6 +740,34 @@ impl Inspector {
                 ran_ms: end.ran_ms as f64,
                 event: end.event.map(str::to_string),
                 held: held.map(str::to_string),
+            },
+        );
+    }
+
+    /// A page script given up on because its document was left (a
+    /// navigation, a cancelled load, a closed view) before it ended: its
+    /// one `script` record, `cancelled`. No lifecycle event of a document
+    /// still showing waits for it, so `held` is `null`.
+    pub fn script_cancelled(&self, source: &str, kind: &'static str, queued: Option<std::time::Duration>) {
+        if !self.is_active() {
+            return;
+        }
+        let script = self.url_text(source);
+        let mut state = self.state();
+        Self::push_locked(
+            &mut state,
+            InspectorEvent::Script {
+                script,
+                kind: kind.to_string(),
+                outcome: "cancelled".to_string(),
+                reason: Some("navigation or view closed".to_string()),
+                bytes: 0,
+                queued_ms: queued.map(|d| round_ms(d.as_secs_f64() * 1000.0)),
+                fetch_ms: None,
+                waited_ms: None,
+                ran_ms: 0.0,
+                event: None,
+                held: None,
             },
         );
     }
