@@ -754,8 +754,16 @@ setTimeout(function () {
         started.elapsed()
     );
     assert_eq!(text(&mut engine, view, "String(window.fromFirst)"), r#"String("undefined")"#);
+    // The fetch was started by the load but runs on its own thread: on the
+    // Mac it can still be connecting when the load returns. It must reach
+    // the server well before /slow.js answers (2 s), i.e. while in flight.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while !server.requests().iter().any(|(p, _)| p == "/slow.js") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
-        server.requests().iter().any(|(p, _)| p == "/slow.js"),
+        server.requests().iter().any(|(p, _)| p == "/slow.js")
+            && !SLOW_ANSWERED.load(std::sync::atomic::Ordering::SeqCst),
         "the fetch should be in flight when the load returns"
     );
     rt.block_on(engine.load_url(view, server.url("/next"))).expect("second load");

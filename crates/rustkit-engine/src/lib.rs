@@ -32135,6 +32135,12 @@ mod remote_font_tests {
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // load_html leaves the page at about:blank, and the private-address
+        // vet lets a page with no http(s) origin reach public addresses only:
+        // every face would be denied, not fetched. Serve the page from the
+        // font host, so its fetches are same-origin loopback.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -32498,6 +32504,10 @@ document.currentScript.remove();
             })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // From about:blank the vet denies 127.0.0.1 at once, which would pass
+        // this test without the budget ever cutting a fetch.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rules = engine.view_font_face_rules(view);
         assert_eq!(rules.len(), 1, "inline @font-face must be discovered");
@@ -32514,6 +32524,10 @@ document.currentScript.remove();
         let took = started.elapsed();
 
         assert_eq!(loaded, 0, "a stalled face must not count as loaded");
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "the face failed in {took:?}, before the 500 ms budget could cut it"
+        );
         assert!(
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled web font: {took:?}"
@@ -38774,18 +38788,16 @@ mod referrer_tests {
         let (port, seen) = referers(TWO_SHEETS, "");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "same-origin: the full URL without its fragment; cross-origin: the origin only"
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "same-origin: the full URL without its fragment; the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 
     #[test]
     fn the_documents_referrer_policy_header_is_respected() {
         let (_, seen) = referers(TWO_SHEETS, "Referrer-Policy: no-referrer\r\n");
-        assert_eq!(seen.len(), 2, "{seen:?}");
+        // One sheet: the cross-origin loopback one is denied by the vet (#445).
+        assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen.iter().all(|(_, r)| r.is_none()), "{seen:?}");
     }
 
@@ -38798,10 +38810,8 @@ mod referrer_tests {
         let (port, seen) = referers(&html, "Referrer-Policy: unsafe-url\r\n");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), None),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ]
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 }
@@ -38895,11 +38905,10 @@ mod image_loader_routing_tests {
         seen.sort();
         assert_eq!(
             seen,
-            vec![
-                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+            vec![("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "one request per image the shield allows, with the policy's Referer; none for the blocked one, \
+             and none for the cross-origin loopback `localhost` image, which the subresource vet denies \
+             (#445, as in fbc6268f; the origin-only Referer is pinned in rustkit-net security.rs)"
         );
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
