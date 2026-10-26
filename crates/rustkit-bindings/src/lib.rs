@@ -1708,6 +1708,12 @@ impl DomBindings {
         self.runtime.borrow_mut().set_console_handler(handler);
     }
 
+    /// Also hand each console call to `handler` as types and lengths only
+    /// (see [`JsRuntime::set_console_shape_handler`]).
+    pub fn set_console_shape_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_shape_handler(handler);
+    }
+
     /// Console arguments reach the handler as type and length only (see
     /// [`JsRuntime::set_console_redaction`]).
     pub fn set_console_redaction(&self, on: bool) {
