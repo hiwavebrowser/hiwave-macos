@@ -311,6 +311,10 @@ fn style_texts(root: &Rc<Node>, javascript_enabled: bool) -> Vec<String> {
     }
     let mut out = Vec::new();
     walk(root, false, javascript_enabled, &mut out);
+    // Adopted sheets follow the tree's own `<style>` elements (CSS
+    // Cascade: `adoptedStyleSheets` is after the shadow root's style
+    // sheets). A disabled sheet is stored as an empty string.
+    out.extend(root.adopted_styles().into_iter().filter(|text| !text.is_empty()));
     out
 }
 

@@ -368,6 +368,8 @@ mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
+mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -8367,7 +8369,15 @@ impl Engine {
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
         let inline_sheets = self.inline_sheets(document, self.building_view.get());
-        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport);
+        let adopted = document.root().adopted_styles();
+        // The fingerprint vouches for the `<style>` and `<link>` sheets
+        // only. Adopted sheets are parsed fresh below, so with any the rule
+        // index compares selectors instead; reused by fingerprint, it
+        // indexed none of their rules.
+        let fingerprint = match adopted.iter().all(String::is_empty) {
+            true => self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport),
+            false => None,
+        };
         // Copies: the steps below filter and rank the rules in place, and
         // must not reach the cached sheets.
         let mut stylesheets: Vec<Stylesheet> =
@@ -8379,6 +8389,17 @@ impl Engine {
 
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
+        // `document.adoptedStyleSheets` follows the document's `<style>`
+        // and `<link>` sheets. The document node holds the text.
+        for text in adopted {
+            if text.is_empty() {
+                continue;
+            }
+            match Stylesheet::parse(&text) {
+                Ok(stylesheet) => stylesheets.push(stylesheet),
+                Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
+            }
+        }
 
         Self::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
