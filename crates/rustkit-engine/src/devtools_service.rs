@@ -372,16 +372,20 @@ mod tests {
         watch(&inspector, &counters, true);
         inspector.console(ConsoleLevel::Log, "a", None);
         assert!(until(Duration::from_secs(3), || counters.read().window_wakes == 1), "first line: no wake");
+        // The panel reads first. The hook is global and other tests' panels
+        // run service passes too, so set before the read it could fire
+        // early and push "b" before the panel had read "a".
+        assert_eq!(read(&inspector, 0).next_seq, 1);
         let late = Arc::clone(&inspector);
         *BEFORE_WAIT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(move || {
             late.set_watched(false);
             late.console(ConsoleLevel::Log, "b", None);
             late.set_watched(true);
         }));
-        // The panel reads; the service then re-reads, runs the hook, waits.
-        assert_eq!(read(&inspector, 0).next_seq, 1);
+        // The next pass (the backstop at the latest) re-reads, runs the
+        // hook and waits; only the backstop finds "b".
         assert!(
-            until(Duration::from_secs(3), || counters.read().window_wakes == 2),
+            until(Duration::from_secs(5), || counters.read().window_wakes == 2),
             "the unsignalled line never woke the panel (wakes {:?}, watermark {})",
             counters.read(),
             inspector.watermark()
