@@ -870,12 +870,13 @@ fn with_the_mirror_on_console_error_stacks_are_shapes_only() {
     crate::console_log::force_for_test(Some(true));
     let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
     crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
-    let page = "<html><body><script>
-function secretMaker() { return new Error('SECRET'); }
+    // Prometheus's nit: the frames come from a script whose URL carries a
+    // query, which must not reach the Inspector either.
+    let page = "<html><body><script src=\"/app.js?token=SECRET\"></script></body></html>";
+    let app = "function secretMaker() { return new Error('SECRET'); }
 function secretCaller() { console.error(secretMaker()); }
-secretCaller();
-</script></body></html>";
-    let server = serve(vec![Route::html("/", page)]);
+secretCaller();";
+    let server = serve(vec![Route::html("/", page), Route::ok("/app.js", "text/javascript", app)]);
     let mut error_text = EngineConfig::default();
     error_text.inspector.keep_error_text = true;
     for config in [EngineConfig::default(), error_text] {
@@ -891,8 +892,53 @@ secretCaller();
         assert!(error["stack"].is_string() && error["error_stack"].is_string(), "{error:#}");
         let text = error.to_string();
         assert!(!text.contains("SECRET") && !text.contains("secret"), "page text in a shapes record: {text}");
+        assert!(!text.contains("token") && text.contains("/app.js"), "frames name the script, no query: {text}");
     }
     assert!(mirrored.lock().unwrap().join("\n").contains("SECRET"), "the mirror keeps its text");
+}
+
+/// #791 review: `count` had the only shape-path test. A failed
+/// `console.assert` and a `console.timeLog` label reach the Inspector as
+/// shapes too, with the mirror on; with console text kept, the text is there
+/// (so the test can see it).
+#[test]
+fn with_the_mirror_on_assert_and_time_log_are_shapes_only() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.assert(false, 'secret-assert');
+console.time('secret-timer');
+console.timeLog('secret-timer');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut texts = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let console: Vec<String> = engine
+            .inspector(view)
+            .expect("inspector")
+            .snapshot_since(0)
+            .records
+            .iter()
+            .filter(|r| r.event.kind() == "console")
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        assert_eq!(console.len(), 2, "one record for the assert, one for timeLog: {console:#?}");
+        texts.push(console.join("\n"));
+    }
+    assert!(!texts[0].contains("secret"), "page text in a shapes record: {}", texts[0]);
+    assert!(texts[1].contains("secret-assert") && texts[1].contains("secret-timer"), "{}", texts[1]);
+    assert!(mirrored.lock().unwrap().join("\n").contains("secret-assert"), "the mirror keeps its text");
 }
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
