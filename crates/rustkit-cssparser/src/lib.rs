@@ -48,6 +48,11 @@ pub struct RuleAst {
     /// Media query lists of the `@media` blocks enclosing this rule,
     /// outermost first. The rule applies only where every one matches.
     pub media: Vec<String>,
+    /// Preludes of the `@container` blocks enclosing this rule, outermost
+    /// first (`card (width >= 200px)`): an optional container name, then
+    /// the size condition. The rule applies to an element only where each
+    /// one holds for its query container.
+    pub container: Vec<String>,
     /// Full dotted name of the cascade layer the rule is in, or `None` for
     /// an unlayered rule. An anonymous `@layer { }` block gets a name no
     /// author can write (see `anonymous_layer_name`).
@@ -62,11 +67,14 @@ enum AtBlock {
     /// An `@layer` block: its rules are in the named layer (anonymous when
     /// the prelude names none).
     Layer(String),
+    /// An `@container` block: its prelude is recorded on each of its rules.
+    Container(String),
     /// Its body is declarations (`@font-face`, `@page`): kept as one rule
     /// whose selector is the at-rule prelude, as before.
     Declarations,
     /// Nothing that styles an element in the static frame (`@keyframes`,
-    /// `@container`, an `@supports` that is false, unknown at-rules): skipped whole.
+    /// an `@container` with no condition, an `@supports` that is false,
+    /// unknown at-rules): skipped whole.
     Skip,
 }
 
@@ -80,6 +88,7 @@ fn at_block_kind(prelude: &str) -> AtBlock {
     match name.as_str() {
         "media" => AtBlock::Rules(Some(condition.to_string())),
         "supports" if supports_condition(condition) == Some(true) => AtBlock::Rules(None),
+        "container" if !condition.is_empty() => AtBlock::Container(condition.to_string()),
         "layer" if condition.is_empty() => AtBlock::Layer(anonymous_layer_name()),
         "layer" => AtBlock::Layer(condition.to_string()),
         "font-face" | "page" | "property" | "counter-style" | "font-palette-values" => {
@@ -465,16 +474,17 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                     AtBlock::Declarations => {}
                     kind => {
                         let body = take_block(&mut chars);
-                        let (media, layer) = match kind {
-                            AtBlock::Rules(media) => (media, None),
-                            AtBlock::Layer(name) => (None, Some(name)),
+                        let (media, container, layer) = match kind {
+                            AtBlock::Rules(media) => (media, None, None),
+                            AtBlock::Container(c) => (None, Some(c), None),
+                            AtBlock::Layer(name) => (None, None, Some(name)),
                             _ => {
                                 current_selector.clear();
                                 continue;
                             }
                         };
                         let inner = parse_stylesheet(&body)?;
-                        merge_block(&mut out, inner, media, layer);
+                        merge_block(&mut out, inner, media, container, layer);
                         current_selector.clear();
                         continue;
                     }
@@ -507,6 +517,7 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                     selector,
                     declarations: current_decls.clone(),
                     media: Vec::new(),
+                    container: Vec::new(),
                     layer: None,
                 });
             }
@@ -566,6 +577,7 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                     selector: parent.clone(),
                     declarations: std::mem::take(&mut current_decls),
                     media: Vec::new(),
+                    container: Vec::new(),
                     layer: None,
                 });
             }
@@ -574,20 +586,21 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
             if parent.is_empty() || prelude.is_empty() {
                 continue;
             }
-            let (css, media, layer) = if prelude.starts_with('@') {
+            let (css, media, container, layer) = if prelude.starts_with('@') {
                 // A conditional group rule inside a style rule: its bare
                 // declarations apply to the parent selector.
                 match at_block_kind(prelude) {
-                    AtBlock::Rules(media) => (format!("{parent}{{{body}}}"), media, None),
-                    AtBlock::Layer(name) => (format!("{parent}{{{body}}}"), None, Some(name)),
+                    AtBlock::Rules(media) => (format!("{parent}{{{body}}}"), media, None, None),
+                    AtBlock::Container(c) => (format!("{parent}{{{body}}}"), None, Some(c), None),
+                    AtBlock::Layer(name) => (format!("{parent}{{{body}}}"), None, None, Some(name)),
                     _ => continue,
                 }
             } else {
                 let selector = nest_selector(&parent, prelude);
-                (format!("{selector}{{{body}}}"), None, None)
+                (format!("{selector}{{{body}}}"), None, None, None)
             };
             let inner = parse_stylesheet(&css)?;
-            merge_block(&mut out, inner, media, layer);
+            merge_block(&mut out, inner, media, container, layer);
             continue;
         }
 
@@ -636,6 +649,7 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                 selector,
                 declarations: current_decls,
                 media: Vec::new(),
+                container: Vec::new(),
                 layer: None,
             });
         }
@@ -645,11 +659,13 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
 }
 
 /// Append the rules and layer statements of a block's body to `out`, each
-/// inside the block's `@media` query list and cascade layer.
+/// inside the block's `@media` query list, `@container` condition and
+/// cascade layer.
 fn merge_block(
     out: &mut StylesheetAst,
     inner: StylesheetAst,
     media: Option<String>,
+    container: Option<String>,
     layer: Option<String>,
 ) {
     let base = out.rules.len();
@@ -674,6 +690,9 @@ fn merge_block(
     for mut rule in inner.rules {
         if let Some(m) = &media {
             rule.media.insert(0, m.clone());
+        }
+        if let Some(c) = &container {
+            rule.container.insert(0, c.clone());
         }
         if let Some(outer) = &layer {
             rule.layer = Some(sublayer(outer, rule.layer.as_deref()));
@@ -1017,6 +1036,7 @@ mod tests {
                 rule(".wide", &["screen", "(min-width: 800px)"]),
                 rule(".grid", &[]),
                 rule(".layered", &[]),
+                rule(".in-card", &[]),
                 rule("@font-face", &[]),
                 rule(".after", &[]),
             ]
@@ -1217,10 +1237,40 @@ mod tests {
                 (".a", s(&["blue"]), s(&["(min-width: 800px)"]), None),
                 (".a .b", s(&["green"]), s(&["(min-width: 800px)"]), None),
                 (".a", s(&["1px"]), vec![], Some("top")),
+                (".a", s(&["2px"]), vec![], None),
                 (".c", s(&["black"]), vec![], None),
             ]
         );
         assert_eq!(ast.layer_statements[0].name, "top");
+    }
+
+    #[test]
+    fn container_blocks_record_their_condition_on_each_rule() {
+        let css = "@container card (width >= 200px) { .a { color: red } \
+                   @container (min-width: 1px) { .b { color: blue } } } \
+                   @media print { @container x (width > 0px) { .p { color: red } } } \
+                   @container { .bare { color: red } } .c { color: black }";
+        let ast = parse_stylesheet(css).expect("parse");
+        let got: Vec<(&str, Vec<&str>, Vec<&str>)> = ast
+            .rules
+            .iter()
+            .map(|r| {
+                (
+                    r.selector.as_str(),
+                    r.container.iter().map(String::as_str).collect(),
+                    r.media.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (".a", vec!["card (width >= 200px)"], vec![]),
+                (".b", vec!["card (width >= 200px)", "(min-width: 1px)"], vec![]),
+                (".p", vec!["x (width > 0px)"], vec!["print"]),
+                (".c", vec![], vec![]),
+            ]
+        );
     }
 
     #[test]

@@ -335,6 +335,7 @@ mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
+mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
     ConsoleLevel, EndReason, Inspector, InspectorConfig, InspectorEvent, InspectorRecord, InspectorSink,
@@ -399,6 +400,8 @@ mod feed_reveal_trigger_tests;
 mod ancestor_attribute_tests;
 #[cfg(test)]
 mod css_has_tests;
+#[cfg(test)]
+mod container_query_tests;
 #[cfg(all(test, feature = "headless"))]
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8709,6 +8712,18 @@ impl Engine {
         let vars_started = mark();
         let css_vars = self.extract_css_variables(&stylesheets);
         let index_started = mark();
+        // The `::first-letter` scan runs only on a page with some
+        // `@container` rule (#782 R2 nit).
+        let any_container_rule =
+            stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
+        let _container_queries = container_query::DocumentScope::install(
+            viewport,
+            any_container_rule,
+            any_container_rule
+                && stylesheets
+                    .iter()
+                    .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
+        );
 
         // A replayed style records no trace entries, so a traced build
         // always cascades in full.
@@ -8792,6 +8807,11 @@ impl Engine {
                 None
             }
         });
+
+        // `<html>` has no box here, but its width and `container-type` count.
+        let _html_container_scope = html_style
+            .as_deref()
+            .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
         if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
             view.html_clips.set(html_style.as_ref().is_some_and(|s| {
@@ -9962,6 +9982,29 @@ impl Engine {
                 child_ancestors.push(Rc::new((tag_lower.to_string(), classes, id, Some(Rc::new(carried)))));
                 child_ancestors.extend(ancestors.iter().cloned());
 
+                // The element's descendants and its own pseudo-elements ask
+                // `@container` queries of it and its ancestors.
+                let _container_scope =
+                    container_query::ElementScope::enter(
+                        &layout_box.style,
+                        parent_style,
+                        Some(&tag_lower),
+                    );
+                // A floated `::first-letter` narrows later boxes like a
+                // floated `::before` (#782 HOLD 5); only the walk asks.
+                if container_query::wants_first_letter()
+                    && self.first_letter_floats(
+                        &tag_lower,
+                        attributes,
+                        stylesheets,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                    )
+                {
+                    container_query::note_first_letter_float();
+                }
+
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
@@ -9975,6 +10018,7 @@ impl Engine {
                         Some(&layout_box.style),
                     )
                 })
+                .inspect(container_query::note_pseudo)
                 .and_then(Self::pseudo_element_box)
                 {
                     layout_box.children.push(before_box);
@@ -10187,6 +10231,7 @@ impl Engine {
                         Some(&layout_box.style),
                     )
                 })
+                .inspect(container_query::note_pseudo)
                 .and_then(Self::pseudo_element_box)
                 {
                     layout_box.children.push(after_box);
@@ -10422,6 +10467,46 @@ impl Engine {
         Self::pseudo_element_box(style)
     }
 
+    /// Whether a rule that floats `::first-letter` (`floats_first_letter`)
+    /// matches this element and holds where it is (`@container`). Fail-safe
+    /// for the `@container` walk: a later `float: none` is not weighed.
+    #[allow(clippy::too_many_arguments)]
+    fn first_letter_floats(
+        &self,
+        tag_name: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        ancestors: &[Ancestor],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+    ) -> bool {
+        stylesheets
+            .iter()
+            .flat_map(|s| s.rules.iter())
+            .filter(|r| container_query::floats_first_letter(r))
+            .any(|rule| {
+                let Some((base, bare, members)) =
+                    pseudo_list_base(&rule.selector, "::first-letter", ":first-letter")
+                else {
+                    return false;
+                };
+                (bare || self.rule_may_match(&base, tag_name, attributes))
+                    && SelectorMatcher
+                        .matched_specificity(
+                            &SelectorMatcher.prepared_selector(&base),
+                            &members,
+                            members[0].1,
+                            tag_name,
+                            attributes,
+                            ancestors,
+                            siblings_before,
+                            sib,
+                        )
+                        .is_some()
+                    && container_query::applies(&rule.container)
+            })
+    }
+
     /// The cascade half of `create_pseudo_element`: the pseudo-element's
     /// style, or None when it generates no box (no rule matched, or none set
     /// `content`).
@@ -10528,6 +10613,8 @@ impl Engine {
                 }
             }
         }
+
+        matching_rules.retain(|(_, rule)| container_query::applies(&rule.container));
 
         // No box without `content`, and only a `content` declaration can set
         // it (it starts None; `initial`/`unset`/`all` only reset it). So when
@@ -11254,6 +11341,10 @@ impl Engine {
             }
         }
         match_share_store(match_share, fresh_matches);
+        // `@container` rules hold only where their query container answers
+        // (`container_query`); filtered after the match share, which keeps
+        // selector matches only.
+        matching_rules.retain(|(rule, _, _)| container_query::applies(&rule.container));
 
         // Sort by cascade layer, then specificity, then source order (lower
         // first, so they get overwritten by higher). CSS Cascade 5 §6.4:
@@ -11273,10 +11364,11 @@ impl Engine {
         // tree's normal declarations win, the inner tree's `!important`
         // ones do. So the inner rules go first in the normal order and last
         // in the important one.
-        let extras = match shadow_tree::active() {
+        let mut extras = match shadow_tree::active() {
             true => shadow_tree::take_extras(),
             false => Vec::new(),
         };
+        extras.retain(|e| container_query::applies(&e.rule().container));
         let (matching_rules, important_rules) = match extras.is_empty() {
             true => (matching_rules, important_rules),
             false => {
@@ -12227,11 +12319,15 @@ impl Engine {
                 }
             }
             "display" => {
-                if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
+                if value.trim().eq_ignore_ascii_case("contents") {
+                    style.display_contents_declared = true;
+                } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);
+                    style.display_contents_declared = false;
                 } else if let Some(display) = parse_display(value) {
                     style.display = display;
                     style.webkit_box = None;
+                    style.display_contents_declared = false;
                 }
             }
             // css-overflow-4 §4.2's legacy line clamp; see
@@ -12244,6 +12340,22 @@ impl Engine {
             "-webkit-line-clamp" => {
                 if let Some(clamp) = rustkit_css::parse_webkit_line_clamp(value) {
                     style.webkit_line_clamp = clamp;
+                }
+            }
+            "container-type" => {
+                if let Some(kind) = rustkit_css::parse_container_type(value) {
+                    style.container_type = kind;
+                }
+            }
+            "container-name" => {
+                if let Some(names) = rustkit_css::parse_container_name(value) {
+                    style.container_name = names;
+                }
+            }
+            "container" => {
+                if let Some((names, kind)) = rustkit_css::parse_container(value) {
+                    style.container_name = names;
+                    style.container_type = kind;
                 }
             }
             // Flexbox properties
@@ -12598,9 +12710,19 @@ impl Engine {
                 }
             }
             "width" => {
-                if let Some(length) = parse_length(value) {
+                let length = parse_length(value);
+                container_query::note_width_value(style, 1, length.is_some(), value);
+                if let Some(length) = length {
                     style.width = length;
                 }
+            }
+            "writing-mode" | "-webkit-writing-mode" => {
+                style.writing_mode_declared = !value.eq_ignore_ascii_case("horizontal-tb");
+            }
+            "columns" | "column-width" => {
+                style.columns_declared = !value
+                    .split_whitespace()
+                    .all(|part| part.eq_ignore_ascii_case("auto"));
             }
             "height" => {
                 if let Some(length) = parse_length(value) {
@@ -12608,7 +12730,9 @@ impl Engine {
                 }
             }
             "min-width" => {
-                if let Some(length) = parse_length(value) {
+                let length = parse_length(value);
+                container_query::note_width_value(style, 2, length.is_some(), value);
+                if let Some(length) = length {
                     style.min_width = length;
                 }
             }
@@ -12617,13 +12741,26 @@ impl Engine {
                     style.min_height = length;
                 }
             }
+            // `none` (no limit) is `Length::Auto` here; it was not parsed,
+            // so an earlier limit stayed (#782 R2).
             "max-width" => {
-                if let Some(length) = parse_length(value) {
+                let length = if value.eq_ignore_ascii_case("none") {
+                    Some(rustkit_css::Length::Auto)
+                } else {
+                    parse_length(value)
+                };
+                container_query::note_width_value(style, 4, length.is_some(), value);
+                if let Some(length) = length {
                     style.max_width = length;
                 }
             }
             "max-height" => {
-                if let Some(length) = parse_length(value) {
+                let length = if value.eq_ignore_ascii_case("none") {
+                    Some(rustkit_css::Length::Auto)
+                } else {
+                    parse_length(value)
+                };
+                if let Some(length) = length {
                     style.max_height = length;
                 }
             }
@@ -14910,6 +15047,11 @@ impl Engine {
 
         for stylesheet in stylesheets {
             for rule in &stylesheet.rules {
+                // Not per element: an `@container` rule's custom properties
+                // would reach every element, inside the container or not.
+                if !rule.container.is_empty() {
+                    continue;
+                }
                 // Custom properties are collected document-wide, from rules
                 // that select the root element. A selector list counts when
                 // any of its items is `:root` or `html`: facebook declares
@@ -35634,6 +35776,13 @@ fn restyle_child(parent: usize, child: usize) -> RestyleChild {
             RestyleChild::Root
         } else if build.path.contains(&child) {
             RestyleChild::Walk
+        } else if container_query::active() {
+            // The `@container` walk reads earlier siblings (a float in one
+            // makes later containers unknown): a placeholder would hide it
+            // and the root's queries would answer otherwise than in the
+            // full build (#782 R2). Build the sibling; its box is dropped
+            // with its parent's.
+            RestyleChild::Build
         } else {
             RestyleChild::Skip
         };
