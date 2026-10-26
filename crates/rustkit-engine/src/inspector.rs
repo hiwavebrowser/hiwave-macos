@@ -638,10 +638,13 @@ impl Inspector {
     /// record its start.
     pub fn navigation_started(&self, url: Option<&Url>) {
         if !self.is_active() {
-            // The lifecycle flags are kept unlistened (see `lifecycle`).
+            // The lifecycle flags are kept unlistened (see `lifecycle`), and
+            // the scripts the last document's `load` waited for go with it.
             let mut state = self.state();
             state.dom_content_loaded = false;
             state.loaded = false;
+            state.held_load.clear();
+            state.held_load_count = 0;
             return;
         }
         let url = url.map(|u| self.url(u));

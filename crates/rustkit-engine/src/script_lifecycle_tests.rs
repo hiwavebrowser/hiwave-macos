@@ -210,6 +210,41 @@ document.head.appendChild(s);
     );
 }
 
+/// #797 review: a panel listening when a script held `load`, closed before
+/// the next navigation and opened again, reads the next document's `load`
+/// as held by that document's scripts only.
+#[test]
+fn a_detached_navigation_forgets_what_held_the_last_load() {
+    let inspector = Inspector::new(&InspectorConfig::default());
+    let ended = |source: &str| {
+        inspector.script_ended(inspector::ScriptEnd {
+            source,
+            kind: "async",
+            outcome: &ScriptOutcome::Ran,
+            started: true,
+            bytes: 1,
+            queued: None,
+            fetch: None,
+            waited: None,
+            ran_ms: 0,
+            event: None,
+        })
+    };
+    inspector.navigation_started(None);
+    inspector.lifecycle("DOMContentLoaded");
+    inspector.set_buffer_enabled(true);
+    ended("inline#1");
+    inspector.set_buffer_enabled(false);
+    inspector.navigation_started(None);
+    inspector.set_buffer_enabled(true);
+    inspector.lifecycle("DOMContentLoaded");
+    inspector.lifecycle("load");
+    let records = json(&inspector.snapshot_since(0).records);
+    let load = records.iter().find(|r| r["type"] == "lifecycle" && r["event"] == "load").expect("load record");
+    assert_eq!(load["held_by"], serde_json::json!([]), "{records:#?}");
+    assert_eq!(load["held_by_count"], 0, "{records:#?}");
+}
+
 /// #797 R2 (2), load path: a navigation cancel between two scripts gives
 /// the rest one `cancelled` record each, and no lifecycle event fires.
 #[test]

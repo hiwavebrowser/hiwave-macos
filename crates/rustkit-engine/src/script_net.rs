@@ -1107,8 +1107,10 @@ fn enqueue_inserted(
                         id,
                         node,
                         // Not the text itself: what does not parse cannot be
-                        // reduced to origin and path for the log.
-                        url: format!("unparseable#{node}"),
+                        // reduced to origin and path for the log. Its own
+                        // name: the load path's `unparseable#n` counts the
+                        // document's scripts, this one is a node id.
+                        url: format!("unparseable-inserted#{node}"),
                         nav_id,
                         in_order,
                         ready_seq,

@@ -217,7 +217,7 @@ steps, timers and callbacks are not scripts here; their errors stay
 
 | field | meaning |
 |---|---|
-| `script` | its URL (as Privacy reduces it), `inline#n`, or `unparseable#n` for a `src` that is not a URL (n: its place among the document's scripts, or an inserted script's node id; the text itself is never recorded) |
+| `script` | its URL (as Privacy reduces it), `inline#n`, or for a `src` that is not a URL `unparseable#n` (n: its place among the document's scripts) or, for a script page script inserted, `unparseable-inserted#n` (n: its node id); the text itself is never recorded |
 | `kind` | `parser` (a parser-blocking classic script), `defer`, `async`, `module`, `inserted` |
 | `outcome` | `ran`; `threw` (its `script_error` is above it); `skipped`; `fetch_failed`; `over_budget` (not started: the script budget was already spent); `stopped` (started, and stopped by the script budget's deadline); `engine_failed`; `cancelled` (its document was left before it ended) |
 | `reason` | for every outcome but `ran` and `threw`, in the engine's words: `nomodule`, `too large to run inside the script budget`, `unparseable src`, `JS engine panicked earlier on this page`, `HTTP <status>`, `network` (the request's `failure` has the stage), `script budget`, `script budget spent before it started`, `JS engine panic`, `navigation or view closed` |
