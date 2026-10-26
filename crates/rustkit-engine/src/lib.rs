@@ -294,7 +294,7 @@ pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
     connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
-    PageHandle, PageInput,
+    PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
 pub use content_thread::{

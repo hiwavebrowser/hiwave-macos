@@ -17,11 +17,17 @@
 //! questions: the devtools thread answers them from the view's Inspector
 //! (`rustkit_engine::devtools_ask_console`, T6a).
 
+use std::time::{Duration, Instant};
+
 use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsQuery};
 use serde::Serialize;
 use tokio::sync::oneshot;
 use wry::WebView;
+
+/// How long the console's input line waits for a busy page before it is
+/// given up and cancelled (T6c).
+const EVAL_DEADLINE: Duration = Duration::from_secs(5);
 
 /// A call of the panel's API with `arg` as JSON. A JSON text is a JS
 /// expression, so a string the page chose (a class name, a console line)
@@ -66,7 +72,8 @@ enum Want {
 
 enum Asked {
     Page(Want, oneshot::Receiver<DevtoolsAnswer>),
-    Eval(oneshot::Receiver<Result<String, String>>),
+    /// The console's input line, and when it is given up.
+    Eval(oneshot::Receiver<Result<String, String>>, Instant),
 }
 
 /// The Inspector's state for the current tab.
@@ -190,7 +197,8 @@ impl Devtools {
 
     /// The console's input line: run `code` in the page and show the result.
     pub fn eval(&mut self, view: &RustKitView, code: &str) {
-        self.asked.push(Asked::Eval(view.devtools_eval(code)));
+        let deadline = Instant::now() + EVAL_DEADLINE;
+        self.asked.push(Asked::Eval(view.devtools_eval(code, deadline), deadline));
     }
 
     /// Act on the answers that have arrived, then ask for new console
@@ -216,9 +224,16 @@ impl Devtools {
                     false
                 }
             },
-            Asked::Eval(rx) => match rx.try_recv() {
+            Asked::Eval(rx, deadline) => match rx.try_recv() {
                 Ok(result) => {
                     arrived.push(Arrived::Eval(result));
+                    false
+                }
+                // Past its deadline the line is given up: the receiver is
+                // dropped, so a late answer is discarded, and a page that
+                // has not reached it yet skips it (R1 condition 5).
+                Err(oneshot::error::TryRecvError::Empty) if Instant::now() >= *deadline => {
+                    arrived.push(Arrived::Eval(Err(rustkit_engine::EVAL_CANCELLED.into())));
                     false
                 }
                 Err(oneshot::error::TryRecvError::Empty) => true,
@@ -317,7 +332,7 @@ impl Devtools {
                     self.hovered = None;
                     self.hover_next = None;
                     self.asked
-                        .retain(|a| matches!(a, Asked::Eval(_) | Asked::Page(Want::Console | Want::Ack, _)));
+                        .retain(|a| matches!(a, Asked::Eval(..) | Asked::Page(Want::Console | Want::Ack, _)));
                     self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
                     run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
                 }

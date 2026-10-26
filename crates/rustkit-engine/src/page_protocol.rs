@@ -19,6 +19,10 @@ use rustkit_viewhost::Bounds;
 use tokio::sync::oneshot;
 use url::Url;
 
+/// A [`PageCmd::DevtoolsEval`] the page reached past its deadline answers
+/// this, without running.
+pub const EVAL_CANCELLED: &str = "cancelled: the page was busy past the deadline";
+
 use crate::devtools_service::DevtoolsCounters;
 
 use crate::{
@@ -70,6 +74,14 @@ pub enum PageCmd {
     },
     Eval {
         script: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The Inspector console's input line (T6c, R1 condition 5). Reached
+    /// past `deadline` (the page was busy and the panel gave up), it is
+    /// cancelled, never run late.
+    DevtoolsEval {
+        script: String,
+        deadline: std::time::Instant,
         reply: oneshot::Sender<Result<String, String>>,
     },
     SetVisible {
@@ -474,7 +486,13 @@ impl PageEndpoint {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
             }
-            PageCmd::Eval { script, reply } => {
+            PageCmd::DevtoolsEval { reply, .. } if reply.is_closed() => {
+                // The panel discarded it (navigated, closed): nothing to run for.
+            }
+            PageCmd::DevtoolsEval { deadline, reply, .. } if std::time::Instant::now() >= deadline => {
+                let _ = reply.send(Err(EVAL_CANCELLED.to_string()));
+            }
+            PageCmd::DevtoolsEval { script, reply, .. } | PageCmd::Eval { script, reply } => {
                 let result = self
                     .engine
                     .execute_script(self.view, &script)

@@ -263,6 +263,18 @@ impl ContentThread {
         rx
     }
 
+    /// The Inspector console's input line: cancelled, not run, if the page
+    /// reaches it at or past `deadline` (T6c).
+    pub fn devtools_eval(&self, script: &str, deadline: Instant) -> oneshot::Receiver<Result<String, String>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::DevtoolsEval {
+            script: script.to_string(),
+            deadline,
+            reply,
+        });
+        rx
+    }
+
     /// The newest navigation id this handle allocated (by `navigate`,
     /// `load_html` or a reload). Only the window allocates ids, so right
     /// after one of those calls this is the id it used.
@@ -641,6 +653,23 @@ mod tests {
             "the line logged before the block is missing: {:?}",
             console.entries
         );
+    }
+
+    #[test]
+    fn a_devtools_eval_reached_past_its_deadline_is_cancelled_not_run_late() {
+        // T6c, R1 condition 5: the page is busy (a 1.5 s host-side block)
+        // when the panel's console line arrives with a 300 ms deadline. The
+        // page reaches it late and must not run it; one in time still runs.
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        page.enqueue(PageCmd::Block(1_500));
+        let mut late = page.devtools_eval("window.ranLate = 1; 'ran'", Instant::now() + Duration::from_millis(300));
+        let answer = wait_recv(&mut late, Duration::from_secs(5)).expect("no answer to the late eval");
+        assert_eq!(answer, Err(crate::EVAL_CANCELLED.to_string()));
+        let mut check = page.devtools_eval("String(window.ranLate)", Instant::now() + Duration::from_secs(5));
+        let ran = wait_recv(&mut check, Duration::from_secs(5)).expect("no answer").expect("eval");
+        assert!(ran.contains("undefined"), "the cancelled eval ran anyway: {ran}");
     }
 
     #[test]

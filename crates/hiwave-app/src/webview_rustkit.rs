@@ -1109,10 +1109,11 @@ impl RustKitView {
             .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()))
     }
 
-    /// Run the console's `code` in the page: the value, or the error.
-    pub fn devtools_eval(&self, code: &str) -> oneshot::Receiver<Result<String, String>> {
+    /// Run the console's `code` in the page: the value, or the error. A
+    /// page that reaches it at or past `deadline` cancels it (T6c).
+    pub fn devtools_eval(&self, code: &str, deadline: std::time::Instant) -> oneshot::Receiver<Result<String, String>> {
         let (reply, rx) = oneshot::channel();
-        self.submit(PageCmd::Eval { script: code.to_string(), reply });
+        self.submit(PageCmd::DevtoolsEval { script: code.to_string(), deadline, reply });
         rx
     }
 }
