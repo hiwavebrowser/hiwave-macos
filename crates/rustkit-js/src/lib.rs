@@ -471,6 +471,7 @@ pub struct JsRuntime {
     executor: std::rc::Rc<executor::HostJobExecutor>,
     config: JsRuntimeConfig,
     console_handler: Option<Arc<ConsoleHandler>>,
+    console_shape_handler: Option<Arc<ConsoleHandler>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
@@ -537,6 +538,7 @@ impl JsRuntime {
             executor,
             config,
             console_handler: None,
+            console_shape_handler: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
@@ -600,6 +602,18 @@ impl JsRuntime {
         self.console_handler = Some(Arc::new(handler));
         #[cfg(feature = "boa")]
         self.diag.console_capturing.set(true);
+    }
+
+    /// Also hand each console call to `handler` as its shape line: each
+    /// argument's type, and a string's length (see `describe::redacted_text`),
+    /// whatever [`set_console_redaction`](Self::set_console_redaction) says.
+    /// For an embedder whose console handler keeps the page's text for one
+    /// reader and must give another reader none of it. Called after the
+    /// console handler, for the same call, and only while one is set.
+    pub fn set_console_shape_handler(&mut self, handler: ConsoleHandler) {
+        self.console_shape_handler = Some(Arc::new(handler));
+        #[cfg(feature = "boa")]
+        self.diag.console_shapes.set(true);
     }
 
     /// Hand the handler each console argument's type, and a string's length,
@@ -1063,9 +1077,13 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
+            let shapes = self.console_shape_handler.clone();
             let logs = self.diag.take_console();
-            for (level, msg, at, stack) in logs {
+            for (level, msg, shape, at, stack) in logs {
                 handler(level, &msg, at.as_ref(), &stack);
+                if let (Some(shapes), Some(shape)) = (&shapes, shape) {
+                    shapes(level, &shape, at.as_ref(), &stack);
+                }
             }
         }
 
@@ -1949,6 +1967,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(received.lock().unwrap().clone(), vec!["<string len=6> <number>"]);
+    }
+
+    /// A shape handler gets each call's types and lengths while the console
+    /// handler keeps the text, for the same calls in the same order.
+    #[test]
+    fn a_shape_handler_gets_shapes_beside_the_text_line() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let texts = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            texts.lock().unwrap().push(format!("text {msg}"));
+        }));
+        let shapes = received.clone();
+        runtime.set_console_shape_handler(Box::new(move |_level, msg, _at, _stack| {
+            shapes.lock().unwrap().push(format!("shape {msg}"));
+        }));
+        runtime.evaluate_script("console.log('SECRET', 1); console.warn({a: 'SECRET'});").unwrap();
+        assert_eq!(
+            received.lock().unwrap().clone(),
+            vec!["text SECRET 1", "shape <string len=6> <number>", "text [object Object]", "shape [object Object]"]
+        );
     }
 
     /// A page that logs without end holds at most 1024 lines between flushes.

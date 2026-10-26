@@ -1457,6 +1457,7 @@ pub(crate) fn install(
                         url: url.clone(),
                         in_order,
                         inserted_by: caller,
+                        inserted_at: std::time::Instant::now(),
                     });
                 }
             }

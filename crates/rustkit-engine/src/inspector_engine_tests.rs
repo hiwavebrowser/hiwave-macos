@@ -192,6 +192,10 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
             if *from_cache { " cache" } else { "" }
         ),
         InspectorEvent::Failure { id, stage, reason, .. } => format!("failure #{id} {} {reason}", stage.as_str()),
+        InspectorEvent::Script { script, kind, outcome, held, .. } => {
+            format!("script {kind} {} {outcome} held={}", local(script), held.as_deref().unwrap_or("-"))
+        }
+        InspectorEvent::Lifecycle { event, held_by_count, .. } => format!("lifecycle {event} held_by={held_by_count}"),
     }
 }
 
@@ -260,6 +264,9 @@ fn a_page_load_is_recorded_in_order() {
             "console Warn <string len=5> @inline#1:4:9",
             "console Error <string len=4> @inline#1:5:9",
             "console Debug <string len=4> @inline#1:6:9",
+            "script parser inline#1 ran held=DOMContentLoaded",
+            "lifecycle DOMContentLoaded held_by=0",
+            "lifecycle load held_by=0",
             "load_finished over_budget=0",
         ]
     );
@@ -762,6 +769,130 @@ console.log('https://h.test/p?token=Q', 'x', 12, true, null, undefined, {a: 1}, 
             vec!["console Log https://h.test/p x 12 true null undefined [object Object] [object Array] TypeError: a secret @inline#1:2:9"],
         ]
     );
+}
+
+/// `HIWAVE_CONSOLE_LOG` mirrors the text the page logged into the tracing
+/// log. The Inspector's own rule still holds while it is on: without
+/// `keep_console_text` the record is shapes only, and the mirror keeps its
+/// text.
+#[test]
+fn the_console_mirror_does_not_put_page_text_in_the_inspector() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.log('secret-console-text', 12);
+console.count('secret-label');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut lines = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        lines.push(only(&described(&engine, view, server.port), &["console"]));
+    }
+    assert_eq!(
+        lines,
+        vec![
+            vec!["console Log <string len=19> <number> @inline#1:2:9", "console Info <string len=15> @inline#1:3:10"],
+            vec!["console Log secret-console-text 12 @inline#1:2:9", "console Info secret-label: 1 @inline#1:3:10"],
+        ]
+    );
+    let mirrored = mirrored.lock().unwrap().join("\n");
+    assert!(mirrored.contains("secret-console-text 12"), "{mirrored}");
+}
+
+/// Prometheus R1 on #791: with the mirror on, `attach` sets the runtime's
+/// error `keep_text`. An uncaught `throw` and a `console.error(new Error)`
+/// still reach the Inspector as shapes only: no page message and no page
+/// function name in any record (message, stack, error_stack).
+#[test]
+fn with_the_mirror_on_errors_and_error_stacks_reach_the_inspector_as_shapes() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+function secretOuter() { secretInner(); }
+function secretInner() {
+  console.error(new Error('secret-logged-text'));
+  throw new TypeError('secret-thrown-text');
+}
+secretOuter();
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+    let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+    assert!(kinds.contains(&"script_error"), "no script_error record: {kinds:?}");
+    let errors: Vec<String> = records
+        .iter()
+        .filter(|r| matches!(r.event.kind(), "console" | "script_error"))
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert!(errors.iter().any(|r| r.contains("\"level\":\"error\"")), "no console.error record: {errors:?}");
+    for record in &errors {
+        assert!(!record.contains("secret"), "page text reached the Inspector with the mirror on: {record}");
+    }
+}
+
+/// Atlas 09:40 on #791's develop merge (#784's console stacks against T1b's
+/// shapes): with the mirror on and console text off, a `console.error`'s
+/// caller stack and its error's own stack still reach the Inspector, as
+/// places only. The shapes path drops function names itself, so this holds
+/// even where the Inspector keeps error text.
+#[test]
+fn with_the_mirror_on_console_error_stacks_are_shapes_only() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+function secretMaker() { return new Error('SECRET'); }
+function secretCaller() { console.error(secretMaker()); }
+secretCaller();
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut error_text = EngineConfig::default();
+    error_text.inspector.keep_error_text = true;
+    for config in [EngineConfig::default(), error_text] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+        let console: Vec<serde_json::Value> = records
+            .iter()
+            .filter(|r| r.event.kind() == "console")
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        let error = console.iter().find(|r| r["level"] == "error").unwrap_or_else(|| panic!("{console:#?}"));
+        assert!(error["stack"].is_string() && error["error_stack"].is_string(), "{error:#}");
+        let text = error.to_string();
+        assert!(!text.contains("SECRET") && !text.contains("secret"), "page text in a shapes record: {text}");
+    }
+    assert!(mirrored.lock().unwrap().join("\n").contains("SECRET"), "the mirror keeps its text");
 }
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
