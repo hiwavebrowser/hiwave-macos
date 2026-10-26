@@ -347,9 +347,15 @@ const PER_RULE: usize = 3;
 const OWN_SITE: &str = "the page's own script: ";
 
 /// The last two host labels (`www.yahoo.com` -> `yahoo.com`). Close enough
-/// for ranking; a two-label public suffix (`co.uk`) reads as one site.
+/// for ranking; a two-label public suffix (`co.uk`) reads as one site. An
+/// IPv4 address is its own site, whole (an IPv6 one is not split out by
+/// `host_of`). No host (`file://`) is no site, so a `file://` page ranks no
+/// script error as its own.
 fn site_of(url: &str) -> Option<String> {
-    let host = host_of(url)?;
+    let host = host_of(url).filter(|h| !h.is_empty())?;
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(host);
+    }
     let labels: Vec<&str> = host.split('.').collect();
     Some(labels[labels.len().saturating_sub(2)..].join("."))
 }
@@ -937,6 +943,17 @@ mod tests {
                 "R5 uncaught TypeError (unhandled rejection) in https://x.test/7730.js:9:12",
             ]
         );
+    }
+
+    /// #802 review nit: a `file://` page has no host, so it has no site and
+    /// no script error is "its own"; an IPv4 host is a site whole, not its
+    /// last two octets.
+    #[test]
+    fn a_file_page_has_no_site_and_an_ip_host_is_whole() {
+        assert_eq!(site_of("file:///tmp/fixture/index.html"), None);
+        assert_eq!(site_of("http://192.168.1.20:8080/a.js"), Some("192.168.1.20".to_string()));
+        assert_ne!(site_of("http://10.0.1.20/"), site_of("http://10.9.1.20/"));
+        assert_eq!(site_of("https://www.yahoo.com/x.js"), Some("yahoo.com".to_string()));
     }
 
     /// yahoo, 2026-10-24: the site's own chunk 7730 throws a SyntaxError
