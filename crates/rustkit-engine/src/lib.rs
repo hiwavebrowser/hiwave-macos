@@ -1294,6 +1294,11 @@ enum ScriptTiming {
 /// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
 const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Why an inline HTML load (`load_html`) does not run a script: it runs
+/// inline classic scripts only. Every other `Skipped` there is a script it
+/// meant to run and could not.
+pub const HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY: &str = "an inline HTML load runs inline classic scripts only";
+
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
 /// `(label, node id, fetched source or why not, is a module script, its
@@ -7494,7 +7499,7 @@ impl Engine {
             let body = match timing {
                 Err(outcome) => Err(outcome),
                 Ok(_) if external || is_module_script(node) => {
-                    Err(ScriptOutcome::Skipped("an inline HTML load runs inline classic scripts only"))
+                    Err(ScriptOutcome::Skipped(HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY))
                 }
                 Ok(_) => Ok(node.text_content()),
             };

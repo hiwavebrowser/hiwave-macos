@@ -1525,11 +1525,15 @@ fn analyze_layout_json(json_str: &str) -> Option<LayoutStats> {
 }
 
 /// The first script of an `--html-file` load that failed: it threw, the
-/// engine failed, or the budget stopped it. A script the HTML load does not
-/// run (an external `<script src>`, a module, `nomodule`) is not a failure.
+/// engine failed, the budget stopped it, or it was skipped though the load
+/// meant to run it (too large, or the engine panicked earlier). A script the
+/// HTML load does not run (an external `<script src>`, a module, `nomodule`)
+/// is not a failure.
 fn inline_script_failure(log: &[ScriptRecord]) -> Option<&ScriptRecord> {
-    log.iter().find(|r| {
-        matches!(r.outcome, ScriptOutcome::Threw(_) | ScriptOutcome::EngineFailed(_) | ScriptOutcome::OverBudget)
+    log.iter().find(|r| match r.outcome {
+        ScriptOutcome::Threw(_) | ScriptOutcome::EngineFailed(_) | ScriptOutcome::OverBudget => true,
+        ScriptOutcome::Skipped(why) => why != rustkit_engine::HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY,
+        _ => false,
     })
 }
 
@@ -1578,6 +1582,12 @@ mod tests {
         let threw = log_of("<html><body><script src=\"/app.js\"></script><script>throw new Error('x');</script></body></html>");
         let failed = inline_script_failure(&threw).expect("a thrown script fails the capture");
         assert_eq!(failed.source, "inline#2", "{threw:?}");
+        // #799 nit: an inline classic script past the size cap was meant to
+        // run and did not.
+        let big = format!("<html><body><script>/*{}*/</script></body></html>", "x".repeat(4 * 1024 * 1024 + 1));
+        let too_large = log_of(&big);
+        let failed = inline_script_failure(&too_large).expect("a too-large inline script fails the capture");
+        assert!(matches!(failed.outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")), "{too_large:?}");
     }
 
     fn parsed(extra: &[&str]) -> Args {
