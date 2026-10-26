@@ -56,40 +56,181 @@ pub fn container_condition_matches(
     container_condition(cond.trim(), width, height, &units) == Some(true)
 }
 
-/// `Some(answer)`, or `None` when any part is unknown (see
-/// [`container_condition_matches`]).
+/// `Some(answer)`, or `None` when the condition is invalid (the rule is
+/// dropped) or any part is unknown (see [`container_condition_matches`]).
 fn container_condition(
     cond: &str,
     width: f32,
     height: Option<f32>,
     units: &ContainerUnits,
 ) -> Option<bool> {
-    let cond = cond.trim();
-    if let Some(rest) = strip_word(cond, "not") {
-        return container_condition(rest, width, height, units).map(|b| !b);
-    }
-    let ands = split_top_level_word(cond, "and");
-    let ors = split_top_level_word(cond, "or");
-    if ands.len() > 1 && ors.len() > 1 {
-        // `a and b or c` without parentheses is not a condition.
-        return None;
-    }
-    for (legs, is_and) in [(&ands, true), (&ors, false)] {
-        if legs.len() > 1 {
-            let mut answer = is_and;
-            for leg in legs.iter() {
-                // Every leg is evaluated: an unknown one anywhere is unknown.
-                let b = container_condition(leg, width, height, units)?;
-                answer = if is_and { answer && b } else { answer || b };
-            }
-            return Some(answer);
+    parse_container_query(cond)?.eval(width, height, units)
+}
+
+/// A parsed `<container-query>`.
+#[derive(Debug)]
+enum ContainerQuery<'a> {
+    Not(Box<ContainerQuery<'a>>),
+    And(Vec<ContainerQuery<'a>>),
+    Or(Vec<ContainerQuery<'a>>),
+    /// `( <size-feature> )`, the text between the parentheses.
+    Feature(&'a str),
+    /// `<general-enclosed>`: a function such as `style()`, or parentheses
+    /// holding something that is neither a query nor a feature. Valid,
+    /// always unknown.
+    Unknown,
+}
+
+impl ContainerQuery<'_> {
+    fn eval(&self, width: f32, height: Option<f32>, units: &ContainerUnits) -> Option<bool> {
+        match self {
+            Self::Not(q) => q.eval(width, height, units).map(|b| !b),
+            // Every leg is evaluated: an unknown one anywhere is unknown.
+            Self::And(legs) => legs.iter().try_fold(true, |acc, q| {
+                Some(q.eval(width, height, units)? && acc)
+            }),
+            Self::Or(legs) => legs.iter().try_fold(false, |acc, q| {
+                Some(q.eval(width, height, units)? || acc)
+            }),
+            Self::Feature(f) => container_feature(f, width, height, units),
+            Self::Unknown => None,
         }
     }
-    let inner = cond.strip_prefix('(')?.strip_suffix(')')?.trim();
-    if inner.starts_with('(') || strip_word(inner, "not").is_some() {
-        container_condition(inner, width, height, units)
+}
+
+/// Parse a lowercased `<container-query>`; `None` when it is invalid:
+///
+/// ```text
+/// <container-query> = not <query-in-parens>
+///                   | <query-in-parens> [ [ and <query-in-parens> ]* | [ or <query-in-parens> ]* ]
+/// <query-in-parens> = ( <container-query> ) | ( <size-feature> ) | <general-enclosed>
+/// ```
+///
+/// So `not` takes exactly one parenthesized query, each `and`/`or` leg is
+/// one parenthesized query (no leading `not`), `and` and `or` do not mix,
+/// and a keyword needs whitespace after it: `not(`, `and(` and `or(` are
+/// function tokens. `not(...)` alone is a `<general-enclosed>` (unknown).
+fn parse_container_query(s: &str) -> Option<ContainerQuery<'_>> {
+    let mut p = QueryParser { s, i: 0 };
+    p.ws();
+    let query = if let Some(end) = p.keyword("not") {
+        p.i = end;
+        if !p.ws() {
+            return None;
+        }
+        ContainerQuery::Not(Box::new(p.query_in_parens()?))
     } else {
-        container_feature(inner, width, height, units)
+        let first = p.query_in_parens()?;
+        let mut legs = vec![first];
+        let mut is_and = None;
+        loop {
+            p.ws();
+            if p.i == s.len() {
+                break;
+            }
+            let (and, end) = match (p.keyword("and"), p.keyword("or")) {
+                (Some(end), _) => (true, end),
+                (_, Some(end)) => (false, end),
+                _ => return None,
+            };
+            if *is_and.get_or_insert(and) != and {
+                return None;
+            }
+            p.i = end;
+            if !p.ws() {
+                return None;
+            }
+            legs.push(p.query_in_parens()?);
+        }
+        match (legs.len(), is_and) {
+            (1, _) => legs.pop()?,
+            (_, Some(true)) => ContainerQuery::And(legs),
+            _ => ContainerQuery::Or(legs),
+        }
+    };
+    p.ws();
+    (p.i == s.len()).then_some(query)
+}
+
+struct QueryParser<'a> {
+    s: &'a str,
+    i: usize,
+}
+
+impl<'a> QueryParser<'a> {
+    fn rest(&self) -> &'a str {
+        &self.s[self.i..]
+    }
+
+    /// Skip whitespace; whether there was any.
+    fn ws(&mut self) -> bool {
+        let rest = self.rest();
+        let trimmed = rest.trim_start();
+        self.i += rest.len() - trimmed.len();
+        trimmed.len() != rest.len()
+    }
+
+    /// The identifier at the cursor and the index just past it.
+    fn ident(&self) -> Option<(&'a str, usize)> {
+        let rest = self.rest();
+        let len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(rest.len());
+        let word = &rest[..len];
+        (word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-' || c == '_'))
+            .then_some((word, self.i + len))
+    }
+
+    /// The end of `word` when it is the identifier at the cursor and not
+    /// the name of a function (`word(`).
+    fn keyword(&self, word: &str) -> Option<usize> {
+        let (w, end) = self.ident()?;
+        (w == word && !self.s[end..].starts_with('(')).then_some(end)
+    }
+
+    /// The text inside the parenthesized group at the cursor; moves past it.
+    fn group(&mut self) -> Option<&'a str> {
+        let rest = self.rest();
+        if !rest.starts_with('(') {
+            return None;
+        }
+        let mut depth = 0i32;
+        for (at, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.i += at + 1;
+                        return Some(&rest[1..at]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn query_in_parens(&mut self) -> Option<ContainerQuery<'a>> {
+        if let Some(inner) = self.group() {
+            let inner = inner.trim();
+            let q = QueryParser { s: inner, i: 0 };
+            let looks_like_query = inner.starts_with('(')
+                || q.keyword("not").is_some()
+                || q.ident().is_some_and(|(_, end)| inner[end..].starts_with('('));
+            if !looks_like_query {
+                return Some(ContainerQuery::Feature(inner));
+            }
+            return Some(parse_container_query(inner).unwrap_or(ContainerQuery::Unknown));
+        }
+        // A function such as `style(...)` or `not(...)`.
+        let (_, end) = self.ident()?;
+        if !self.s[end..].starts_with('(') {
+            return None;
+        }
+        self.i = end;
+        self.group()?;
+        Some(ContainerQuery::Unknown)
     }
 }
 
@@ -249,6 +390,24 @@ fn container_range(
 fn container_length(v: &str, units: &ContainerUnits) -> Option<f32> {
     let v = v.trim();
     if v.contains('%') {
+        return None;
+    }
+    // min()/max() with any number of arguments; the crate's length parser
+    // reads only two.
+    for (name, min) in [("min(", true), ("max(", false)] {
+        if let Some(inner) = v.strip_prefix(name).and_then(|r| r.strip_suffix(')')) {
+            if balanced(inner) {
+                let mut out: Option<f32> = None;
+                for arg in split_top_level(inner, ',') {
+                    let x = container_length(arg, units)?;
+                    out = Some(out.map_or(x, |o| if min { o.min(x) } else { o.max(x) }));
+                }
+                return out;
+            }
+        }
+    }
+    if has_long_min_max(v) {
+        // A nested min()/max() with three or more arguments: unknown.
         return None;
     }
     if let Some(n) = parse_number(v) {
@@ -583,6 +742,47 @@ fn strip_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
     }
 }
 
+/// Whether the parentheses in `s` balance and never close past depth 0.
+fn balanced(s: &str) -> bool {
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
+}
+
+/// Whether `s` holds a `min(`/`max(` call with three or more arguments.
+fn has_long_min_max(s: &str) -> bool {
+    ["min(", "max("].iter().any(|name| {
+        s.match_indices(name).any(|(at, _)| {
+            let body = &s[at + name.len()..];
+            let mut depth = 1i32;
+            let mut commas = 0;
+            for c in body.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => commas += 1,
+                    _ => {}
+                }
+            }
+            commas >= 2
+        })
+    })
+}
+
 fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -678,6 +878,45 @@ mod tests {
         assert!(c("(width > 100px) AND (width < 400px)", 300.0, None));
         // `)and` is fine: the keyword only needs whitespace after it.
         assert!(c("(width > 100px)and (width < 400px)", 300.0, None));
+    }
+
+    /// The parser drops what Chromium 148 drops from `cssRules`: `None`
+    /// for invalid grammar, a query for valid grammar (`not(...)` is a
+    /// valid, unknown `<general-enclosed>`).
+    #[test]
+    fn invalid_container_grammar_parses_to_none() {
+        use super::parse_container_query as q;
+        for bad in [
+            "not (a: 1px) or (b: 1px)",
+            "(a: 1px) and not (b: 1px)",
+            "(a: 1px) or not (b: 1px)",
+            "not not (a: 1px)",
+            "(a: 1px) and(b: 1px)",
+            "(a: 1px) or(b: 1px)",
+            "not",
+            "(a: 1px) and",
+            "(a: 1px) (b: 1px)",
+            "(a: 1px) or (b: 1px) and (c: 1px)",
+            "(a: 1px",
+            "card",
+            "",
+        ] {
+            assert!(q(bad).is_none(), "{bad:?} should be invalid");
+        }
+        for good in [
+            "not(a: 1px)",
+            "not (a: 1px)",
+            "(a: 1px) and (b: 1px)",
+            "(a: 1px) or (b: 1px)",
+            "((a: 1px) and (b: 1px))",
+            "(a: 1px)and (b: 1px)",
+            "style(--x: 1)",
+            "not style(--x: 1)",
+            "(a: 1px) and style(--x: 1)",
+            "((a: 1px) and not (b: 1px))",
+        ] {
+            assert!(q(good).is_some(), "{good:?} should be valid");
+        }
     }
 
     /// min()/max() take any number of arguments; the third one counts.
