@@ -368,6 +368,8 @@ mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
+mod adopted_sheets_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -8535,7 +8537,15 @@ impl Engine {
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
         let inline_sheets = self.inline_sheets(document, self.building_view.get());
-        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport);
+        let adopted = document.root().adopted_styles();
+        // The fingerprint vouches for the `<style>` and `<link>` sheets
+        // only. Adopted sheets are parsed fresh below, so with any the rule
+        // index compares selectors instead; reused by fingerprint, it
+        // indexed none of their rules.
+        let fingerprint = match adopted.iter().all(String::is_empty) {
+            true => self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport),
+            false => None,
+        };
         // Copies: the steps below filter and rank the rules in place, and
         // must not reach the cached sheets.
         let mut stylesheets: Vec<Stylesheet> =
@@ -8547,6 +8557,17 @@ impl Engine {
 
         // Add external stylesheets (loaded from <link> elements)
         stylesheets.extend(external_stylesheets.iter().cloned());
+        // `document.adoptedStyleSheets` follows the document's `<style>`
+        // and `<link>` sheets. The document node holds the text.
+        for text in adopted {
+            if text.is_empty() {
+                continue;
+            }
+            match Stylesheet::parse(&text) {
+                Ok(stylesheet) => stylesheets.push(stylesheet),
+                Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
+            }
+        }
 
         Self::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
@@ -32282,6 +32303,12 @@ mod remote_font_tests {
             .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // load_html leaves the page at about:blank, and the private-address
+        // vet lets a page with no http(s) origin reach public addresses only:
+        // every face would be denied, not fetched. Serve the page from the
+        // font host, so its fetches are same-origin loopback.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -32645,6 +32672,10 @@ document.currentScript.remove();
             })
             .expect("view");
         engine.load_html(view, &html).expect("load");
+        // From about:blank the vet denies 127.0.0.1 at once, which would pass
+        // this test without the budget ever cutting a fetch.
+        engine.views.get_mut(&view).expect("view").url =
+            Some(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
 
         let rules = engine.view_font_face_rules(view);
         assert_eq!(rules.len(), 1, "inline @font-face must be discovered");
@@ -32661,6 +32692,10 @@ document.currentScript.remove();
         let took = started.elapsed();
 
         assert_eq!(loaded, 0, "a stalled face must not count as loaded");
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "the face failed in {took:?}, before the 500 ms budget could cut it"
+        );
         assert!(
             took < std::time::Duration::from_millis(2_500),
             "waited for the stalled web font: {took:?}"
@@ -38921,18 +38956,16 @@ mod referrer_tests {
         let (port, seen) = referers(TWO_SHEETS, "");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "same-origin: the full URL without its fragment; cross-origin: the origin only"
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "same-origin: the full URL without its fragment; the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 
     #[test]
     fn the_documents_referrer_policy_header_is_respected() {
         let (_, seen) = referers(TWO_SHEETS, "Referrer-Policy: no-referrer\r\n");
-        assert_eq!(seen.len(), 2, "{seen:?}");
+        // One sheet: the cross-origin loopback one is denied by the vet (#445).
+        assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen.iter().all(|(_, r)| r.is_none()), "{seen:?}");
     }
 
@@ -38945,10 +38978,8 @@ mod referrer_tests {
         let (port, seen) = referers(&html, "Referrer-Policy: unsafe-url\r\n");
         assert_eq!(
             seen,
-            vec![
-                ("/cross.css".to_string(), None),
-                ("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ]
+            vec![("/same.css".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "the cross-origin loopback `localhost` sheet is denied by the subresource vet (#445: a local page reaches only its own origin), as in fbc6268f; the cross-origin Referer values are pinned in rustkit-net security.rs"
         );
     }
 }
@@ -39042,11 +39073,10 @@ mod image_loader_routing_tests {
         seen.sort();
         assert_eq!(
             seen,
-            vec![
-                ("/cross.png".to_string(), Some(format!("http://127.0.0.1:{port}/"))),
-                ("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1"))),
-            ],
-            "one request per image the shield allows, each with the policy's Referer; none for the blocked one"
+            vec![("/same.png".to_string(), Some(format!("http://127.0.0.1:{port}/page?q=1")))],
+            "one request per image the shield allows, with the policy's Referer; none for the blocked one, \
+             and none for the cross-origin loopback `localhost` image, which the subresource vet denies \
+             (#445, as in fbc6268f; the origin-only Referer is pinned in rustkit-net security.rs)"
         );
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
