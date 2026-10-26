@@ -1556,6 +1556,8 @@ fn shield_interceptor(args: &Args) -> Option<rustkit_net::RequestInterceptor> {
     if !args.shield {
         return None;
     }
+    // The event log names the list and rule of a block.
+    hiwave_shield_intercept::name_matched_rules();
     let ready = hiwave_shield_intercept::wait_until_ready(Duration::from_millis(args.shield_wait_ms));
     eprintln!("shield: on, filter lists {}", if ready { "ready" } else { "not ready (domain floor only)" });
     Some(hiwave_shield_intercept::create_shield_interceptor())

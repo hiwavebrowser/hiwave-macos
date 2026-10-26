@@ -55,7 +55,7 @@ field that is `null` today may hold a value later.
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
 | `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms`, `queued_ms` (see below) |
-| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`), `queued_ms` |
+| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`. Rules the filter engine joined into one are written each as its list writes it, separated by ` <+> `, and any of them may have matched: `list` is then named only when all are from that list, else `unattributed`. The rule is named only where the tool asked for rule names (parity-capture `--shield`; they cost about 8 MB); elsewhere `rule` is `null` and `list` is `unattributed` when several lists are loaded), `queued_ms` |
 | `script` | `script`, `kind`, `outcome`, `reason`, `bytes`, `queued_ms`, `fetch_ms`, `waited_ms`, `ran_ms`, `event`, `held`: one page script's life, recorded when it is over (see Scripts) |
 | `lifecycle` | `event` (`DOMContentLoaded`, `load`), `held_by`, `held_by_count`: recorded as the event fires (see Scripts) |
 

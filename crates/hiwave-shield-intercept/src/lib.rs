@@ -312,6 +312,18 @@ struct ShieldQuery {
 /// The worker's engine is built (see [`shield_worker`]).
 static READY: AtomicBool = AtomicBool::new(false);
 
+/// The worker builds its engine naming matched rules (see [`name_matched_rules`]).
+static NAME_RULES: AtomicBool = AtomicBool::new(false);
+
+/// Build the filter engine so a block names its rule and list (the event
+/// log's `failure.blocked_by`). The rule text costs about 9 MB, so only a
+/// tool that reports it asks (parity-capture `--shield`); call it before
+/// the first request or [`wait_until_ready`]. Without it a block from the
+/// filter lists names no rule.
+pub fn name_matched_rules() {
+    NAME_RULES.store(true, Ordering::Release);
+}
+
 /// Wait up to `timeout` for the filter engine to be built, starting its
 /// build if nothing has yet. True when it is ready: until then every
 /// request is judged by the pending floor (`list = "domain-floor"`), so a
@@ -338,7 +350,11 @@ fn shield_worker() -> Option<std::sync::mpsc::Sender<ShieldQuery>> {
         let spawned = std::thread::Builder::new()
             .name("shield-filter-worker".into())
             .spawn(move || {
-                let engine = hiwave_shield::AdBlocker::with_filter_lists();
+                let engine = if NAME_RULES.load(Ordering::Acquire) {
+                    hiwave_shield::AdBlocker::with_filter_lists_naming_rules()
+                } else {
+                    hiwave_shield::AdBlocker::with_filter_lists()
+                };
                 READY.store(true, std::sync::atomic::Ordering::Release);
                 tracing::info!("shield filter engine ready");
                 while let Ok(q) = rx.recv() {

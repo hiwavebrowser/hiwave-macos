@@ -17,11 +17,22 @@ pub use filter_lists::{FilterListManager, FilterListSource, FILTER_LISTS};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockMatch {
     /// The list's name (`EasyList`, `EasyPrivacy`), `HiWave defaults` for
-    /// the starter rules, or `custom` for rules handed to `with_rules`.
+    /// the starter rules, `custom` for rules handed to `with_rules`, or
+    /// [`UNATTRIBUTED`] when the engine cannot say which list it was.
     pub list: String,
-    /// The rule as the list writes it.
+    /// The rule as the list writes it; `None` when the engine was built
+    /// without rule names. Rules the engine joined into one are written
+    /// as the list writes each, separated by ` <+> `: one of them matched.
     pub rule: Option<String>,
 }
+
+/// The list named for a match that rules from more than one list could
+/// have made: the engine joined rules from different lists into the one
+/// that matched (` <+> `), or was built without rule names.
+pub const UNATTRIBUTED: &str = "unattributed";
+
+/// What adblock-rust writes between the rules it joined into one.
+const JOINED: &str = " <+> ";
 
 /// Ad blocker powered by Brave's adblock-rust engine
 pub struct AdBlocker {
@@ -30,11 +41,13 @@ pub struct AdBlocker {
     requests_blocked: AtomicU64,
     trackers_blocked: AtomicU64,
     /// The list each rule came from, when rules came from more than one.
-    /// The engine is built with debug information, so a match names its
-    /// rule's text (a few MB more for the full lists).
     rule_lists: HashMap<String, &'static str>,
-    /// The list a rule not in `rule_lists` came from.
+    /// The list every rule came from, when `rule_lists` is empty.
     default_list: &'static str,
+    /// The engine keeps each rule's text, so a match names its rule. About
+    /// 9 MB more for the full lists, so `with_filter_lists` leaves it off
+    /// (`with_filter_lists_naming_rules` turns it on).
+    names_rules: bool,
 }
 
 impl AdBlocker {
@@ -88,17 +101,23 @@ impl AdBlocker {
     pub fn new() -> Self {
         log::info!("Initializing ad blocker");
 
-        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults")
+        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults", true)
     }
 
     /// Creates ad blocker with the given filter rules
     pub fn with_rules(rules: &[&str]) -> Self {
         log::info!("Initializing ad blocker with {} rules", rules.len());
-        Self::from_parts(rules, HashMap::new(), "custom")
+        Self::from_parts(rules, HashMap::new(), "custom", true)
     }
 
-    fn from_parts(rules: &[&str], rule_lists: HashMap<String, &'static str>, default_list: &'static str) -> Self {
-        let engine = Engine::from_rules_debug(rules.iter().copied(), ParseOptions::default());
+    fn from_parts(
+        rules: &[&str],
+        rule_lists: HashMap<String, &'static str>,
+        default_list: &'static str,
+        names_rules: bool,
+    ) -> Self {
+        let engine =
+            Engine::from_rules_parametrised(rules.iter().copied(), ParseOptions::default(), names_rules, true);
         Self {
             engine,
             enabled: true,
@@ -106,12 +125,17 @@ impl AdBlocker {
             trackers_blocked: AtomicU64::new(0),
             rule_lists,
             default_list,
+            names_rules,
         }
     }
 
     /// Creates ad blocker from several named lists: a match names the list
     /// its rule came from (the first, for a rule two lists share).
     pub fn from_named_lists(lists: &[(&'static str, &str)]) -> Self {
+        Self::from_lists(lists, true)
+    }
+
+    fn from_lists(lists: &[(&'static str, &str)], names_rules: bool) -> Self {
         let mut rules = Vec::new();
         let mut rule_lists = HashMap::new();
         for (name, content) in lists {
@@ -121,7 +145,9 @@ impl AdBlocker {
             }
         }
         let default_list = lists.first().map(|(name, _)| *name).unwrap_or("custom");
-        Self::from_parts(&rules, rule_lists, default_list)
+        // One list: every match is from it, with or without rule names.
+        let rule_lists = if lists.len() > 1 { rule_lists } else { HashMap::new() };
+        Self::from_parts(&rules, rule_lists, default_list, names_rules)
     }
 
     /// Creates ad blocker from filter list content (e.g., EasyList)
@@ -135,6 +161,17 @@ impl AdBlocker {
     /// Creates ad blocker with full EasyList/EasyPrivacy filter lists
     /// Falls back to default rules if filter lists can't be loaded
     pub fn with_filter_lists() -> Self {
+        Self::filter_lists(false)
+    }
+
+    /// [`with_filter_lists`](Self::with_filter_lists), with a match naming
+    /// its rule and list (dev-tools T2: the event log's `blocked_by`). The
+    /// rule text costs about 9 MB, so only a tool that reports it asks.
+    pub fn with_filter_lists_naming_rules() -> Self {
+        Self::filter_lists(true)
+    }
+
+    fn filter_lists(names_rules: bool) -> Self {
         log::info!("Initializing ad blocker with EasyList/EasyPrivacy");
 
         match FilterListManager::new() {
@@ -159,7 +196,7 @@ impl AdBlocker {
                     );
                     let named: Vec<(&'static str, &str)> =
                         lists.iter().map(|(name, content)| (*name, content.as_str())).collect();
-                    Self::from_named_lists(&named)
+                    Self::from_lists(&named, names_rules)
                 }
             }
             None => {
@@ -177,6 +214,7 @@ impl AdBlocker {
         self.engine = Engine::from_rules_debug(rules_refs, ParseOptions::default());
         self.rule_lists.clear();
         self.default_list = "custom";
+        self.names_rules = true;
         self.requests_blocked.store(0, Ordering::Relaxed);
         self.trackers_blocked.store(0, Ordering::Relaxed);
 
@@ -214,11 +252,9 @@ impl AdBlocker {
                     log::debug!("Blocked: {} (from {})", url, source_url);
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
                     self.trackers_blocked.fetch_add(1, Ordering::Relaxed);
-                    let rule = result.filter;
-                    let list = rule
-                        .as_deref()
-                        .and_then(|r| self.rule_lists.get(r.trim()).copied())
-                        .unwrap_or(self.default_list);
+                    // Without rule names the engine writes "NetworkFilter".
+                    let rule = result.filter.filter(|_| self.names_rules);
+                    let list = self.list_of(rule.as_deref());
                     Some(BlockMatch { list: list.to_string(), rule })
                 } else {
                     None
@@ -228,6 +264,21 @@ impl AdBlocker {
                 log::warn!("Failed to create request for {}: {}", url, e);
                 None
             }
+        }
+    }
+
+    /// The list a matched rule came from. A rule the engine joined from
+    /// several (` <+> `) is looked up part by part, and named only when
+    /// every part is from the same list: any of them may have matched.
+    fn list_of(&self, rule: Option<&str>) -> &'static str {
+        if self.rule_lists.is_empty() {
+            return self.default_list;
+        }
+        let Some(rule) = rule else { return UNATTRIBUTED };
+        let mut lists = rule.split(JOINED).map(|part| self.rule_lists.get(part.trim()).copied());
+        match lists.next().flatten() {
+            Some(list) if lists.all(|other| other == Some(list)) => list,
+            _ => UNATTRIBUTED,
         }
     }
 
@@ -375,6 +426,53 @@ mod tests {
         assert_eq!(
             AdBlocker::new().check(&Url::parse("https://doubleclick.net/x").unwrap(), &source, ResourceType::Script),
             Some(BlockMatch { list: "HiWave defaults".into(), rule: Some("||doubleclick.net^".into()) })
+        );
+    }
+
+    /// Prometheus R1 on #792: adblock-rust joins plain pattern rules with
+    /// the same options into one (` <+> `), which no list writes. Such a
+    /// match is named for a list only when every joined rule is from it.
+    #[test]
+    fn a_joined_rule_names_a_list_only_when_all_its_parts_are_from_it() {
+        let source = Url::parse("https://example.com/").unwrap();
+        let ad = Url::parse("https://example.com/adbanner.js").unwrap();
+
+        // The rule that matched is EasyPrivacy's; it is joined with one of
+        // EasyList's (same options, same token), so either could have matched.
+        let mixed = AdBlocker::from_named_lists(&[("EasyList", "/adbanner.gif\n"), ("EasyPrivacy", "/adbanner.js\n")]);
+        let found = mixed.check(&ad, &source, ResourceType::Script).expect("blocked");
+        assert!(found.rule.as_deref().is_some_and(|r| r.contains(JOINED)), "the engine joined the rules: {found:?}");
+        assert_eq!(found.list, UNATTRIBUTED, "{found:?}");
+
+        // Both joined rules are EasyPrivacy's.
+        let same = AdBlocker::from_named_lists(&[
+            ("EasyList", "||ads.example.org^\n"),
+            ("EasyPrivacy", "/adbanner.js\n/adbanner.gif\n"),
+        ]);
+        let found = same.check(&ad, &source, ResourceType::Script).expect("blocked");
+        assert!(found.rule.as_deref().is_some_and(|r| r.contains(JOINED)), "the engine joined the rules: {found:?}");
+        assert_eq!(found.list, "EasyPrivacy", "{found:?}");
+    }
+
+    /// Prometheus R1 on #792: the rule text costs every user about 9 MB, so
+    /// the full lists keep it only when asked. Without it a match names no
+    /// rule, and no list when several were loaded.
+    #[test]
+    fn without_rule_names_a_match_names_no_rule() {
+        let source = Url::parse("https://example.com/").unwrap();
+        let ad = Url::parse("https://ads.example.com/banner.js").unwrap();
+        let lists = [("EasyList", "||ads.example.com^\n"), ("EasyPrivacy", "||pixel.example.org^\n")];
+        assert_eq!(
+            AdBlocker::from_lists(&lists, false).check(&ad, &source, ResourceType::Script),
+            Some(BlockMatch { list: UNATTRIBUTED.into(), rule: None })
+        );
+        assert_eq!(
+            AdBlocker::from_lists(&lists[..1], false).check(&ad, &source, ResourceType::Script),
+            Some(BlockMatch { list: "EasyList".into(), rule: None })
+        );
+        assert_eq!(
+            AdBlocker::from_lists(&lists, true).check(&ad, &source, ResourceType::Script),
+            Some(BlockMatch { list: "EasyList".into(), rule: Some("||ads.example.com^".into()) })
         );
     }
 
