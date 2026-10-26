@@ -803,6 +803,48 @@ console.count('secret-label');
     assert!(mirrored.contains("secret-console-text 12"), "{mirrored}");
 }
 
+/// Prometheus R1 on #791: with the mirror on, `attach` sets the runtime's
+/// error `keep_text`. An uncaught `throw` and a `console.error(new Error)`
+/// still reach the Inspector as shapes only: no page message and no page
+/// function name in any record (message, stack, error_stack).
+#[test]
+fn with_the_mirror_on_errors_and_error_stacks_reach_the_inspector_as_shapes() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+function secretOuter() { secretInner(); }
+function secretInner() {
+  console.error(new Error('secret-logged-text'));
+  throw new TypeError('secret-thrown-text');
+}
+secretOuter();
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+    let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+    assert!(kinds.contains(&"script_error"), "no script_error record: {kinds:?}");
+    let errors: Vec<String> = records
+        .iter()
+        .filter(|r| matches!(r.event.kind(), "console" | "script_error"))
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert!(errors.iter().any(|r| r.contains("\"level\":\"error\"")), "no console.error record: {errors:?}");
+    for record in &errors {
+        assert!(!record.contains("secret"), "page text reached the Inspector with the mirror on: {record}");
+    }
+}
+
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
 
 /// Page scripts now run under a name (`inline#n`, `script#n`) so positions

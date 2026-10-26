@@ -129,7 +129,13 @@ pub(crate) fn script_error(inspector: &Inspector, report: &rustkit_js::ErrorRepo
         });
         InspectorEvent::ScriptError {
             name: report.name.unwrap_or("").to_string(),
-            message: report.message.as_deref().map(|m| cap(m, MAX_MESSAGE_CHARS).0),
+            // The runtime keeps the text while the mirror is on (`attach`);
+            // the Inspector keeps it only under its own rule (#791 R1).
+            message: report
+                .message
+                .as_deref()
+                .filter(|_| inspector.keeps_error_text())
+                .map(|m| cap(m, MAX_MESSAGE_CHARS).0),
             location,
             stack,
             unhandled_rejection: report.rejection,
