@@ -2016,6 +2016,19 @@ mod tests {
         assert!(submission.body.is_none());
     }
 
+    /// A GET with no successful controls still builds `action?` (HTML form
+    /// submission). Engine #771 depended on this shape after the empty-list
+    /// early return was removed.
+    #[test]
+    fn a_get_with_no_entries_still_appends_an_empty_query() {
+        let form = FormState::new();
+        form.set_action("/search");
+        form.set_method(FormMethod::Get);
+        let submission = form.create_submission("https://example.com/page", &[]);
+        assert_eq!(submission.url, "https://example.com/search?");
+        assert!(submission.body.is_none());
+    }
+
     #[test]
     fn test_form_submission_post() {
         let form = FormState::new();

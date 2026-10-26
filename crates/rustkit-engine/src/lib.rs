@@ -415,6 +415,8 @@ mod script_nav_image_wait_tests;
 mod post_onload_requests_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_action_url_tests;
+#[cfg(test)]
+mod form_empty_submit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
