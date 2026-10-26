@@ -16,8 +16,10 @@
 //
 // A <style> in a shadow root styles that tree only, and document rules
 // stop at the boundary (engine `shadow_tree.rs`: `:host`, `::slotted`).
-// What this is not, yet: `::part` is not understood, and adoptedStyleSheets
-// apply to nothing. `slotchange` does not fire. Manual slot assignment (`slot.assign()`) assigns nothing.
+// What this is not, yet: `::part` is not understood. `slotchange` does not
+// fire. Manual slot assignment (`slot.assign()`) assigns nothing.
+// `adoptedStyleSheets` is installed by web_cssom.js, which loads next, and
+// the engine applies that CSS with this tree's `<style>` elements.
 // composedPath() does not hide the inside of a closed shadow root from
 // listeners outside it.
 //
