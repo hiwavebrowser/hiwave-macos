@@ -66,7 +66,7 @@ fn list_ptr(engine: &Engine, view: EngineViewId) -> (*const DisplayCommand, usiz
 }
 
 fn last_drawn(engine: &mut Engine) -> (*const DisplayCommand, usize) {
-    engine.presenter.renderer_mut().expect("renderer").last_executed_list()
+    engine.presenter.as_mut().expect("window presenter").renderer_mut().expect("renderer").last_executed_list()
 }
 
 /// The pointer-identity check: a scrolled frame of a large page draws the
@@ -83,7 +83,7 @@ fn scrolling_a_large_page_draws_the_pages_own_list_not_a_copy() {
     let viewhost_id = engine.views[&view].viewhost_id;
     for offset in [(0.0, 120.0), (0.0, 5_000.0), (0.0, max.1)] {
         let display_list = engine.views[&view].display_list.as_ref().unwrap();
-        engine.presenter.draw_scrolled(viewhost_id, display_list, offset, None).expect("draw");
+        engine.presenter.as_mut().expect("window presenter").draw_scrolled(viewhost_id, display_list, offset, None).expect("draw");
         assert_eq!(last_drawn(&mut engine), (ptr, len), "at {offset:?} the renderer drew the page's list in place");
     }
 
@@ -104,12 +104,16 @@ fn capture(engine: &mut Engine, view: EngineViewId, offset: (f32, f32), copied: 
         let list = engine.views[&view].display_list.as_ref().unwrap().commands.clone();
         engine
             .presenter
+            .as_mut()
+            .expect("window presenter")
             .capture_commands(viewhost_id, (WIDTH, HEIGHT), path_str, &scrolled_commands(&list, offset))
             .expect("capture");
     } else {
         let display_list = engine.views[&view].display_list.as_ref().unwrap();
         engine
             .presenter
+            .as_mut()
+            .expect("window presenter")
             .draw_scrolled(viewhost_id, display_list, offset, Some(path_str))
             .expect("capture");
     }
@@ -158,16 +162,16 @@ fn fixed_sticky_images_and_iframes_draw_the_same_under_scroll() {
 fn an_image_is_uploaded_once_however_often_the_page_scrolls() {
     let (mut engine, view, _server) = load(&large_body(60));
     engine.render(view).expect("render");
-    let uploaded = engine.presenter.images_uploaded;
+    let uploaded = engine.presenter.as_ref().expect("window presenter").images_uploaded;
     assert_eq!(uploaded, 2, "the red and the blue image, each once, however many rows name them");
     for _ in 0..5 {
         assert!(engine.scroll_view(view, 0.0, -150.0).unwrap());
     }
     let viewhost_id = engine.views[&view].viewhost_id;
     let display_list = engine.views[&view].display_list.as_ref().unwrap();
-    engine.presenter.draw_scrolled(viewhost_id, display_list, (0.0, 600.0), None).expect("draw");
+    engine.presenter.as_mut().expect("window presenter").draw_scrolled(viewhost_id, display_list, (0.0, 600.0), None).expect("draw");
     engine.render(view).expect("render");
-    assert_eq!(engine.presenter.images_uploaded, 2, "no image was uploaded again");
+    assert_eq!(engine.presenter.as_ref().expect("window presenter").images_uploaded, 2, "no image was uploaded again");
 }
 
 fn median_ms(mut samples: Vec<std::time::Duration>) -> f64 {
@@ -203,7 +207,7 @@ fn timing_of_render_and_scroll_on_a_large_page() {
         copy.push(t.elapsed());
         drop(copied);
         let t = std::time::Instant::now();
-        engine.presenter.draw_scrolled(viewhost_id, display_list, offset, None).expect("draw");
+        engine.presenter.as_mut().expect("window presenter").draw_scrolled(viewhost_id, display_list, offset, None).expect("draw");
         scroll.push(t.elapsed());
     }
     println!(

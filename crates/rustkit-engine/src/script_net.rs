@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -25,7 +25,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use rustkit_bindings::{DomBindings, NetDelivery, NetRequest};
 use rustkit_net::policy::{FetchPolicy, RequestMode, ResponseKind, ScriptRequest, ScriptResponse};
-use rustkit_net::{CredentialsMode, RedirectMode, RequestDestination, RequestId, ResourceLoader};
+use rustkit_net::{CredentialsMode, RedirectMode, Request, RequestDestination, RequestId, ResourceLoader};
 use tracing::debug;
 use url::Url;
 
@@ -33,6 +33,57 @@ use crate::inspector::{self, FailureStage, Inspector, ResourceType};
 
 /// What the page sees for every refusal and every failure.
 const NETWORK_ERROR: &str = "network error";
+
+fn log_request(method: &str, url: &str, status: &str, disposition: &str) {
+    crate::console_log::net(
+        "end",
+        method,
+        url,
+        status,
+        disposition,
+        rustkit_js::diag_nav(),
+    );
+}
+
+fn log_handoff(request: &NetRequest, outcome: &NetDelivery, disposition: &str) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    let (status, url) = match outcome {
+        NetDelivery::Response { status, url, .. } => (status.to_string(), url.as_str()),
+        NetDelivery::Error(_) => ("-".to_string(), request.url.as_str()),
+    };
+    log_request(&request.method, url, &status, disposition);
+}
+
+/// A live-loop answer no longer has the request's method. The start line does.
+pub(crate) fn log_live_handoff(outcome: &NetDelivery, disposition: &str) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    match outcome {
+        NetDelivery::Response { url, status, .. } => {
+            log_request("-", url, &status.to_string(), disposition);
+        }
+        NetDelivery::Error(_) => log_request("-", "-", "-", disposition),
+    }
+}
+
+fn log_denial(method: &str, url: &str, denial: &rustkit_net::policy::Denial) {
+    if !crate::console_log::enabled() {
+        return;
+    }
+    use rustkit_net::policy::Denial;
+    let (disposition, status) = match denial {
+        Denial::Shield | Denial::Csp => ("blocked", "-".to_string()),
+        Denial::Timeout => ("timeout", "-".to_string()),
+        Denial::Cancelled => ("cancelled", "-".to_string()),
+        Denial::BadStatus(code) => ("response", code.to_string()),
+        Denial::Network(_) => return,
+        _ => ("error", "-".to_string()),
+    };
+    log_request(method, url, &status, disposition);
+}
 
 thread_local! {
     /// Answers fetched while the JavaScript budget was already spent. The
@@ -44,7 +95,6 @@ thread_local! {
 
 pub(crate) fn clear_parked_deliveries() {
     PARKED.with(|parked| parked.borrow_mut().clear());
-    PARKED_SCRIPTS.with(|parked| parked.borrow_mut().clear());
 }
 
 pub(crate) fn take_parked_deliveries() -> Vec<(u64, NetDelivery)> {
@@ -128,10 +178,12 @@ pub(crate) async fn pump(
             // function would land in a turn the watchdog stops at once.
             if super::script_js_exhausted() || super::script_js_resume_would_be_stopped() {
                 if bindings.shelve_net_request(request.id) {
+                    log_handoff(request, &outcome, "parked");
                     park_delivery((request.id, outcome));
                 }
                 continue;
             }
+            log_handoff(request, &outcome, "delivered");
             let (delivered, stopped) = super::with_script_js(bindings, || {
                 catch_unwind(AssertUnwindSafe(|| {
                     bindings.deliver_net_response(request.id, outcome)
@@ -251,9 +303,13 @@ async fn execute(
         Ok(r) => r,
         Err(reason) => {
             debug!(id = request.id, %reason, "Script request refused before the policy");
+            log_request(&request.method, &request.url, "-", "error");
             return NetDelivery::Error(NETWORK_ERROR.into());
         }
     };
+    let log_net = crate::console_log::enabled();
+    let method = if log_net { script_request.method.to_string() } else { String::new() };
+    let url = if log_net { script_request.url.to_string() } else { String::new() };
     let resource_type = match script_request.destination {
         RequestDestination::Xhr => ResourceType::Xhr,
         RequestDestination::Fetch => ResourceType::Fetch,
@@ -272,6 +328,7 @@ async fn execute(
         }
         Ok(Err(denial)) => {
             debug!(id = request.id, ?denial, "Script request denied");
+            log_denial(&method, &url, &denial);
             if let Some(guard) = guard {
                 let (stage, reason) = inspector::denial_stage(&denial);
                 guard.fail(stage, reason);
@@ -280,6 +337,7 @@ async fn execute(
         }
         Err(_) => {
             debug!(id = request.id, "Script request hit its network cap");
+            log_request(&method, &url, "-", "timeout");
             if let Some(guard) = guard {
                 let reason = match on_deadline {
                     FailureStage::OverBudget => "script budget spent",
@@ -413,21 +471,7 @@ pub(crate) async fn pump_modules(
             if i >= room {
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
-            let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-            let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-            let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
-            inspector::answer_module(guard, &fetched);
-            match fetched {
-                Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
-                    final_url: module.final_url.to_string(),
-                    source: module.source,
-                }),
-                Ok(Err(denial)) => {
-                    debug!(%url, ?denial, "Module fetch denied");
-                    Err(NETWORK_ERROR.to_string())
-                }
-                Err(_) => Err("timed out".to_string()),
-            }
+            fetch_module(policy, loader, url, document, deadline, inspector).await
         }))
         .await;
 
@@ -444,13 +488,77 @@ pub(crate) async fn pump_modules(
     out
 }
 
-/// Take-fetch-deliver for everything a page can have waiting: script network
-/// requests (XHR, fetch), the modules a dynamic `import()` asked for, and the
-/// scripts it inserted (with `scripts`, the referrer they are fetched with
-/// and the log their outcomes go to). One can start another (a fetch
-/// callback calls `import()`, an inserted script fetches), so they alternate
-/// until none found work, at most `ALTERNATIONS` times. Whatever is still waiting then is left for the next step's pump
-/// (the network side fails its stragglers itself).
+/// One module through the policy's module entry point, as the page gets
+/// it: its source, or why there is none.
+async fn fetch_module(
+    policy: &FetchPolicy,
+    loader: &ResourceLoader,
+    url: &str,
+    document: &Url,
+    deadline: tokio::time::Instant,
+    inspector: &Arc<Inspector>,
+) -> Result<rustkit_bindings::FetchedModule, String> {
+    let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
+    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
+    let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+    inspector::answer_module(guard, &fetched);
+    match fetched {
+        Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
+            final_url: module.final_url.to_string(),
+            source: module.source,
+        }),
+        Ok(Err(denial)) => {
+            debug!(%url, ?denial, "Module fetch denied");
+            Err(NETWORK_ERROR.to_string())
+        }
+        Err(_) => Err("timed out".to_string()),
+    }
+}
+
+/// A module a dynamic `import()` asked for that is out: the URL as asked
+/// for and, in the end, its source or why there is none.
+pub(crate) type LiveModule = LiveFuture<(String, Result<rustkit_bindings::FetchedModule, String>)>;
+
+/// Start the modules `urls` for the live loop, as [`start_live`] starts a
+/// script request: nothing runs until [`settle_live`] polls them, and no
+/// turn waits for one. Past the page's module cap (`fetched` counts what
+/// this document has started), a module fails at once.
+pub(crate) fn start_live_modules(
+    policy: &Arc<FetchPolicy>,
+    loader: &Arc<ResourceLoader>,
+    urls: Vec<String>,
+    document: &Url,
+    deadline: tokio::time::Instant,
+    fetched: &mut usize,
+    inspector: &Arc<Inspector>,
+) -> Vec<LiveModule> {
+    urls.into_iter()
+        .map(|url| -> LiveModule {
+            if *fetched >= MAX_MODULES_PER_PAGE {
+                let refused = Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
+                return Box::pin(std::future::ready((url, refused)));
+            }
+            *fetched += 1;
+            let (policy, loader, document, inspector) =
+                (policy.clone(), loader.clone(), document.clone(), inspector.clone());
+            Box::pin(async move {
+                let outcome = fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await;
+                (url, outcome)
+            })
+        })
+        .collect()
+}
+
+/// Take-fetch-deliver for the network a page can have waiting: script
+/// requests (XHR, fetch) and the modules a dynamic `import()` asked for.
+/// One can start the other, so they alternate until none found work, at
+/// most `ALTERNATIONS` times. Whatever is still waiting then is left for
+/// the next step's pump (the network side fails its stragglers itself).
+///
+/// Dynamically inserted external scripts are not part of this.
+/// [`drive_inserted_scripts`] fetches them. They do not delay
+/// `DOMContentLoaded`. Ones prepared while the document was still loading
+/// do delay `window` `load`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_all(
     bindings: &DomBindings,
@@ -462,7 +570,6 @@ pub(crate) async fn pump_all(
     document: Option<&Url>,
     modules_fetched: &mut usize,
     inspector: &Arc<Inspector>,
-    scripts: Option<&crate::SubresourceReferrer>,
     requests: bool,
 ) -> Pump {
     const ALTERNATIONS: u32 = 4;
@@ -480,18 +587,12 @@ pub(crate) async fn pump_all(
             }
             None => Pump::default(),
         };
-        let inserted = match scripts {
-            Some(referrer) => pump_inserted_scripts(bindings, loader, referrer, deadline, inspector).await,
-            None => Pump::default(),
-        };
-        let worked = net.requests + modules.requests + inserted.requests;
-        total.poisoned |= net.poisoned || modules.poisoned || inserted.poisoned;
+        let worked = net.requests + modules.requests;
+        total.poisoned |= net.poisoned || modules.poisoned;
         total.threw.extend(net.threw);
         total.threw.extend(modules.threw);
-        total.threw.extend(inserted.threw);
-        total.records.extend(inserted.records);
         total.requests += worked;
-        total.rounds += net.rounds + modules.rounds + inserted.rounds;
+        total.rounds += net.rounds + modules.rounds;
         if total.poisoned || worked == 0 {
             break;
         }
@@ -499,469 +600,850 @@ pub(crate) async fn pump_all(
     total
 }
 
-/// Deepest chain of inserted scripts followed in one pump (each round
+/// Deepest chain of inserted scripts followed in one drive (each round
 /// fetches what the previous round's scripts inserted).
 const MAX_INSERTED_SCRIPT_ROUNDS: u32 = 16;
 
-/// What fetching an inserted script came to: its text, or why there is none.
-type Fetched = Result<String, crate::ScriptOutcome>;
+/// The window loop's wake. Set by the app; tests leave it empty and call
+/// `pump_live` themselves. The callback only wakes the loop. It does not
+/// run the script.
+static LIVE_WAKE: OnceLock<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> = OnceLock::new();
 
-thread_local! {
-    /// Inserted scripts the load could not finish because its JavaScript
-    /// budget was spent: fetched and not yet run, or run and still owed
-    /// their `load` or `error`. The load hands them to the live loop
-    /// ([`LiveScripts::adopt`]); dropping them would leave a loader waiting
-    /// on them forever.
-    static PARKED_SCRIPTS: std::cell::RefCell<Vec<LiveScript>> = const { std::cell::RefCell::new(Vec::new()) };
+/// Install `wake`. A later installed callback replaces the earlier one.
+pub(crate) fn set_live_wake(wake: Arc<dyn Fn() + Send + Sync>) {
+    let slot = LIVE_WAKE.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
 }
 
-pub(crate) fn take_parked_scripts() -> Vec<LiveScript> {
-    PARKED_SCRIPTS.with(|parked| std::mem::take(&mut *parked.borrow_mut()))
+pub(crate) fn poke_live_turn() {
+    let Some(slot) = LIVE_WAKE.get() else {
+        return;
+    };
+    let wake = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(wake) = wake {
+        wake();
+    }
 }
 
-fn park_script(script: LiveScript) {
-    PARKED_SCRIPTS.with(|parked| parked.borrow_mut().push(script));
+/// External classic scripts one view has inserted and not yet run. The
+/// fetch runs on the engine's fetch thread, not on the turn that enqueued
+/// it. A result is stored here and a live turn runs it. A script runs when
+/// its own fetch finishes, unless `async` was set false, in which case it
+/// waits for the in-order scripts inserted before it. A fetch that failed
+/// or was blocked fires `error` as soon as that result is in and does not
+/// hold later scripts. `retire` (a new document) drops whatever is queued
+/// and rejects a result stamped with an earlier `nav_id`, so it cannot run
+/// on the next page.
+pub(crate) struct InsertedScripts {
+    board: Arc<Mutex<InsertedBoard>>,
 }
 
-/// Fetch and run the external classic scripts the page inserted
-/// (`web_scripts.js`), round by round, until it inserts no more. Each is
-/// fetched as a parser-inserted script is (the page's referrer, the script
-/// destination the shield classifies by, the loader's cookies), never
-/// through page script, and run as its element's script: `currentScript`
-/// is the element, then the element hears `load`, or `error` when the fetch
-/// failed. `deadline` is a network cap: a script still out then fails
-/// and its element hears `error`. What the JavaScript budget no longer
-/// reaches (a script whose body arrived, an event still owed) is parked
-/// for the live loop, which runs it on a turn that has budget. What each
-/// did is in the pump's `records`.
-pub(crate) async fn pump_inserted_scripts(
+struct InsertedBoard {
+    /// The document these jobs belong to. A result stamped with another
+    /// id is discarded.
+    nav_id: u64,
+    next_id: u64,
+    /// How many results have been stored. A ready script records the value
+    /// at the moment its body arrived, so two that are both waiting run in
+    /// the order they finished.
+    ready_seq: u64,
+    jobs: Vec<InsertedJob>,
+    /// Events a script has earned and could not hear yet because the turn's
+    /// JavaScript budget was spent, oldest first. A turn with budget fires
+    /// them before it runs another script, so each element hears exactly one
+    /// `load` or `error` (#775: a loader waiting on a dropped one waited
+    /// forever).
+    owed: std::collections::VecDeque<OwedEvent>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+struct OwedEvent {
+    node: usize,
+    event: &'static str,
+    /// The script's URL, for the log.
+    source: String,
+    /// The index of this element's own record in the pump that ran it,
+    /// when the event fires in that pump. `None` once it is owed to a
+    /// later turn, whose pump does not hold that record.
+    record: Option<usize>,
+}
+
+struct InsertedJob {
+    id: u64,
+    node: usize,
+    url: String,
+    nav_id: u64,
+    /// `async` was set false: this script waits for in-order scripts
+    /// inserted before it. Otherwise it runs when its fetch finishes.
+    in_order: bool,
+    /// Set when `body` is stored. Zero while the fetch is still out.
+    ready_seq: u64,
+    body: Option<FetchedInserted>,
+    guard: Option<crate::inspector::RequestGuard>,
+    /// Tripped on navigation or a cancelled load. The in-flight fetch
+    /// selects on it and drops the socket.
+    cancel: Arc<FetchCancel>,
+}
+
+/// How many inserted-script fetches may be on the wire at once. Script
+/// fetches that crowd the wire starve a page's stylesheets (#733's
+/// microsoft gate); Chrome holds an HTTP/1.1 host to six connections.
+pub(crate) const MAX_INSERTED_FETCHES_IN_FLIGHT: usize = 8;
+/// How many may be waiting behind those. Past this the script hears
+/// `error` instead of the queue growing without a bound. The queue is the
+/// process's, not a view's: 64 failed a burst of about 73 (walmart inserts
+/// about 113 at once). Per-view bounds come with M6's tabs.
+const MAX_INSERTED_FETCH_QUEUE: usize = 512;
+
+struct FetchCancel {
+    flag: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl FetchCancel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            flag: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            // Register before the check, so a cancel that lands between
+            // them still wakes this wait.
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+fn cancelled_fetch() -> FetchedInserted {
+    FetchedInserted::Transport {
+        stage: FailureStage::Cancelled,
+        inspector_reason: "abandoned (navigation or view closed)",
+        detail: "cancelled".into(),
+    }
+}
+
+fn cancel_inserted_jobs(board: &mut InsertedBoard) {
+    for job in board.jobs.drain(..) {
+        job.cancel.cancel();
+        if let Some(guard) = job.guard {
+            guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
+        }
+    }
+    board.owed.clear();
+    board.notify.notify_waiters();
+}
+
+/// What the fetch thread produced. The script itself runs later, inside a
+/// turn.
+enum FetchedInserted {
+    Source(InsertedSource),
+    /// A response that was not 2xx. The element hears `error`.
+    Http(InsertedHttp),
+    Transport {
+        stage: FailureStage,
+        inspector_reason: &'static str,
+        detail: String,
+    },
+    /// Not fetched (`unparseable src`). No load or error event.
+    Skipped(&'static str),
+}
+
+struct InsertedSource {
+    text: String,
+    status: u16,
+    mime: Option<String>,
+    encoded_size: Option<u64>,
+    from_cache: bool,
+}
+
+struct InsertedHttp {
+    status: u16,
+    mime: Option<String>,
+    encoded_size: Option<u64>,
+    from_cache: bool,
+}
+
+struct FetchJob {
+    loader: Arc<ResourceLoader>,
+    request: Request,
+    board: Arc<Mutex<InsertedBoard>>,
+    job_id: u64,
+    nav_id: u64,
+    cancel: Arc<FetchCancel>,
+}
+
+impl InsertedScripts {
+    pub(crate) fn new() -> Self {
+        Self {
+            board: Arc::new(Mutex::new(InsertedBoard {
+                nav_id: 0,
+                next_id: 1,
+                ready_seq: 0,
+                jobs: Vec::new(),
+                owed: std::collections::VecDeque::new(),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            })),
+        }
+    }
+
+    /// Drop every queued script and accept only results for `nav_id` from
+    /// now on. A fetch already in flight is cancelled: its future is
+    /// dropped, so the socket closes, and its result is not stored.
+    pub(crate) fn retire(&self, nav_id: u64) {
+        let mut board = lock_board(&self.board);
+        cancel_inserted_jobs(&mut board);
+        board.nav_id = nav_id;
+    }
+
+    /// Drop every queued script without moving the document generation. A
+    /// cancelled load uses this: the fetch is cancelled and the result
+    /// must not run later.
+    pub(crate) fn abandon(&self) {
+        let mut board = lock_board(&self.board);
+        cancel_inserted_jobs(&mut board);
+    }
+
+    fn has_jobs(&self) -> bool {
+        let board = lock_board(&self.board);
+        !board.jobs.is_empty() || !board.owed.is_empty()
+    }
+
+    /// A script is queued, its fetch is still out, or its element is still
+    /// owed its event.
+    pub(crate) fn pending(&self) -> bool {
+        self.has_jobs()
+    }
+
+    fn has_ready(&self) -> bool {
+        let board = lock_board(&self.board);
+        !board.owed.is_empty() || next_ready_index(&board.jobs).is_some()
+    }
+
+    fn take_owed(&self) -> Option<OwedEvent> {
+        let mut board = lock_board(&self.board);
+        board.owed.pop_front()
+    }
+
+    fn owe(&self, owed: OwedEvent) {
+        lock_board(&self.board).owed.push_back(owed);
+    }
+
+    fn take_ready(&self) -> Option<InsertedJob> {
+        let mut board = lock_board(&self.board);
+        let index = next_ready_index(&board.jobs)?;
+        Some(board.jobs.remove(index))
+    }
+
+    fn notify(&self) -> Arc<tokio::sync::Notify> {
+        lock_board(&self.board).notify.clone()
+    }
+}
+
+impl Clone for InsertedScripts {
+    fn clone(&self) -> Self {
+        Self { board: Arc::clone(&self.board) }
+    }
+}
+
+fn lock_board(board: &Mutex<InsertedBoard>) -> std::sync::MutexGuard<'_, InsertedBoard> {
+    board.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A finished fetch that must not hold the queue: the element hears `error`
+/// (or, for an unparseable URL, nothing) and later scripts do not wait for it.
+fn does_not_block(body: &FetchedInserted) -> bool {
+    match body {
+        FetchedInserted::Source(_) => false,
+        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } | FetchedInserted::Skipped(_) => true,
+    }
+}
+
+/// The script to run next, if one is ready (HTML §4.12.1.1). An async script
+/// (the default for one the page inserted) is ready when its fetch has
+/// finished. An in-order script (`async` set false) is ready when its fetch
+/// has finished and every in-order script inserted before it has already
+/// run, except a failed or blocked fetch: that fires `error` immediately and
+/// does not hold the ones after it. Among the scripts that are ready, the
+/// one whose fetch finished first runs.
+fn next_ready_index(jobs: &[InsertedJob]) -> Option<usize> {
+    let mut in_order_blocked = false;
+    let mut best: Option<(usize, u64)> = None;
+    for (index, job) in jobs.iter().enumerate() {
+        let failure = job.body.as_ref().is_some_and(does_not_block);
+        if job.in_order && in_order_blocked && !failure {
+            continue;
+        }
+        if job.body.is_none() {
+            if job.in_order {
+                in_order_blocked = true;
+            }
+            continue;
+        }
+        if job.in_order && !failure {
+            in_order_blocked = true;
+        }
+        if best.map(|(_, seq)| job.ready_seq < seq).unwrap_or(true) {
+            best = Some((index, job.ready_seq));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// Queue fetches for the external classic scripts the page has inserted
+/// since the last take. `false`: the JS engine panicked taking the queue,
+/// and the queue has been dropped.
+pub(crate) fn enqueue_inserted_scripts(
     bindings: &DomBindings,
-    loader: &ResourceLoader,
+    loader: &Arc<ResourceLoader>,
     referrer: &crate::SubresourceReferrer,
-    deadline: tokio::time::Instant,
     inspector: &Arc<Inspector>,
+    scripts: &InsertedScripts,
+) -> bool {
+    if enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        return true;
+    }
+    scripts.abandon();
+    false
+}
+
+/// Run at most one inserted script whose body has already arrived. Does not
+/// wait for a fetch. A script this one inserts is queued before the call
+/// returns, so the caller can see that the chain is not idle yet.
+pub(crate) fn drive_at_most_one(
+    bindings: &DomBindings,
+    loader: &Arc<ResourceLoader>,
+    referrer: &crate::SubresourceReferrer,
+    inspector: &Arc<Inspector>,
+    scripts: &InsertedScripts,
+    execute: bool,
 ) -> Pump {
     let mut out = Pump::default();
-    for _ in 0..MAX_INSERTED_SCRIPT_ROUNDS {
-        let Ok(scripts) = catch_unwind(AssertUnwindSafe(|| bindings.take_inserted_scripts())) else {
-            out.poisoned = true;
-            return out;
-        };
-        if scripts.is_empty() {
-            return out;
-        }
-        out.rounds += 1;
-        out.requests += scripts.len();
-        let fetched = futures::future::join_all(scripts.iter().map(|script| async move {
-            let url = Url::parse(&script.url).map_err(|_| crate::ScriptOutcome::Skipped("unparseable src"))?;
-            fetch_inserted(loader, referrer.get_for(url, RequestDestination::Script), deadline, inspector).await
-        }))
-        .await;
-
-        // Run in the order the page inserted them.
-        for (script, result) in scripts.into_iter().zip(fetched) {
-            if result.is_ok() && super::script_js_exhausted() {
-                park_script(LiveScript::new(script, Stage::Arrived(0, result)));
-                continue;
-            }
-            let event = run_fetched(bindings, inspector, script.node, script.url.clone(), result, &mut out);
-            if out.poisoned {
-                return out;
-            }
-            if let Some(event) = event {
-                if super::script_js_exhausted() {
-                    park_script(LiveScript::new(script, Stage::Owed(event)));
-                    continue;
-                }
-                fire_inserted_event(bindings, script.node, event, &script.url, &mut out);
-            }
-        }
+    if !enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        out.poisoned = true;
+        scripts.abandon();
+        return out;
+    }
+    if !execute || super::script_js_exhausted() || !scripts.has_ready() {
+        return out;
+    }
+    out.rounds += 1;
+    if run_inserted(bindings, inspector, scripts, &mut out) {
+        scripts.abandon();
+        return out;
+    }
+    if !enqueue_inserted(bindings, loader, referrer, inspector, scripts) {
+        out.poisoned = true;
+        scripts.abandon();
     }
     out
 }
 
-/// Fetch one inserted script; `deadline` is its network timeout.
-async fn fetch_inserted(
-    loader: &ResourceLoader,
-    request: rustkit_net::Request,
-    deadline: tokio::time::Instant,
+/// Fetch and run the external classic scripts the page inserted
+/// (`web_scripts.js`). Each is fetched as a parser-inserted script is (the
+/// page's referrer, the script destination the shield classifies by, the
+/// loader's cookies), never through page script, and run as its element's
+/// script: `currentScript` is the element, then the element hears `load`,
+/// or `error` when the fetch failed. One whose `async` was set false waits
+/// its turn; every other one runs when its own fetch finishes.
+///
+/// `deadline` bounds how long this call waits. It does not bound the fetch.
+/// A fetch still pending when the deadline passes stays queued, hears
+/// neither event yet, and is not recorded over budget. The fetch thread
+/// keeps it going. When the body arrives it wakes a live turn, which runs
+/// the script. `execute` false only enqueues: a turn with no budget left
+/// does not run a script. What ran is in the pump's `records`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_inserted_scripts(
+    bindings: &DomBindings,
+    loader: Arc<ResourceLoader>,
+    referrer: &crate::SubresourceReferrer,
     inspector: &Arc<Inspector>,
-) -> Fetched {
-    use crate::{FetchFailure, ScriptOutcome};
-    let guard = inspector
-        .begin_request(&request.url, "GET", ResourceType::Script, Some("script"))
-        .map(|g| g.timeout_at(deadline, "timed out"));
-    let fetch = async {
-        match loader.fetch(request).await {
-            Ok(response) if response.ok() => {
-                let received = guard.map(|g| g.received(&response));
-                match response.text().await {
-                    Ok(text) => {
-                        if let Some(received) = received {
-                            received.read(text.len());
-                        }
-                        Ok(text)
-                    }
-                    Err(e) => {
-                        if let Some(received) = received {
-                            received.fail(FailureStage::Decode, "body is not UTF-8");
-                        }
-                        Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
-                    }
-                }
+    scripts: &InsertedScripts,
+    deadline: tokio::time::Instant,
+    execute: bool,
+) -> Pump {
+    let mut out = Pump::default();
+    let mut ran = 0u32;
+    loop {
+        if !enqueue_inserted(bindings, &loader, referrer, inspector, scripts) {
+            out.poisoned = true;
+            scripts.abandon();
+            return out;
+        }
+        if !scripts.has_jobs() {
+            return out;
+        }
+        // A script whose budget is spent stays queued for a turn that has
+        // some; it is never run over budget or dropped.
+        if !execute || super::script_js_exhausted() {
+            return out;
+        }
+        if scripts.has_ready() {
+            ran += 1;
+            out.rounds += 1;
+            if run_inserted(bindings, inspector, scripts, &mut out) {
+                scripts.abandon();
+                return out;
             }
-            Ok(response) => {
-                if let Some(guard) = guard {
-                    guard.received(&response).unread();
+            if ran >= MAX_INSERTED_SCRIPT_ROUNDS {
+                // The chain is deeper than one drive follows. Start the next
+                // fetch and leave it to the next call; do not drop it.
+                if !enqueue_inserted(bindings, &loader, referrer, inspector, scripts) {
+                    out.poisoned = true;
+                    scripts.abandon();
                 }
-                Err(ScriptOutcome::FetchFailed(FetchFailure::Status(response.status.as_u16())))
+                return out;
             }
-            Err(e) => {
-                inspector::fail_net(guard, &e);
-                Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(format!("{e}"))))
+            continue;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return out;
+        }
+        // The fetch itself is on the script thread. The event loop polls
+        // the load a slice at a time, so this wait does not hold the window.
+        let notify = scripts.notify();
+        let woke = async move {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                _ = notified => true,
+                _ = tokio::time::sleep_until(deadline) => false,
             }
         }
-    };
-    match tokio::time::timeout_at(deadline, fetch).await {
-        Ok(result) => result,
-        Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport("timed out".into()))),
+        .await;
+        if !woke {
+            return out;
+        }
     }
 }
 
-/// Run what fetching inserted script `node` came to as its element's script,
-/// and log it in `out`. Answers the event the element is owed: `load` once
-/// it ran (thrown, or stopped by the budget, alike), `error` when it could
-/// not be fetched or is too large to run, none when it was never a request.
-/// Too large is not a network failure: the body arrived and the engine
-/// refuses to run it. `error` is still the one event that element gets, so
-/// a loader waiting on it hears that it will not run instead of waiting
-/// forever. A JS engine panic poisons `out` instead.
-fn run_fetched(
+/// Queue a fetch for every external classic script the page has inserted
+/// since the last take, after the ones already queued. `false`: the JS
+/// engine panicked taking the queue.
+fn enqueue_inserted(
+    bindings: &DomBindings,
+    loader: &Arc<ResourceLoader>,
+    referrer: &crate::SubresourceReferrer,
+    inspector: &Arc<Inspector>,
+    scripts: &InsertedScripts,
+) -> bool {
+    let Ok(queued) = catch_unwind(AssertUnwindSafe(|| bindings.take_inserted_scripts())) else {
+        return false;
+    };
+    if queued.is_empty() {
+        return true;
+    }
+    let mut started = Vec::new();
+    {
+        let mut board = lock_board(&scripts.board);
+        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by } in queued {
+            if let Some(at) = inserted_by {
+                // The name `run_inserted` evaluates it under.
+                inspector.note_inserted(&format!("inserted#{node}"), &at.path, at.line, at.column);
+            }
+            let id = board.next_id;
+            board.next_id = board.next_id.wrapping_add(1);
+            let nav_id = board.nav_id;
+            match Url::parse(&url) {
+                Ok(parsed) => {
+                    let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
+                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
+                    let cancel = FetchCancel::new();
+                    board.jobs.push(InsertedJob {
+                        id,
+                        node,
+                        url,
+                        nav_id,
+                        in_order,
+                        ready_seq: 0,
+                        body: None,
+                        guard,
+                        cancel: Arc::clone(&cancel),
+                    });
+                    started.push(FetchJob {
+                        loader: Arc::clone(loader),
+                        request,
+                        board: Arc::clone(&scripts.board),
+                        job_id: id,
+                        nav_id,
+                        cancel,
+                    });
+                }
+                Err(_) => {
+                    board.ready_seq = board.ready_seq.wrapping_add(1);
+                    let ready_seq = board.ready_seq;
+                    board.jobs.push(InsertedJob {
+                        id,
+                        node,
+                        url,
+                        nav_id,
+                        in_order,
+                        ready_seq,
+                        body: Some(FetchedInserted::Skipped("unparseable src")),
+                        guard: None,
+                        cancel: FetchCancel::new(),
+                    });
+                }
+            }
+        }
+    }
+    for job in started {
+        spawn_inserted_fetch(job);
+    }
+    true
+}
+
+/// The fetch thread. One current-thread runtime, so a fetch progresses
+/// while the window thread is parked in `ControlFlow::Wait`. The future is
+/// built on that thread.
+fn spawn_inserted_fetch(job: FetchJob) {
+    let tx = fetch_sender();
+    let board = Arc::clone(&job.board);
+    let job_id = job.job_id;
+    let nav_id = job.nav_id;
+    if tx.try_send(job).is_err() {
+        debug!("inserted-script fetch queue is full or the thread is gone");
+        let failed = FetchedInserted::Transport {
+            stage: FailureStage::Policy,
+            inspector_reason: "too many script requests",
+            detail: "inserted-script fetch queue is full".into(),
+        };
+        if store_inserted_result(&board, job_id, nav_id, failed) {
+            poke_live_turn();
+        }
+    }
+}
+
+fn fetch_sender() -> &'static tokio::sync::mpsc::Sender<FetchJob> {
+    static TX: OnceLock<tokio::sync::mpsc::Sender<FetchJob>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FetchJob>(MAX_INSERTED_FETCH_QUEUE);
+        let limit = Arc::new(tokio::sync::Semaphore::new(MAX_INSERTED_FETCHES_IN_FLIGHT));
+        std::thread::Builder::new()
+            .name("rk-inserted-script".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("inserted-script fetch runtime");
+                let local = tokio::task::LocalSet::new();
+                rt.block_on(local.run_until(async move {
+                    while let Some(job) = rx.recv().await {
+                        // A navigation already dropped this job. Do not take
+                        // a permit, and do not sit behind the ones in flight.
+                        let permit = tokio::select! {
+                            biased;
+                            _ = job.cancel.cancelled() => continue,
+                            permit = limit.clone().acquire_owned() => permit,
+                        };
+                        let Ok(permit) = permit else {
+                            break;
+                        };
+                        if job.cancel.is_cancelled() {
+                            continue;
+                        }
+                        tokio::task::spawn_local(async move {
+                            let _permit = permit;
+                            run_fetch_job(job).await;
+                        });
+                    }
+                }));
+            })
+            .expect("inserted-script fetch thread");
+        tx
+    })
+}
+
+async fn run_fetch_job(job: FetchJob) {
+    rustkit_js::set_diag_nav(job.nav_id);
+    if job.cancel.is_cancelled() {
+        log_request(job.request.method.as_str(), job.request.url.as_str(), "-", "cancelled");
+        return;
+    }
+    let fetched = fetch_inserted(&job.loader, job.request, &job.cancel).await;
+    if store_inserted_result(&job.board, job.job_id, job.nav_id, fetched) {
+        poke_live_turn();
+    }
+}
+
+/// `true` when the result was stored for a job that is still the current
+/// document's. A navigation or a cancel clears the job first, and this
+/// stores nothing.
+fn store_inserted_result(board: &Mutex<InsertedBoard>, job_id: u64, nav_id: u64, fetched: FetchedInserted) -> bool {
+    let mut board = lock_board(board);
+    if board.nav_id != nav_id {
+        return false;
+    }
+    let Some(index) = board.jobs.iter().position(|job| job.id == job_id && job.nav_id == nav_id && job.body.is_none()) else {
+        return false;
+    };
+    board.ready_seq = board.ready_seq.wrapping_add(1);
+    let ready_seq = board.ready_seq;
+    {
+        let job = &mut board.jobs[index];
+        job.ready_seq = ready_seq;
+        job.body = Some(fetched);
+    }
+    let notify = Arc::clone(&board.notify);
+    drop(board);
+    notify.notify_one();
+    true
+}
+
+/// One inserted script's HTTP fetch. A 30s stall completes as a network
+/// error (the element hears `error` when a turn runs it). This is the
+/// request's own timeout, not the turn's budget: the turn stopping its
+/// wait does not drop the fetch. A navigation cancels it: the future is
+/// dropped and the socket closes.
+async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &FetchCancel) -> FetchedInserted {
+    if cancel.is_cancelled() {
+        return cancelled_fetch();
+    }
+    let deadline = tokio::time::Instant::now() + crate::LIVE_REQUEST_TIMEOUT;
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return cancelled_fetch(),
+        response = tokio::time::timeout_at(deadline, loader.fetch(request)) => response,
+    };
+    let response = match response {
+        Ok(Ok(response)) => response,
+        Ok(Err(e)) => {
+            let (stage, reason) = inspector::net_error_stage(&e);
+            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string() };
+        }
+        Err(_) => {
+            return FetchedInserted::Transport {
+                stage: FailureStage::Timeout,
+                inspector_reason: "timed out",
+                detail: "timed out".into(),
+            };
+        }
+    };
+    if !response.ok() {
+        return FetchedInserted::Http(InsertedHttp {
+            status: response.status.as_u16(),
+            mime: response_mime(&response),
+            encoded_size: response.encoded_body_size,
+            from_cache: response.from_cache,
+        });
+    }
+    let http = InsertedHttp {
+        status: response.status.as_u16(),
+        mime: response_mime(&response),
+        encoded_size: response.encoded_body_size,
+        from_cache: response.from_cache,
+    };
+    let text = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return cancelled_fetch(),
+        text = tokio::time::timeout_at(deadline, response.text()) => text,
+    };
+    match text {
+        Ok(Ok(text)) => FetchedInserted::Source(InsertedSource {
+            text,
+            status: http.status,
+            mime: http.mime,
+            encoded_size: http.encoded_size,
+            from_cache: http.from_cache,
+        }),
+        Ok(Err(e)) => FetchedInserted::Transport {
+            stage: FailureStage::Decode,
+            inspector_reason: "body is not UTF-8",
+            detail: e.to_string(),
+        },
+        Err(_) => FetchedInserted::Transport {
+            stage: FailureStage::Timeout,
+            inspector_reason: "timed out",
+            detail: "timed out".into(),
+        },
+    }
+}
+
+fn response_mime(response: &rustkit_net::Response) -> Option<String> {
+    response
+        .content_type
+        .as_ref()
+        .map(|mime| mime.essence_str().to_string())
+        .or_else(|| {
+            response
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        })
+}
+
+/// Fire the oldest owed event, or else run the next inserted script whose
+/// body has arrived. Does nothing once the turn's JavaScript budget is
+/// spent: the script stays queued for a later turn. `true`: the JS engine
+/// panicked and nothing further on this page may run.
+fn run_inserted(
     bindings: &DomBindings,
     inspector: &Arc<Inspector>,
-    node: usize,
-    source: String,
-    fetched: Fetched,
+    scripts: &InsertedScripts,
     out: &mut Pump,
-) -> Option<&'static str> {
-    use crate::{EngineFailure, ScriptOutcome, ScriptRecord};
-    let mut record = ScriptRecord { source, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
+) -> bool {
+    use crate::{EngineFailure, FetchFailure, ScriptOutcome, ScriptRecord};
+    if super::script_js_exhausted() {
+        return false;
+    }
+    if let Some(owed) = scripts.take_owed() {
+        fire_inserted_event(bindings, owed, out);
+        return false;
+    }
+    let Some(mut job) = scripts.take_ready() else {
+        return false;
+    };
+    let Some(fetched) = job.body.take() else {
+        return false;
+    };
+    finish_inserted_guard(job.guard.take(), &fetched);
+    let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
-        Ok(text) if text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
-            record.bytes = text.len();
-            record.outcome = ScriptOutcome::Skipped("too large to run inside the script budget");
-            out.records.push(record);
-            return Some("error");
+        FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
+            record.bytes = source.text.len();
+            Err(ScriptOutcome::Skipped("too large to run inside the script budget"))
         }
-        Ok(text) => text,
+        FetchedInserted::Source(source) => Ok(source.text),
+        FetchedInserted::Http(http) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(http.status))),
+        FetchedInserted::Transport { detail, .. } => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(detail))),
+        FetchedInserted::Skipped(reason) => Err(ScriptOutcome::Skipped(reason)),
+    };
+    let event = match text {
         Err(outcome) => {
-            let event = matches!(outcome, ScriptOutcome::FetchFailed(_)).then_some("error");
+            // Too large is not a network failure, but `error` is still the
+            // one event that element gets: a loader waiting on it hears that
+            // it will not run. An unparseable `src` was never a request.
+            let event = match outcome {
+                ScriptOutcome::FetchFailed(_) => Some("error"),
+                ScriptOutcome::Skipped(reason) if reason.starts_with("too large") => Some("error"),
+                _ => None,
+            };
             record.outcome = outcome;
-            out.records.push(record);
-            return event;
+            event
+        }
+        Ok(text) => {
+            record.bytes = text.len();
+            // Named like a parser-inserted external script, not by its URL
+            // (which would become its imports' base).
+            let name = format!("inserted#{}", job.node);
+            inspector.alias_script(&name, &record.source);
+            crate::console_log::alias(&name, &record.source);
+            let started = std::time::Instant::now();
+            let (ran, stopped) = super::with_script_js(bindings, || {
+                let _ = bindings.set_current_script(Some(job.node));
+                let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
+                let _ = bindings.set_current_script(None);
+                ran
+            });
+            record.elapsed_ms = started.elapsed().as_millis() as u64;
+            record.outcome = if stopped {
+                crate::log_script_stopped(&record.source, record.elapsed_ms, crate::take_script_js_overrun());
+                ScriptOutcome::OverBudget
+            } else {
+                match ran {
+                    Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
+                    Ok(Ok(_)) => ScriptOutcome::Ran,
+                    Ok(Err(e)) => {
+                        let message = e.to_string();
+                        ScriptOutcome::Threw(
+                            message
+                                .strip_prefix("JS error: Execution error: ")
+                                .map(str::to_string)
+                                .unwrap_or(message),
+                        )
+                    }
+                }
+            };
+            // Run, thrown, or stopped by the budget, the element hears `load`.
+            matches!(record.outcome, ScriptOutcome::Ran | ScriptOutcome::Threw(_) | ScriptOutcome::OverBudget)
+                .then_some("load")
         }
     };
-    record.bytes = text.len();
-    // Named like a parser-inserted external script, not by its URL (which
-    // would become its imports' base).
-    let name = format!("inserted#{node}");
-    inspector.alias_script(&name, &record.source);
-    let started = std::time::Instant::now();
-    let (ran, stopped) = super::with_script_js(bindings, || {
-        let _ = bindings.set_current_script(Some(node));
-        let ran = catch_unwind(AssertUnwindSafe(|| bindings.evaluate_named(&text, &name)));
-        let _ = bindings.set_current_script(None);
-        ran
-    });
-    record.elapsed_ms = started.elapsed().as_millis() as u64;
-    record.outcome = if stopped {
-        crate::log_script_stopped(&record.source, record.elapsed_ms, crate::take_script_js_overrun());
-        ScriptOutcome::OverBudget
-    } else {
-        match ran {
-            Err(_) => ScriptOutcome::EngineFailed(EngineFailure::Panic),
-            Ok(Ok(_)) => ScriptOutcome::Ran,
-            Ok(Err(e)) => {
-                let message = e.to_string();
-                ScriptOutcome::Threw(
-                    message
-                        .strip_prefix("JS error: Execution error: ")
-                        .map(str::to_string)
-                        .unwrap_or(message),
-                )
-            }
-        }
-    };
+    if let Some(event) = event {
+        crate::console_log::inserted_script(&record.source, event);
+    }
     let poisoned = record.outcome == ScriptOutcome::EngineFailed(EngineFailure::Panic);
+    let source = record.source.clone();
+    let index = out.records.len();
     out.records.push(record);
+    out.requests += 1;
     if poisoned {
         out.poisoned = true;
-        return None;
+        return true;
     }
-    // Run, thrown or stopped, the element hears `load`.
-    Some("load")
+    if let Some(event) = event {
+        // A spent budget (the script itself may have spent it) owes the
+        // event to the next turn that has some, ahead of any other script.
+        if super::script_js_exhausted() {
+            scripts.owe(OwedEvent { node: job.node, event, source, record: None });
+        } else {
+            fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
+        }
+    }
+    false
 }
 
-/// Fire `event` at inserted script `node`. A listener the budget stopped is
-/// that script's stop in the log; what one threw goes to `out.threw`.
-fn fire_inserted_event(bindings: &DomBindings, node: usize, event: &'static str, source: &str, out: &mut Pump) {
-    let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(node, event));
+/// Fire an inserted script's `load` or `error`. A listener the budget
+/// stopped is that script's stop in the log; what one threw goes to
+/// `out.threw`.
+fn fire_inserted_event(bindings: &DomBindings, owed: OwedEvent, out: &mut Pump) {
+    let (fired, stopped) = super::with_script_js(bindings, || bindings.fire_script_event(owed.node, owed.event));
     if stopped {
-        crate::log_script_stopped(source, crate::script_js_stopped_ms(), crate::take_script_js_overrun());
-        match out.records.last_mut().filter(|record| record.source == source) {
-            Some(record) => record.outcome = crate::ScriptOutcome::OverBudget,
-            None => out.records.push(crate::ScriptRecord {
-                source: source.to_string(),
-                bytes: 0,
-                elapsed_ms: 0,
-                outcome: crate::ScriptOutcome::OverBudget,
-            }),
-        }
+        crate::log_script_stopped(&owed.source, crate::script_js_stopped_ms(), crate::take_script_js_overrun());
+        mark_listener_stopped(out, owed.record, owed.source);
     } else if let Err(e) = fired {
         out.threw.push(e.to_string());
     }
 }
 
-/// Inserted scripts the live loop has taken and not finished: out on the
-/// network, fetched and waiting for a turn with JavaScript budget (an
-/// in-order one also for the in-order ones inserted before it), or run and
-/// still owed their `load` or `error`.
-///
-/// A turn's slice is scheduling, not a network timeout. Until 2026-10-22
-/// each turn fetched its inserted scripts inside a two-second slice shared
-/// by every round of the turn and failed whatever was still out at its end,
-/// for good: a Next.js page's chunks, inserted by a runtime that took a
-/// second to arrive, all failed at once, and the page reloaded itself. A
-/// fetch here stays out across turns until it answers or its own network
-/// timeout passes, and each element hears exactly one `load` or `error`.
-///
-/// Its fetches go straight to the loader, as a parser-inserted script's do,
-/// not through the page's `FetchPolicy`, so they are bounded here: at most
-/// [`MAX_LIVE_INSERTED_FETCHES`] are out at once and the rest wait, in
-/// insertion order, for a slot. A page that inserts more than
-/// [`MAX_LIVE_INSERTED_PENDING`] that have not arrived yet gets `error` for
-/// each one over, at once, rather than the engine holding them.
-pub(crate) struct LiveScripts {
-    scripts: Vec<LiveScript>,
-    /// Arrivals so far: the order async scripts run in.
-    arrivals: u64,
-    /// Most fetches out at once.
-    max_fetches: usize,
-    /// Most scripts waiting for a slot or out.
-    max_pending: usize,
-}
-
-/// Most inserted-script fetches the live loop has out for one view at once:
-/// the page's `FetchPolicy` allows the same number of its own requests.
-pub(crate) const MAX_LIVE_INSERTED_FETCHES: usize = 24;
-
-/// Most inserted scripts one view may have waiting for a fetch slot or out.
-pub(crate) const MAX_LIVE_INSERTED_PENDING: usize = 512;
-
-impl Default for LiveScripts {
-    fn default() -> Self {
-        Self::with_limits(MAX_LIVE_INSERTED_FETCHES, MAX_LIVE_INSERTED_PENDING)
+/// The budget stopped a `load`/`error` listener: that is its script's
+/// stop in the log. `record` is the index of the script's own record in
+/// this pump; `None` (the event was owed to a later turn) adds one.
+pub(crate) fn mark_listener_stopped(out: &mut Pump, record: Option<usize>, source: String) {
+    match record.and_then(|index| out.records.get_mut(index)) {
+        Some(record) => record.outcome = crate::ScriptOutcome::OverBudget,
+        None => out.records.push(crate::ScriptRecord {
+            source,
+            bytes: 0,
+            elapsed_ms: 0,
+            outcome: crate::ScriptOutcome::OverBudget,
+        }),
     }
 }
 
-/// One inserted script in [`LiveScripts`] (or parked by the load).
-pub(crate) struct LiveScript {
-    node: usize,
-    source: String,
-    in_order: bool,
-    stage: Stage,
-}
-
-enum Stage {
-    /// Waiting for a fetch slot.
-    Queued(rustkit_net::Request),
-    Fetching(LiveFuture<Fetched>),
-    /// With its place in the arrival order.
-    Arrived(u64, Fetched),
-    /// Ran (or failed) and its element is still owed this event.
-    Owed(&'static str),
-}
-
-impl LiveScript {
-    fn new(script: rustkit_bindings::InsertedScript, stage: Stage) -> Self {
-        LiveScript { node: script.node, source: script.url, in_order: script.in_order, stage }
-    }
-}
-
-impl LiveScripts {
-    pub(crate) fn with_limits(max_fetches: usize, max_pending: usize) -> Self {
-        LiveScripts { scripts: Vec::new(), arrivals: 0, max_fetches, max_pending }
-    }
-
-    /// Scripts not finished.
-    pub(crate) fn len(&self) -> usize {
-        self.scripts.len()
-    }
-
-    /// Fetches out now.
-    pub(crate) fn fetching(&self) -> usize {
-        self.scripts.iter().filter(|s| matches!(s.stage, Stage::Fetching(_))).count()
-    }
-
-    /// The document they belonged to is gone.
-    pub(crate) fn clear(&mut self) {
-        self.scripts.clear();
-    }
-
-    /// Take over what the load parked ([`take_parked_scripts`]), in the
-    /// order it was parked.
-    pub(crate) fn adopt(&mut self, parked: Vec<LiveScript>) {
-        for mut script in parked {
-            if let Stage::Arrived(at, _) = &mut script.stage {
-                *at = self.arrivals;
-                self.arrivals += 1;
-            }
-            self.scripts.push(script);
+fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched: &FetchedInserted) {
+    let Some(guard) = guard else {
+        return;
+    };
+    match fetched {
+        FetchedInserted::Source(source) => guard.response(
+            source.status,
+            source.mime.as_deref(),
+            source.encoded_size,
+            Some(source.text.len() as u64),
+            source.from_cache,
+        ),
+        FetchedInserted::Http(http) => {
+            guard.response(http.status, http.mime.as_deref(), http.encoded_size, None, http.from_cache);
         }
-    }
-
-    /// Take what the page inserted since the last call, and start fetching
-    /// what waits for a slot, in insertion order, while one is free; each
-    /// fails as a network error `timeout` after it starts. Nothing runs
-    /// until [`Self::settle`] polls it. Answers how many were taken; `Err`
-    /// when the JS engine panicked.
-    pub(crate) fn start(
-        &mut self,
-        bindings: &DomBindings,
-        loader: &Arc<ResourceLoader>,
-        referrer: &crate::SubresourceReferrer,
-        timeout: std::time::Duration,
-        inspector: &Arc<Inspector>,
-    ) -> Result<usize, ()> {
-        let scripts = catch_unwind(AssertUnwindSafe(|| bindings.take_inserted_scripts())).map_err(|_| ())?;
-        let taken = scripts.len();
-        let mut pending =
-            self.scripts.iter().filter(|s| matches!(s.stage, Stage::Queued(_) | Stage::Fetching(_))).count();
-        for script in scripts {
-            let fetched = match Url::parse(&script.url) {
-                Ok(_) if pending >= self.max_pending => Err(crate::ScriptOutcome::FetchFailed(
-                    crate::FetchFailure::Transport("too many inserted scripts waiting".into()),
-                )),
-                Ok(url) => {
-                    pending += 1;
-                    let request = referrer.get_for(url, RequestDestination::Script);
-                    self.scripts.push(LiveScript::new(script, Stage::Queued(request)));
-                    continue;
-                }
-                Err(_) => Err(crate::ScriptOutcome::Skipped("unparseable src")),
-            };
-            self.arrivals += 1;
-            self.scripts.push(LiveScript::new(script, Stage::Arrived(self.arrivals - 1, fetched)));
-        }
-        let mut free = self.max_fetches.saturating_sub(self.fetching());
-        for script in self.scripts.iter_mut() {
-            if free == 0 {
-                break;
-            }
-            if !matches!(script.stage, Stage::Queued(_)) {
-                continue;
-            }
-            let Stage::Queued(request) = std::mem::replace(&mut script.stage, Stage::Owed("error")) else {
-                unreachable!("matched above");
-            };
-            let deadline = tokio::time::Instant::now() + timeout;
-            let (loader, inspector) = (loader.clone(), inspector.clone());
-            script.stage = Stage::Fetching(Box::pin(async move {
-                fetch_inserted(&loader, request, deadline, &inspector).await
-            }));
-            free -= 1;
-        }
-        Ok(taken)
-    }
-
-    /// Let the fetches that are out make progress for at most `slice`, and
-    /// keep what arrived, in arrival order. Returns as soon as one has.
-    pub(crate) async fn settle(&mut self, slice: std::time::Duration) {
-        if !self.scripts.iter().any(|s| matches!(s.stage, Stage::Fetching(_))) {
-            return;
-        }
-        let pause = tokio::time::sleep(slice);
-        tokio::pin!(pause);
-        let (scripts, arrivals) = (&mut self.scripts, &mut self.arrivals);
-        std::future::poll_fn(|cx| {
-            let mut arrived = false;
-            for script in scripts.iter_mut() {
-                let ready = match &mut script.stage {
-                    Stage::Fetching(fetch) => match fetch.as_mut().poll(cx) {
-                        Poll::Ready(fetched) => Some(fetched),
-                        Poll::Pending => None,
-                    },
-                    _ => None,
-                };
-                if let Some(fetched) = ready {
-                    script.stage = Stage::Arrived(*arrivals, fetched);
-                    *arrivals += 1;
-                    arrived = true;
-                }
-            }
-            if arrived {
-                return Poll::Ready(());
-            }
-            pause.as_mut().poll(cx)
-        })
-        .await;
-    }
-
-    /// Run what is ready while the turn has JavaScript budget: first the
-    /// events owed, then the scripts that arrived, async ones in the order
-    /// they arrived and in-order ones in the order they were inserted
-    /// (HTML §4.12.1.1). What the budget does not reach waits for a later
-    /// turn.
-    pub(crate) fn run(&mut self, bindings: &DomBindings, inspector: &Arc<Inspector>) -> Pump {
-        let mut out = Pump::default();
-        while !super::script_js_exhausted() && !super::script_js_resume_would_be_stopped() {
-            let next = self
-                .scripts
-                .iter()
-                .position(|s| matches!(s.stage, Stage::Owed(_)))
-                .or_else(|| self.next_to_run());
-            let Some(at) = next else {
-                break;
-            };
-            let LiveScript { node, source, in_order, stage } = self.scripts.remove(at);
-            let event = match stage {
-                Stage::Owed(event) => Some(event),
-                Stage::Arrived(_, fetched) => {
-                    let event = run_fetched(bindings, inspector, node, source.clone(), fetched, &mut out);
-                    if out.poisoned {
-                        return out;
-                    }
-                    event
-                }
-                Stage::Queued(_) | Stage::Fetching(_) => unreachable!("only owed or arrived scripts are picked"),
-            };
-            let Some(event) = event else {
-                continue;
-            };
-            if super::script_js_exhausted() {
-                self.scripts.insert(at, LiveScript { node, source, in_order, stage: Stage::Owed(event) });
-                break;
-            }
-            fire_inserted_event(bindings, node, event, &source, &mut out);
-        }
-        out
-    }
-
-    /// The arrived script that runs next: the earliest to arrive of the
-    /// async ones and the first in-order one, if that one has arrived.
-    fn next_to_run(&self) -> Option<usize> {
-        let mut blocked = false;
-        let mut next: Option<(u64, usize)> = None;
-        for (at, script) in self.scripts.iter().enumerate() {
-            if let Stage::Arrived(arrival, _) = script.stage {
-                if !(script.in_order && blocked) && next.is_none_or(|(first, _)| arrival < first) {
-                    next = Some((arrival, at));
-                }
-            }
-            if script.in_order && !matches!(script.stage, Stage::Owed(_)) {
-                blocked = true;
-            }
-        }
-        next.map(|(_, at)| at)
+        FetchedInserted::Transport { stage, inspector_reason, .. } => guard.fail(*stage, inspector_reason),
+        FetchedInserted::Skipped(_) => drop(guard),
     }
 }

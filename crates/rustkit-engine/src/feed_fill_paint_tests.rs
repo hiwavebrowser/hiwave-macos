@@ -88,6 +88,8 @@ fn inked(engine: &mut Engine, view: EngineViewId, tag: &str) -> f32 {
     let list = engine.views[&view].display_list.clone().expect("display list");
     engine
         .presenter
+        .as_mut()
+        .expect("window presenter")
         .draw_scrolled(viewhost_id, &list, offset, Some(path.to_str().unwrap()))
         .expect("capture");
     let ppm = std::fs::read(&path).expect("frame");

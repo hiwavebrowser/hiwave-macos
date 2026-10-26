@@ -137,6 +137,17 @@ impl Await {
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
+                        // HIWAVE PATCH (interrupt diagnostics): resumed by the
+                        // fulfilled reaction with an uncatchable throw.
+                        crate::vm::interrupt_diag::note_interrupt_err(
+                            "await.resume.fulfill",
+                            resume_interrupt_message(
+                                async_function.is_some(),
+                                async_generator.is_some(),
+                                runnable.is_some(),
+                            ),
+                            &err,
+                        );
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);
                         }
@@ -211,6 +222,17 @@ impl Await {
                     if let CompletionRecord::Throw(err) = completion
                         && !err.is_catchable()
                     {
+                        // HIWAVE PATCH (interrupt diagnostics): resumed by the
+                        // rejected reaction with an uncatchable throw.
+                        crate::vm::interrupt_diag::note_interrupt_err(
+                            "await.resume.reject",
+                            resume_interrupt_message(
+                                async_function.is_some(),
+                                async_generator.is_some(),
+                                runnable.is_some(),
+                            ),
+                            &err,
+                        );
                         if let Some((module, code)) = runnable {
                             abandon_interrupted_module_body(&module, &code);
                         }
@@ -248,6 +270,26 @@ impl Await {
 
         context.vm.set_return_value(return_value);
         context.handle_yield()
+    }
+}
+
+// HIWAVE PATCH (interrupt diagnostics): the message the resume path formats.
+// An async function's promise is rejected with the first string; a generator
+// or a module body takes the others. The site name still says which reaction
+// resumed the body.
+fn resume_interrupt_message(
+    async_function: bool,
+    async_generator: bool,
+    module_body: bool,
+) -> &'static str {
+    if async_function {
+        "async function was interrupted"
+    } else if async_generator {
+        "async generator was interrupted"
+    } else if module_body {
+        "module evaluation was interrupted"
+    } else {
+        "the script was interrupted"
     }
 }
 

@@ -103,6 +103,7 @@ pub mod string;
 pub mod symbol;
 pub mod value;
 pub mod vm;
+pub use vm::{host_stack, interrupt_diag};
 
 mod host_defined;
 mod sys;

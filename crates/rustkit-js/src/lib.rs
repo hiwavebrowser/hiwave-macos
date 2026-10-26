@@ -14,8 +14,8 @@ mod import_map;
 #[cfg(feature = "boa")]
 mod module;
 #[cfg(feature = "boa")]
-pub use module::{FetchedModule, ModuleHandle, ModuleState};
-pub use control::{ThreadStamp, ViewControl, Watchdog};
+pub use module::{DynamicImportFailure, FetchedModule, ModuleHandle, ModuleState};
+pub use control::{mono_us, ThreadStamp, ViewControl, Watchdog};
 #[cfg(feature = "boa")]
 mod executor;
 #[cfg(feature = "boa")]
@@ -24,17 +24,193 @@ mod describe;
 mod rejections;
 #[cfg(feature = "boa")]
 mod diag;
+mod source_context;
 #[cfg(feature = "boa")]
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info, trace};
+
+thread_local! {
+    static DIAG_TURN: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_JOB: Cell<&'static str> = const { Cell::new("") };
+    static DIAG_NAV: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The kind of turn whose script is running: `load`, `live`, `navigation-teardown`.
+/// Empty when no turn has been marked. Restored when the guard drops.
+pub fn set_diag_turn(turn: &'static str) {
+    DIAG_TURN.with(|cell| cell.set(turn));
+}
+
+pub fn diag_turn() -> &'static str {
+    DIAG_TURN.with(Cell::get)
+}
+
+/// The job inside the turn: `timer`, `microtask`, or empty.
+pub fn set_diag_job(job: &'static str) {
+    DIAG_JOB.with(|cell| cell.set(job));
+}
+
+pub fn diag_job() -> &'static str {
+    DIAG_JOB.with(Cell::get)
+}
+
+/// Navigation id of the document the window thread is loading or showing.
+pub fn set_diag_nav(nav: u64) {
+    DIAG_NAV.with(|cell| cell.set(nav));
+}
+
+pub fn diag_nav() -> u64 {
+    DIAG_NAV.with(Cell::get)
+}
+
+thread_local! {
+    static DIAG_CONTROL: std::cell::RefCell<Option<Arc<control::ViewControl>>> =
+        const { std::cell::RefCell::new(None) };
+    static DIAG_STAMP: std::cell::RefCell<Option<Arc<control::ThreadStamp>>> =
+        const { std::cell::RefCell::new(None) };
+    static DEADLINE_TRIP_US: Cell<u64> = const { Cell::new(0) };
+}
+
+fn note_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(control::mono_us()));
+}
+
+fn clear_deadline_trip() {
+    DEADLINE_TRIP_US.with(|at| at.set(0));
+}
+
+/// `word=… turn_id=… setter=… setter_target=… setter_age_us=… wall_us=… turn_budget_us=… deadline_age_us=… depth=… host_depth=… recursion_limit=… host_limit=… max_depth=…`
+/// for an interrupt log. Empty clocks read as `-` or zero when nothing is armed.
+/// `depth` is the JavaScript frame count at the last recursion check, and
+/// `recursion_limit` is the frame cap that check used.
+pub fn interrupt_attribution() -> String {
+    let (word, setter, setter_at, setter_target) = DIAG_CONTROL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|control| control.word_writer())
+            .unwrap_or((0, "-", 0, 0))
+    });
+    let (turn, wall, turn_budget) = DIAG_STAMP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|stamp| stamp.timing())
+            .unwrap_or((0, 0, 0))
+    });
+    let now = control::mono_us();
+    let setter_age = if setter_at == 0 {
+        0
+    } else {
+        now.saturating_sub(setter_at)
+    };
+    let deadline_age = DEADLINE_TRIP_US.with(|at| {
+        let tripped = at.get();
+        if tripped == 0 {
+            None
+        } else {
+            Some(now.saturating_sub(tripped))
+        }
+    });
+    let target = if setter_target == control::ALL {
+        "all".to_string()
+    } else {
+        setter_target.to_string()
+    };
+    let deadline = deadline_age
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    #[cfg(feature = "boa")]
+    let depth = recursion_depth_log();
+    #[cfg(not(feature = "boa"))]
+    let depth = "depth=- host_depth=- recursion_limit=- host_limit=- max_depth=-".to_string();
+    format!(
+        "word={word} turn_id={turn} setter={setter} setter_target={target} setter_age_us={setter_age} wall_us={wall} turn_budget_us={turn_budget} deadline_age_us={deadline} {depth}"
+    )
+}
+
+/// Sets [`diag_turn`] and puts the previous kind back on drop.
+pub struct DiagTurn {
+    prev: &'static str,
+}
+
+impl DiagTurn {
+    pub fn enter(turn: &'static str) -> Self {
+        let prev = diag_turn();
+        set_diag_turn(turn);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagTurn {
+    fn drop(&mut self) {
+        set_diag_turn(self.prev);
+    }
+}
+
+/// Sets [`diag_job`] and puts the previous job back on drop.
+pub struct DiagJob {
+    prev: &'static str,
+}
+
+impl DiagJob {
+    pub fn enter(job: &'static str) -> Self {
+        let prev = diag_job();
+        set_diag_job(job);
+        Self { prev }
+    }
+}
+
+impl Drop for DiagJob {
+    fn drop(&mut self) {
+        set_diag_job(self.prev);
+    }
+}
+
+/// Install the function Boa calls when an interrupt path fires. A null hook
+/// leaves those paths silent. The hook itself decides whether to write.
+#[cfg(feature = "boa")]
+pub fn set_interrupt_diag(hook: Option<boa_engine::interrupt_diag::InterruptDiag>) {
+    boa_engine::interrupt_diag::set_interrupt_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_interrupt_diag(_hook: Option<fn(&'static str, &'static str, &'static str)>) {}
+
+/// Install the function Boa calls the first time a host-reentry climb crosses
+/// 256, 512, or 1000. A null hook leaves the climb silent.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_diag(hook: Option<boa_engine::host_stack::HostStackDiag>) {
+    boa_engine::host_stack::set_host_stack_diag(hook);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_diag(_hook: Option<fn(usize, &str, &str)>) {}
+
+/// Record host-reentry names only while this is set.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_armed(on: bool) {
+    boa_engine::host_stack::set_host_stack_armed(on);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_armed(_on: bool) {}
+
+/// Move the first host-stack log mark. `None` restores 256.
+#[cfg(feature = "boa")]
+pub fn set_host_stack_first_mark(mark: Option<usize>) {
+    boa_engine::host_stack::set_host_stack_first_mark(mark);
+}
+
+#[cfg(not(feature = "boa"))]
+pub fn set_host_stack_first_mark(_mark: Option<usize>) {}
 
 /// Errors that can occur in JS operations.
 #[derive(Error, Debug)]
@@ -112,9 +288,30 @@ pub struct ScriptPosition {
     pub column: u32,
 }
 
+/// One of the page's frames on a stack: its position, and the function's
+/// name only when error text is kept ([`JsRuntime::set_error_reports`]; a
+/// name is the page's text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFrame {
+    pub function: Option<String>,
+    pub at: ScriptPosition,
+}
+
+/// The stacks of a `console.error` call (with error reports on; empty
+/// otherwise), innermost first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleStacks {
+    /// The page's frames that made the call.
+    pub caller: Vec<ScriptFrame>,
+    /// The first error argument's own frames: where it was made (a page
+    /// that catches an error and logs it, as frameworks do, logs this).
+    pub error: Vec<ScriptFrame>,
+}
+
 /// Console output handler: the level, the arguments formatted and joined,
-/// and the calling script's position when the caller was in a named script.
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
+/// the calling script's position when the caller was in a named script,
+/// and a `console.error`'s stacks.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
 
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no
@@ -139,6 +336,10 @@ pub struct ErrorReport {
     /// The page's frames, innermost first: only positions in scripts the
     /// engine evaluated, never a function name.
     pub frames: Vec<ScriptPosition>,
+    /// Each of `frames`' function names, in step with it, only with error
+    /// text kept (else empty); `None` for top-level code or a function
+    /// with no name.
+    pub functions: Vec<Option<String>>,
     /// The first of `frames` is where it was thrown. Not so when the
     /// innermost page code is in no script of its own (`eval` code, an
     /// `on*` attribute's handler): it then has no position, and is never
@@ -160,6 +361,37 @@ pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
 /// `undefined`. That keeps every Boa-managed value on the Boa side: a host
 /// function can capture Rust state freely but can never hold a JS object.
 pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
+
+/// A [`HostFunction`] that is also told where in the page's script it was
+/// called from ([`JsRuntime::register_host_function_with_caller`]).
+pub type HostFunctionWithCaller = Box<dyn Fn(&[JsValue], Option<ScriptPosition>) -> JsValue>;
+
+fn stack_addr() -> usize {
+    let slot = 0u8;
+    &slot as *const u8 as usize
+}
+
+thread_local! {
+    static REENTRY_ORIGIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+static REENTRY_USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn reentry_reset() {
+    REENTRY_ORIGIN.with(|origin| origin.set(stack_addr()));
+    REENTRY_USED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn reentry_note(_depth: usize) {
+    let used = REENTRY_ORIGIN.with(|origin| origin.get().saturating_sub(stack_addr()));
+    REENTRY_USED.fetch_max(used, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Native-stack bytes the re-entry probe has climbed on this process.
+/// Zero until a test installs the probe and runs it.
+pub fn reentry_stack_used() -> usize {
+    REENTRY_USED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Pending timer.
 #[allow(dead_code)]
@@ -251,6 +483,9 @@ pub struct JsRuntime {
     /// never sees this object.
     #[cfg(feature = "boa")]
     host: boa_engine::JsObject,
+    /// Page script text, only while an embedder has asked to quote it in
+    /// an error log. See [`JsRuntime::set_capture_script_sources`].
+    sources: source_context::ScriptSources,
 }
 
 impl JsRuntime {
@@ -311,6 +546,7 @@ impl JsRuntime {
             diag,
             #[cfg(feature = "boa")]
             host,
+            sources: source_context::ScriptSources::default(),
         };
 
         // Set up built-in APIs
@@ -347,6 +583,7 @@ impl JsRuntime {
     pub fn run_jobs(&mut self) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
+            let _job = DiagJob::enter("microtask");
             let result = self.context.run_jobs();
             self.consume_interrupt();
             result.map_err(|e| JsError::ExecutionError(e.to_string()))
@@ -390,6 +627,18 @@ impl JsRuntime {
         }
         #[cfg(not(feature = "boa"))]
         let _ = (on, keep_text);
+    }
+
+    /// Keep the source of each named script and module so a later error can
+    /// quote the text around its position. Off by default, and turning it
+    /// off drops whatever was kept. The page cannot see this.
+    pub fn set_capture_script_sources(&mut self, on: bool) {
+        self.sources.set_enabled(on);
+    }
+
+    /// The source last evaluated as `path`, when capture is on.
+    pub fn script_source(&self, path: &str) -> Option<String> {
+        self.sources.get(path)
     }
 
     /// The page errors since the last call (with reports on), oldest first:
@@ -579,6 +828,7 @@ impl JsRuntime {
             let result = match path {
                 Some(path) => {
                     self.diag.know_path(path);
+                    self.sources.remember(path, source);
                     self.context
                         .eval(Source::from_bytes(source).with_path(std::path::Path::new(path)))
                 }
@@ -655,6 +905,7 @@ impl JsRuntime {
         self.deadline.at.set(at);
         self.deadline.hit.set(false);
         self.deadline.late.set(None);
+        clear_deadline_trip();
     }
 
     /// Whether the deadline has stopped a host call since it was last set
@@ -672,6 +923,7 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         self.context
             .set_interrupt_word(control.as_ref().map(|c| c.word().clone()));
+        DIAG_CONTROL.with(|slot| *slot.borrow_mut() = control.clone());
         *self.deadline.control.borrow_mut() = control;
     }
 
@@ -685,6 +937,7 @@ impl JsRuntime {
         };
         let turn = stamp.begin_turn(&control, budget);
         *self.deadline.stamp.borrow_mut() = Some(stamp.clone());
+        DIAG_STAMP.with(|slot| *slot.borrow_mut() = Some(stamp.clone()));
         self.deadline.graced.set(false);
         self.set_turn(turn);
         turn
@@ -699,6 +952,7 @@ impl JsRuntime {
         let open = stamp.current_turn();
         if open == 0 {
             *self.deadline.stamp.borrow_mut() = None;
+            DIAG_STAMP.with(|slot| *slot.borrow_mut() = None);
         }
         self.set_turn(open);
     }
@@ -810,8 +1064,8 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             let logs = self.diag.take_console();
-            for (level, msg, at) in logs {
-                handler(level, &msg, at.as_ref());
+            for (level, msg, at, stack) in logs {
+                handler(level, &msg, at.as_ref(), &stack);
             }
         }
 
@@ -821,12 +1075,88 @@ impl JsRuntime {
         }
     }
 
+    /// Set only the host re-entry cap. The frame cap and the operand-stack
+    /// cap are left as they are.
+    pub fn set_host_reentry_limit(&mut self, limit: usize) {
+        #[cfg(feature = "boa")]
+        {
+            self.context
+                .runtime_limits_mut()
+                .set_host_recursion_limit(limit);
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = limit;
+        }
+    }
+
+    /// A native `__rk_reenter(n)` that calls the page function `__rk_step(n)`.
+    /// Tests use it to climb the native stack. A page does not get this
+    /// function unless a test installs it.
+    #[cfg(feature = "boa")]
+    pub fn install_reentry_probe(&mut self) {
+        use boa_engine::{
+            js_string, Context, JsNativeError, JsObject, JsResult, JsValue as BoaValue,
+            NativeFunction,
+        };
+        reentry_reset();
+        let native = NativeFunction::from_copy_closure(
+            |_this, args, context: &mut Context| -> JsResult<BoaValue> {
+                let n = args
+                    .first()
+                    .and_then(|value| value.as_number())
+                    .unwrap_or(0.0);
+                reentry_note(n as usize);
+                let step = context
+                    .global_object()
+                    .get(js_string!("__rk_step"), context)?;
+                let function = step.as_object().ok_or_else(|| {
+                    boa_engine::JsError::from_native(
+                        JsNativeError::typ().with_message("no __rk_step"),
+                    )
+                })?;
+                JsObject::call(
+                    &function,
+                    &BoaValue::undefined(),
+                    &[BoaValue::from(n)],
+                    context,
+                )
+            },
+        );
+        self.context
+            .register_global_callable(js_string!("__rk_reenter"), 1, native)
+            .expect("reentry probe");
+    }
+
     /// Define a global function `name` that calls `function`.
     pub fn register_host_function(
         &mut self,
         name: &str,
         length: usize,
         function: HostFunction,
+    ) -> Result<(), JsError> {
+        self.register_native(name, length, Box::new(move |args, _| function(args)), false)
+    }
+
+    /// [`register_host_function`](Self::register_host_function), also
+    /// handing `function` the position of the page's innermost frame that
+    /// led to the call (the embedder's own frames and those in no named
+    /// script passed over; one walk of the VM's frames per call).
+    pub fn register_host_function_with_caller(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+    ) -> Result<(), JsError> {
+        self.register_native(name, length, function, true)
+    }
+
+    fn register_native(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+        with_caller: bool,
     ) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
@@ -852,6 +1182,7 @@ impl JsRuntime {
                         // takes long to unwind, the log still says when.
                         if !deadline.hit.replace(true) {
                             deadline.late.set(Some(late));
+                            note_deadline_trip();
                             tracing::warn!(
                                 late_ms = late.as_millis() as u64,
                                 "Script budget spent: host calls are refused until the script has unwound"
@@ -863,7 +1194,11 @@ impl JsRuntime {
                         return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
                     }
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
-                    Ok(to_boa_value(function(&args)))
+                    let caller = match with_caller {
+                        true => diag::caller_position(context, true),
+                        false => None,
+                    };
+                    Ok(to_boa_value(function(&args, caller)))
                 })
             };
             self.context
@@ -873,7 +1208,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
-            let _ = (name, length, function);
+            let _ = (name, length, function, with_caller);
             Err(JsError::NotInitialized)
         }
     }
@@ -1351,7 +1686,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
 
@@ -1402,7 +1737,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
         runtime
@@ -1448,7 +1783,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime
@@ -1474,6 +1809,20 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let err = runtime.evaluate_script_named("1;\n  null.x;", "inline#2").unwrap_err();
         assert!(err.to_string().contains("(inline#2:2:"), "{err}");
+    }
+
+    #[test]
+    fn script_source_is_kept_only_while_capture_is_on() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#1").ok();
+        assert!(runtime.script_source("inline#1").is_none());
+        runtime.set_capture_script_sources(true);
+        runtime.evaluate_script_named("var box = {};\nbox.missing(1);\n", "inline#2").ok();
+        let kept = runtime.script_source("inline#2").expect("captured");
+        assert!(kept.contains("box.missing(1)"), "{kept}");
+        assert!(runtime.script_source("inline#1").is_none(), "scripts from before capture stay unstored");
+        runtime.set_capture_script_sources(false);
+        assert!(runtime.script_source("inline#2").is_none());
     }
 
     /// A thrown value that is not an error is described (`[object Object]`,
@@ -1527,7 +1876,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 
@@ -1549,7 +1898,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime
@@ -1578,7 +1927,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime.set_console_redaction(true);
@@ -1608,7 +1957,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         let module = runtime.begin_module("https://a.test/m.js", "for (let i = 0; i < 5000; i++) console.log(i);");
@@ -1627,7 +1976,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime.evaluate_script_named("1;\neval(\"console.log('in eval')\");", "inline#1").unwrap();
@@ -1666,7 +2015,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+        runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
         runtime.set_error_reports(true, false);
         let body = "{ console.log(\"c\"); throw new Error(\"x\"); }";
         let script = format!("1;\neval('{}');\n{call};", declare.replace("BODY", body));
@@ -1716,7 +2065,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             let body = "{\nconsole.log('c');\n  throw new Error('x'); }";
             let script = format!("{};\n{call};", declare.replace("BODY", body));
@@ -1737,7 +2086,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             assert!(runtime.evaluate_script_named(script, "inline#1").is_err());
             let reports = runtime.take_error_reports();
@@ -1821,6 +2170,52 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(setters, JsValue::Number(n) if n == 8.0));
+
+        // A climb through 256 records the setter once, with the name on the
+        // stack, and does not log that threshold again before it returns.
+        {
+            use std::sync::{Mutex, OnceLock};
+            fn lines() -> &'static Mutex<Vec<String>> {
+                static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+                LINES.get_or_init(|| Mutex::new(Vec::new()))
+            }
+            fn hook(depth: usize, histogram: &str, frames: &str) {
+                lines()
+                    .lock()
+                    .unwrap()
+                    .push(format!("depth={depth} histogram={histogram} frames={frames}"));
+            }
+            struct Disarm;
+            impl Drop for Disarm {
+                fn drop(&mut self) {
+                    set_host_stack_armed(false);
+                    set_host_stack_diag(None);
+                    set_host_stack_first_mark(None);
+                }
+            }
+            let _disarm = Disarm;
+            lines().lock().unwrap().clear();
+            // A debug native stack overflows before a climb of 256. The
+            // marks in a live run stay 256/512/1000; this only moves the first.
+            set_host_stack_first_mark(Some(4));
+            runtime
+                .context
+                .runtime_limits_mut()
+                .set_host_recursion_limit(1024);
+            set_host_stack_diag(Some(hook));
+            set_host_stack_armed(true);
+            let climbed = runtime
+                .evaluate_script(
+                    "var n = 0; var obj = { set x(v) { n++; if (n < 6) this.x = v; } }; obj.x = 1; n",
+                )
+                .unwrap();
+            assert!(matches!(climbed, JsValue::Number(n) if n == 6.0));
+            let logged = lines().lock().unwrap().clone();
+            assert_eq!(logged.len(), 1, "{logged:?}");
+            assert!(logged[0].starts_with("depth=4 "), "{}", logged[0]);
+            assert!(logged[0].contains("histogram=set x=4"), "{}", logged[0]);
+            assert!(logged[0].contains("set x > set x"), "{}", logged[0]);
+        }
 
         let word = Arc::new(AtomicU64::new(0));
         runtime.context.set_interrupt_word(Some(word.clone()));
@@ -1952,5 +2347,7 @@ mod tests {
             .and_then(|n| n.parse::<usize>().ok())
             .unwrap_or(0);
         assert!(max >= 20, "{line}");
+        let attribution = interrupt_attribution();
+        assert!(attribution.contains(&line), "{attribution}");
     }
 }

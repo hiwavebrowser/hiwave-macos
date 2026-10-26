@@ -236,6 +236,10 @@ struct CaptureResult {
     /// `--inspector-out`
     #[serde(skip_serializing_if = "Option::is_none", default)]
     inspector: Option<inspector::InspectorOutput>,
+    /// True when this capture ran on the content thread (`HIWAVE_CONTENT_THREAD`).
+    /// Absent means an older capture tool. `false` is the flag-off worker.
+    #[serde(default)]
+    content_thread: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -323,6 +327,7 @@ impl CaptureResult {
             diagnostics: None,
             diagnostics_path: None,
             inspector: None,
+            content_thread: false,
         }
     }
 
@@ -360,8 +365,52 @@ struct LiveStats {
     idle_at_end: bool,
 }
 
+/// Wakes the live loop's sleep when work arrives off the page thread, as the
+/// app's event loop is woken (`rustkit_engine::set_live_wake`): an inserted
+/// script's fetch finishing is not `in_flight`, so without it a page with no
+/// timer set slept the rest of `--live-ms` and its inserted scripts ran only
+/// on the last turn.
+#[derive(Default)]
+struct LiveWake {
+    woken: std::sync::Mutex<bool>,
+    arrived: std::sync::Condvar,
+}
+
+impl LiveWake {
+    /// The process's one waker, installed in the engine on first use.
+    fn installed() -> Arc<LiveWake> {
+        static WAKE: std::sync::OnceLock<Arc<LiveWake>> = std::sync::OnceLock::new();
+        WAKE.get_or_init(|| {
+            let wake = Arc::new(LiveWake::default());
+            let engine_side = Arc::clone(&wake);
+            rustkit_engine::set_live_wake(Arc::new(move || engine_side.wake()));
+            wake
+        })
+        .clone()
+    }
+
+    fn wake(&self) {
+        *self.woken.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.arrived.notify_one();
+    }
+
+    /// Sleep up to `limit`, less if woken (or woken since the last sleep).
+    fn sleep(&self, limit: Duration) {
+        let woken = self.woken.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut woken, _) = self
+            .arrived
+            .wait_timeout_while(woken, limit, |woken| !*woken)
+            .unwrap_or_else(|e| e.into_inner());
+        *woken = false;
+    }
+}
+
 /// The app's pacing (`hiwave-app` `process_events`): a turn when the next
-/// timer is due or a request is out, never sooner than the last turn took.
+/// timer is due, a request is out or the engine wakes the loop. Timer and
+/// request waits are never shorter than the last turn took (nor
+/// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
+/// once, as the app's poke does, so a page that keeps waking the loop gets
+/// back-to-back turns.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
@@ -374,6 +423,7 @@ fn run_live(
     let began = Instant::now();
     let mut clock = began;
     let mut stats = LiveStats::default();
+    let wake = LiveWake::installed();
     tracing::info!(live_ms, "Live loop started");
     loop {
         let started = Instant::now();
@@ -396,9 +446,10 @@ fn run_live(
         if left.is_zero() {
             break;
         }
-        // An idle page still gets its time: in the app only input wakes it.
+        // An idle page still gets its time: in the app only input, or the
+        // engine's wake, ends the wait.
         let wait = next.map_or(left, |wait| wait.max(started.elapsed()).max(MIN_LIVE_TURN));
-        std::thread::sleep(wait.min(left));
+        wake.sleep(wait.min(left));
     }
     stats.wall_ms = began.elapsed().as_millis() as u64;
     stats
@@ -444,9 +495,14 @@ fn main() {
 
     let started = Instant::now();
     let args_clone = args.clone();
+    // Flag off: today's worker. Flag on: the page thread's name and stack,
+    // so a 26-case run with HIWAVE_CONTENT_THREAD set is not the flag-off
+    // capture again. The tool has no window, so the headless presenter stays
+    // with the page on that thread.
+    let (worker_name, worker_stack) = capture_worker_spec(rustkit_engine::content_thread_enabled());
     let handler = std::thread::Builder::new()
-        .name("capture-worker".into())
-        .stack_size(16 * 1024 * 1024)
+        .name(worker_name.into())
+        .stack_size(worker_stack)
         .spawn(move || run_capture(&args_clone))
         .expect("failed to spawn capture worker thread");
     let mut result = match handler.join() {
@@ -466,6 +522,17 @@ fn main() {
     }
 }
 
+/// Where a capture runs. `HIWAVE_CONTENT_THREAD` selects the content
+/// thread (the name the page thread uses, and its stack). Anything else
+/// keeps the capture worker the campaign has always used.
+fn capture_worker_spec(content_thread: bool) -> (&'static str, usize) {
+    if content_thread {
+        ("page", rustkit_engine::content_stack_bytes())
+    } else {
+        ("capture-worker", 16 * 1024 * 1024)
+    }
+}
+
 /// The user agent the shipping RustKit content view sends
 /// (hiwave-app/src/webview_rustkit.rs). Live sites branch on it, so a URL
 /// capture must present as the product does, not as a test tool.
@@ -478,6 +545,7 @@ fn run_capture(args: &Args) -> CaptureResult {
     let sink = wants_events.then(CollectingSink::default);
     let mut inspector: Option<Arc<Inspector>> = None;
     let mut result = capture(args, sink.as_ref(), &mut inspector);
+    result.content_thread = std::thread::current().name() == Some("page");
     if let Some(sink) = sink {
         let records = sink.records();
         if let Some(ref path) = args.event_log {
@@ -1478,6 +1546,72 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A page whose only pending work is an inserted script's fetch (no
+    /// timer set, nothing `in_flight`) still runs the script when its fetch
+    /// arrives, not on the live window's last turn.
+    #[test]
+    fn an_inserted_script_runs_when_its_fetch_arrives_not_at_the_end_of_the_window() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let (ctype, body) = if line.starts_with("GET /late.js") {
+                        std::thread::sleep(Duration::from_millis(300));
+                        ("text/javascript", "console.log('late ran');".to_string())
+                    } else {
+                        let page = "<html><body>x<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/late.js'; document.body.appendChild(s); }, 50);</script></body></html>";
+                        ("text/html", page.to_string())
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-wake-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("events.jsonl");
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--live-ms",
+            "6000",
+            "--event-log",
+            log.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let records: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let at = |pred: &dyn Fn(&serde_json::Value) -> bool| records.iter().find(|r| pred(r)).map(|r| r["t_ms"].as_f64().unwrap());
+        let load = at(&|r| r["type"] == "load_finished").expect("load_finished");
+        let ran = at(&|r| r["type"] == "console").expect("late.js logged");
+        assert!(ran - load < 2_000.0, "late.js ran {:.0} ms after load (the window is 6000 ms)", ran - load);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_script_budget_flag_sets_the_engines_script_budget_and_nothing_else() {
         let config = capture_config(&parsed(&["--script-budget-ms", "60000"]), None);
@@ -1646,5 +1780,22 @@ mod tests {
         assert_eq!(parse_point("point:-10.0:40.5"), Some((-10.0, 40.5)));
         assert_eq!(parse_point("String(\"fallback_clicked\")"), None);
         assert_eq!(parse_point("missing"), None);
+    }
+
+    #[test]
+    fn the_content_thread_flag_selects_the_page_worker() {
+        let (name, stack) = capture_worker_spec(false);
+        assert_eq!((name, stack), ("capture-worker", 16 * 1024 * 1024));
+        let (name, stack) = capture_worker_spec(true);
+        assert_eq!(name, "page");
+        assert!(stack >= 8 * 1024 * 1024, "content stack {stack}");
+        let got = std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(stack)
+            .spawn(|| std::thread::current().name().unwrap().to_string())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(got, "page");
     }
 }

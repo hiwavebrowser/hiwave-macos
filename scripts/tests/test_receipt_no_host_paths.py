@@ -254,6 +254,48 @@ class TestReceiptNoHostPaths(unittest.TestCase):
         self.assertEqual(rec["binary"], str(self.binary))
         self.assertEqual(rec["raw_runs"][0]["file"], str(self.run_file))
 
+    # ── #661 residuals the PR body named but did not pin ────────────────────
+
+    def test_a_path_with_a_space_in_the_note_is_cut_at_the_space(self):
+        # ABS_PATH's segment alphabet has no space, so the leading directories
+        # up to the space are stripped and the rest of the path stays. Pin
+        # the residual so a wider match cannot silently re-leak a home dir.
+        # These expected values are the known partial leak, not the goal:
+        # tighten them to the basename once ABS_PATH handles spaces.
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t, want in [
+            ("/Users/example/My Documents/out/parity-capture",
+             "My Documents/out/parity-capture"),
+            ("bins at /Users/example/My Documents/out/parity-capture done",
+             "bins at My Documents/out/parity-capture done"),
+            (r"C:\Users\example\My Documents\out.bin",
+             r"My Documents\out.bin"),
+        ]:
+            self.assertEqual(receipt.public_text(t, REPO), want)
+        out = run_receipt("--note", f"bins at {self.outside / 'My Documents' / 'parity-capture'}")
+        self.assert_clean(out)
+        self.assertEqual(
+            json.loads(out)["note"],
+            "bins at My Documents/parity-capture",
+        )
+
+    def test_a_schemeless_wiki_path_in_the_note_is_shortened_to_its_basename(self):
+        # Two-or-more-segment absolute paths match ABS_PATH even when they
+        # are wiki-style URL paths typed without a scheme. Schemed URLs are
+        # left alone (credentials stripped elsewhere).
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t, want in [
+            ("/w/load.php?modules=site", "load.php?modules=site"),
+            ("see /w/load.php?modules=site", "see load.php?modules=site"),
+            ("https://example.com/w/load.php?modules=site",
+             "https://example.com/w/load.php?modules=site"),
+            ("https://en.wikipedia.org/w/load.php?modules=site",
+             "https://en.wikipedia.org/w/load.php?modules=site"),
+        ]:
+            self.assertEqual(receipt.public_text(t, REPO), want)
+
 
 if __name__ == "__main__":
     unittest.main()

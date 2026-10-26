@@ -22,7 +22,7 @@
 //! never need to clear a turn-targeted word: every writer uses `fetch_max`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -45,9 +45,31 @@ static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 
 /// Microseconds since the first call, the clock turn start times are on.
 /// Finer than the budgets so a turn is never judged by a rounded clock.
-fn now_us() -> u64 {
+pub fn mono_us() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+fn now_us() -> u64 {
+    mono_us()
+}
+
+const SETTER_NONE: u8 = 0;
+const SETTER_WATCHDOG: u8 = 1;
+const SETTER_STOP_ALL: u8 = 2;
+const SETTER_CANCEL: u8 = 3;
+const SETTER_COMMIT: u8 = 4;
+const SETTER_CLEAR: u8 = 5;
+
+fn setter_name(tag: u8) -> &'static str {
+    match tag {
+        SETTER_WATCHDOG => "watchdog",
+        SETTER_STOP_ALL => "stop_all",
+        SETTER_CANCEL => "cancel",
+        SETTER_COMMIT => "commit",
+        SETTER_CLEAR => "clear",
+        _ => "-",
+    }
 }
 
 /// One view's stop state.
@@ -78,6 +100,11 @@ pub struct ViewControl {
     /// Bumped on Stop and Close, never lowered. Not read yet: navigations a
     /// stopped page raised are dropped by it from M4.
     pub nav_epoch: AtomicU64,
+    /// Who last wrote [`Self::interrupt`], for the console-log line. The
+    /// opcode check does not read these.
+    setter_tag: AtomicU8,
+    setter_at_us: AtomicU64,
+    setter_target: AtomicU64,
 }
 
 impl ViewControl {
@@ -91,7 +118,29 @@ impl ViewControl {
             committed_nav: AtomicU64::new(0),
             nav_lock: Mutex::new(()),
             nav_epoch: AtomicU64::new(0),
+            setter_tag: AtomicU8::new(SETTER_NONE),
+            setter_at_us: AtomicU64::new(0),
+            setter_target: AtomicU64::new(0),
         }
+    }
+
+    fn note_setter(&self, tag: u8, target: u64) {
+        self.setter_target.store(target, Ordering::Relaxed);
+        // 0 means "nobody has written". A write in the first microsecond
+        // of the clock still has to be distinguishable from that.
+        self.setter_at_us.store(now_us().max(1), Ordering::Relaxed);
+        self.setter_tag.store(tag, Ordering::Release);
+    }
+
+    /// The word, and who last wrote it: tag, monotonic time, target turn.
+    pub fn word_writer(&self) -> (u64, &'static str, u64, u64) {
+        let tag = self.setter_tag.load(Ordering::Acquire);
+        (
+            self.interrupt.load(Ordering::Relaxed),
+            setter_name(tag),
+            self.setter_at_us.load(Ordering::Relaxed),
+            self.setter_target.load(Ordering::Relaxed),
+        )
     }
 
     /// This view's id in [`ThreadStamp`] (`turn_view`).
@@ -102,11 +151,22 @@ impl ViewControl {
     /// Stop `turn` if it is this view's running turn. Never lowers the
     /// word: a later turn's id, or [`ALL`], stays.
     pub fn interrupt_turn(&self, turn: u64) {
+        self.note_setter(SETTER_WATCHDOG, turn);
         self.interrupt.fetch_max(turn, Ordering::Relaxed);
     }
 
     /// Stop every turn of this view until [`ViewControl::clear_all`].
     pub fn stop_all(&self) {
+        self.write_all(SETTER_STOP_ALL);
+    }
+
+    /// [`ViewControl::stop_all`] from a navigation cancel.
+    pub fn stop_cancelled(&self) {
+        self.write_all(SETTER_CANCEL);
+    }
+
+    fn write_all(&self, tag: u8) {
+        self.note_setter(tag, ALL);
         self.interrupt.store(ALL, Ordering::Relaxed);
     }
 
@@ -114,9 +174,14 @@ impl ViewControl {
     /// commits in the view. A turn id in the word is left: it names a turn
     /// that has ended. Whether `ALL` was set.
     pub fn clear_all(&self) -> bool {
-        self.interrupt
+        let cleared = self
+            .interrupt
             .compare_exchange(ALL, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+            .is_ok();
+        if cleared {
+            self.note_setter(SETTER_CLEAR, 0);
+        }
+        cleared
     }
 
     /// Whether the word stops `turn`.
@@ -141,7 +206,7 @@ impl ViewControl {
         let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.committed_nav.store(nav_id, Ordering::SeqCst);
         if self.nav_cancelled(nav_id) {
-            self.stop_all();
+            self.write_all(SETTER_COMMIT);
         } else {
             self.clear_all();
         }
@@ -180,9 +245,25 @@ impl ViewControl {
         let loading = self.loading_nav.load(Ordering::SeqCst);
         let hit = loading != 0 && loading <= nav_id;
         if hit && self.committed_nav.load(Ordering::SeqCst) == loading {
-            self.stop_all();
+            self.write_all(SETTER_CANCEL);
         }
         hit
+    }
+
+    /// Navigation `nav_id` ended without committing a document (a refused
+    /// connection, a fetch error, a 204). The document still on screen gets
+    /// its script back: lift [`ALL`], which the window raised when it
+    /// started `nav_id`. Not when a newer navigation or a Stop cancelled
+    /// it; that one raised ALL for its own reason. Whether ALL was lifted
+    /// for this navigation. Held under the nav lock, as `cancel_nav`, so a
+    /// cancel cannot land between the check and the lift.
+    pub fn end_uncommitted(&self, nav_id: u64) -> bool {
+        let _held = self.nav_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if nav_id == 0 || self.nav_committed(nav_id) || self.nav_cancelled(nav_id) {
+            return false;
+        }
+        self.clear_all();
+        true
     }
 
     /// Whether `nav_id` has been cancelled.
@@ -281,6 +362,18 @@ impl ThreadStamp {
     /// The open turn's id; 0 = idle.
     pub fn current_turn(&self) -> u64 {
         self.turn.load(Ordering::Relaxed)
+    }
+
+    /// The open turn's id, how long it has been open, and its budget, in
+    /// microseconds. Zeros when idle.
+    pub fn timing(&self) -> (u64, u64, u64) {
+        let turn = self.turn.load(Ordering::Relaxed);
+        if turn == 0 {
+            return (0, 0, 0);
+        }
+        let started = self.turn_started_us.load(Ordering::Relaxed);
+        let budget = self.turn_budget_us.load(Ordering::Relaxed);
+        (turn, now_us().saturating_sub(started), budget)
     }
 
     /// The open turn, if the read was not torn by a turn ending or
@@ -564,6 +657,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_cancel_racing_the_end_of_an_uncommitted_navigation_keeps_its_stop() {
+        // #730 follow-up (b): the page lowered ALL for a navigation that
+        // never committed after reading "not cancelled", unlocked. A newer
+        // navigation's cancel and stop landing between the two was undone,
+        // and the old document's script ran on under the new load.
+        let control = Arc::new(ViewControl::new());
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        let held = control.nav_lock.lock().unwrap();
+        let ending = {
+            let control = Arc::clone(&control);
+            std::thread::spawn(move || control.end_uncommitted(2))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // A newer navigation, as `ContentThread::navigate`: cancel, then stop.
+        control.cancel_nav.fetch_max(2, Ordering::SeqCst);
+        control.stop_all();
+        drop(held);
+        let lifted = ending.join().unwrap();
+        assert!(!lifted, "ALL was lifted for a navigation already cancelled");
+        assert!(control.stops(42), "the newer navigation's stop was undone");
+    }
+
+    #[test]
+    fn an_uncommitted_navigation_gives_the_shown_document_its_script_back() {
+        let control = ViewControl::new();
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.end_load(1));
+        control.stop_all();
+        control.begin_nav(2);
+        assert!(control.end_load(2));
+        assert!(control.end_uncommitted(2));
+        assert!(!control.stops(42));
+        assert!(!control.end_uncommitted(1), "a committed navigation is not ended again");
+    }
+
+    #[test]
     fn a_cancel_stops_the_running_load_and_every_earlier_one() {
         let control = ViewControl::new();
         control.begin_nav(3);
@@ -644,6 +778,27 @@ mod tests {
         control.interrupt_turn(11);
         assert!(!control.clear_all(), "clear_all leaves a turn id");
         assert!(control.stops(11));
+    }
+
+    #[test]
+    fn the_last_writer_of_the_word_is_recorded() {
+        let control = ViewControl::new();
+        control.interrupt_turn(4);
+        let (word, tag, at, target) = control.word_writer();
+        assert_eq!((word, tag, target), (4, "watchdog", 4));
+        assert!(at > 0);
+        control.begin_nav(1);
+        control.commit_nav(1);
+        assert!(control.cancel_nav(1));
+        let (word, tag, _, target) = control.word_writer();
+        assert_eq!((word, tag, target), (ALL, "cancel", ALL));
+        assert!(control.clear_all());
+        let (word, tag, _, target) = control.word_writer();
+        assert_eq!((word, tag, target), (0, "clear", 0));
+        control.begin_nav(2);
+        control.cancel_nav(2);
+        control.commit_nav(2);
+        assert_eq!(control.word_writer().1, "commit");
     }
 
     #[test]

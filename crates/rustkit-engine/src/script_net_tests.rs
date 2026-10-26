@@ -337,3 +337,22 @@ fn a_page_without_the_bridge_has_no_requests() {
     ));
     assert_eq!((found.requests, found.rounds, found.poisoned), (0, 0, false));
 }
+
+/// #730 follow-up (f), Prometheus NIT: a stopped `load` listener marked the
+/// last record with the same URL. Two inserts of one URL could swap: the
+/// first element's stop landed on the second element's run.
+#[test]
+fn a_stopped_listener_marks_its_own_scripts_record_not_another_with_the_same_url() {
+    use crate::script_net::mark_listener_stopped;
+    use crate::{ScriptOutcome, ScriptRecord};
+    let run = |source: &str| ScriptRecord { source: source.into(), bytes: 1, elapsed_ms: 1, outcome: ScriptOutcome::Ran };
+    let mut out = Pump::default();
+    out.records.push(run("https://a.test/x.js"));
+    out.records.push(run("https://a.test/x.js"));
+    mark_listener_stopped(&mut out, Some(0), "https://a.test/x.js".into());
+    assert_eq!(out.records[0].outcome, ScriptOutcome::OverBudget, "the first element's record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran, "the second element's run was marked");
+    mark_listener_stopped(&mut out, None, "https://a.test/x.js".into());
+    assert_eq!(out.records.len(), 3, "an event owed to a later turn adds its own record");
+    assert_eq!(out.records[1].outcome, ScriptOutcome::Ran);
+}

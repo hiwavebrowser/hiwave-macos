@@ -27,8 +27,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Icon, WindowBuilder},
 };
-use tracing::{error, info, trace, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, trace, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wry::{Rect, WebView, WebViewBuilder};
 
 /// Default height of the chrome top bar area (workspace + tabs + toolbar)
@@ -58,6 +58,27 @@ mod webview_rustkit;
 mod shield_adapter;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+mod devtools_panel;
+
+/// Run `$body` with the RustKit content view bound to `$view` and give
+/// `true`; give `false` for WebKit content, whose Inspector is the injected
+/// script (`ui/inspector_inject.js`).
+macro_rules! with_rustkit_content {
+    ($content:expr, $view:ident => $body:expr) => {{
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        let handled = match *$content {
+            UnifiedContentWebView::RustKit(ref $view) => {
+                $body;
+                true
+            }
+            _ => false,
+        };
+        #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
+        let handled = false;
+        handled
+    }};
+}
 
 mod content_webview_trait;
 #[cfg(target_os = "macos")]
@@ -226,6 +247,9 @@ enum UserEvent {
     DecayTick,
     // The stall log's ping (window_stall.rs); only sent with HIWAVE_STALL_LOG=1
     WindowThreadPing,
+    // An inserted script's fetch finished. The event only wakes the loop;
+    // MainEventsCleared runs the script on the live turn.
+    LiveTurn,
     // Focus mode events
     EnterFocusMode,
     ExitFocusMode,
@@ -285,6 +309,12 @@ enum UserEvent {
     InspectorStopPicker,
     InspectorScrollToElement { path: String },
     InspectElement { path: String },
+    /// The panel asks for the DOM tree again.
+    InspectorRefreshTree,
+    /// The panel selected a node (a tree row, a breadcrumb).
+    InspectorSelect { path: String },
+    /// The panel expanded a node whose children the tree left out.
+    InspectorExpand { path: String },
     // Console events
     InspectorConsoleMessage(String),
     InspectorConsoleClear,
@@ -590,6 +620,33 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+#[cfg(test)]
+mod rust_log_tests {
+    use super::rust_log_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn defaults_to_info_and_honors_a_rust_log_directive() {
+        assert_eq!(rust_log_filter(None).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("   ")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("===bad===")).max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+        assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
+        assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// `RUST_LOG` when it is set to a directive this process can parse.
+/// Unset, blank, and unparseable values stay at info, which is what the
+/// app logged before `RUST_LOG` was read.
+fn rust_log_filter(rust_log: Option<&str>) -> EnvFilter {
+    match rust_log.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        None => EnvFilter::new("info"),
+    }
+}
+
 /// Stack size of the calling thread, as the OS reports it. Logged at startup
 /// so a hand-test log shows the linker's main-thread stack took effect.
 #[cfg(target_os = "macos")]
@@ -602,11 +659,26 @@ fn main_thread_stack_size() -> usize {
     unsafe { pthread_get_stacksize_np(pthread_self()) }
 }
 
+/// The shipped app runs the page on the content thread (M4) unless
+/// `HIWAVE_CONTENT_THREAD` is set, to `0` for example, which keeps the page on
+/// the window thread. The engine's own default stays off, so parity-capture
+/// and the engine tests keep their board-comparable arm.
+#[cfg(target_os = "macos")]
+fn default_content_thread_on() {
+    if std::env::var_os("HIWAVE_CONTENT_THREAD").is_none() {
+        // main() has started no threads yet.
+        std::env::set_var("HIWAVE_CONTENT_THREAD", "1");
+    }
+}
+
 fn main() {
-    // Initialize logging with log compatibility
+    #[cfg(target_os = "macos")]
+    default_content_thread_on();
+    // Initialize logging with log compatibility. `RUST_LOG` selects the
+    // level when it is set; otherwise info, as before.
     tracing_log::LogTracer::init().expect("Failed to set log tracer");
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(rust_log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
@@ -615,6 +687,15 @@ fn main() {
     info!(
         "Main thread stack: {} MiB",
         main_thread_stack_size() / (1024 * 1024)
+    );
+    #[cfg(target_os = "macos")]
+    info!(
+        "Content thread: {}",
+        if rustkit_engine::content_thread_enabled() {
+            "on"
+        } else {
+            "off (HIWAVE_CONTENT_THREAD)"
+        }
     );
 
     // Initialize application state
@@ -706,7 +787,13 @@ fn main() {
     let chrome_height = Arc::new(Mutex::new(CHROME_HEIGHT_DEFAULT as f64));
     let shelf_height = Arc::new(Mutex::new(SHELF_HEIGHT_DEFAULT as f64));
     let inspector_height = Arc::new(Mutex::new(INSPECTOR_HEIGHT_DEFAULT as f64));
-    // Sidebar width: 0.0 = closed, >0 = open with that width
+    // Sidebar width: 0.0 = closed, >0 = open with that width.
+    // The content view starts at the full window. A page with no inserted
+    // scripts reads that width, then hears one `resize` when chrome opens
+    // the sidebar. Creating it already inset made that first read the
+    // narrowed width, and chrome's initial width of 0 then dispatched a
+    // stale full-window resize. Bounds set while a load holds the engine
+    // are applied when it ends.
     let sidebar_width_state = Arc::new(Mutex::new(0.0_f64));
     let right_sidebar_open = Arc::new(Mutex::new(false));
 
@@ -1037,6 +1124,9 @@ fn main() {
                         info!("Toggle focus mode response: {:?}", response);
                         let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
                     }
+                    IpcMessage::ToggleInspector => {
+                        let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
+                    }
                     IpcMessage::GetFocusModeStatus => {
                         let response = ipc::commands::handle_message(&chrome_state, msg);
                         info!("Get focus mode status response: {:?}", response);
@@ -1230,8 +1320,25 @@ fn main() {
         
         let rustkit_view = RustKitView::with_shield_counter(&window, bounds, Some(blocked_counter))
             .expect("Failed to create RustKit view");
-        rustkit_view.load_html_internal(ABOUT_HTML)
-            .expect("Failed to load initial HTML");
+        // An inserted script's fetch finishes off this thread. Posting
+        // here wakes `MainEventsCleared`, which runs the script. The loop
+        // does not poll for it.
+        let wake_proxy = Arc::new(Mutex::new(proxy.clone()));
+        rustkit_engine::set_live_wake(Arc::new(move || {
+            if let Ok(proxy) = wake_proxy.lock() {
+                let _ = proxy.send_event(UserEvent::LiveTurn);
+            }
+        }));
+        // A restored tab is queued below as `UserEvent::Navigate`. With the
+        // content thread both loads return immediately, and a new-tab
+        // document queued first used to be applied after the restore had
+        // already taken the newer navigation id (10/26 launches). The
+        // restore is the first command; a late default document carries an
+        // older id and is dropped.
+        if is_new_tab_url(&initial_url) {
+            rustkit_view.load_html_internal(ABOUT_HTML)
+                .expect("Failed to load initial HTML");
+        }
         
         UnifiedContentWebView::RustKit(Arc::new(rustkit_view))
     };
@@ -1774,36 +1881,14 @@ fn main() {
                         IpcMessage::CloseInspector => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
                         }
-                        IpcMessage::InspectorGetDomTree => {
-                            // This will be handled by evaluating script on content webview
-                            // and sending result back to inspector
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            // Send event to evaluate on content
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
+                        IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
                         }
-                        IpcMessage::InspectorGetElementStyles { path } => {
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("'", "\\'").replace("\\", "\\\\"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
+                        IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
+                        }
+                        IpcMessage::InspectorExpandNode { path } => {
+                            let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
                         }
                         IpcMessage::InspectorHighlightElement { path } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
@@ -1822,36 +1907,6 @@ fn main() {
                         }
                         IpcMessage::InspectorConsoleEval { code } => {
                             let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
-                        }
-                        IpcMessage::InspectorRefresh => {
-                            // Refresh DOM tree by evaluating script on content
-                            let script = r#"
-                                (function() {
-                                    if (window.__hiwaveInspector) {
-                                        const tree = window.__hiwaveInspector.getDomTree(10);
-                                        window.ipc.postMessage(JSON.stringify({
-                                            cmd: 'inspector_dom_tree_result',
-                                            tree: tree
-                                        }));
-                                    }
-                                })();
-                            "#;
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script.to_string()));
-                        }
-                        IpcMessage::InspectorSelectElement { path } => {
-                            // Get styles for the selected element
-                            let script = format!(r#"
-                                (function() {{
-                                    if (window.__hiwaveInspector) {{
-                                        const styles = window.__hiwaveInspector.getElementStyles('{}');
-                                        window.ipc.postMessage(JSON.stringify({{
-                                            cmd: 'inspector_element_styles_result',
-                                            styles: styles
-                                        }}));
-                                    }}
-                                }})();
-                            "#, path.replace("\\", "\\\\").replace("'", "\\'"));
-                            let _ = inspector_proxy.send_event(UserEvent::EvaluateContentScript(script));
                         }
                         IpcMessage::InspectorClose => {
                             let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
@@ -2044,6 +2099,10 @@ fn main() {
     // When the content page's next timer is due. The loop sleeps until
     // input otherwise, and a sleeping loop runs no timers.
     let live_wake = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    // The Inspector's native path for RustKit content: picking, the
+    // selection and the console's place.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let mut devtools = devtools_panel::Devtools::default();
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2145,9 +2204,17 @@ fn main() {
                         if let Some(tag) = view.focus_at_point(content_x as f32, content_y as f32) {
                             info!(%tag, "Focused content element");
                         }
-                        if let Some(url) = view.link_at_point(content_x as f32, content_y as f32) {
-                            info!(%url, "Link clicked");
-                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        // The content view already recorded this click when
+                        // the page runs on its own thread. Asking here races
+                        // that thread, and a miss is logged as a script
+                        // navigation. The click comes back as
+                        // NavigateRequested with the user as its origin.
+                        if !rustkit_engine::content_thread_enabled() {
+                            if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
+                            {
+                                info!(%url, "Link clicked");
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            }
                         }
                     }
                 }
@@ -2369,6 +2436,24 @@ fn main() {
                             // every script-driven control was dead (Z lane I0).
                             // Where the pointer is, and when it goes: what a
                             // hover menu or a drag listens for.
+                            // The Inspector's select-element mode takes the
+                            // pointer instead: hover outlines, release picks.
+                            if devtools.picking() {
+                                let at = (click.x as f32, click.y as f32);
+                                match click.input {
+                                    rustkit_viewhost::PointerInput::Move => {
+                                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                                    }
+                                    rustkit_viewhost::PointerInput::Leave => {
+                                        devtools.pick_hover(view, &inspector_for_events, None)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button if !click.down => {
+                                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                                    }
+                                    rustkit_viewhost::PointerInput::Button => {}
+                                }
+                                continue;
+                            }
                             match click.input {
                                 rustkit_viewhost::PointerInput::Move => {
                                     view.mouse_move_at_point(click.x as f32, click.y as f32);
@@ -2422,6 +2507,13 @@ fn main() {
                             rustkit_viewhost::InputKind::Key(key) => {
                             if key.cmd {
                                 continue; // menu shortcuts are not text
+                            }
+                            // Esc leaves select-element mode; the page does not hear it.
+                            if devtools.picking() && key.mac_keycode == 53 {
+                                if !key.up {
+                                    devtools.stop_picker(view, &inspector_for_events);
+                                }
+                                continue;
                             }
                             // macOS keyCodes -> the Win32 VK numbering the edit
                             // model speaks. Text keys carry their characters.
@@ -2487,9 +2579,18 @@ fn main() {
                         // a submit from a timer. Until 2026-10-06 these were
                         // dropped: only the user's own click on a link or a
                         // submit button went anywhere (hand tests H14, H16).
-                        if let Some(url) = view.take_script_navigation() {
-                            info!(%url, "Script navigation");
+                        if let Some((url, from_user)) = view.take_script_navigation() {
+                            if from_user {
+                                info!(%url, "Link clicked");
+                            } else {
+                                info!(%url, "Script navigation");
+                            }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                        }
+                        // The page's console lines, and a new tree after it
+                        // changed; an open panel asks on its own clock.
+                        if let Some(at) = devtools.pump(view, &inspector_for_events) {
+                            live_wake.set(Some(live_wake.get().map_or(at, |wake| wake.min(at))));
                         }
                         view.render();
                     }
@@ -4193,6 +4294,9 @@ fn main() {
                             answered.now(clock);
                         }
                     }
+                    UserEvent::LiveTurn => {
+                        // MainEventsCleared follows and runs the live turn.
+                    }
                     UserEvent::DecayTick => {
                         // Get decay settings and calculate decay levels for all tabs
                         let state = state_for_events.lock().unwrap();
@@ -4423,6 +4527,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.open(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Inject inspector script into content webview if not already injected
                         let inject_script = format!(
                             "if (!window.__hiwaveInspector) {{ {} }}",
@@ -4462,6 +4569,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        if with_rustkit_content!(content_for_events, view => devtools.close(view, &inspector_for_events)) {
+                            return;
+                        }
                         // Clear highlight in content
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
@@ -4507,6 +4617,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorHighlightElement { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, Some(&path))) {
+                            return;
+                        }
                         let script = format!(
                             "if (window.__hiwaveInspector) {{ window.__hiwaveInspector.highlightElement('{}'); }}",
                             path.replace("'", "\\'")
@@ -4514,11 +4627,17 @@ fn main() {
                         let _ = content_for_events.evaluate_script(&script);
                     }
                     UserEvent::InspectorClearHighlight => {
+                        if with_rustkit_content!(content_for_events, view => devtools.highlight(view, None)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.clearHighlight(); }"
                         );
                     }
                     UserEvent::InspectorStartPicker => {
+                        if with_rustkit_content!(content_for_events, _view => devtools.start_picker(&inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
@@ -4527,6 +4646,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorStopPicker => {
+                        if with_rustkit_content!(content_for_events, view => devtools.stop_picker(view, &inspector_for_events)) {
+                            return;
+                        }
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
@@ -4540,6 +4662,44 @@ fn main() {
                             path.replace("'", "\\'")
                         );
                         let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorRefreshTree => {
+                        if with_rustkit_content!(content_for_events, view => devtools.send_tree(view)) {
+                            return;
+                        }
+                        let _ = content_for_events.evaluate_script(r#"
+                            (function() {
+                                if (window.__hiwaveInspector) {
+                                    const tree = window.__hiwaveInspector.getDomTree(10);
+                                    window.ipc.postMessage(JSON.stringify({
+                                        cmd: 'inspector_dom_tree_result',
+                                        tree: tree
+                                    }));
+                                }
+                            })();
+                        "#);
+                    }
+                    UserEvent::InspectorSelect { path } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.select(view, &path)) {
+                            return;
+                        }
+                        let script = format!(r#"
+                            (function() {{
+                                if (window.__hiwaveInspector) {{
+                                    const styles = window.__hiwaveInspector.getElementStyles('{}');
+                                    window.ipc.postMessage(JSON.stringify({{
+                                        cmd: 'inspector_element_styles_result',
+                                        styles: styles
+                                    }}));
+                                }}
+                            }})();
+                        "#, path.replace("\\", "\\\\").replace("'", "\\'"));
+                        let _ = content_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::InspectorExpand { path } => {
+                        // The injected-script tree is sent whole; only
+                        // RustKit's is cut and expanded on demand.
+                        with_rustkit_content!(content_for_events, view => devtools.expand(view, &path));
                     }
                     UserEvent::InspectElement { path } => {
                         // Open inspector and select the element
@@ -4576,6 +4736,9 @@ fn main() {
                         );
                     }
                     UserEvent::InspectorConsoleEval { code } => {
+                        if with_rustkit_content!(content_for_events, view => devtools.eval(view, &code)) {
+                            return;
+                        }
                         // Execute JavaScript in content webview
                         let escaped_code = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
                         let script = format!(r#"

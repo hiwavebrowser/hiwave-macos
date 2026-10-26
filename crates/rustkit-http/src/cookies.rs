@@ -309,4 +309,36 @@ mod tests {
         jar.set(&url("http://127.0.0.1:8000/"), "s=1; Secure", CookieSource::Http);
         assert_eq!(jar.header_for(&url("http://127.0.0.1:8000/"), false).as_deref(), Some("s=1"));
     }
+
+    #[test]
+    fn path_without_a_slash_control_chars_and_oversized_names_are_refused() {
+        let jar = CookieJar::new();
+        let u = url("https://example.com/shop/cart");
+        // Path must start with `/` (§5.2.4); otherwise the default path stays.
+        jar.set(&u, "a=1; Path=shop", CookieSource::Http);
+        assert_eq!(
+            jar.header_for(&url("https://example.com/shop/x"), false).as_deref(),
+            Some("a=1")
+        );
+        assert_eq!(
+            jar.header_for(&url("https://example.com/other"), false),
+            None,
+            "default path is /shop, not Path=shop"
+        );
+        // Control characters inside name or value are refused (§5.2).
+        // A leading/trailing newline is trimmed before the check; mid-string is not.
+        jar.set(&u, "ba\nd=1", CookieSource::Http);
+        jar.set(&u, "ok=has\u{1}x", CookieSource::Http);
+        assert_eq!(
+            jar.header_for(&url("https://example.com/shop/x"), false).as_deref(),
+            Some("a=1")
+        );
+        // Name+value over the 4096-byte floor is dropped.
+        let huge = format!("n={}", "x".repeat(MAX_COOKIE_BYTES));
+        jar.set(&u, &huge, CookieSource::Http);
+        assert_eq!(
+            jar.header_for(&url("https://example.com/shop/x"), false).as_deref(),
+            Some("a=1")
+        );
+    }
 }

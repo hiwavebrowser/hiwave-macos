@@ -1402,6 +1402,32 @@ mod tests {
         assert!(!is_h2_illegal_request_header("x-custom"));
     }
 
+    /// #707: before this, `cookie_store(true)` was a no-op and
+    /// `document.cookie` / `Set-Cookie` stayed inert.
+    #[test]
+    fn cookie_store_true_installs_a_jar_and_false_leaves_none() {
+        let with = ClientBuilder::new()
+            .cookie_store(true)
+            .build()
+            .expect("client with jar");
+        assert!(with.cookie_jar().is_some(), "cookie_store(true) must install a jar");
+
+        let without = ClientBuilder::new()
+            .cookie_store(false)
+            .build()
+            .expect("client without jar");
+        assert!(
+            without.cookie_jar().is_none(),
+            "cookie_store(false) must leave the client jar-less"
+        );
+
+        let default = ClientBuilder::new().build().expect("default client");
+        assert!(
+            default.cookie_jar().is_none(),
+            "the builder default is off until cookie_store(true)"
+        );
+    }
+
     #[test]
     fn test_parse_status_line() {
         let (version, status) = parse_status_line("HTTP/1.1 200 OK\r\n").unwrap();

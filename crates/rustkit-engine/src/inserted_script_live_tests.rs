@@ -192,11 +192,13 @@ setTimeout(function () {
         "{}",
         page.log()
     );
-    // Each chunk ran once; async ones as they arrived (the last asked for
-    // answers a second before the first).
+    // Each chunk ran once; async ones as they arrived. The fetch slots
+    // (`MAX_INSERTED_FETCHES_IN_FLIGHT`, 8) hold chunks 8-14 until the first
+    // ones answer, so compare two that are out together: chunk 7 answers
+    // half a second before chunk 0.
     assert_eq!(page.js("window.ranChunks.length"), "Number(15.0)");
     assert_eq!(
-        page.js("window.ranChunks.indexOf(14) < window.ranChunks.indexOf(0)"),
+        page.js("window.ranChunks.indexOf(7) < window.ranChunks.indexOf(0)"),
         "Boolean(true)",
         "{}",
         page.js("window.ranChunks.join()")
@@ -338,7 +340,7 @@ fn slow_insert_routes() -> Vec<(&'static str, &'static str, String)> {
 fn stop_drops_an_inserted_script_still_being_fetched() {
     let mut page = Page::load(EngineConfig::default(), slow_insert_routes());
     page.turn(60_000);
-    assert_eq!(page.engine.views[&page.view].live_scripts.len(), 1, "the fetch is out");
+    assert!(page.engine.views[&page.view].live_inserted.pending(), "the fetch is out");
     page.engine.stop(page.view);
     page.turns_until("false", Duration::from_millis(1500), 0);
     assert_eq!(
@@ -355,7 +357,7 @@ fn stop_drops_an_inserted_script_still_being_fetched() {
 fn a_navigation_drops_an_inserted_script_still_being_fetched() {
     let mut page = Page::load(EngineConfig::default(), slow_insert_routes());
     page.turn(60_000);
-    assert_eq!(page.engine.views[&page.view].live_scripts.len(), 1, "the fetch is out");
+    assert!(page.engine.views[&page.view].live_inserted.pending(), "the fetch is out");
     let next = Url::parse(&format!("http://127.0.0.1:{}/next", page._server.port)).unwrap();
     page.rt.block_on(page.engine.load_url(page.view, next)).expect("load_url");
     page.turns_until("false", Duration::from_millis(1500), 0);
@@ -367,9 +369,11 @@ fn a_navigation_drops_an_inserted_script_still_being_fetched() {
     );
 }
 
-/// The fetches the live loop has out are bounded: the rest wait for a slot,
-/// and what is over the waiting bound hears `error` at once. Every element
-/// still hears exactly one event.
+/// The fetches the live loop has out are bounded: at most
+/// `MAX_INSERTED_FETCHES_IN_FLIGHT` (8) are on the wire at once and the rest
+/// wait for a slot, so twelve 300 ms chunks take two waves. Every element
+/// still hears exactly one event. (#775 bounded per view; the merge into
+/// #730 keeps #730's fetch thread, whose bound is this one.)
 #[test]
 fn inserted_script_fetches_are_bounded() {
     let page = "<html><body><p id=p>x</p><script>
@@ -390,13 +394,12 @@ setTimeout(function () {
         routes.push((leak(format!("/chunk.js?delay=300&n={i}")), "text/javascript", "window.ran++;".to_string()));
     }
     let mut page = Page::load(EngineConfig::default(), routes);
-    page.engine.views.get_mut(&page.view).unwrap().live_scripts = script_net::LiveScripts::with_limits(4, 8);
     let started = Instant::now();
-    let mut most = 0;
     page.turn(60_000);
+    let mut all_heard = None;
     while started.elapsed() < Duration::from_secs(8) {
-        most = most.max(page.engine.views[&page.view].live_scripts.fetching());
         if page.js("window.heard.load + window.heard.error === 12") == "Boolean(true)" {
+            all_heard = Some(started.elapsed());
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -405,9 +408,55 @@ setTimeout(function () {
     page.turns_until("false", Duration::from_millis(200), 0);
     assert_eq!(
         page.js("'load=' + heard.load + ' error=' + heard.error + ' ran=' + ran"),
-        r#"String("load=8 error=4 ran=8")"#,
+        r#"String("load=12 error=0 ran=12")"#,
         "{}",
         page.log()
     );
-    assert!(most <= 4 && most > 0, "fetches out at once: {most}");
+    let all_heard = all_heard.expect("every element heard its event");
+    assert!(
+        all_heard >= Duration::from_millis(550),
+        "twelve 300 ms fetches finished in {all_heard:?}: more than 8 were out at once"
+    );
+}
+
+/// #730 follow-up (d): the fetch queue behind the in-flight slots held 64
+/// jobs for the whole process, so a page that inserted more than about 73
+/// scripts at once (64 queued, 8 on the wire, one waiting for a slot) had
+/// the rest hear `error` without a request. Walmart inserts about 113.
+#[test]
+fn a_burst_of_a_hundred_inserted_scripts_all_load() {
+    let page = "<html><body><p id=p>x</p><script>
+window.heard = { load: 0, error: 0 };
+window.ran = 0;
+setTimeout(function () {
+  for (var i = 0; i < 100; i++) {
+    var s = document.createElement('script');
+    s.src = '/chunk.js?delay=20&n=' + i;
+    s.onload = function () { heard.load++; };
+    s.onerror = function () { heard.error++; };
+    document.head.appendChild(s);
+  }
+}, 60000);
+</script></body></html>";
+    let mut routes = vec![("/", "text/html", page.to_string())];
+    for i in 0..100 {
+        routes.push((leak(format!("/chunk.js?delay=20&n={i}")), "text/javascript", "window.ran++;".to_string()));
+    }
+    let mut page = Page::load(EngineConfig::default(), routes);
+    let started = Instant::now();
+    page.turn(60_000);
+    while started.elapsed() < Duration::from_secs(15) {
+        if page.js("window.heard.load + window.heard.error === 100") == "Boolean(true)" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        page.turn(20);
+    }
+    page.turns_until("false", Duration::from_millis(200), 0);
+    assert_eq!(
+        page.js("'load=' + heard.load + ' error=' + heard.error + ' ran=' + ran"),
+        r#"String("load=100 error=0 ran=100")"#,
+        "{}",
+        page.log()
+    );
 }
