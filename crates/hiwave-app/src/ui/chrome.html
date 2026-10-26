@@ -3812,6 +3812,10 @@
                 <span class="icon">&#128269;</span>
                 <span>Search</span>
             </button>
+            <button type="button" class="right-sidebar-action" id="rightSidebarInspector" title="Inspector (Cmd+Opt+I)">
+                <span class="icon">&#128270;</span>
+                <span>Inspector</span>
+            </button>
             <button type="button" class="right-sidebar-action" id="rightSidebarHelp">
                 <span class="icon">?</span>
                 <span>Shortcuts</span>
@@ -6755,6 +6759,14 @@
         }
 
         // Right sidebar search button
+        const rightSidebarInspectorBtn = document.getElementById('rightSidebarInspector');
+        if (rightSidebarInspectorBtn) {
+            rightSidebarInspectorBtn.addEventListener('click', () => {
+                toggleRightSidebar(); // Close the sidebar
+                sendIpc('toggle_inspector');
+            });
+        }
+
         const rightSidebarSearchBtn = document.getElementById('rightSidebarSearch');
         if (rightSidebarSearchBtn) {
             rightSidebarSearchBtn.addEventListener('click', () => {

@@ -261,6 +261,7 @@ pub fn handle_message(state: &Arc<Mutex<AppState>>, message: IpcMessage) -> IpcR
         IpcMessage::InspectorConsoleEval { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_console_eval" })),
         IpcMessage::InspectorRefresh => IpcResponse::success(serde_json::json!({ "action": "inspector_refresh" })),
         IpcMessage::InspectorSelectElement { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_select_element" })),
+        IpcMessage::InspectorExpandNode { .. } => IpcResponse::success(serde_json::json!({ "action": "inspector_expand_node" })),
         IpcMessage::InspectorClose => IpcResponse::success(serde_json::json!({ "action": "inspector_close" })),
     }
 }
