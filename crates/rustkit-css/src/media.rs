@@ -18,26 +18,299 @@ pub fn media_query_list_matches(list: &str, width: f32, height: f32) -> bool {
         .any(|q| query_matches(q.trim(), width, height))
 }
 
+/// Font-relative and viewport units for an `@container` condition: em is
+/// the query container's font size, rem the root element's, vw/vh the
+/// viewport's (css-contain-3 §6.1: relative units resolve against the query
+/// container's computed values, not its size).
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerUnits {
+    pub em: f32,
+    pub rem: f32,
+    pub vw: f32,
+    pub vh: f32,
+}
+
 /// Does an `@container` size condition (css-contain-3 §6.3) hold for a query
 /// container whose content box is `width` x `height` CSS px? `height` is
-/// `None` for an `inline-size` container: a condition that reads its block
-/// size does not hold. `inline-size` and `block-size` are `width` and
-/// `height` (horizontal writing mode).
-pub fn container_condition_matches(condition: &str, width: f32, height: Option<f32>) -> bool {
-    let cond = condition
-        .to_ascii_lowercase()
-        .replace("inline-size", "width")
-        .replace("block-size", "height");
+/// `None` for an `inline-size` container. `inline-size` and `block-size` are
+/// `width` and `height` (horizontal writing mode).
+///
+/// Only size features are known: `width`, `height`, `aspect-ratio`,
+/// `orientation` (with `min-`/`max-` and range syntax), compared with
+/// lengths in absolute, font-relative or viewport units. Anything else (a
+/// media feature such as `hover` or `color`, a `device-` feature, a style
+/// query, a unit the walk cannot resolve such as `ch` or `cqw`, a block-size
+/// feature of an `inline-size` container) is unknown, and an unknown part
+/// makes the whole condition false, under `not` too: Chromium 148 applies
+/// none of `not (hover)`, `(width > 299px) or (hover)`, `not (width >=
+/// 30ch)` (#782 R2, docs/diagnostics/2026-10-26/css_container_query_r2.html).
+/// Style queries Chromium does answer (`not style(--x)` holds there); here
+/// they stay false.
+pub fn container_condition_matches(
+    condition: &str,
+    width: f32,
+    height: Option<f32>,
+    units: ContainerUnits,
+) -> bool {
+    let cond = condition.to_ascii_lowercase();
+    container_condition(cond.trim(), width, height, &units) == Some(true)
+}
+
+/// `Some(answer)`, or `None` when any part is unknown (see
+/// [`container_condition_matches`]).
+fn container_condition(
+    cond: &str,
+    width: f32,
+    height: Option<f32>,
+    units: &ContainerUnits,
+) -> Option<bool> {
     let cond = cond.trim();
-    if !cond.starts_with('(') && !cond.starts_with("not") {
-        return false;
+    if let Some(rest) = strip_word(cond, "not") {
+        return container_condition(rest, width, height, units).map(|b| !b);
     }
-    let reads_height = ["height", "aspect-ratio", "orientation"]
-        .iter()
-        .any(|f| cond.contains(f));
-    match height {
-        None if reads_height => false,
-        h => condition_matches(cond, width, h.unwrap_or(0.0)),
+    let ands = split_top_level_word(cond, "and");
+    let ors = split_top_level_word(cond, "or");
+    if ands.len() > 1 && ors.len() > 1 {
+        // `a and b or c` without parentheses is not a condition.
+        return None;
+    }
+    for (legs, is_and) in [(&ands, true), (&ors, false)] {
+        if legs.len() > 1 {
+            let mut answer = is_and;
+            for leg in legs.iter() {
+                // Every leg is evaluated: an unknown one anywhere is unknown.
+                let b = container_condition(leg, width, height, units)?;
+                answer = if is_and { answer && b } else { answer || b };
+            }
+            return Some(answer);
+        }
+    }
+    let inner = cond.strip_prefix('(')?.strip_suffix(')')?.trim();
+    if inner.starts_with('(') || strip_word(inner, "not").is_some() {
+        container_condition(inner, width, height, units)
+    } else {
+        container_feature(inner, width, height, units)
+    }
+}
+
+/// A size feature's name: `width`, `height`, `aspect-ratio`, `orientation`.
+fn size_feature(name: &str) -> Option<&'static str> {
+    match name.trim() {
+        "width" | "inline-size" => Some("width"),
+        "height" | "block-size" => Some("height"),
+        "aspect-ratio" => Some("aspect-ratio"),
+        "orientation" => Some("orientation"),
+        _ => None,
+    }
+}
+
+fn container_actual(base: &str, width: f32, height: Option<f32>) -> Option<f32> {
+    match base {
+        "width" => Some(width),
+        "height" => height,
+        "aspect-ratio" => {
+            let h = height?;
+            (h > 0.0).then(|| width / h)
+        }
+        _ => None,
+    }
+}
+
+fn container_value(base: &str, v: &str, units: &ContainerUnits) -> Option<f32> {
+    match base {
+        "width" | "height" => container_length(v, units),
+        "aspect-ratio" => {
+            let (a, b) = match v.split_once('/') {
+                Some((a, b)) => (parse_number(a)?, parse_number(b)?),
+                None => (parse_number(v)?, 1.0),
+            };
+            (a >= 0.0 && b > 0.0).then(|| a / b)
+        }
+        _ => None,
+    }
+}
+
+fn container_feature(
+    feature: &str,
+    width: f32,
+    height: Option<f32>,
+    units: &ContainerUnits,
+) -> Option<bool> {
+    if feature.contains(['<', '>']) || (feature.contains('=') && !feature.contains(':')) {
+        return container_range(feature, width, height, units);
+    }
+    let (name, value) = match feature.split_once(':') {
+        Some((n, v)) => (n.trim(), Some(v.trim())),
+        None => (feature.trim(), None),
+    };
+    let (prefix, name) = match name.strip_prefix("min-") {
+        Some(b) => (Some(true), b),
+        None => match name.strip_prefix("max-") {
+            Some(b) => (Some(false), b),
+            None => (None, name),
+        },
+    };
+    let base = size_feature(name)?;
+    if base == "orientation" {
+        let h = height?;
+        let actual = if h >= width { "portrait" } else { "landscape" };
+        return match (prefix, value) {
+            (None, Some(v @ ("portrait" | "landscape"))) => Some(v == actual),
+            (None, None) => Some(true),
+            _ => None,
+        };
+    }
+    let actual = container_actual(base, width, height);
+    match value {
+        // Boolean context: the feature's value is not zero. Chromium 148
+        // answers `(width)` false on a 0px-wide container.
+        None if prefix.is_none() => match base {
+            "aspect-ratio" => Some(height? > 0.0 && width > 0.0),
+            _ => Some(actual? != 0.0),
+        },
+        None => None,
+        Some(v) => {
+            let wanted = container_value(base, v, units)?;
+            Some(compare(actual?, wanted, prefix))
+        }
+    }
+}
+
+fn container_range(
+    feature: &str,
+    width: f32,
+    height: Option<f32>,
+    units: &ContainerUnits,
+) -> Option<bool> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut ops: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = feature.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '<' | '>' | '=') {
+            let mut op = c.to_string();
+            if c != '=' && chars.peek() == Some(&'=') {
+                op.push('=');
+                chars.next();
+            }
+            parts.push(cur.trim().to_string());
+            cur.clear();
+            ops.push(op);
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(cur.trim().to_string());
+    let named: Vec<usize> = (0..parts.len()).filter(|i| size_feature(&parts[*i]).is_some()).collect();
+    let [at] = named.as_slice() else {
+        return None;
+    };
+    let base = size_feature(&parts[*at])?;
+    if base == "orientation" {
+        return None;
+    }
+    match ops.len() {
+        1 => {}
+        // `a < width < b`: the name in the middle, both one way.
+        2 if *at == 1 => {
+            let less = |o: &str| o.starts_with('<');
+            let more = |o: &str| o.starts_with('>');
+            if !(ops.iter().all(|o| less(o)) || ops.iter().all(|o| more(o))) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let actual = container_actual(base, width, height);
+    let mut values = Vec::with_capacity(parts.len());
+    for (i, p) in parts.iter().enumerate() {
+        values.push(if i == *at { actual? } else { container_value(base, p, units)? });
+    }
+    let mut answer = true;
+    for (i, op) in ops.iter().enumerate() {
+        let (a, b) = (values[i], values[i + 1]);
+        answer &= match op.as_str() {
+            "<" => a < b,
+            "<=" => a <= b,
+            ">" => a > b,
+            ">=" => a >= b,
+            "=" => (a - b).abs() < 0.001,
+            _ => return None,
+        };
+    }
+    Some(answer)
+}
+
+/// A length in px for a container condition: unitless 0, or a number with
+/// an absolute, font-relative (`em`, `rem`) or viewport (`vw`, `vh`,
+/// `vmin`, `vmax`) unit; inside `calc()`/`min()`/`max()`/`clamp()` px,
+/// font-relative and viewport units. Any other unit (`ch`, `ex`, `lh`,
+/// `cq*`, `dvw`, a percentage) is unknown.
+fn container_length(v: &str, units: &ContainerUnits) -> Option<f32> {
+    let v = v.trim();
+    if v.contains('%') {
+        return None;
+    }
+    if let Some(n) = parse_number(v) {
+        return (n == 0.0).then_some(0.0);
+    }
+    let per_unit = |unit: &str, math: bool| -> Option<f32> {
+        Some(match unit {
+            "px" => 1.0,
+            "em" => units.em,
+            "rem" => units.rem,
+            "vw" => units.vw / 100.0,
+            "vh" => units.vh / 100.0,
+            "vmin" => units.vw.min(units.vh) / 100.0,
+            "vmax" => units.vw.max(units.vh) / 100.0,
+            _ if math => return None,
+            "in" => 96.0,
+            "cm" => 96.0 / 2.54,
+            "mm" => 96.0 / 25.4,
+            "pt" => 96.0 / 72.0,
+            "pc" => 16.0,
+            "q" => 96.0 / 101.6,
+            _ => return None,
+        })
+    };
+    let split = v
+        .find(|c: char| c.is_ascii_alphabetic())
+        .filter(|at| *at > 0)
+        .map(|at| v.split_at(at));
+    if let Some((n, unit)) = split {
+        if let Some(n) = parse_number(n) {
+            return Some(n * per_unit(unit, false)?);
+        }
+    }
+    // A math function: every unit in it must be one this resolves.
+    let bytes = v.as_bytes();
+    let mut i = 0;
+    let mut saw_unit = false;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() || bytes[i] == b'.' {
+            let mut j = i;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
+                j += 1;
+            }
+            let mut k = j;
+            while k < bytes.len() && bytes[k].is_ascii_alphabetic() {
+                k += 1;
+            }
+            if j < k {
+                per_unit(&v[j..k], true)?;
+                saw_unit = true;
+            }
+            i = k;
+        } else {
+            i += 1;
+        }
+    }
+    if !saw_unit {
+        return None;
+    }
+    match crate::parse_length(v)? {
+        crate::Length::Auto | crate::Length::FitContent | crate::Length::Percent(_) => None,
+        l => Some(l.to_px_with_viewport(units.em, units.rem, 0.0, units.vw, units.vh)),
     }
 }
 
@@ -363,9 +636,19 @@ fn split_top_level_word<'a>(s: &'a str, word: &str) -> Vec<&'a str> {
 mod tests {
     use super::media_query_list_matches as m;
 
+    const U: super::ContainerUnits = super::ContainerUnits {
+        em: 16.0,
+        rem: 16.0,
+        vw: 800.0,
+        vh: 600.0,
+    };
+
+    fn c(cond: &str, width: f32, height: Option<f32>) -> bool {
+        super::container_condition_matches(cond, width, height, U)
+    }
+
     #[test]
     fn container_conditions_read_the_container_size() {
-        use super::container_condition_matches as c;
         assert!(c("(width >= 200px)", 300.0, None));
         assert!(c("(min-width: 250px)", 300.0, None));
         assert!(!c("(min-width: 400px)", 300.0, None));
@@ -379,6 +662,59 @@ mod tests {
         // Style queries and bare words are not size conditions.
         assert!(!c("style(--x: 1)", 300.0, None));
         assert!(!c("card", 300.0, None));
+    }
+
+    /// #782 R2 (fix 1): `not` over a part this evaluator does not know was
+    /// true, and media-only features answered for a container. Each row is
+    /// Chromium 148's answer on docs/diagnostics/2026-10-26/
+    /// css_container_query_r2.html (a 300px inline-size container, 800x600
+    /// viewport), except `not style(--x)`, which Chromium applies (it
+    /// answers style queries) and which stays false here.
+    #[test]
+    fn an_unknown_part_makes_a_container_condition_false_even_under_not() {
+        assert!(!c("not style(--x)", 300.0, None));
+        assert!(!c("not (width >= 30ch)", 300.0, None));
+        assert!(!c("(hover)", 300.0, None));
+        assert!(!c("not (hover)", 300.0, None));
+        assert!(!c("(color)", 300.0, None));
+        assert!(!c("(prefers-color-scheme: light)", 300.0, None));
+        assert!(!c("(min-device-width: 1px)", 300.0, None));
+        assert!(!c("(width > 299px) or (hover)", 300.0, None));
+        assert!(!c("(width > 400px) or not (hover)", 300.0, None));
+        assert!(!c("(width > 299px) and (hover)", 300.0, None));
+        assert!(!c("not (width > 299px) or (hover)", 300.0, None));
+        assert!(c("not (not (width > 299px))", 300.0, None));
+        assert!(c("(width > 299px)", 300.0, None));
+        // A block-size feature of an inline-size container is unknown too.
+        assert!(!c("not (height > 0px)", 300.0, None));
+        assert!(!c("not (orientation: portrait)", 300.0, None));
+        // Units: cq*, ch, % are unknown; vw is the viewport's, em the
+        // container's font size.
+        assert!(!c("not (width > 10cqw)", 300.0, None));
+        assert!(!c("not (width > 50%)", 300.0, None));
+        assert!(!c("(width > 50vw)", 300.0, None));
+        assert!(c("(width < 50vw)", 300.0, None));
+        assert!(c("(width > 10em)", 300.0, None));
+        let big = super::ContainerUnits { em: 40.0, ..U };
+        assert!(!super::container_condition_matches("(width > 10em)", 300.0, None, big));
+        assert!(c("(min-width: 3in)", 300.0, None));
+        assert!(!c("(min-width: 3.2in)", 300.0, None));
+        assert!(c("(min-width: calc(100px + 10em))", 300.0, None));
+        assert!(!c("(min-width: calc(100px + 1in))", 300.0, None));
+        assert!(!c("(min-width: calc(100px + 1ch))", 300.0, None));
+        // Mixed `and`/`or` without parentheses is not a condition.
+        assert!(!c("(width > 1px) and (width > 2px) or (width > 3px)", 300.0, None));
+    }
+
+    /// #782 R2 nit: `(width)` is the boolean context, false at 0 (Chromium
+    /// 148 applies none of it on a 0px-wide container).
+    #[test]
+    fn a_bare_size_feature_is_false_at_zero() {
+        assert!(!c("(width)", 0.0, None));
+        assert!(c("(width)", 300.0, None));
+        assert!(!c("(height)", 300.0, None));
+        assert!(!c("(height)", 300.0, Some(0.0)));
+        assert!(c("(height)", 300.0, Some(10.0)));
     }
 
     #[test]

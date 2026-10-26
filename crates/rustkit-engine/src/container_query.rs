@@ -55,6 +55,8 @@ struct Container {
     /// Content-box block size; `None` unless `container-type: size` with a
     /// definite height.
     block: Option<f32>,
+    /// Computed font size, CSS px: what `em` in its conditions is.
+    em: f32,
 }
 
 /// One element of the walk.
@@ -79,6 +81,9 @@ struct Frame {
 #[derive(Debug, Default)]
 struct State {
     viewport: (f32, f32),
+    /// The root element's font size, CSS px (`rem`); set by the first
+    /// element entered.
+    root_em: Option<f32>,
     frames: Vec<Frame>,
     /// Some rule floats a `::first-letter` (see `first_letter_floats`).
     first_letter_floats: bool,
@@ -104,6 +109,7 @@ impl DocumentScope {
     ) -> Self {
         let state = viewport.filter(|_| any_container_rule).map(|(w, h)| State {
             viewport: (w, h),
+            root_em: None,
             first_letter_floats,
             frames: vec![Frame {
                 width: Some(w),
@@ -143,6 +149,7 @@ impl ElementScope {
             let Some(state) = s.as_mut() else {
                 return false;
             };
+            state.root_em.get_or_insert_with(|| font_px(style));
             let parent_width = state.frames.last().and_then(|f| f.width);
             // An earlier float in the same formatting context may sit beside
             // this box; one that starts a new context is then narrowed by
@@ -258,11 +265,12 @@ pub(crate) fn applies(preludes: &[String]) -> bool {
         let Some(state) = s.as_ref() else {
             return false;
         };
-        preludes.iter().all(|p| prelude_holds(p, &state.frames))
+        preludes.iter().all(|p| prelude_holds(p, state))
     })
 }
 
-fn prelude_holds(prelude: &str, frames: &[Frame]) -> bool {
+fn prelude_holds(prelude: &str, state: &State) -> bool {
+    let frames = &state.frames;
     let prelude = prelude.trim();
     // `<container-name>? <container-query>`: a leading ident that is not
     // `not` and does not open a condition is the name.
@@ -284,7 +292,15 @@ fn prelude_holds(prelude: &str, frames: &[Frame]) -> bool {
         }
         return match &frame.container {
             Some(Some(c)) => {
-                rustkit_css::media::container_condition_matches(condition, c.inline, c.block)
+                let units = rustkit_css::media::ContainerUnits {
+                    em: c.em,
+                    rem: state.root_em.unwrap_or(16.0),
+                    vw: state.viewport.0,
+                    vh: state.viewport.1,
+                };
+                rustkit_css::media::container_condition_matches(
+                    condition, c.inline, c.block, units,
+                )
             }
             _ => false,
         };
@@ -313,6 +329,7 @@ fn frame_for(
                 ContainerType::Size => definite_height(style, viewport),
                 _ => None,
             },
+            em: font_px(style),
         })),
     };
     Frame {
@@ -509,22 +526,32 @@ fn content_width(
     Some(min.map_or(width, |m| width.max(m)))
 }
 
+/// A size container's content-box height when its style alone gives it:
+/// `height` clamped by `max-height` and `min-height` (min wins, CSS 2.1
+/// §10.7; #782 R2). A percentage, or a limit or border-box padding that
+/// does not resolve here, makes it unknown.
 fn definite_height(style: &ComputedStyle, vp: (f32, f32)) -> Option<f32> {
-    // Percentages of the containing block's height need layout.
-    let h = resolve(&style.height, style, None, vp)?;
-    Some(match style.box_sizing {
+    let extras = match style.box_sizing {
         BoxSizing::BorderBox => {
-            let v = |l: &Length| resolve(l, style, None, vp).unwrap_or(0.0);
             let border = |w: &Length, s: rustkit_css::BorderStyle| match s {
-                rustkit_css::BorderStyle::None => 0.0,
-                _ => v(w),
+                rustkit_css::BorderStyle::None => Some(0.0),
+                _ => resolve(w, style, None, vp).or(Some(0.0)),
             };
-            (h - v(&style.padding_top)
-                - v(&style.padding_bottom)
-                - border(&style.border_top_width, style.border_top_style)
-                - border(&style.border_bottom_width, style.border_bottom_style))
-            .max(0.0)
+            resolve(&style.padding_top, style, None, vp)?
+                + resolve(&style.padding_bottom, style, None, vp)?
+                + border(&style.border_top_width, style.border_top_style)?
+                + border(&style.border_bottom_width, style.border_bottom_style)?
         }
-        BoxSizing::ContentBox => h,
-    })
+        BoxSizing::ContentBox => 0.0,
+    };
+    let to_content = |v: f32| (v - extras).max(0.0);
+    let height = to_content(resolve(&style.height, style, None, vp)?);
+    let limit = |len: &Length| match len {
+        Length::Auto => Some(None),
+        l => resolve(l, style, None, vp).map(|v| Some(to_content(v))),
+    };
+    let max = limit(&style.max_height)?;
+    let min = limit(&style.min_height)?;
+    let height = max.map_or(height, |m| height.min(m));
+    Some(min.map_or(height, |m| height.max(m)))
 }

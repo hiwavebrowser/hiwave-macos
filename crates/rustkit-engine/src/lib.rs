@@ -8386,12 +8386,17 @@ impl Engine {
         let vars_started = mark();
         let css_vars = self.extract_css_variables(&stylesheets);
         let index_started = mark();
+        // The `::first-letter` scan runs only on a page with some
+        // `@container` rule (#782 R2 nit).
+        let any_container_rule =
+            stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
         let _container_queries = container_query::DocumentScope::install(
             viewport,
-            stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty())),
-            stylesheets
-                .iter()
-                .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
+            any_container_rule,
+            any_container_rule
+                && stylesheets
+                    .iter()
+                    .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -12410,15 +12415,26 @@ impl Engine {
                     style.min_height = length;
                 }
             }
+            // `none` (no limit) is `Length::Auto` here; it was not parsed,
+            // so an earlier limit stayed (#782 R2).
             "max-width" => {
-                let length = parse_length(value);
+                let length = if value.eq_ignore_ascii_case("none") {
+                    Some(rustkit_css::Length::Auto)
+                } else {
+                    parse_length(value)
+                };
                 container_query::note_width_value(style, 4, length.is_some(), value);
                 if let Some(length) = length {
                     style.max_width = length;
                 }
             }
             "max-height" => {
-                if let Some(length) = parse_length(value) {
+                let length = if value.eq_ignore_ascii_case("none") {
+                    Some(rustkit_css::Length::Auto)
+                } else {
+                    parse_length(value)
+                };
+                if let Some(length) = length {
                     style.max_height = length;
                 }
             }
@@ -35413,6 +35429,13 @@ fn restyle_child(parent: usize, child: usize) -> RestyleChild {
             RestyleChild::Root
         } else if build.path.contains(&child) {
             RestyleChild::Walk
+        } else if container_query::active() {
+            // The `@container` walk reads earlier siblings (a float in one
+            // makes later containers unknown): a placeholder would hide it
+            // and the root's queries would answer otherwise than in the
+            // full build (#782 R2). Build the sibling; its box is dropped
+            // with its parent's.
+            RestyleChild::Build
         } else {
             RestyleChild::Skip
         };
