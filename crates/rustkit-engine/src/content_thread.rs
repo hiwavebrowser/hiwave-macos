@@ -475,6 +475,28 @@ mod tests {
     }
 
     #[test]
+    fn report_page_runs_inline_chart_js_and_its_dom_content_loaded_listener() {
+        // Prometheus's #799 nit 1: the report page as the shell loads it
+        // (`load_report_page`): Chart.js (200 KB) inlined in a `<script>`,
+        // then the page's script, which does its work from DOMContentLoaded.
+        let html = include_str!("../../hiwave-app/src/ui/report.html").replace(
+            "<!-- Chart.js is injected by Rust before page load -->",
+            &format!("<script>{}</script>", include_str!("../../hiwave-app/src/ui/chart.umd.min.js")),
+        );
+        let page = page();
+        let mut loaded = page.load_html(&html);
+        let load = wait_recv(&mut loaded, Duration::from_secs(20)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut seen = page.eval(
+            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display",
+        );
+        let seen = wait_recv(&mut seen, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(seen.contains("function,function,block"), "Chart.js, the page script, DOMContentLoaded: {seen}");
+    }
+
+    #[test]
     fn stop_during_a_script_returns_and_a_later_eval_runs() {
         let page = page();
         let mut loaded = page.load_html("<p id=\"t\">x</p>");
