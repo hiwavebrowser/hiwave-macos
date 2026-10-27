@@ -699,10 +699,10 @@ mod tests {
         let page = page();
         let mut loaded = page.load_html("<p>x</p>");
         assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
-        let mut logged = page.eval("console.log('before'); 1");
-        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
         let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
         assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('before'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
         page.enqueue(PageCmd::Block(3_000));
         // Queued behind the block: no answer until it ends.
         let mut behind = page.eval("1");

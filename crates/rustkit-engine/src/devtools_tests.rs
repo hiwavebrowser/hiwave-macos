@@ -337,10 +337,16 @@ fn console_lines_from_inspector_records() {
 }
 
 #[test]
-fn console_reads_since_and_closing_forgets_nothing() {
-    // T6b: the tab ring records before the panel opens, and closing the
-    // panel keeps what was recorded (it used to empty the buffer).
-    let (mut engine, view) = page("<html><body><p>hi</p></body></html>");
+fn console_reads_since_and_with_the_ring_on_closing_forgets_nothing() {
+    // T6b, `HIWAVE_DEVTOOLS_RING=1`: the tab ring records before the panel
+    // opens, and closing the panel keeps what was recorded (it used to
+    // empty the buffer).
+    let inspector = crate::inspector::InspectorConfig { buffer: true, ..crate::inspector::InspectorConfig::tab() };
+    let mut engine = Engine::new(EngineConfig { inspector, ..EngineConfig::default() }).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, "<html><body><p>hi</p></body></html>").expect("load_html");
     let console_levels = |c: &crate::DevtoolsConsole| -> Vec<&'static str> {
         c.entries.iter().filter(|e| e.kind == "console").map(|e| e.level).collect()
     };

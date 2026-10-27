@@ -1441,22 +1441,21 @@ mod tests {
         view.wry_load_url(&url).unwrap();
         assert!(view.is_loading());
         let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        assert_eq!(view.pending_attach.get(), Some(true), "the load did not hold the engine");
         while view.step_load() {}
+        assert_eq!(view.pending_attach.get(), None);
         let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
-        let wakes = |budget: Duration| {
-            let deadline = Instant::now() + budget;
-            let from = counters.read().window_wakes;
-            while counters.read().window_wakes == from && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            counters.read().window_wakes - from
-        };
         // What the page recorded before: the panel reads it.
-        let _ = wakes(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(300));
         let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(300));
+        let from = counters.read().window_wakes;
         let _ = view.execute_script_sync("console.log('after the load'); 1");
-        assert!(wakes(Duration::from_secs(3)) > 0, "a console line after the load never woke the panel");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while counters.read().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(counters.read().window_wakes > from, "a console line after the load never woke the panel");
     }
 
     #[test]
