@@ -7707,7 +7707,7 @@ impl Engine {
 
         // Inline <svg> subtrees parse into svg_cache before the tree build,
         // which only looks the documents up.
-        self.cache_inline_svgs(&document);
+        self.lctx.cache_inline_svgs(&document);
 
         // Get external stylesheets from view state
         let external_stylesheets = self
@@ -8554,7 +8554,7 @@ impl Engine {
         let traced = self.lctx.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
         if !traced && !self.building_view_has_edits() {
-            if let Some(tree) = self.reused_tree(&memo_key) {
+            if let Some(tree) = self.lctx.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -8625,7 +8625,7 @@ impl Engine {
         // `@media` filter, custom-property extraction, rule index, walk.
         let mark = || cascade_started.map(|_| std::time::Instant::now());
         let vars_started = mark();
-        let css_vars = self.extract_css_variables(&stylesheets);
+        let css_vars = self.lctx.extract_css_variables(&stylesheets);
         let index_started = mark();
         // The `::first-letter` scan runs only on a page with some
         // `@container` rule (#782 R2 nit).
@@ -8653,7 +8653,7 @@ impl Engine {
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
             false => {
-                let index = self.shared_rule_index(&stylesheets, fingerprint);
+                let index = self.lctx.shared_rule_index(&stylesheets, fingerprint);
                 if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
                     *view.lay.rule_reads.borrow_mut() = Some(index.clone());
                 }
@@ -8707,7 +8707,7 @@ impl Engine {
             {
                 let _relational = RelationalNodeScope::enter(Some(html.clone()));
                 Some(memoized_style(html.id, || {
-                    self.compute_style_for_element(
+                    self.lctx.compute_style_for_element(
                         tag_name,
                         attributes,
                         &stylesheets,
@@ -8861,6 +8861,9 @@ impl Engine {
             .is_some_and(|v| !v.lay.edit_states.borrow().is_empty())
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The box tree an earlier build with this key left in the memo, with
     /// every `<img>` box's natural size resolved again: images are what
     /// loads between the two builds.
@@ -8877,6 +8880,9 @@ impl Engine {
         info!(boxes, images = images.len(), "Tree reuse");
         Some(tree)
     }
+}
+
+impl Engine {
 
     /// Leave a recording build's tree for the next build with its key, or
     /// (RUSTKIT_TREE_REUSE=verify) compare it with the tree a replaying
@@ -8903,7 +8909,7 @@ impl Engine {
             let Some((mut tree, images)) = taken else {
                 return;
             };
-            let boxes = self.refresh_image_sizes(&mut tree, &images);
+            let boxes = self.lctx.refresh_image_sizes(&mut tree, &images);
             let mut mismatches = 0usize;
             count_tree_differences(&tree, root_box, &mut mismatches);
             match mismatches {
@@ -8918,6 +8924,9 @@ impl Engine {
         }
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Resolve the natural size of every `<img>` box in a reused tree again,
     /// as the walk would now. Returns the number of boxes in the tree.
     fn refresh_image_sizes(
@@ -8960,10 +8969,10 @@ impl Engine {
         explicit_height: Option<f32>,
     ) -> (f32, f32) {
         let loaded = Url::parse(src).ok().and_then(|parsed_url| {
-            if let Some(cached) = self.lctx.image_manager.get_cached(&parsed_url) {
+            if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
                 Some(cached)
             } else if parsed_url.scheme() == "data" {
-                self.lctx.image_manager.load_blocking(parsed_url).ok()
+                self.image_manager.load_blocking(parsed_url).ok()
             } else {
                 None
             }
@@ -8972,7 +8981,7 @@ impl Engine {
         // Vector images: the SVG's own sizing (viewBox/width/height)
         // is the natural size the raster cache can't provide.
         let svg_size = Url::parse(src).ok().and_then(|u| {
-            self.lctx.svg_cache.borrow().get(u.as_str()).map(|svg| {
+            self.svg_cache.borrow().get(u.as_str()).map(|svg| {
                 svg.get_size(
                     explicit_width.unwrap_or(300.0),
                     explicit_height.unwrap_or(150.0),
@@ -8993,6 +9002,9 @@ impl Engine {
             },
         }
     }
+}
+
+impl Engine {
 
     /// Build a layout box from a DOM node with stylesheet support.
     /// Build the Chrome-compatible selector SEGMENT for one element, e.g.
@@ -9258,7 +9270,7 @@ impl Engine {
                 // Create computed style based on element, attributes, and stylesheets
                 let (mut style, share_id) = style_share_tracked(|| {
                     memoized_style(node.id, || {
-                        self.compute_style_for_element(
+                        self.lctx.compute_style_for_element(
                             tag_name,
                             attributes,
                             stylesheets,
@@ -9418,7 +9430,7 @@ impl Engine {
                         .unwrap_or(src);
 
                     let (natural_width, natural_height) =
-                        self.img_natural_size(&src, explicit_width, explicit_height);
+                        self.lctx.img_natural_size(&src, explicit_width, explicit_height);
 
                     let mut b = LayoutBox::new(
                         BoxType::Image {
@@ -9909,7 +9921,7 @@ impl Engine {
                 // A floated `::first-letter` narrows later boxes like a
                 // floated `::before` (#782 HOLD 5); only the walk asks.
                 if container_query::wants_first_letter()
-                    && self.first_letter_floats(
+                    && self.lctx.first_letter_floats(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -9923,7 +9935,7 @@ impl Engine {
 
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
-                    self.pseudo_element_style(
+                    self.lctx.pseudo_element_style(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -10136,7 +10148,7 @@ impl Engine {
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
-                    self.pseudo_element_style(
+                    self.lctx.pseudo_element_style(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -10370,7 +10382,7 @@ impl Engine {
         sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
-        let style = self.pseudo_element_style(
+        let style = self.lctx.pseudo_element_style(
             tag_name,
             attributes,
             stylesheets,
@@ -10383,6 +10395,9 @@ impl Engine {
         Self::pseudo_element_box(style)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Whether a rule that floats `::first-letter` (`floats_first_letter`)
     /// matches this element and holds where it is (`@container`). Fail-safe
     /// for the `@container` walk: a later `float: none` is not weighed.
@@ -10483,7 +10498,7 @@ impl Engine {
                     matched.is_none()
                         || ix.pseudo_keys[gi][which]
                             .as_deref()
-                            .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
+                            .is_none_or(|keys| Engine::keys_may_match(keys, tag_name, attributes)),
                     "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                     ix.rule(stylesheets, g).selector
                 );
@@ -10658,6 +10673,9 @@ impl Engine {
         // `*::before, *::after { box-sizing: … }` matches on every element.
         pseudo_style.content.is_some().then_some(pseudo_style)
     }
+}
+
+impl Engine {
 
     /// The box half of `create_pseudo_element`, from the cascaded style.
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
@@ -10688,6 +10706,9 @@ impl Engine {
         Some(pseudo_box)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Compute a basic style for an element based on its tag and attributes.
     fn compute_style_for_element(
         &self,
@@ -11222,7 +11243,7 @@ impl Engine {
                     );
                     debug_assert!(
                         matched.is_none()
-                            || Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                            || Engine::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
                         "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                         rule.selector
                     );
@@ -11379,7 +11400,7 @@ impl Engine {
                 }
             }
         }
-        let vars = Self::element_custom_properties(&inherited_vars, &declared_vars);
+        let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
         let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
@@ -11387,7 +11408,7 @@ impl Engine {
         // that decided it. A recorder that walked the rules again could
         // disagree with the cascade, and a diagnostic tool that disagrees
         // with the engine is worse than no tool.
-        let recording = self.lctx.style_trace.borrow().is_some();
+        let recording = self.style_trace.borrow().is_some();
         let mut records: Vec<DeclarationRecord> = Vec::new();
         let mut order = 0usize;
         // `ch` resolves against this element's own font, which is not final
@@ -11502,13 +11523,13 @@ impl Engine {
             // fixture sets padding via the `padding` shorthand, and an agent
             // asking for the computed `padding-left` should get 16px rather
             // than a hole because no rule spelled that longhand.
-            let computed = Self::COMPUTED_PROPERTIES
+            let computed = Engine::COMPUTED_PROPERTIES
                 .iter()
                 .filter_map(|p| {
-                    Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
+                    Engine::computed_value_of(&style, p).map(|v| (p.to_string(), v))
                 })
                 .collect();
-            if let Some(trace) = self.lctx.style_trace.borrow_mut().as_mut() {
+            if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
                 trace.push(StyleRecord {
                     tag: tag_name.to_lowercase(),
                     id,
@@ -11558,6 +11579,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Read one computed property back off the style the cascade produced.
     ///
@@ -11615,6 +11639,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Apply inline style attribute to computed style.
     fn apply_inline_style(
         &self,
@@ -11656,7 +11683,7 @@ impl Engine {
     ) {
         if value.trim().eq_ignore_ascii_case("inherit") {
             if let Some(parent) = parent_style {
-                if Self::inherit_property(style, parent, property) {
+                if Engine::inherit_property(style, parent, property) {
                     return;
                 }
             }
@@ -11692,6 +11719,9 @@ impl Engine {
             self.apply_style_property(style, property, &substituted);
         }
     }
+}
+
+impl Engine {
 
     /// Apply a single CSS property to a computed style.
     /// `property: inherit` — copy the parent's computed value (CSS Cascade 4
@@ -11757,6 +11787,9 @@ impl Engine {
         true
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
 
@@ -13375,6 +13408,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Stop the in-flight navigation for a view.
     ///
@@ -13987,20 +14023,23 @@ impl Engine {
         format!("inline-svg:{:016x}", hash)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Parse every inline `<svg>` subtree in the document into svg_cache so
     /// the box build (which runs with `&self`) can size them and the
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let xml = Self::inline_svg_markup(&svg_el);
-            let key = Self::inline_svg_key(&xml);
-            if self.lctx.svg_cache.borrow().contains_key(&key) {
+            let xml = Engine::inline_svg_markup(&svg_el);
+            let key = Engine::inline_svg_key(&xml);
+            if self.svg_cache.borrow().contains_key(&key) {
                 continue;
             }
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
-                    self.lctx.svg_cache.borrow_mut().insert(key, doc);
+                    self.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
                     debug!(?e, "Inline SVG failed to parse; box stays unpainted");
@@ -14008,6 +14047,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Index every inline `<svg>` subtree's shape geometry by the same
     /// content-hash key the box build and the paint splice use.
@@ -14924,11 +14966,14 @@ impl Engine {
         loaded
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Point the text stack at ONE partition's faces. Called before every
     /// layout and paint of a view, so a view only ever sees its own site's
     /// fonts — the registry is a slot the engine swaps, not a shared cache.
     fn install_web_fonts_for(&self, partition: &rustkit_layout::TopLevelSite) {
-        let faces = self.lctx.font_loader.faces_for(partition);
+        let faces = self.font_loader.faces_for(partition);
         // The tag names the installed set; the loader only ever grows a
         // partition, so partition + count identifies it exactly.
         let tag = format!("{}#{}", partition.as_str(), faces.len());
@@ -14941,6 +14986,9 @@ impl Engine {
             );
         }
     }
+}
+
+impl Engine {
 
     /// Loaded faces in the partition of the view being built (the opaque one
     /// for a view-less build).
@@ -14955,9 +15003,12 @@ impl Engine {
 
     fn install_web_fonts(&self, id: EngineViewId) {
         let base = self.views.get(&id).and_then(|v| v.url.as_ref());
-        self.install_web_fonts_for(&Self::font_partition(base));
+        self.lctx.install_web_fonts_for(&Self::font_partition(base));
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Extract CSS variables from :root rules.
     fn extract_css_variables(&self, stylesheets: &[Stylesheet]) -> HashMap<String, String> {
         let mut variables = HashMap::new();
@@ -15022,6 +15073,9 @@ impl Engine {
             &mut false,
         ))
     }
+}
+
+impl Engine {
 
     /// The custom properties in effect on one element: the inherited map
     /// with this element's winning `--*` declarations applied, each resolved
@@ -15099,6 +15153,9 @@ impl Engine {
         Arc::new(CustomProperties::over(inherited, layer))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Check if a selector matches an element.
     ///
     /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
@@ -15204,6 +15261,9 @@ impl Engine {
         }
         ix
     }
+}
+
+impl Engine {
 
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
@@ -15237,6 +15297,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// `build_rule_index`, reused while the selectors don't change. A page
     /// load lays out 2-3 times over a freshly extracted copy of the same
     /// sheets, and rebuilding the index each time was ~38% of github's
@@ -15307,8 +15370,11 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        Self::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
+        Engine::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
     }
+}
+
+impl Engine {
 
     /// `rule_may_match` with the subject keys already in hand (the rule
     /// index stores them per rule).
@@ -15341,6 +15407,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The subject requirements of each member of a selector list, cached
     /// per selector string. `rule_may_match` is true for an element only if
     /// some key's id/tag/class all hold, and the rule index buckets rules by
@@ -15355,7 +15424,7 @@ impl Engine {
         // simple_selector_matches_with_pseudo for the subject compound. The
         // compound matches an element only if one of the keys pushed holds;
         // pushing none means the matcher can never accept it.
-        fn keys_for_compound(engine: &Engine, compound: &str, out: &mut Vec<SubjectKey>) {
+        fn keys_for_compound(engine: &layout_ctx::LayoutCtx, compound: &str, out: &mut Vec<SubjectKey>) {
             if compound == "*" {
                 return out.push(SubjectKey::default());
             }
@@ -15426,7 +15495,7 @@ impl Engine {
         // and tokenized the string the way the matcher does (`Never` for an
         // invalid, pseudo-element or subject-less selector), so the index
         // no longer repeats that work per rule (~150 ms of github's index).
-        fn keys_for(engine: &Engine, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
+        fn keys_for(engine: &layout_ctx::LayoutCtx, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
             match prepared {
                 PreparedSelector::Never => {}
                 PreparedSelector::List(members) => {
@@ -15459,6 +15528,9 @@ impl Engine {
             v
         })
     }
+}
+
+impl Engine {
 }
 
 /// The selector matcher. It reads no `Engine` state (its caches are
@@ -22177,7 +22249,7 @@ mod tests {
         // branch builds an Image sized from the viewBox. This is the exit the
         // real engine takes on every relayout, and the one the `shelf`
         // capture went through.
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         assert!(
             !engine.lctx.svg_cache.borrow().is_empty(),
             "the pre-pass did not parse the subtree, so the cache-hit exit \
@@ -22337,7 +22409,7 @@ mod tests {
             </div>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         assert_eq!(
             index.len(),
@@ -22461,7 +22533,7 @@ mod tests {
             </svg>
         </body></html>"##;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -22556,7 +22628,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
 
         // The user-space bbox must be the viewBox's own origin, or the test
@@ -22653,7 +22725,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -23995,7 +24067,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         // Two identical svgs, one content-addressed entry.
         assert_eq!(engine.lctx.svg_cache.borrow().len(), 1, "identical svgs must share a cache entry");
         let svg_cache = engine.lctx.svg_cache.borrow();
@@ -24771,7 +24843,7 @@ mod element_identity_tests {
         let empty = std::collections::HashMap::new();
         let vars = HashMap::new();
         let style_of = |tag: &str| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &empty,
                 &[],
@@ -24810,7 +24882,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -24878,7 +24950,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -24913,7 +24985,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -25100,7 +25172,7 @@ mod element_identity_tests {
             if let Some(s) = inline {
                 a.insert("style".to_string(), s.to_string());
             }
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &a,
                 std::slice::from_ref(&sheet),
@@ -25149,7 +25221,7 @@ mod element_identity_tests {
         parent.font_size = rustkit_css::Length::Px(14.0);
         parent.border_top_color = rustkit_css::Color::new(1, 2, 3, 1.0);
         let style = |tag: &str, a: HashMap<String, String>| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &a,
                 std::slice::from_ref(&sheet),
@@ -26577,7 +26649,7 @@ mod web_font_tests {
             .flat_map(|s| s.font_face_rules())
             .collect();
         engine.load_local_web_fonts_from(None, &rules);
-        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        engine.lctx.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
         let mut layout = engine.build_layout_from_document(&document, &[]);
         let containing_block = Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -26667,7 +26739,7 @@ mod web_font_tests {
             .flat_map(|s| s.font_face_rules())
             .collect();
         engine.load_local_web_fonts_from(None, &rules);
-        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        engine.lctx.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
         let mut layout = engine.build_layout_from_document(&document, &[]);
         layout.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -30856,7 +30928,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         FULL_SELECTOR_MATCHES.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit")]),
             std::slice::from_ref(&sheet),
@@ -30895,9 +30967,9 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit"), ("id", "main")]),
             sheets,
@@ -30932,7 +31004,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         FULL_SELECTOR_MATCHES.with(|n| n.set(0));
         let before = engine.create_pseudo_element(
             "div",
@@ -30996,7 +31068,7 @@ mod rule_prefilter_tests {
             ),
         ];
         let styles = |indexed: bool| {
-            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.lctx.build_rule_index(sheets)));
             let mut out = Vec::new();
             for (tag, a) in &elements {
                 for ancestors in &ancestors_sets {
@@ -31004,7 +31076,7 @@ mod rule_prefilter_tests {
                         for pseudo in ["::before", "::after"] {
                             out.push(format!(
                                 "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
-                                engine.pseudo_element_style(
+                                engine.lctx.pseudo_element_style(
                                     tag, a, sheets, ancestors, siblings, *sib, pseudo, None,
                                 )
                             ));
@@ -31031,7 +31103,7 @@ mod rule_prefilter_tests {
         let sheet = Stylesheet::parse(css).expect("css");
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let ix = engine.build_rule_index(sheets);
+        let ix = engine.lctx.build_rule_index(sheets);
         assert_eq!(ix.specificity.len(), sheet.rules.len());
         for (g, rule) in sheet.rules.iter().enumerate() {
             assert_eq!(
@@ -31060,7 +31132,7 @@ mod rule_prefilter_tests {
         .expect("sheet");
         let vars = HashMap::new();
         let style = |tag: &str, pairs: &[(&str, &str)]| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &attrs(pairs),
                 std::slice::from_ref(&sheet),
@@ -31081,7 +31153,7 @@ mod rule_prefilter_tests {
             assert_eq!(style("u", &[]).color, green, "{path}: source order");
         };
         check("string path");
-        let _scope = RuleIndexScope::install(engine.build_rule_index(std::slice::from_ref(&sheet)));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(std::slice::from_ref(&sheet)));
         check("indexed path");
     }
 
@@ -31105,7 +31177,7 @@ mod rule_prefilter_tests {
         let sheet = Stylesheet::parse(css).expect("css");
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let ix = engine.build_rule_index(sheets);
+        let ix = engine.lctx.build_rule_index(sheets);
         assert_eq!(ix.prepared.len(), sheet.rules.len());
         let chain = vec![
             ancestor("section", &["a"], Some("d")),
@@ -31164,7 +31236,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
         let host = attrs(&[("class", "hit"), ("id", "main")]);
         let before = engine.create_pseudo_element(
@@ -31230,7 +31302,7 @@ mod rule_prefilter_tests {
             .iter()
             .flat_map(|h| [pseudo(h, "::before"), pseudo(h, "::after")])
             .collect();
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         let indexed: Vec<_> = hosts
             .iter()
             .flat_map(|h| [pseudo(h, "::before"), pseudo(h, "::after")])
@@ -31262,7 +31334,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
         for indexed in [false, true] {
-            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.lctx.build_rule_index(sheets)));
             let pseudo = |class: &str, which: &str| {
                 engine
                     .create_pseudo_element(
@@ -31318,7 +31390,7 @@ mod rule_prefilter_tests {
             elements
                 .iter()
                 .map(|(tag, a)| {
-                    let s = engine.compute_style_for_element(
+                    let s = engine.lctx.compute_style_for_element(
                         tag,
                         a,
                         sheets,
@@ -31335,7 +31407,7 @@ mod rule_prefilter_tests {
 
         let unindexed = styles(&engine);
         let indexed = {
-            let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+            let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
             styles(&engine)
         };
         assert_eq!(indexed, unindexed);
@@ -31351,8 +31423,8 @@ mod rule_prefilter_tests {
         // different allocation (and possibly different declarations).
         let first = parse(".a { color: red } #b > p { color: blue }");
         let again = parse(".a { color: green } #b > p { color: blue }");
-        let ix = engine.shared_rule_index(&first, None);
-        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again, None)));
+        let ix = engine.lctx.shared_rule_index(&first, None);
+        assert!(Rc::ptr_eq(&ix, &engine.lctx.shared_rule_index(&again, None)));
 
         // It is installed for the slice at hand, not the one it was built from.
         {
@@ -31369,7 +31441,7 @@ mod rule_prefilter_tests {
         ] {
             let sheets: Vec<Stylesheet> =
                 css.iter().map(|c| Stylesheet::parse(c).expect("css")).collect();
-            let rebuilt = engine.shared_rule_index(&sheets, None);
+            let rebuilt = engine.lctx.shared_rule_index(&sheets, None);
             assert!(!Rc::ptr_eq(&ix, &rebuilt), "{css:?} reused a stale index");
             assert_eq!(rebuilt.rules.len(), sheets.iter().map(|s| s.rules.len()).sum::<usize>());
         }
@@ -31395,9 +31467,9 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("data-hit", ""), ("class", "card")]),
             sheets,
@@ -31460,7 +31532,7 @@ mod rule_prefilter_tests {
             elements
                 .iter()
                 .map(|(tag, a)| {
-                    let s = engine.compute_style_for_element(
+                    let s = engine.lctx.compute_style_for_element(
                         tag, a, sheets, &vars, &ancestors, &[], sib, None,
                     );
                     format!("{s:?}")
@@ -31471,7 +31543,7 @@ mod rule_prefilter_tests {
         for sib in [SiblingContext::SOLE, not_first] {
             let unindexed = styles(&engine, sib);
             let indexed = {
-                let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+                let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
                 styles(&engine, sib)
             };
             assert_eq!(indexed, unindexed);
@@ -31515,16 +31587,16 @@ mod rule_prefilter_tests {
                 );
                 if full {
                     assert!(
-                        engine.rule_may_match(sel, tag, a),
+                        engine.lctx.rule_may_match(sel, tag, a),
                         "prefilter rejected `{sel}` for <{tag} {a:?}>, which the matcher accepts"
                     );
                 }
             }
         }
         // And it does reject the plain impossible cases.
-        assert!(!engine.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
-        assert!(!engine.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
-        assert!(!engine.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
+        assert!(!engine.lctx.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.lctx.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.lctx.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
     }
 }
 
@@ -31752,9 +31824,9 @@ mod cascade_wire_tests {
     fn an_invalid_transform_leaves_the_previous_value_untouched() {
         let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_style_property(&mut style, "transform", "scale(2)");
+        e.lctx.apply_style_property(&mut style, "transform", "scale(2)");
         let before = style.transform.ops.len();
-        e.apply_style_property(&mut style, "transform", "!!!garbage!!!");
+        e.lctx.apply_style_property(&mut style, "transform", "!!!garbage!!!");
         assert_eq!(
             style.transform.ops.len(),
             before,
@@ -31771,19 +31843,19 @@ mod cascade_wire_tests {
         let e = engine();
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "red");
-        e.apply_style_property(&mut s, "background", "invalid-junk(1)");
+        e.lctx.apply_style_property(&mut s, "background", "red");
+        e.lctx.apply_style_property(&mut s, "background", "invalid-junk(1)");
         assert_eq!(s.background_color, red, "the colour stays");
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
-        e.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
+        e.lctx.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
+        e.lctx.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
         assert_eq!(s.background_color, red, "one bad layer drops the whole value");
         assert_eq!(s.background_layers.len(), 1, "the image stays");
         assert!(s.background_gradient.is_some());
 
         // A valid value still resets what it does not name.
-        e.apply_style_property(&mut s, "background", "none");
+        e.lctx.apply_style_property(&mut s, "background", "none");
         assert_eq!(s.background_color, rustkit_css::Color::TRANSPARENT);
         assert!(s.background_layers.is_empty());
     }
@@ -31792,8 +31864,8 @@ mod cascade_wire_tests {
     fn an_invalid_background_color_keeps_the_earlier_colour() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background-color", "red");
-        e.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
+        e.lctx.apply_style_property(&mut s, "background-color", "red");
+        e.lctx.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
         assert_eq!(s.background_color, rustkit_css::Color::new(255, 0, 0, 1.0));
     }
 
@@ -31803,12 +31875,12 @@ mod cascade_wire_tests {
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
         for property in ["border", "border-top"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "2px solid red");
-            e.apply_style_property(&mut s, property, "invalid-junk(1)");
+            e.lctx.apply_style_property(&mut s, property, "2px solid red");
+            e.lctx.apply_style_property(&mut s, property, "invalid-junk(1)");
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: width");
             assert_eq!(s.border_top_style, rustkit_css::BorderStyle::Solid, "{property}: style");
             assert_eq!(s.border_top_color, red, "{property}: colour");
-            e.apply_style_property(&mut s, property, "4px dashed bogus");
+            e.lctx.apply_style_property(&mut s, property, "4px dashed bogus");
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: bad colour");
         }
     }
@@ -31820,8 +31892,8 @@ mod cascade_wire_tests {
         // is `0` (`flex: 1 1 0` stays valid).
         for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "flex", "2 3 10px");
-            e.apply_style_property(&mut s, "flex", junk);
+            e.lctx.apply_style_property(&mut s, "flex", "2 3 10px");
+            e.lctx.apply_style_property(&mut s, "flex", junk);
             assert_eq!(s.flex_grow, 2.0, "flex: {junk}");
             assert_eq!(s.flex_shrink, 3.0, "flex: {junk}");
             assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(10.0), "flex: {junk}");
@@ -31847,14 +31919,14 @@ mod cascade_wire_tests {
             "0 0 content",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "flex", "3 3 10px");
-            e.apply_style_property(&mut s, "flex", value);
+            e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
+            e.lctx.apply_style_property(&mut s, "flex", value);
             assert_eq!(s.flex_grow, 0.0, "flex: {value}");
             assert_eq!(s.flex_shrink, 0.0, "flex: {value}");
         }
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "3 3 10px");
-        e.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
+        e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
+        e.lctx.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
         assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
     }
 
@@ -31862,14 +31934,14 @@ mod cascade_wire_tests {
     fn an_invalid_font_shorthand_keeps_the_earlier_font() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "font", "italic bold 20px serif");
+        e.lctx.apply_style_property(&mut s, "font", "italic bold 20px serif");
         let (size, weight, font_style) = (s.font_size.clone(), s.font_weight, s.font_style);
-        e.apply_style_property(&mut s, "font", "bogus 30px serif");
+        e.lctx.apply_style_property(&mut s, "font", "bogus 30px serif");
         assert_eq!(s.font_size, size, "an unknown prefix token drops the value");
         assert_eq!(s.font_weight, weight);
         assert_eq!(s.font_style, font_style);
         // Every prefix keyword the grammar allows still parses.
-        e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
+        e.lctx.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
         assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
     }
 
@@ -31879,11 +31951,11 @@ mod cascade_wire_tests {
     fn a_background_shorthand_keeps_text_clip_and_math_positions() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
+        e.lctx.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
         assert_eq!(s.background_layers.len(), 1, "text clip");
         assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
+        e.lctx.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
         assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
         for value in [
             "url(a.png) min(10px, 5%) 0 no-repeat",
@@ -31893,8 +31965,8 @@ mod cascade_wire_tests {
             "url(a.png) center / clamp(10px, 50%, 100px) auto",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "background", "red");
-            e.apply_style_property(&mut s, "background", value);
+            e.lctx.apply_style_property(&mut s, "background", "red");
+            e.lctx.apply_style_property(&mut s, "background", value);
             assert_eq!(s.background_layers.len(), 1, "{value}: the layer applies");
         }
     }
@@ -31905,8 +31977,8 @@ mod cascade_wire_tests {
         let e = engine();
         for junk in ["10deg 30px serif", "bolddeg 30px serif", "oblique xdeg 30px serif"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "font", "20px serif");
-            e.apply_style_property(&mut s, "font", junk);
+            e.lctx.apply_style_property(&mut s, "font", "20px serif");
+            e.lctx.apply_style_property(&mut s, "font", junk);
             assert_eq!(s.font_size, rustkit_css::Length::Px(20.0), "font: {junk}");
         }
         for valid in [
@@ -31917,8 +31989,8 @@ mod cascade_wire_tests {
             "oblique 0.05turn 30px serif",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "font", "20px serif");
-            e.apply_style_property(&mut s, "font", valid);
+            e.lctx.apply_style_property(&mut s, "font", "20px serif");
+            e.lctx.apply_style_property(&mut s, "font", valid);
             assert_eq!(s.font_size, rustkit_css::Length::Px(30.0), "font: {valid}");
         }
     }
@@ -31945,8 +32017,8 @@ mod cascade_wire_tests {
             ("border", "1px solid color-mix(in lab, red 50%, blue)"),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "4px dashed red");
-            e.apply_style_property(&mut s, property, value);
+            e.lctx.apply_style_property(&mut s, property, "4px dashed red");
+            e.lctx.apply_style_property(&mut s, property, value);
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
             assert_eq!(
                 s.border_top_style,
@@ -31957,8 +32029,8 @@ mod cascade_wire_tests {
         }
         // A token that is not colour-shaped still drops the declaration.
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "border", "2px solid red");
-        e.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
+        e.lctx.apply_style_property(&mut s, "border", "2px solid red");
+        e.lctx.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
         assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
     }
 
@@ -31970,12 +32042,12 @@ mod cascade_wire_tests {
         let half_green = rustkit_css::Color::new(0, 128, 0, 0.5);
         for property in ["background", "background-color"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "red");
-            e.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
+            e.lctx.apply_style_property(&mut s, property, "red");
+            e.lctx.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
             assert_eq!(s.background_color, half_green, "{property}");
         }
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
+        e.lctx.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
         assert_eq!(s.border_top_color, rustkit_css::Color::new(128, 0, 128, 1.0));
     }
 
@@ -31991,8 +32063,8 @@ mod cascade_wire_tests {
             "url(a.png) light-dark(#fff, #000)",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "background", "red");
-            e.apply_style_property(&mut s, "background", value);
+            e.lctx.apply_style_property(&mut s, "background", "red");
+            e.lctx.apply_style_property(&mut s, "background", value);
             assert_eq!(s.background_layers.len(), 1, "{value}: the image applies");
             match &s.background_layers[0].image {
                 rustkit_css::BackgroundImage::Url(u) => assert_eq!(u, "a.png", "{value}"),
@@ -32015,8 +32087,8 @@ mod cascade_wire_tests {
     fn an_unknown_keyword_falls_back_to_static_rather_than_keeping_the_old_value() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "position", "absolute");
-        e.apply_style_property(&mut s, "position", "notakeyword");
+        e.lctx.apply_style_property(&mut s, "position", "absolute");
+        e.lctx.apply_style_property(&mut s, "position", "notakeyword");
         assert_eq!(
             s.position,
             rustkit_css::Position::Static,
@@ -32044,7 +32116,7 @@ mod cascade_wire_tests {
     fn the_overflow_shorthand_sets_both_axes() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "overflow", "hidden");
+        e.lctx.apply_style_property(&mut s, "overflow", "hidden");
         assert_eq!(s.overflow_x, rustkit_css::Overflow::Hidden);
         assert_eq!(s.overflow_y, rustkit_css::Overflow::Hidden);
     }
@@ -32053,8 +32125,8 @@ mod cascade_wire_tests {
     fn the_axis_longhands_are_independent() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "overflow-x", "scroll");
-        e.apply_style_property(&mut s, "overflow-y", "hidden");
+        e.lctx.apply_style_property(&mut s, "overflow-x", "scroll");
+        e.lctx.apply_style_property(&mut s, "overflow-y", "hidden");
         assert_eq!(s.overflow_x, rustkit_css::Overflow::Scroll);
         assert_eq!(
             s.overflow_y,
@@ -32067,7 +32139,7 @@ mod cascade_wire_tests {
     fn a_shorthand_carrying_a_colour_still_sets_the_line() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "text-decoration", "underline red");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "underline red");
         assert!(
             s.text_decoration_line.underline,
             "a shorthand naming a colour as well as a line must still set the line"
@@ -32078,8 +32150,8 @@ mod cascade_wire_tests {
     fn a_value_naming_no_line_keyword_leaves_the_line_alone() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "text-decoration", "underline");
-        e.apply_style_property(&mut s, "text-decoration", "red");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "underline");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "red");
         assert!(
             s.text_decoration_line.underline,
             "a colour-only value must not clear an already-set line"
@@ -32091,7 +32163,7 @@ mod cascade_wire_tests {
     fn the_single_number_shorthand_zeroes_the_basis() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1");
+        e.lctx.apply_style_property(&mut s, "flex", "1");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(
@@ -32100,7 +32172,7 @@ mod cascade_wire_tests {
             "flex: 1 must zero the basis or the container is not divided; the zero is 0%"
         );
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 1");
+        e.lctx.apply_style_property(&mut s, "flex", "1 1");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Percent(0.0));
     }
 
@@ -32110,23 +32182,23 @@ mod cascade_wire_tests {
         // items evenly; as Auto they sized to content and split unevenly.
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 1 0");
+        e.lctx.apply_style_property(&mut s, "flex", "1 1 0");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex-basis", "0");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "0");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "0 0 2.5rem");
+        e.lctx.apply_style_property(&mut s, "flex", "0 0 2.5rem");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(40.0));
-        e.apply_style_property(&mut s, "flex-basis", "1rem");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "1rem");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
 
         // An explicit auto still resets; garbage leaves the basis alone.
-        e.apply_style_property(&mut s, "flex-basis", "bogus");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "bogus");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
-        e.apply_style_property(&mut s, "flex-basis", "auto");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "auto");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Auto);
     }
 
@@ -32134,7 +32206,7 @@ mod cascade_wire_tests {
     fn a_two_value_shorthand_distinguishes_shrink_from_basis() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 200px");
+        e.lctx.apply_style_property(&mut s, "flex", "1 200px");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(
             s.flex_basis,
@@ -32142,7 +32214,7 @@ mod cascade_wire_tests {
             "a length in position 2 is the BASIS"
         );
         let mut s2 = ComputedStyle::default();
-        e.apply_style_property(&mut s2, "flex", "2 3");
+        e.lctx.apply_style_property(&mut s2, "flex", "2 3");
         assert_eq!(s2.flex_grow, 2.0);
         assert_eq!(s2.flex_shrink, 3.0, "a bare number in position 2 is the SHRINK");
     }
@@ -32161,7 +32233,7 @@ mod cascade_wire_tests {
             ("legacy", JustifyItems::Stretch),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "justify-items", value);
+            e.lctx.apply_style_property(&mut s, "justify-items", value);
             assert_eq!(s.justify_items, expected, "justify-items: {value}");
         }
         for (value, expected) in [
@@ -32172,7 +32244,7 @@ mod cascade_wire_tests {
             ("normal", JustifySelf::Auto),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "justify-self", value);
+            e.lctx.apply_style_property(&mut s, "justify-self", value);
             assert_eq!(s.justify_self, expected, "justify-self: {value}");
         }
     }
@@ -36391,7 +36463,7 @@ mod style_share_tests {
     fn matches_are_shared_only_for_the_slice_the_enclosing_scope_named() {
         let e = engine();
         let sheets = vec![rustkit_css::Stylesheet::parse("#top li { color: red } li { margin: 0 }").expect("css")];
-        let _index = RuleIndexScope::install(e.build_rule_index(&sheets));
+        let _index = RuleIndexScope::install(e.lctx.build_rule_index(&sheets));
         let ix = active_rule_index(&sheets).expect("index");
         let _scope = StyleShareScope::install(StyleShareMode::Share);
         let none = HashMap::new();
@@ -37409,7 +37481,7 @@ mod windows_engine_pins {
         let sizes: Vec<f32> = ["h1", "h2", "h3", "h4", "h5", "h6"]
             .iter()
             .map(|t| {
-                let s = e.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
                     other => panic!("<{t}> font-size is {other:?}, expected Px"),
@@ -37491,7 +37563,7 @@ mod windows_a_leg_pins {
             <div><a class="btn"><svg viewbox="0 0 24 24"><rect width="24" height="24"/></svg></a></div>
             </body></html>"#;
         let d = Document::parse_html(html).expect("parse");
-        e.cache_inline_svgs(&d);
+        e.lctx.cache_inline_svgs(&d);
         let mut root = e.build_layout_from_document(&d, &[]);
         root.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -37545,13 +37617,13 @@ mod windows_a_leg_pins {
         vars.insert("--bg".to_string(), "#0f172a".to_string());
         vars.insert("--accent".to_string(), "#06b6d4".to_string());
         vars.insert("--alias".to_string(), "var(--accent)".to_string());
-        assert_eq!(e.resolve_css_variables("var(--bg)", &vars), "#0f172a");
-        assert_eq!(e.resolve_css_variables("1px solid var(--accent)", &vars), "1px solid #06b6d4");
-        assert_eq!(e.resolve_css_variables("var(--missing, red)", &vars), "red");
-        assert_eq!(e.resolve_css_variables("var(--bg, red)", &vars), "#0f172a");
-        assert_eq!(e.resolve_css_variables("var(--alias)", &vars), "#06b6d4");
-        assert_eq!(e.resolve_css_variables("var(--missing, rgb(1, 2, 3))", &vars), "rgb(1, 2, 3)");
-        assert_eq!(e.resolve_css_variables("#fff", &vars), "#fff");
+        assert_eq!(e.lctx.resolve_css_variables("var(--bg)", &vars), "#0f172a");
+        assert_eq!(e.lctx.resolve_css_variables("1px solid var(--accent)", &vars), "1px solid #06b6d4");
+        assert_eq!(e.lctx.resolve_css_variables("var(--missing, red)", &vars), "red");
+        assert_eq!(e.lctx.resolve_css_variables("var(--bg, red)", &vars), "#0f172a");
+        assert_eq!(e.lctx.resolve_css_variables("var(--alias)", &vars), "#06b6d4");
+        assert_eq!(e.lctx.resolve_css_variables("var(--missing, rgb(1, 2, 3))", &vars), "rgb(1, 2, 3)");
+        assert_eq!(e.lctx.resolve_css_variables("#fff", &vars), "#fff");
     }
 
     #[test]
@@ -37615,7 +37687,7 @@ mod windows_a_leg_pins {
         crate::test_gpu::on_helper_engine(
             std::time::Duration::from_secs(10),
             "resolve_css_variables did not terminate",
-            move |e| e.resolve_css_variables(&v, &vars),
+            move |e| e.lctx.resolve_css_variables(&v, &vars),
         )
     }
 
@@ -38041,26 +38113,26 @@ mod logical_property_tests {
 
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "inset-inline", "1px 2px");
-        e.apply_style_property(&mut style, "inset-block-start", "3px");
+        e.lctx.apply_style_property(&mut style, "inset-inline", "1px 2px");
+        e.lctx.apply_style_property(&mut style, "inset-block-start", "3px");
         assert_eq!(style.left, Some(rustkit_css::Length::Px(1.0)));
         assert_eq!(style.right, Some(rustkit_css::Length::Px(2.0)));
         assert_eq!(style.top, Some(rustkit_css::Length::Px(3.0)));
         // Three values is not a valid two-value shorthand: ignored.
-        e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
+        e.lctx.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
         assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
 
         // A single calc() with internal spaces is one value, not three.
         // Before #403's top-level split, `calc(1px + 2px)` was dropped.
         let mut calc_style = ComputedStyle::new();
-        e.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
+        e.lctx.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
         assert_eq!(
             calc_style.margin_left,
             rustkit_css::Length::Px(3.0),
             "margin-inline: calc(1px + 2px) must apply to both sides"
         );
         assert_eq!(calc_style.margin_right, rustkit_css::Length::Px(3.0));
-        e.apply_style_property(
+        e.lctx.apply_style_property(
             &mut calc_style,
             "padding-inline",
             "calc(1px + 2px) calc(3px + 4px)",
@@ -38118,24 +38190,24 @@ mod logical_property_tests {
 
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "border-inline-end-style", "dashed");
-        e.apply_style_property(&mut style, "border-block-start-style", "solid");
+        e.lctx.apply_style_property(&mut style, "border-inline-end-style", "dashed");
+        e.lctx.apply_style_property(&mut style, "border-block-start-style", "solid");
         assert_eq!(style.border_right_style, BorderStyle::Dashed);
         assert_eq!(style.border_top_style, BorderStyle::Solid);
-        e.apply_style_property(&mut style, "border-inline-style", "dotted solid");
+        e.lctx.apply_style_property(&mut style, "border-inline-style", "dotted solid");
         assert_eq!((style.border_left_style, style.border_right_style), (BorderStyle::Dotted, BorderStyle::Solid));
-        e.apply_style_property(&mut style, "border-inline-end-width", "9px");
-        e.apply_style_property(&mut style, "border-block-start-width", "8px");
+        e.lctx.apply_style_property(&mut style, "border-inline-end-width", "9px");
+        e.lctx.apply_style_property(&mut style, "border-block-start-width", "8px");
         assert_eq!(style.border_right_width, Length::Px(9.0));
         assert_eq!(style.border_top_width, Length::Px(8.0));
         // Each colour may contain spaces: split at the top level only.
-        e.apply_style_property(&mut style, "border-inline-color", "rgb(10, 20, 30) rgba(0, 0, 0, 0.5)");
+        e.lctx.apply_style_property(&mut style, "border-inline-color", "rgb(10, 20, 30) rgba(0, 0, 0, 0.5)");
         assert_eq!(style.border_left_color, Color::from_rgb(10, 20, 30));
         assert_eq!(style.border_right_color.a, 0.5);
-        e.apply_style_property(&mut style, "border-block-color", "rgb(4, 5, 6)");
+        e.lctx.apply_style_property(&mut style, "border-block-color", "rgb(4, 5, 6)");
         assert_eq!(style.border_top_color, Color::from_rgb(4, 5, 6));
         assert_eq!(style.border_bottom_color, Color::from_rgb(4, 5, 6));
-        e.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
+        e.lctx.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
         assert_eq!(style.border_bottom_color, Color::from_rgb(7, 8, 9));
     }
 }
@@ -38154,12 +38226,12 @@ mod gap_shorthand_tests {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         for property in ["gap", "grid-gap"] {
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, property, "10px 20px");
+            e.lctx.apply_style_property(&mut style, property, "10px 20px");
             assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
             assert_eq!(style.column_gap, Length::Px(20.0), "{property}");
 
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
+            e.lctx.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
             assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
             assert_eq!(style.column_gap, Length::Percent(5.0), "{property}");
         }
@@ -38169,7 +38241,7 @@ mod gap_shorthand_tests {
     fn gap_with_one_value_sets_both_and_a_bad_value_sets_neither() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
+        e.lctx.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
         assert_eq!(style.row_gap, Length::Px(10.0));
         assert_eq!(style.column_gap, Length::Px(10.0));
 
@@ -38180,7 +38252,7 @@ mod gap_shorthand_tests {
         // `gap: 10 20`), and so is the one-value form of either.
         for bad in ["1px 2px 3px", "1px red", "-5px 20px", "10px -1px", "10 20", "-5px", "10"] {
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, "gap", bad);
+            e.lctx.apply_style_property(&mut style, "gap", bad);
             assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
             assert_eq!(style.column_gap, ComputedStyle::new().column_gap, "{bad}");
         }
@@ -39413,15 +39485,15 @@ mod grid_template_areas_tests {
     fn a_non_rectangular_areas_value_is_ignored() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'b c'");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "'a a' 'b c'");
         assert!(s.grid_template_areas.is_some());
         // L-shaped `a`: invalid, so the earlier value stands.
-        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'a b'");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "'a a' 'a b'");
         assert!(s.grid_template_areas.as_ref().unwrap().get_area("c").is_some());
         // Disjoint `a` and ragged rows are invalid too.
         assert!(rustkit_css::GridTemplateAreas::parse("'a b a'").is_none());
         assert!(rustkit_css::GridTemplateAreas::parse("'a b' 'c'").is_none());
-        e.apply_style_property(&mut s, "grid-template-areas", "none");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "none");
         assert!(s.grid_template_areas.is_none());
     }
 
@@ -39429,20 +39501,20 @@ mod grid_template_areas_tests {
     fn grid_area_and_line_names_parse() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-area", "main");
+        e.lctx.apply_style_property(&mut s, "grid-area", "main");
         let main = GridLine::Name("main".into());
         assert_eq!(
             (&s.grid_row_start, &s.grid_column_start, &s.grid_row_end, &s.grid_column_end),
             (&main, &main, &main, &main)
         );
-        e.apply_style_property(&mut s, "grid-area", "1 / 2 / 3");
+        e.lctx.apply_style_property(&mut s, "grid-area", "1 / 2 / 3");
         assert_eq!(s.grid_row_start, GridLine::Number(1));
         assert_eq!(s.grid_column_start, GridLine::Number(2));
         assert_eq!(s.grid_row_end, GridLine::Number(3));
         assert_eq!(s.grid_column_end, GridLine::Auto);
-        e.apply_style_property(&mut s, "grid-column", "nav");
+        e.lctx.apply_style_property(&mut s, "grid-column", "nav");
         assert_eq!(s.grid_column_end, GridLine::Name("nav".into()));
-        e.apply_style_property(&mut s, "grid-row", "span hdr / 2");
+        e.lctx.apply_style_property(&mut s, "grid-row", "span hdr / 2");
         assert_eq!(s.grid_row_start, GridLine::SpanName("hdr".into()));
     }
 
@@ -39450,7 +39522,7 @@ mod grid_template_areas_tests {
     fn grid_template_shorthand_forms() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-template", "auto / 15.5rem minmax(0,1fr)");
+        e.lctx.apply_style_property(&mut s, "grid-template", "auto / 15.5rem minmax(0,1fr)");
         assert_eq!(s.grid_template_rows.tracks.len(), 1);
         assert_eq!(s.grid_template_columns.tracks[0].size, TrackSize::Px(248.0));
         assert_eq!(
@@ -39459,7 +39531,7 @@ mod grid_template_areas_tests {
         );
         assert!(s.grid_template_areas.is_none());
 
-        e.apply_style_property(&mut s, "grid-template", "[top] 'a a' 40px [mid] 'b c' / 1fr 2fr");
+        e.lctx.apply_style_property(&mut s, "grid-template", "[top] 'a a' 40px [mid] 'b c' / 1fr 2fr");
         let areas = s.grid_template_areas.as_ref().expect("areas from the strings");
         assert_eq!(areas.get_area("c").unwrap().column_start, 2);
         let rows = &s.grid_template_rows.tracks;
@@ -39468,7 +39540,7 @@ mod grid_template_areas_tests {
         assert_eq!(rows[1].size, TrackSize::Auto, "a string with no size is an auto row");
         assert_eq!(rows[1].line_names, vec!["mid".to_string()]);
 
-        e.apply_style_property(&mut s, "grid-template", "none");
+        e.lctx.apply_style_property(&mut s, "grid-template", "none");
         assert!(s.grid_template_areas.is_none());
         assert!(s.grid_template_rows.tracks.is_empty());
     }
@@ -40737,7 +40809,7 @@ mod individual_transform_tests {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::default();
         for (p, v) in decls {
-            e.apply_style_property(&mut style, p, v);
+            e.lctx.apply_style_property(&mut style, p, v);
         }
         style
     }
@@ -40820,7 +40892,7 @@ mod individual_transform_tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let r = |v: &str| e.resolve_css_variables(v, &vars);
+        let r = |v: &str| e.lctx.resolve_css_variables(v, &vars);
         assert_eq!(r("var(--x)var(--y)"), "0 -200%");
         // No space where the neighbours could not fuse anyway.
         assert_eq!(r("calc(var(--n)*2px)"), "calc(5*2px)");
