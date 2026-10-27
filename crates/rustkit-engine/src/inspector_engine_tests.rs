@@ -565,7 +565,7 @@ fn a_console_line_is_read_while_the_script_that_logged_it_still_runs() {
     // console until it was over.
     let page = "<html><body><script>
 console.log('started');
-var t = Date.now(); while (Date.now() - t < 600) {}
+var t = Date.now(); while (Date.now() - t < 1000) {}
 console.log('done');
 </script></body></html>";
     let server = serve(vec![Route::html("/", page)]);
@@ -591,6 +591,45 @@ console.log('done');
     let seen = reader.join().unwrap().expect("no console line at all");
     let early = ended.saturating_duration_since(seen);
     assert!(early >= Duration::from_millis(400), "the line was read only {early:?} before the load ended");
+}
+
+#[test]
+fn console_calls_held_by_a_hung_script_are_counted_without_the_page() {
+    // T6d review: a hot loop past the live cap, then a hang. The calls
+    // over the cap wait for the script's end, which a hung script never
+    // reaches, and nothing said any were waiting.
+    let page = "<html><body><script>
+for (var i = 0; i < 300; i++) console.log(i);
+var t = Date.now(); while (Date.now() - t < 1000) {}
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let inspector = engine.inspector(view).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (stop, inspector) = (stop.clone(), inspector.clone());
+        std::thread::spawn(move || {
+            // The last count seen while the script ran, with the console
+            // records there were then.
+            let mut last = None;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let held = inspector.console_held();
+                if held > 0 {
+                    let snapshot = inspector.snapshot_since(0);
+                    let recorded =
+                        snapshot.records.iter().filter(|r| matches!(r.event, InspectorEvent::Console { .. })).count();
+                    last = Some((held, recorded));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            last
+        })
+    };
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (held, recorded) = reader.join().unwrap().expect("no held calls were ever counted");
+    assert_eq!(held + recorded, 300, "held {held} + recorded {recorded}");
+    assert_eq!(inspector.console_held(), 0, "the flush at the script's end left a count");
 }
 
 // ---- Privacy ----

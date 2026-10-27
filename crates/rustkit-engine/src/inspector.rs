@@ -578,6 +578,9 @@ pub struct Inspector {
     watermark: AtomicU64,
     /// A panel watches this view: tell the devtools thread about records.
     watched: AtomicBool,
+    /// Console calls the page's runtime holds for its next flush, kept by
+    /// the runtime (`set_console_held_counter`) and read without the page.
+    console_held: Arc<std::sync::atomic::AtomicUsize>,
     state: Mutex<State>,
 }
 
@@ -628,6 +631,7 @@ impl Inspector {
             keep_error_text: config.keep_error_text,
             watermark: AtomicU64::new(0),
             watched: AtomicBool::new(false),
+            console_held: Arc::default(),
             state: Mutex::new(State {
                 buffer: config.buffer,
                 buffer_default: config.buffer,
@@ -688,6 +692,20 @@ impl Inspector {
     /// condition 2).
     pub fn page_crashed(&self) -> bool {
         self.state.is_poisoned()
+    }
+
+    /// Console calls made but not yet recorded: past the live rate cap, a
+    /// running script's calls wait for its end, and a script that then
+    /// hangs never hands them over (T6d review). One atomic load, so a
+    /// panel can say "K console lines held by a running script" while the
+    /// page is blocked.
+    pub fn console_held(&self) -> usize {
+        self.console_held.load(Ordering::Relaxed)
+    }
+
+    /// The counter the page's runtime keeps [`console_held`](Self::console_held) in.
+    pub(crate) fn console_held_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.console_held.clone()
     }
 
     /// Test hook: panic on this thread while holding the lock, as a page
