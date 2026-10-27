@@ -940,6 +940,34 @@ thrower();";
     }
 }
 
+/// Prometheus's #799 nit 3 (Atlas 20:50 (4)): an error thrown from a
+/// callback, not from a script's own run, still reaches the Inspector as a
+/// `script_error`: a timer, an animation frame and an event listener, each
+/// with its own error type so the three are told apart.
+#[test]
+fn errors_thrown_in_timer_frame_and_listener_callbacks_reach_the_inspector() {
+    let page = "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">x</p><script>
+setTimeout(function () { throw new TypeError('t'); }, 0);
+requestAnimationFrame(function () { throw new RangeError('r'); });
+document.getElementById('p').addEventListener('click', function () { throw new EvalError('l'); });
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    for _ in 0..5 {
+        runtime().block_on(engine.pump_live(view, 20));
+    }
+    engine.click_at_point(view, 20.0, 20.0);
+    let errors: Vec<String> = records(&engine, view)
+        .iter()
+        .filter(|r| r.event.kind() == "script_error")
+        .map(|r| serde_json::to_value(r).unwrap()["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for (callback, name) in [("timer", "TypeError"), ("animation frame", "RangeError"), ("listener", "EvalError")] {
+        assert!(errors.iter().any(|e| e == name), "the {callback}'s {name} never reached the Inspector: {errors:?}");
+    }
+}
+
 /// #791 review: `count` had the only shape-path test. A failed
 /// `console.assert` and a `console.timeLog` label reach the Inspector as
 /// shapes too, with the mirror on; with console text kept, the text is there
