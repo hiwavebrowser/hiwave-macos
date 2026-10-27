@@ -931,6 +931,33 @@ mod tests {
         assert!(!c("(max-width: min(500px, 40em, 10rem))", 300.0, None));
     }
 
+    /// #782 follow-up (Prometheus on #782): a parenthesis inside a quoted
+    /// string does not open or close a group, so `style(--x: ")")` is one
+    /// general-enclosed part and the query stays valid (Chromium 148 keeps
+    /// `(width > 1px) or style(--x: ")")` in `cssRules` and applies it, see
+    /// docs/diagnostics/2026-10-27/css_container_query_nits.html k3). The
+    /// style part is still unknown here, so the answer is still false.
+    #[test]
+    fn a_quoted_paren_does_not_end_a_query_group() {
+        let q = |s: &str| super::parse_container_query(s).is_some();
+        for good in [
+            r#"style(--x: ")")"#,
+            r#"style(--x: "(")"#,
+            r#"style(--x: ')')"#,
+            r#"style(--x: "\")")"#,
+            r#"(width > 1px) or style(--x: ")")"#,
+            r#"style(--x: "a)b") and (width > 1px)"#,
+            r#"not style(--x: "((")"#,
+        ] {
+            assert!(q(good), "{good:?} should be valid");
+        }
+        for bad in [r#"style(--x: ")""#, r#"(width > 1px) or style(--x: "("#] {
+            assert!(!q(bad), "{bad:?} should be invalid");
+        }
+        assert!(!c(r#"(width > 1px) or style(--x: ")")"#, 300.0, None));
+        assert!(c(r#"(width > 1px) and ((width > 2px) or (width > 3px))"#, 300.0, None));
+    }
+
     #[test]
     fn container_conditions_read_the_container_size() {
         assert!(c("(width >= 200px)", 300.0, None));
