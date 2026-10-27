@@ -269,15 +269,17 @@ fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
 
 /// DOM §4.2.3 "pre-insert" `node` into `parent` before `child` (`None`
 /// appends). Returns the DOMException name on a failed validity check,
-/// before anything is touched.
+/// before anything is touched. `replacing`: the caller takes `child` out
+/// next (replaceChild, replaceWith), so a Document is checked by the
+/// "replace" rules, which do not count `child` itself.
 fn pre_insert(
     parent: &Rc<Node>,
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
+    replacing: bool,
 ) -> Result<(), &'static str> {
-    // Only elements and fragments take children here; a Document's
-    // one-element rules come with a later rung.
-    if !parent.is_element() && !is_fragment(parent) {
+    let document = matches!(parent.node_type, NodeType::Document);
+    if !document && !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
     if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
@@ -286,11 +288,14 @@ fn pre_insert(
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
         return Err("NotFoundError");
     }
-    if matches!(
-        node.node_type,
-        NodeType::Document | NodeType::DocumentType { .. }
-    ) {
-        return Err("HierarchyRequestError");
+    match node.node_type {
+        NodeType::Document => return Err("HierarchyRequestError"),
+        NodeType::DocumentType { .. } if !document => return Err("HierarchyRequestError"),
+        NodeType::Text(_) if document => return Err("HierarchyRequestError"),
+        _ => {}
+    }
+    if document {
+        document_child_check(parent, node, child.as_ref(), replacing)?;
     }
     // Inserting a node before itself inserts it before its next sibling.
     let child = match child {
@@ -311,6 +316,48 @@ fn pre_insert(
         }
     }
     Ok(())
+}
+
+/// DOM §4.2.3 step 6 of "ensure pre-insert validity" (and step 6 of
+/// "replace"): a Document has at most one element child and one doctype,
+/// the doctype before the element.
+fn document_child_check(
+    document: &Rc<Node>,
+    node: &Rc<Node>,
+    child: Option<&Rc<Node>>,
+    replacing: bool,
+) -> Result<(), &'static str> {
+    let is_doctype = |n: &Rc<Node>| matches!(n.node_type, NodeType::DocumentType { .. });
+    let kids = document.children();
+    // When replacing, `child` is about to leave and does not count.
+    let counted = |n: &&Rc<Node>| !(replacing && child.is_some_and(|c| c.id == n.id));
+    let has_element = kids.iter().filter(counted).any(|n| n.is_element());
+    let has_doctype = kids.iter().filter(counted).any(is_doctype);
+    let at = child.and_then(|c| kids.iter().position(|k| k.id == c.id));
+    let doctype_after = at.is_some_and(|i| kids[i + 1..].iter().any(is_doctype));
+    let element_before = at.is_some_and(|i| kids[..i].iter().any(|n| n.is_element()));
+    let before_doctype = !replacing && child.is_some_and(is_doctype);
+    let one_element = |elements: usize| {
+        elements == 1 && (has_element || before_doctype || doctype_after)
+    };
+    let bad = match node.node_type {
+        NodeType::DocumentFragment => {
+            let inner = node.children();
+            let elements = inner.iter().filter(|n| n.is_element()).count();
+            elements > 1
+                || inner.iter().any(|n| matches!(n.node_type, NodeType::Text(_)))
+                || one_element(elements)
+        }
+        NodeType::Element { .. } => one_element(1),
+        NodeType::DocumentType { .. } => {
+            has_doctype || element_before || (child.is_none() && has_element)
+        }
+        _ => false,
+    };
+    match bad {
+        true => Err("HierarchyRequestError"),
+        false => Ok(()),
+    }
 }
 
 fn is_fragment(node: &Node) -> bool {
@@ -362,7 +409,8 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
                 None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
                 Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
             };
-            pre_insert(&parent, &node, child)
+            let replacing = matches!(args.get(5), Some(JsValue::Boolean(true)));
+            pre_insert(&parent, &node, child, replacing)
         }
         Some("remove") if is_child_of(&node, &parent) => {
             node.remove_from_parent();
@@ -1457,6 +1505,7 @@ pub(crate) fn install(
                         url: url.clone(),
                         in_order,
                         inserted_by: caller,
+                        inserted_at: std::time::Instant::now(),
                     });
                 }
             }
@@ -1773,7 +1822,10 @@ const WRAPPERS_JS: &str = r#"
         }
         return o[SLOT];
     }
-    function write(op, parent, node, child, method) {
+    // `replacing`: `child` is the node this call takes out (replaceChild,
+    // and replaceWith while `this` is still in place), so the Document
+    // checks do not count it.
+    function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
         function here(s) { return s.gen === gen ? s.id : -1; }
@@ -1781,7 +1833,7 @@ const WRAPPERS_JS: &str = r#"
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c);
+        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
@@ -1822,7 +1874,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var self = this;
         return batch(function () {
-            write('insert', self, node, child, 'replaceChild');
+            write('insert', self, node, child, 'replaceChild', true);
             return write('remove', self, child, null, 'replaceChild');
         });
     };
@@ -1840,8 +1892,8 @@ const WRAPPERS_JS: &str = r#"
         nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
         return nodes;
     }
-    function insertAll(parent, nodes, ref, method) {
-        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    function insertAll(parent, nodes, ref, method, replacing) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method, replacing); });
     }
     // DOM queues one record per call of these; they make several writes,
     // which an observer merges into one while `fn` runs.
@@ -1898,7 +1950,7 @@ const WRAPPERS_JS: &str = r#"
             var self = this, nodes = toNodes(args);
             batch(function () {
                 if (self.parentNode === p) {
-                    insertAll(p, nodes, self, 'replaceWith');
+                    insertAll(p, nodes, self, 'replaceWith', true);
                     p.removeChild(self);
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');

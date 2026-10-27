@@ -407,6 +407,8 @@ pub struct Renderer {
     // Blit pipeline for copying RGBA textures (unlike texture_pipeline which treats R as alpha)
     blit_pipeline: wgpu::RenderPipeline,
     color_glyph_pipeline: wgpu::RenderPipeline,
+    // CSS `filter` colour-matrix layer composite
+    filter_matrix_pipeline: pipeline::FilterMatrixPipeline,
     // Image pipeline: the blit shader composited source-over (straight alpha)
     image_pipeline: wgpu::RenderPipeline,
     // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
@@ -663,6 +665,13 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
+        let filter_matrix_pipeline = pipeline::create_filter_matrix_pipeline(
+            &device,
+            surface_format,
+            &uniform_bind_group_layout,
+            &texture_bind_group_layout,
+        );
+
         // Image pipeline: blit shader + source-over blend for straight alpha.
         let image_pipeline = pipeline::create_image_pipeline(
             &device,
@@ -735,6 +744,7 @@ impl Renderer {
             _texture_pipeline_rgba: texture_pipeline_rgba,
             blit_pipeline,
             color_glyph_pipeline,
+            filter_matrix_pipeline,
             image_pipeline,
             blit_pipeline_rgba,
             backdrop_filter_pipelines,
@@ -1602,19 +1612,27 @@ impl Renderer {
             // back to fading each command (see `OpacityScopes`).
             let layered = commands
                 .iter()
-                .filter(|cmd| matches!(cmd, DisplayCommand::PushOpacity(_)))
+                .filter(|cmd| {
+                    matches!(cmd, DisplayCommand::PushOpacity(_) | DisplayCommand::PushFilter(_))
+                })
                 .count()
                 <= MAX_OPACITY_LAYERS;
             let mut cleared = false;
-            let mut layers: Vec<(wgpu::TextureView, f32)> = Vec::new();
+            let mut layers: Vec<(wgpu::TextureView, LayerEffect)> = Vec::new();
             for (i, cmd) in commands.iter().enumerate() {
                 if layered {
                     match cmd {
                         DisplayCommand::PushOpacity(alpha) => {
-                            self.begin_opacity_layer(target, &mut layers, *alpha, &mut cleared)?;
+                            let fade = LayerEffect::Fade(alpha.clamp(0.0, 1.0));
+                            self.begin_opacity_layer(target, &mut layers, fade, &mut cleared)?;
                             continue;
                         }
-                        DisplayCommand::PopOpacity => {
+                        DisplayCommand::PushFilter(matrix) => {
+                            let effect = LayerEffect::ColorMatrix(*matrix);
+                            self.begin_opacity_layer(target, &mut layers, effect, &mut cleared)?;
+                            continue;
+                        }
+                        DisplayCommand::PopOpacity | DisplayCommand::PopFilter => {
                             self.end_opacity_layer(target, &mut layers, &mut cleared)?;
                             continue;
                         }
@@ -2278,7 +2296,7 @@ impl Renderer {
     fn flush_mid_stream(
         &mut self,
         base: &wgpu::TextureView,
-        layers: &[(wgpu::TextureView, f32)],
+        layers: &[(wgpu::TextureView, LayerEffect)],
         cleared: &mut bool,
     ) -> Result<(), RendererError> {
         match layers.last() {
@@ -2295,38 +2313,39 @@ impl Renderer {
         }
     }
 
-    /// `PushOpacity`: what is batched belongs under the group, so it is
-    /// drawn first; then the group draws into a fresh transparent layer.
+    /// `PushOpacity` / `PushFilter`: what is batched belongs under the
+    /// group, so it is drawn first; then the group draws into a fresh
+    /// transparent layer.
     fn begin_opacity_layer(
         &mut self,
         base: &wgpu::TextureView,
-        layers: &mut Vec<(wgpu::TextureView, f32)>,
-        alpha: f32,
+        layers: &mut Vec<(wgpu::TextureView, LayerEffect)>,
+        effect: LayerEffect,
         cleared: &mut bool,
     ) -> Result<(), RendererError> {
         self.flush_mid_stream(base, layers, cleared)?;
         let layer = self.opacity_layer_view(layers.len());
         self.clear_transparent(&layer);
-        layers.push((layer, alpha.clamp(0.0, 1.0)));
+        layers.push((layer, effect));
         Ok(())
     }
 
-    /// `PopOpacity`: finish the group's layer and lay it, faded, over the
-    /// layer below it or over `base`.
+    /// `PopOpacity` / `PopFilter`: finish the group's layer and lay it,
+    /// faded or filtered, over the layer below it or over `base`.
     fn end_opacity_layer(
         &mut self,
         base: &wgpu::TextureView,
-        layers: &mut Vec<(wgpu::TextureView, f32)>,
+        layers: &mut Vec<(wgpu::TextureView, LayerEffect)>,
         cleared: &mut bool,
     ) -> Result<(), RendererError> {
-        let Some((layer, alpha)) = layers.pop() else {
+        let Some((layer, effect)) = layers.pop() else {
             return Ok(());
         };
         self.flush_batches_to(&layer, false)?;
         match layers.last() {
-            Some((below, _)) => self.composite_opacity_layer(&layer, below, alpha, false),
+            Some((below, _)) => self.composite_opacity_layer(&layer, below, effect, false),
             None => {
-                self.composite_opacity_layer(&layer, base, alpha, !*cleared);
+                self.composite_opacity_layer(&layer, base, effect, !*cleared);
                 *cleared = true;
             }
         }
@@ -2386,17 +2405,43 @@ impl Renderer {
         self.submit(encoder);
     }
 
-    /// Lay `layer` over `target`, faded by `alpha`. Drawing source-over
-    /// into a transparent layer leaves premultiplied colour in it, so the
-    /// layer goes through the premultiplied pipeline with every channel
-    /// scaled.
+    /// Lay `layer` over `target`, faded by `alpha` or through a filter's
+    /// colour matrix. Drawing source-over into a transparent layer leaves
+    /// premultiplied colour in it, so a faded layer goes through the
+    /// premultiplied pipeline with every channel scaled, and a filtered one
+    /// through the matrix pipeline, which unpremultiplies first.
     fn composite_opacity_layer(
         &self,
         layer: &wgpu::TextureView,
         target: &wgpu::TextureView,
-        alpha: f32,
+        effect: LayerEffect,
         clear: bool,
     ) {
+        let (alpha, matrix_bind_group) = match effect {
+            LayerEffect::Fade(alpha) => (alpha, None),
+            LayerEffect::ColorMatrix(m) => {
+                // Rows of the first four columns, then the offsets column.
+                let mut packed = [0.0f32; 20];
+                for row in 0..4 {
+                    packed[row * 4..row * 4 + 4].copy_from_slice(&m[row * 5..row * 5 + 4]);
+                    packed[16 + row] = m[row * 5 + 4];
+                }
+                let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Filter Matrix Buffer"),
+                    contents: bytemuck::cast_slice(&packed),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Filter Matrix Bind Group"),
+                    layout: &self.filter_matrix_pipeline.matrix_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                (1.0, Some(group))
+            }
+        };
         let (vw, vh) = self.viewport_size;
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Opacity Layer Bind Group"),
@@ -2456,7 +2501,13 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            render_pass.set_pipeline(&self.color_glyph_pipeline);
+            match &matrix_bind_group {
+                Some(group) => {
+                    render_pass.set_pipeline(&self.filter_matrix_pipeline.pipeline);
+                    render_pass.set_bind_group(2, group, &[]);
+                }
+                None => render_pass.set_pipeline(&self.color_glyph_pipeline),
+            }
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &bind_group, &[]);
             render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -2972,6 +3023,11 @@ impl Renderer {
                     self.fade_since(alpha, starts);
                 }
             }
+
+            // A filter is drawn only through a layer of its own (see
+            // `LayerEffect::ColorMatrix`); past `MAX_OPACITY_LAYERS` scopes
+            // the group paints unfiltered.
+            DisplayCommand::PushFilter(_) | DisplayCommand::PopFilter => {}
 
             // A fixed run undoes the page's scroll (`set_scroll_offset`);
             // unscrolled, these are marks only.
@@ -6853,6 +6909,16 @@ const MAX_OPACITY_LAYERS: usize = 256;
 /// How many vertices each of the four batches holds, in the order colour,
 /// glyph, colour glyph, image.
 type BatchLens = [usize; 4];
+
+/// How an open layer is laid over what is under it when its scope closes.
+#[derive(Debug, Clone, Copy)]
+enum LayerEffect {
+    /// `PushOpacity`: every channel scaled by the factor.
+    Fade(f32),
+    /// `PushFilter`: a 4x5 row-major colour matrix on unpremultiplied
+    /// colour, clamped (Filter Effects 1 §13).
+    ColorMatrix([f32; 20]),
+}
 
 /// The open `PushOpacity` scopes, innermost last.
 ///

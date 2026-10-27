@@ -113,6 +113,10 @@ pub struct RustKitView {
     pending_load: RefCell<Option<PendingLoad>>,
     /// Bounds set while a load held the engine, applied when it ends.
     pending_bounds: Cell<Option<Bounds>>,
+    /// A panel attached or detached while a load held the engine, asked
+    /// again when it ends (#803 review (2)): the page never heard it, so
+    /// it recorded nothing and nothing watched it.
+    pending_attach: Cell<Option<bool>>,
     /// Events the flag-off page published, kept for the tests.
     #[cfg(test)]
     seen_events: RefCell<Vec<PageEvent>>,
@@ -350,6 +354,7 @@ impl RustKitView {
             closed: Cell::new(false),
             pending_load: RefCell::new(None),
             pending_bounds: Cell::new(None),
+            pending_attach: Cell::new(None),
             #[cfg(test)]
             seen_events: RefCell::new(Vec::new()),
         }
@@ -1035,6 +1040,9 @@ impl RustKitView {
         }
         self.drop_events();
         self.live_clock.set(Instant::now());
+        if let Some(on) = self.pending_attach.take() {
+            let _ = self.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(on));
+        }
     }
 
     /// Execute JavaScript synchronously on the flag-off path. The content
@@ -1059,22 +1067,64 @@ impl RustKitView {
 
     // The developer tools (`devtools_panel`): on-demand, bounded questions
     // about the page's last committed DOM and layout, answered on the
-    // page's own thread. Nothing here waits for the answer.
+    // page's own thread, and console reads, answered by the devtools thread
+    // from the view's Inspector without the page (T6a). Nothing here waits
+    // for the answer.
 
-    /// Ask the page a developer-tools question. The answer arrives on the
-    /// receiver: before this returns on the same-thread path, after the
-    /// page's current turn on the content thread. A closed receiver means
-    /// no answer (a closed view, or a load holding the same-thread page).
+    /// Ask a developer-tools question. The answer arrives on the receiver:
+    /// from the devtools thread for a console read; otherwise before this
+    /// returns on the same-thread path, after the page's current turn on
+    /// the content thread. A closed receiver means no answer (a closed
+    /// view, or a load holding the same-thread page).
     pub fn devtools_ask(&self, query: rustkit_engine::DevtoolsQuery) -> oneshot::Receiver<rustkit_engine::DevtoolsAnswer> {
+        if let Some(thread) = self.content.as_ref().filter(|_| self.is_open()) {
+            return thread.devtools_ask(query);
+        }
+        let page = self
+            .endpoint
+            .as_ref()
+            .filter(|_| self.is_open())
+            .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| Some((e.inspector()?, e.devtools_counters()))));
+        if let (rustkit_engine::DevtoolsQuery::Console { since }, Some((inspector, counters))) = (&query, &page) {
+            // The answer arrives on the devtools thread, after this returns:
+            // the window is woken for it as on the content thread (#803
+            // review (1)), or an idle page's line waits for an unrelated wake.
+            return rustkit_engine::devtools_ask_console(Arc::clone(inspector), *since, Some(Arc::clone(counters)));
+        }
+        // An open panel is woken when the view records (T6b). A load holding
+        // the endpoint drops the command, so it is asked again at the end.
+        if let rustkit_engine::DevtoolsQuery::Attach(on) = query {
+            match &page {
+                Some((inspector, counters)) => rustkit_engine::devtools_watch(inspector, counters, on),
+                None if self.endpoint.is_some() && self.is_open() => self.pending_attach.set(Some(on)),
+                None => {}
+            }
+        }
         let (reply, rx) = oneshot::channel();
         self.submit(PageCmd::Devtools { query, reply });
         rx
     }
 
-    /// Run the console's `code` in the page: the value, or the error.
-    pub fn devtools_eval(&self, code: &str) -> oneshot::Receiver<Result<String, String>> {
+    /// The view's Inspector, for reads that need not ask the page. Only
+    /// its atomic [`watermark`](rustkit_engine::Inspector::watermark) is
+    /// read on the window thread: sinks run under its lock.
+    pub fn devtools_inspector(&self) -> Option<std::sync::Arc<rustkit_engine::Inspector>> {
+        if !self.is_open() {
+            return None;
+        }
+        if let Some(thread) = self.content.as_ref() {
+            return thread.devtools_inspector();
+        }
+        self.endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()))
+    }
+
+    /// Run the console's `code` in the page: the value, or the error. A
+    /// page that reaches it at or past `deadline` cancels it (T6c).
+    pub fn devtools_eval(&self, code: &str, deadline: std::time::Instant) -> oneshot::Receiver<Result<String, String>> {
         let (reply, rx) = oneshot::channel();
-        self.submit(PageCmd::Eval { script: code.to_string(), reply });
+        self.submit(PageCmd::DevtoolsEval { script: code.to_string(), deadline, reply });
         rx
     }
 }
@@ -1379,6 +1429,65 @@ mod tests {
         assert!(view.pending_bounds.get().is_some());
         while view.step_load() {}
         assert!(view.pending_bounds.get().is_none());
+    }
+
+    #[test]
+    fn a_panel_attached_during_a_load_is_watched_once_it_ends() {
+        // #803 review (2): the load holds the endpoint, so the attach could
+        // neither watch the view nor reach the page. An idle page then never
+        // woke the panel for its console.
+        let url = slow_server(Duration::from_millis(600), "<p>x</p>");
+        let view = view();
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        assert_eq!(view.pending_attach.get(), Some(true), "the load did not hold the engine");
+        while view.step_load() {}
+        assert_eq!(view.pending_attach.get(), None);
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        // What the page recorded before: the panel reads it.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        std::thread::sleep(Duration::from_millis(300));
+        let from = counters.read().window_wakes;
+        let _ = view.execute_script_sync("console.log('after the load'); 1");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while counters.read().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(counters.read().window_wakes > from, "a console line after the load never woke the panel");
+    }
+
+    #[test]
+    fn a_console_read_on_the_same_thread_path_wakes_the_window() {
+        // #803 review (1): the answer arrives on the devtools thread after
+        // the ask returns; with no wake an idle page's line waited for an
+        // unrelated one.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let _ = view.execute_script_sync("console.log('one'); 1");
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        // The watch's own wake for the unread line comes first.
+        std::thread::sleep(Duration::from_millis(300));
+        let from = counters.read().window_wakes;
+        let mut rx = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let answer = loop {
+            match rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => panic!("no console answer: {e:?}"),
+            }
+        };
+        let rustkit_engine::DevtoolsAnswer::Console(console) = answer else { panic!("{answer:?}") };
+        assert!(!console.entries.is_empty(), "the line is missing");
+        // The wake is posted just after the answer is sent.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while counters.read().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(counters.read().window_wakes - from, 1, "the answer posted no window wake");
     }
 
     #[test]

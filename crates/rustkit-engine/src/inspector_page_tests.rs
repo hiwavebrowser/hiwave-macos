@@ -48,8 +48,24 @@ fn inspector(page: &str) -> (Engine, EngineViewId) {
         .create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 800 })
         .expect("view");
     engine.load_html(view, page).expect("load_html");
-    assert_eq!(engine.run_inline_scripts(view).expect("the Inspector's script runs"), 1);
     (engine, view)
+}
+
+/// `load_html` runs the Inspector's one script, once, with no host call
+/// after it (before T8 the host had to call `run_inline_scripts`).
+#[test]
+fn the_inspector_page_script_runs_exactly_once() {
+    let dump = target_dump();
+    let (mut engine, view) = inspector(&inspector_page_html(&dump, None, None).unwrap());
+    let log: Vec<_> = engine
+        .script_log(view)
+        .unwrap()
+        .iter()
+        .map(|r| (r.source.clone(), r.outcome.clone()))
+        .collect();
+    assert_eq!(log, vec![("inline#1".to_string(), ScriptOutcome::Ran)], "{log:?}");
+    let api = engine.execute_script(view, "typeof window.hiwaveInspector.selectNode").unwrap();
+    assert!(api.contains("function"), "{api}");
 }
 
 #[derive(Debug, Clone)]
