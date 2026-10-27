@@ -5123,8 +5123,12 @@ impl Engine {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than
         // guessing across views.
-        let view_id = self.lctx.building_view.get()?;
-        self.edit_value_in(view_id, node_raw)
+        self.lctx
+            .building_lay()?
+            .edit_states
+            .borrow()
+            .get(&node_raw)
+            .map(|s| (s.value(), s.caret_position()))
     }
 
     /// Resolve a possibly-relative resource URL against the document being
@@ -5139,8 +5143,11 @@ impl Engine {
     /// warnings in one live session). One resolution point, at build, fixes
     /// the cache key, the natural size, and the paint lookup together.
     fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
-        let id = self.lctx.building_view.get()?;
-        self.resolve_resource_url_in(id, raw)
+        self.lctx.building.borrow().as_ref()?;
+        match self.lctx.building_url() {
+            Some(base) => base.join(raw).ok(),
+            None => Url::parse(raw).ok(),
+        }
     }
 
     /// A view's viewport in CSS px, as `relayout` sizes it: the headless
@@ -5189,19 +5196,19 @@ impl Engine {
         tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) else {
+        let Some(lay) = self.lctx.building_lay() else {
             return std::borrow::Cow::Borrowed(attributes);
         };
         let checked = match tag_lower {
-            "input" => view
-                .lay.checked_states.borrow()
+            "input" => lay
+                .checked_states.borrow()
                 .get(&node_raw)
                 .copied()
                 .filter(|checked| *checked != attributes.contains_key("checked")),
             _ => None,
         };
-        let hovered = view.lay.hover_chain.borrow().contains(&node_raw);
-        let active = view.lay.active_chain.borrow().contains(&node_raw);
+        let hovered = lay.hover_chain.borrow().contains(&node_raw);
+        let active = lay.active_chain.borrow().contains(&node_raw);
         if checked.is_none() && !hovered && !active {
             return std::borrow::Cow::Borrowed(attributes);
         }
@@ -8465,7 +8472,7 @@ impl Engine {
 
     /// Build a layout tree FOR A SPECIFIC VIEW.
     ///
-    /// Owns the `building_view`/`building_focus` scoping so no caller can
+    /// Owns the `building` scoping so no caller can
     /// forget it: without them the view-agnostic recursive builder cannot
     /// find live edit state and SILENTLY falls back to the frozen DOM
     /// attribute — typed text vanishes with no error. Every layout build
@@ -8476,12 +8483,16 @@ impl Engine {
         document: &Document,
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
-        self.lctx.building_view.set(Some(id));
-        self.lctx.building_focus
-            .set(self.views.get(&id).and_then(|v| v.lay.focused_node.get()));
+        let view = self.views.get(&id);
+        *self.lctx.building.borrow_mut() = Some(Rc::new(layout_ctx::BuildView {
+            id,
+            lay: view.map(|v| v.lay.clone()).unwrap_or_default(),
+            url: view.and_then(|v| v.url.clone()),
+            viewport: self.view_viewport(id),
+            focus: view.and_then(|v| v.lay.focused_node.get()),
+        }));
         let built = self.build_layout_from_document(document, external_stylesheets);
-        self.lctx.building_focus.set(None);
-        self.lctx.building_view.set(None);
+        *self.lctx.building.borrow_mut() = None;
         built
     }
 
@@ -8526,26 +8537,15 @@ impl Engine {
         // `@media` rules apply only where their queries match this view's
         // viewport. Without a view (ad-hoc builds) there is no viewport to
         // ask, so conditional rules stay out rather than guessing a size.
-        let viewport = self
-            .lctx.building_view
-            .get()
-            .and_then(|id| self.view_viewport(id));
+        let viewport = self.lctx.building_viewport();
         let memo_key = StyleMemoKey {
-            view: self.lctx.building_view.get(),
+            view: self.lctx.building_id(),
             document: document as *const Document,
             external_sheets: external_stylesheets.len(),
             viewport,
-            focus: self.lctx.building_focus.get(),
-            hover: self
-                .lctx.building_view
-                .get()
-                .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.lay.hover_chain.borrow().first().copied()),
-            active: self
-                .lctx.building_view
-                .get()
-                .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.lay.active_chain.borrow().first().copied()),
+            focus: self.lctx.building_focus(),
+            hover: self.lctx.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
+            active: self.lctx.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -8574,7 +8574,7 @@ impl Engine {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
-        let inline_sheets = self.inline_sheets(document, self.lctx.building_view.get());
+        let inline_sheets = self.inline_sheets(document, self.lctx.building_id());
         let adopted = document.root().adopted_styles();
         // The fingerprint vouches for the `<style>` and `<link>` sheets
         // only. Adopted sheets are parsed fresh below, so with any the rule
@@ -8654,8 +8654,8 @@ impl Engine {
             true => None,
             false => {
                 let index = self.lctx.shared_rule_index(&stylesheets, fingerprint);
-                if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
-                    *view.lay.rule_reads.borrow_mut() = Some(index.clone());
+                if let Some(lay) = self.lctx.building_lay() {
+                    *lay.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
             }
@@ -8728,8 +8728,8 @@ impl Engine {
             .as_deref()
             .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
-        if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
-            view.lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
+        if let Some(lay) = self.lctx.building_lay() {
+            lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
                 s.overflow_x != rustkit_css::Overflow::Visible
                     || s.overflow_y != rustkit_css::Overflow::Visible
             }));
@@ -8855,10 +8855,7 @@ impl Engine {
     /// True when the view being built holds typed text: a form control's
     /// box carries it, and the style memo's key does not cover it.
     fn building_view_has_edits(&self) -> bool {
-        self.lctx.building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .is_some_and(|v| !v.lay.edit_states.borrow().is_empty())
+        self.lctx.building_lay().is_some_and(|lay| !lay.edit_states.borrow().is_empty())
     }
 
 }
@@ -9320,10 +9317,7 @@ impl Engine {
                     | rustkit_css::Length::Max(_)
                     | rustkit_css::Length::Clamp(_)
                     | rustkit_css::Length::Calc(_)) => {
-                        let viewport = self
-                            .lctx.building_view
-                            .get()
-                            .and_then(|id| self.view_viewport(id));
+                        let viewport = self.lctx.building_viewport();
                         match viewport {
                             Some((vw, vh)) => rustkit_css::Length::Px(
                                 other
@@ -9628,7 +9622,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9721,7 +9715,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9799,7 +9793,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9874,7 +9868,7 @@ impl Engine {
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
                 // focus ring without reaching back into engine state.
-                if self.lctx.building_focus.get() == Some(node.id) {
+                if self.lctx.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                 }
 
@@ -13737,7 +13731,7 @@ impl Engine {
     /// engine itself goes through `inline_sheets`.
     #[cfg(test)]
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
-        self.inline_sheets(document, self.lctx.building_view.get())
+        self.inline_sheets(document, self.lctx.building_id())
             .into_iter()
             .map(Rc::unwrap_or_clone)
             .collect()
@@ -14993,12 +14987,8 @@ impl Engine {
     /// Loaded faces in the partition of the view being built (the opaque one
     /// for a view-less build).
     fn web_font_count(&self) -> usize {
-        let base = self
-            .lctx.building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .and_then(|v| v.url.as_ref());
-        self.lctx.font_loader.faces_for(&Self::font_partition(base)).len()
+        let base = self.lctx.building_url();
+        self.lctx.font_loader.faces_for(&Self::font_partition(base.as_ref())).len()
     }
 
     fn install_web_fonts(&self, id: EngineViewId) {
@@ -15283,7 +15273,7 @@ impl Engine {
         let external = match external.is_empty() {
             true => None,
             false => {
-                let own = &self.views.get(&self.lctx.building_view.get()?)?.external_stylesheets;
+                let own = &self.views.get(&self.lctx.building_id()?)?.external_stylesheets;
                 if !std::ptr::eq(own.as_slice(), external) {
                     return None;
                 }

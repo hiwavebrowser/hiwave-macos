@@ -11,7 +11,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
+
+use url::Url;
 
 use rustkit_image::ImageManager;
 use rustkit_layout::FontLoader;
@@ -36,16 +39,11 @@ pub(crate) struct LayoutCtx {
     /// [`crate::Engine::set_style_recording`] for why this is a side table
     /// rather than a field on `ComputedStyle`.
     pub(crate) style_trace: RefCell<Option<Vec<StyleRecord>>>,
-    /// View currently being laid out, so the view-agnostic recursive builder
-    /// can read that view's edit states (and only that view's).
-    pub(crate) building_view: Cell<Option<EngineViewId>>,
-    /// Focused node of the view currently being laid out.
-    ///
-    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
-    /// so the alternative was checking "is this node focused in ANY view",
-    /// which would mark a node focused in one view while building another.
-    /// Set by `relayout` around the build; `None` outside one.
-    pub(crate) building_focus: Cell<Option<rustkit_dom::NodeId>>,
+    /// The view currently being laid out, so the view-agnostic recursive
+    /// builder can read that view's edit states, focus and viewport (and
+    /// only that view's). Set by `build_layout_for_view` around the build;
+    /// `None` outside one.
+    pub(crate) building: RefCell<Option<Rc<BuildView>>>,
     /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
     /// vector content — they bypass ImageManager's raster decode (which
     /// rejects them as "Unknown image format") and are spliced into the
@@ -59,10 +57,46 @@ impl Default for LayoutCtx {
             image_manager: Arc::new(ImageManager::new()),
             font_loader: Arc::new(FontLoader::new()),
             style_trace: RefCell::default(),
-            building_view: Cell::default(),
-            building_focus: Cell::default(),
+            building: RefCell::default(),
             svg_cache: RefCell::default(),
         }
+    }
+}
+
+/// What a build reads of the view it is for, taken by the engine when the
+/// build starts.
+pub(crate) struct BuildView {
+    pub(crate) id: EngineViewId,
+    pub(crate) lay: Rc<ViewLayout>,
+    /// The document's URL: relative resource URLs and the font partition.
+    pub(crate) url: Option<Url>,
+    /// The viewport in CSS px: the headless bounds, else the host surface.
+    pub(crate) viewport: Option<(f32, f32)>,
+    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
+    /// so the alternative was checking "is this node focused in ANY view",
+    /// which would mark a node focused in one view while building another.
+    pub(crate) focus: Option<rustkit_dom::NodeId>,
+}
+
+impl LayoutCtx {
+    pub(crate) fn building_id(&self) -> Option<EngineViewId> {
+        self.building.borrow().as_ref().map(|b| b.id)
+    }
+
+    pub(crate) fn building_lay(&self) -> Option<Rc<ViewLayout>> {
+        self.building.borrow().as_ref().map(|b| b.lay.clone())
+    }
+
+    pub(crate) fn building_focus(&self) -> Option<rustkit_dom::NodeId> {
+        self.building.borrow().as_ref().and_then(|b| b.focus)
+    }
+
+    pub(crate) fn building_viewport(&self) -> Option<(f32, f32)> {
+        self.building.borrow().as_ref().and_then(|b| b.viewport)
+    }
+
+    pub(crate) fn building_url(&self) -> Option<Url> {
+        self.building.borrow().as_ref().and_then(|b| b.url.clone())
     }
 }
 
