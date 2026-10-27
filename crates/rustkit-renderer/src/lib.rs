@@ -1608,8 +1608,12 @@ impl Renderer {
             // layer is laid over what is under it, faded: the group is
             // faded as one picture (CSS Color 4 §4), so a child over its
             // parent's background does not show the background through.
-            // Past `MAX_OPACITY_LAYERS` scopes in one list the scopes fall
-            // back to fading each command (see `OpacityScopes`).
+            // A filter group is a layer the same way, composited through its
+            // colour matrix. Opacity and filter scopes share the budget:
+            // past `MAX_OPACITY_LAYERS` of them in one list, all of them fall
+            // back to `process_command`, which applies each scope to the
+            // vertices batched inside it (see `OpacityScopes`). So does the
+            // backdrop-blur path, which never layers.
             let layered = commands
                 .iter()
                 .filter(|cmd| {
@@ -3013,21 +3017,27 @@ impl Renderer {
                 self.pop_transform();
             }
 
+            // Reached only off the layered path: past `MAX_OPACITY_LAYERS`
+            // scopes, on the backdrop-blur path and on the GPU-gradient
+            // path. There the scope is applied to each vertex batched inside
+            // it (see `OpacityScopes`), a filter's matrix as well as a fade.
             DisplayCommand::PushOpacity(alpha) => {
                 let lens = self.batch_lens();
-                self.opacity_scopes.push(*alpha, lens);
+                self.opacity_scopes.push(LayerEffect::Fade(alpha.clamp(0.0, 1.0)), lens);
             }
 
-            DisplayCommand::PopOpacity => {
-                if let Some((alpha, starts)) = self.opacity_scopes.pop() {
-                    self.fade_since(alpha, starts);
+            DisplayCommand::PushFilter(matrix) => {
+                let lens = self.batch_lens();
+                self.opacity_scopes.push(LayerEffect::ColorMatrix(*matrix), lens);
+            }
+
+            // A pop closes the innermost scope of either kind: the display
+            // list nests them, so the two never interleave.
+            DisplayCommand::PopOpacity | DisplayCommand::PopFilter => {
+                if let Some((effect, starts)) = self.opacity_scopes.pop() {
+                    self.apply_since(effect, starts);
                 }
             }
-
-            // A filter is drawn only through a layer of its own (see
-            // `LayerEffect::ColorMatrix`); past `MAX_OPACITY_LAYERS` scopes
-            // the group paints unfiltered.
-            DisplayCommand::PushFilter(_) | DisplayCommand::PopFilter => {}
 
             // A fixed run undoes the page's scroll (`set_scroll_offset`);
             // unscrolled, these are marks only.
@@ -6453,21 +6463,38 @@ impl Renderer {
         ]
     }
 
-    /// Fade the vertices each batch has gained since `starts` by `alpha`.
+    /// Apply `effect` to the vertices each batch has gained since `starts`.
     /// The colour-glyph pipeline blends premultiplied; the others straight.
-    fn fade_since(&mut self, alpha: f32, starts: BatchLens) {
-        fade_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], alpha);
-        fade_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], alpha);
-        fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], alpha);
-        fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], alpha);
+    ///
+    /// A fade scales alpha. A filter's matrix runs on the colour of fills
+    /// and glyphs, the colour they paint; for images and colour glyphs the
+    /// vertex colour is a tint over the texture, so only the matrix's alpha
+    /// gain (`opacity()`) is applied there and their pixels stay unfiltered.
+    fn apply_since(&mut self, effect: LayerEffect, starts: BatchLens) {
+        match effect {
+            LayerEffect::Fade(alpha) => {
+                fade_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], alpha);
+                fade_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], alpha);
+                fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], alpha);
+                fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], alpha);
+            }
+            LayerEffect::ColorMatrix(m) => {
+                filter_straight(self.color_vertices.iter_mut().map(|v| &mut v.color), starts[0], &m);
+                filter_straight(self.texture_vertices.iter_mut().map(|v| &mut v.color), starts[1], &m);
+                let gain = m[18].clamp(0.0, 1.0);
+                fade_premultiplied(self.color_glyph_vertices.iter_mut().map(|v| &mut v.color), starts[2], gain);
+                fade_straight(self.image_vertices.iter_mut().map(|v| &mut v.color), starts[3], gain);
+            }
+        }
     }
 
-    /// Fade what the open opacity scopes have batched so far. Called before
-    /// every draw of the batches.
+    /// Apply what the open scopes have batched so far. Called before every
+    /// draw of the batches. Innermost first: a filter inside a filter runs
+    /// on the content before the outer one does.
     fn settle_opacity(&mut self) {
         let lens = self.batch_lens();
-        for (alpha, starts) in self.opacity_scopes.settle(lens) {
-            self.fade_since(alpha, starts);
+        for (effect, starts) in self.opacity_scopes.settle(lens).into_iter().rev() {
+            self.apply_since(effect, starts);
         }
     }
 
@@ -6920,20 +6947,27 @@ enum LayerEffect {
     ColorMatrix([f32; 20]),
 }
 
-/// The open `PushOpacity` scopes, innermost last.
+/// The open `PushOpacity` and `PushFilter` scopes, innermost last, when
+/// they are not drawn as layers.
 ///
-/// Draw calls do not know about opacity. A scope remembers where each batch
-/// stood when it opened, and the vertices added since are faded when it
-/// closes; scopes nest, so an inner scope's vertices are faded again by the
-/// outer one, which multiplies the factors. A batch flush in the middle of a
-/// scope fades what the scope has added so far ([`OpacityScopes::settle`])
-/// and the scope carries on from the empty batches.
+/// Draw calls do not know about opacity or filters. A scope remembers where
+/// each batch stood when it opened, and the vertices added since are faded,
+/// or run through the filter's colour matrix, when it closes; scopes nest,
+/// so an inner scope's vertices are processed again by the outer one, which
+/// multiplies fades and composes matrices inner first. A batch flush in the
+/// middle of a scope applies what the scope has added so far
+/// ([`OpacityScopes::settle`]) and the scope carries on from the empty
+/// batches.
+///
+/// Per vertex is exact for opaque content that does not overlap. Where a
+/// translucent part overlaps another inside the group, the group would be
+/// processed as one picture by a layer, and per vertex is an approximation.
 ///
 /// Pure for the same reason as [`clip_entry_for`]: no device is needed to
 /// test the bookkeeping.
 #[derive(Debug, Default)]
 struct OpacityScopes {
-    scopes: Vec<(f32, BatchLens)>,
+    scopes: Vec<(LayerEffect, BatchLens)>,
 }
 
 impl OpacityScopes {
@@ -6941,20 +6975,21 @@ impl OpacityScopes {
         self.scopes.clear();
     }
 
-    fn push(&mut self, alpha: f32, lens: BatchLens) {
-        self.scopes.push((alpha.clamp(0.0, 1.0), lens));
+    fn push(&mut self, effect: LayerEffect, lens: BatchLens) {
+        self.scopes.push((effect, lens));
     }
 
-    /// Close the innermost scope: its factor and where its vertices start.
+    /// Close the innermost scope: its effect and where its vertices start.
     /// `None` for a pop without a push.
-    fn pop(&mut self) -> Option<(f32, BatchLens)> {
+    fn pop(&mut self) -> Option<(LayerEffect, BatchLens)> {
         self.scopes.pop()
     }
 
-    /// Before the batches are drawn: every open scope's factor and start, to
-    /// be faded now. Afterwards each scope starts at `lens`, so a second
-    /// call before the batches are emptied fades nothing twice.
-    fn settle(&mut self, lens: BatchLens) -> Vec<(f32, BatchLens)> {
+    /// Before the batches are drawn: every open scope's effect and start,
+    /// outermost first, to be applied now (innermost first). Afterwards each
+    /// scope starts at `lens`, so a second call before the batches are
+    /// emptied applies nothing twice.
+    fn settle(&mut self, lens: BatchLens) -> Vec<(LayerEffect, BatchLens)> {
         let due = self.scopes.clone();
         for scope in &mut self.scopes {
             scope.1 = lens;
@@ -6974,6 +7009,19 @@ impl OpacityScopes {
 fn fade_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, alpha: f32) {
     for color in colors.skip(start) {
         color[3] *= alpha;
+    }
+}
+
+/// Run a filter's colour matrix on straight-alpha vertex colours from
+/// `start` on: the 4x5 row-major matrix on unpremultiplied RGBA, clamped,
+/// as `filter_matrix.wgsl` does per pixel (Filter Effects 1 §13).
+fn filter_straight<'a>(colors: impl Iterator<Item = &'a mut [f32; 4]>, start: usize, m: &[f32; 20]) {
+    for color in colors.skip(start) {
+        let c = *color;
+        for (row, out) in color.iter_mut().enumerate() {
+            let r = &m[row * 5..row * 5 + 5];
+            *out = (r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3] * c[3] + r[4]).clamp(0.0, 1.0);
+        }
     }
 }
 
@@ -10174,16 +10222,28 @@ mod opacity_scope_tests {
         batch.iter().map(|c| c[3]).collect()
     }
 
+    fn fade(alpha: f32) -> LayerEffect {
+        LayerEffect::Fade(alpha)
+    }
+
+    /// `Renderer::apply_since` for the colour batch.
+    fn apply(batch: &mut [[f32; 4]], effect: LayerEffect, start: usize) {
+        match effect {
+            LayerEffect::Fade(alpha) => fade_straight(batch.iter_mut(), start, alpha),
+            LayerEffect::ColorMatrix(m) => filter_straight(batch.iter_mut(), start, &m),
+        }
+    }
+
     fn close(scopes: &mut OpacityScopes, batch: &mut [[f32; 4]]) {
-        let (alpha, starts) = scopes.pop().expect("an open scope");
-        fade_straight(batch.iter_mut(), starts[0], alpha);
+        let (effect, starts) = scopes.pop().expect("an open scope");
+        apply(batch, effect, starts[0]);
     }
 
     #[test]
     fn a_scope_fades_what_was_batched_inside_it_only() {
         let mut scopes = OpacityScopes::default();
         let mut batch = vec![OPAQUE];
-        scopes.push(0.5, [batch.len(); 4]);
+        scopes.push(fade(0.5), [batch.len(); 4]);
         batch.push(OPAQUE);
         close(&mut scopes, &mut batch);
         batch.push(OPAQUE);
@@ -10194,9 +10254,9 @@ mod opacity_scope_tests {
     fn nested_scopes_multiply() {
         let mut scopes = OpacityScopes::default();
         let mut batch = Vec::new();
-        scopes.push(0.5, [0; 4]);
+        scopes.push(fade(0.5), [0; 4]);
         batch.push(OPAQUE);
-        scopes.push(0.5, [batch.len(); 4]);
+        scopes.push(fade(0.5), [batch.len(); 4]);
         batch.push(OPAQUE);
         close(&mut scopes, &mut batch);
         close(&mut scopes, &mut batch);
@@ -10207,17 +10267,17 @@ mod opacity_scope_tests {
     fn a_flush_inside_a_scope_fades_both_halves_once() {
         let mut scopes = OpacityScopes::default();
         let mut batch = vec![OPAQUE];
-        scopes.push(0.5, [batch.len(); 4]);
+        scopes.push(fade(0.5), [batch.len(); 4]);
         batch.push(OPAQUE);
-        scopes.push(0.5, [batch.len(); 4]);
+        scopes.push(fade(0.5), [batch.len(); 4]);
         batch.push(OPAQUE);
 
         // The flush: settle, a second settle before the draw (a flush that
         // calls another), then the batches are emptied.
         for _ in 0..2 {
             let lens = [batch.len(); 4];
-            for (alpha, starts) in scopes.settle(lens) {
-                fade_straight(batch.iter_mut(), starts[0], alpha);
+            for (effect, starts) in scopes.settle(lens).into_iter().rev() {
+                apply(&mut batch, effect, starts[0]);
             }
         }
         assert_eq!(alphas(&batch), [1.0, 0.5, 0.25], "what was drawn");
@@ -10230,6 +10290,69 @@ mod opacity_scope_tests {
         close(&mut scopes, &mut batch);
         batch.push(OPAQUE);
         assert_eq!(alphas(&batch), [0.25, 0.5, 1.0], "after the flush");
+    }
+
+    // invert(1) and grayscale(1) as `rustkit_layout::filter` builds them.
+    const INVERT: [f32; 20] = [
+        -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+    /// #790 R1 nit 4: off the layered path (past `MAX_OPACITY_LAYERS`, or on
+    /// a page with `backdrop-filter: blur()`) a filter scope used to paint
+    /// its content unfiltered.
+    #[test]
+    fn a_filter_scope_runs_its_matrix_on_what_was_batched_inside_it_only() {
+        let mut scopes = OpacityScopes::default();
+        let mut batch = vec![RED];
+        scopes.push(LayerEffect::ColorMatrix(INVERT), [batch.len(); 4]);
+        batch.push(RED);
+        close(&mut scopes, &mut batch);
+        batch.push(RED);
+        assert_eq!(batch, [RED, [0.0, 1.0, 1.0, 1.0], RED]);
+    }
+
+    #[test]
+    fn nested_filters_apply_inner_first_across_a_flush() {
+        // grayscale-ish row sum then invert differs from invert then the row
+        // sum: a matrix that copies red into every channel, inside invert.
+        let red_everywhere: [f32; 20] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        let mut scopes = OpacityScopes::default();
+        let mut batch = Vec::new();
+        scopes.push(LayerEffect::ColorMatrix(INVERT), [0; 4]);
+        scopes.push(LayerEffect::ColorMatrix(red_everywhere), [0; 4]);
+        scopes.push(fade(0.5), [0; 4]);
+        batch.push(RED);
+        // A flush in the middle: what was drawn is inner first.
+        for _ in 0..2 {
+            let lens = [batch.len(); 4];
+            for (effect, starts) in scopes.settle(lens).into_iter().rev() {
+                apply(&mut batch, effect, starts[0]);
+            }
+        }
+        // red -> fade .5 -> (1,1,1,.5) -> invert -> (0,0,0,.5).
+        assert_eq!(batch, [[0.0, 0.0, 0.0, 0.5]], "what was drawn");
+        batch.clear();
+        scopes.rebase();
+        batch.push(RED);
+        for _ in 0..3 {
+            close(&mut scopes, &mut batch);
+        }
+        assert_eq!(batch, [[0.0, 0.0, 0.0, 0.5]], "after the flush");
+    }
+
+    #[test]
+    fn a_filter_matrix_clamps() {
+        let mut batch = vec![[0.5, 0.5, 0.5, 1.0]];
+        // brightness(3)
+        let mut m = [0.0; 20];
+        for (i, gain) in [3.0, 3.0, 3.0, 1.0].into_iter().enumerate() {
+            m[i * 6] = gain;
+        }
+        filter_straight(batch.iter_mut(), 0, &m);
+        assert_eq!(batch, [[1.0, 1.0, 1.0, 1.0]]);
     }
 
     #[test]

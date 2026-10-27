@@ -42401,4 +42401,57 @@ mod filter_pins {
             );
         }
     }
+
+    /// Pins today's nesting for a box with both `filter` and `clip-path`
+    /// (docs/diagnostics/2026-10-27/css_filter_clip_path.html): the filter
+    /// group is outermost, then the transform, then the clip, so the clip
+    /// applies to the content before the filter does. For the colour
+    /// matrices supported now that order paints the same as Chrome's (filter
+    /// first, then clip, CSS Masking 1 §3/Filter Effects 1 §3), because a
+    /// colour matrix is per pixel. Once blur or drop-shadow paint, the clip
+    /// must wrap the filter, since they bleed past the box and Chrome clips
+    /// the filtered result; this pin is the one to change then.
+    #[test]
+    fn filter_with_clip_path_clips_inside_the_filter_group() {
+        let order = |lines: &[String]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|c| !c.starts_with("SolidColor(Color { r: 255, g: 255, b: 255"))
+                .map(|c| c.split(['(', ' ']).next().unwrap_or("").to_string())
+                .collect()
+        };
+        let lines = page("filter:invert(1);clip-path:inset(20px)");
+        let all = lines.join("\n");
+        assert_eq!(
+            order(&lines),
+            ["PushFilter", "PushClip", "SolidColor", "SolidColor", "PopClip", "PopFilter"],
+            "{all}"
+        );
+        assert!(lines.iter().any(|c| c.starts_with("PushFilter([-1.0, 0.0, 0.0, 0.0, 1.0,")), "{all}");
+        assert!(
+            lines.iter().any(|c| c == "PushClip(Rect { x: 20.0, y: 20.0, width: 60.0, height: 60.0 })"),
+            "inset(20px) of the 100px box:\n{all}"
+        );
+
+        // With a transform and a rounded shape: filter, transform, clip.
+        let lines = page("filter:invert(1);clip-path:circle(40px);transform:translateX(10px)");
+        let all = lines.join("\n");
+        assert_eq!(
+            order(&lines),
+            [
+                "PushFilter", "PushTransform", "PushClipRounded", "SolidColor", "SolidColor",
+                "PopClip", "PopTransform", "PopFilter",
+            ],
+            "{all}"
+        );
+
+        // A filter with nothing to apply leaves the clip alone.
+        let lines = page("filter:blur(2px);clip-path:inset(20px)");
+        assert_eq!(
+            order(&lines),
+            ["PushClip", "SolidColor", "SolidColor", "PopClip"],
+            "{}",
+            lines.join("\n")
+        );
+    }
 }
