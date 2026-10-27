@@ -11,11 +11,25 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use rustkit_image::ImageManager;
+use rustkit_layout::FontLoader;
 
 use crate::{EngineViewId, StyleRecord};
 
-#[derive(Default)]
 pub(crate) struct LayoutCtx {
+    /// Decoded images: the build reads natural sizes from it (and decodes a
+    /// `data:` image in place).
+    pub(crate) image_manager: Arc<ImageManager>,
+    /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
+    /// pin: one loader for the whole engine, with cross-site isolation
+    /// provided by the partition key on every operation rather than by
+    /// handing each view its own object. Per-view loaders would refetch the
+    /// same face for every tab; an unpartitioned shared one would be a
+    /// cross-site timing oracle. The partitioned shared loader is the only
+    /// shape that is both.
+    pub(crate) font_loader: Arc<FontLoader>,
     /// Cascade provenance, recorded by the REAL cascade when armed.
     ///
     /// `None` = not recording, which is the default and costs nothing. See
@@ -37,6 +51,19 @@ pub(crate) struct LayoutCtx {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
+}
+
+impl Default for LayoutCtx {
+    fn default() -> Self {
+        Self {
+            image_manager: Arc::new(ImageManager::new()),
+            font_loader: Arc::new(FontLoader::new()),
+            style_trace: RefCell::default(),
+            building_view: Cell::default(),
+            building_focus: Cell::default(),
+            svg_cache: RefCell::default(),
+        }
+    }
 }
 
 /// What the build reads and writes of one view, shared the same way

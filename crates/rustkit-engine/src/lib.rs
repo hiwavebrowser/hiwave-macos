@@ -2232,15 +2232,6 @@ pub struct Engine {
     /// `None` leaves the default (1024) alone.
     host_reentry_override: Option<usize>,
     loader: Arc<ResourceLoader>,
-    image_manager: Arc<ImageManager>,
-    /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
-    /// pin: one loader for the whole engine, with cross-site isolation
-    /// provided by the partition key on every operation rather than by
-    /// handing each view its own object. Per-view loaders would refetch the
-    /// same face for every tab; an unpartitioned shared one would be a
-    /// cross-site timing oracle. The partitioned shared loader is the only
-    /// shape that is both.
-    font_loader: Arc<FontLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
@@ -2441,9 +2432,6 @@ impl Engine {
                 .map_err(EngineError::NetworkError)?,
         );
 
-        // Initialize ImageManager
-        let image_manager = Arc::new(ImageManager::new());
-
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -2455,9 +2443,7 @@ impl Engine {
             nav_seq,
             host_reentry_override: None,
             loader,
-            image_manager,
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -2797,7 +2783,7 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        self.image_manager.forget_view(id.0);
+        self.lctx.image_manager.forget_view(id.0);
         self.page_commits.remove(&id);
 
         if let Some(presenter) = self.presenter.as_mut() {
@@ -8974,10 +8960,10 @@ impl Engine {
         explicit_height: Option<f32>,
     ) -> (f32, f32) {
         let loaded = Url::parse(src).ok().and_then(|parsed_url| {
-            if let Some(cached) = self.image_manager.get_cached(&parsed_url) {
+            if let Some(cached) = self.lctx.image_manager.get_cached(&parsed_url) {
                 Some(cached)
             } else if parsed_url.scheme() == "data" {
-                self.image_manager.load_blocking(parsed_url).ok()
+                self.lctx.image_manager.load_blocking(parsed_url).ok()
             } else {
                 None
             }
@@ -13437,7 +13423,7 @@ impl Engine {
                 if let Some(bindings) = view.bindings.as_ref() {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_inserted_scripts()));
                 }
-                self.image_manager.begin_navigation(id.0, view.decode_epoch);
+                self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed
                 // (or `is_loading` stays true until the next start), and UI
@@ -13540,7 +13526,7 @@ impl Engine {
         view.devtools_highlight = None;
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
-        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
         Ok(NavWatch {
             canceller,
             nav_id: view.nav_id,
@@ -13574,7 +13560,7 @@ impl Engine {
         // hit-testing are not the previous page's.
         let unlaid = committed && std::mem::take(&mut view.initial_layout_deferred);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
-        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
         if view.navigation.is_loading() {
             info!(?id, nav_id, "Navigation cancelled");
             view.inspector
@@ -14350,7 +14336,7 @@ impl Engine {
             view.images_attempted.extend(discovered);
         }
 
-        let image_manager = self.image_manager.clone();
+        let image_manager = self.lctx.image_manager.clone();
 
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
@@ -14808,29 +14794,29 @@ impl Engine {
         for rule in rules {
             let face = Self::layout_font_face(rule);
             let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
-            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+            if self.lctx.font_loader.is_loaded_key(&key) || self.lctx.font_loader.is_failed(&key) {
                 continue;
             }
             match resolve_font_source(base, &rule.src) {
                 FontSource::Data(bytes) => {
-                    self.font_loader.insert_loaded(key, bytes);
+                    self.lctx.font_loader.insert_loaded(key, bytes);
                     loaded += 1;
                 }
                 FontSource::File(path) => match std::fs::read(&path) {
                     Ok(bytes) => {
                         debug!(family = %rule.family, ?path, len = bytes.len(), "@font-face: loaded local font");
-                        self.font_loader.insert_loaded(key, bytes);
+                        self.lctx.font_loader.insert_loaded(key, bytes);
                         loaded += 1;
                     }
                     Err(e) => {
                         warn!(family = %rule.family, ?path, ?e, "@font-face: could not read local font file");
-                        self.font_loader.mark_failed(key);
+                        self.lctx.font_loader.mark_failed(key);
                     }
                 },
                 FontSource::Remote(_) => {}
                 FontSource::Blocked(reason) => {
                     warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
-                    self.font_loader.mark_failed(key);
+                    self.lctx.font_loader.mark_failed(key);
                 }
             }
         }
@@ -14856,7 +14842,7 @@ impl Engine {
         for rule in self.view_font_face_rules(id) {
             let face = Self::layout_font_face(&rule);
             let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
-            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+            if self.lctx.font_loader.is_loaded_key(&key) || self.lctx.font_loader.is_failed(&key) {
                 continue;
             }
             if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
@@ -14926,12 +14912,12 @@ impl Engine {
         for (key, family, url, outcome) in fetched {
             match outcome {
                 Ok(bytes) => {
-                    self.font_loader.insert_loaded(key, bytes);
+                    self.lctx.font_loader.insert_loaded(key, bytes);
                     loaded += 1;
                 }
                 Err(reason) => {
                     warn!(%family, %url, %reason, "Web font not loaded");
-                    self.font_loader.mark_failed(key);
+                    self.lctx.font_loader.mark_failed(key);
                 }
             }
         }
@@ -14942,7 +14928,7 @@ impl Engine {
     /// layout and paint of a view, so a view only ever sees its own site's
     /// fonts — the registry is a slot the engine swaps, not a shared cache.
     fn install_web_fonts_for(&self, partition: &rustkit_layout::TopLevelSite) {
-        let faces = self.font_loader.faces_for(partition);
+        let faces = self.lctx.font_loader.faces_for(partition);
         // The tag names the installed set; the loader only ever grows a
         // partition, so partition + count identifies it exactly.
         let tag = format!("{}#{}", partition.as_str(), faces.len());
@@ -14964,7 +14950,7 @@ impl Engine {
             .get()
             .and_then(|id| self.views.get(&id))
             .and_then(|v| v.url.as_ref());
-        self.font_loader.faces_for(&Self::font_partition(base)).len()
+        self.lctx.font_loader.faces_for(&Self::font_partition(base)).len()
     }
 
     fn install_web_fonts(&self, id: EngineViewId) {
@@ -16973,7 +16959,7 @@ impl Engine {
             && !frame
                 .missing_images
                 .iter()
-                .any(|url| self.image_manager.is_cached(url))
+                .any(|url| self.lctx.image_manager.is_cached(url))
             && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
     }
 
@@ -17773,7 +17759,7 @@ impl Engine {
             id,
             viewhost_id,
             is_headless,
-            &self.image_manager,
+            &self.lctx.image_manager,
         )?;
 
         if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
@@ -18367,7 +18353,7 @@ impl Engine {
 
     /// Load an image from a URL.
     pub async fn load_image(&self, view_id: EngineViewId, url: Url) -> Result<(), EngineError> {
-        let image_manager = self.image_manager.clone();
+        let image_manager = self.lctx.image_manager.clone();
         let event_tx = self.event_tx.clone();
         let referrer = self.subresource_referrer(view_id);
 
@@ -18415,24 +18401,24 @@ impl Engine {
 
     /// Preload an image (non-blocking).
     pub fn preload_image(&self, url: Url) {
-        self.image_manager.preload(url);
+        self.lctx.image_manager.preload(url);
     }
 
     /// Check if an image is cached.
     pub fn is_image_cached(&self, url: &Url) -> bool {
-        self.image_manager.is_cached(url)
+        self.lctx.image_manager.is_cached(url)
     }
 
     /// Get a cached image's dimensions.
     pub fn get_image_dimensions(&self, url: &Url) -> Option<(u32, u32)> {
-        self.image_manager
+        self.lctx.image_manager
             .get_cached(url)
             .map(|img| (img.natural_width, img.natural_height))
     }
 
     /// Get the image manager for direct access.
     pub fn image_manager(&self) -> Arc<ImageManager> {
-        self.image_manager.clone()
+        self.lctx.image_manager.clone()
     }
 
     /// The navigation counter this engine allocates from.
@@ -18466,7 +18452,7 @@ impl Engine {
 
     /// Clear the image cache.
     pub fn clear_image_cache(&self) {
-        self.image_manager.clear_cache();
+        self.lctx.image_manager.clear_cache();
     }
 
     /// Drain IPC messages from all views.
@@ -21971,7 +21957,6 @@ mod tests {
         Some(Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -21979,7 +21964,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -22713,7 +22697,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -22721,7 +22704,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -22784,7 +22766,6 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -22792,7 +22773,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -22872,13 +22852,11 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23056,7 +23034,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23064,7 +23041,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23150,7 +23126,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23158,7 +23133,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23264,7 +23238,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23272,7 +23245,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23342,7 +23314,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23350,7 +23321,6 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23414,13 +23384,11 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23499,14 +23467,12 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
         };
@@ -23602,13 +23568,11 @@ mod tests {
             let engine = Engine {
                 config: EngineConfig::default(),
                 views: HashMap::new(),
-                font_loader: Arc::new(FontLoader::new()),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-                image_manager: Arc::new(ImageManager::new()),
                 event_tx,
                 event_rx: Some(event_rx),
                 lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23705,13 +23669,11 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23786,13 +23748,11 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23869,13 +23829,11 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -23952,13 +23910,11 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -24029,13 +23985,11 @@ mod tests {
         let mut engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -24109,13 +24063,11 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -25856,7 +25808,7 @@ div { height: 10px; }
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
         assert!(
-            engine.image_manager.is_cached(&at("/shown.png")),
+            engine.lctx.image_manager.is_cached(&at("/shown.png")),
             "the background image is in the cache paint reads"
         );
         assert!(!engine.is_image_cached(&at("/tracker.png")));
@@ -26023,7 +25975,7 @@ div { width: 50px; height: 20px; background: url(/bg.jpg) no-repeat; }
             );
             let at = Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
             assert!(
-                engine.image_manager.is_cached(&at),
+                engine.lctx.image_manager.is_cached(&at),
                 "{path} decodes: the server sent a format the request asked for"
             );
         }
@@ -26675,13 +26627,11 @@ mod web_font_tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
@@ -32843,11 +32793,11 @@ document.currentScript.remove();
             "waited for the stalled web font: {took:?}"
         );
         assert!(
-            engine.font_loader.is_failed(&key),
+            engine.lctx.font_loader.is_failed(&key),
             "timeout must mark the face failed so relayout stops retrying it"
         );
         assert!(
-            engine.font_loader.faces_for(&partition).is_empty(),
+            engine.lctx.font_loader.faces_for(&partition).is_empty(),
             "no face bytes may be installed after a budget timeout"
         );
     }
