@@ -122,6 +122,36 @@ fn a_forced_layout_reads_inline_svg_and_a_focused_control_without_a_borrow_panic
 }
 
 #[test]
+fn script_scrolls_to_the_end_of_rows_it_appended_in_the_same_task() {
+    // Atlas's #812 land condition: a forced layout left the scroll maximum
+    // at the old document's, so `scrollTo(0, body.scrollHeight)` after
+    // appending rows stopped at the old end while scrollHeight read the new
+    // one. 1000px in a 200px view ends at 800; ten more 100px rows at 1800.
+    let page = "<html><head><style>body{margin:0} div{height:100px}</style></head><body>\
+        <div></div><div></div><div></div><div></div><div></div>\
+        <div></div><div></div><div></div><div></div><div></div></body></html>";
+    let append = "for (var i = 0; i < 10; i++) document.body.appendChild(document.createElement('div'));";
+    for (case, scroll) in [
+        ("read first", "window.__h = document.body.scrollHeight; window.scrollTo(0, window.__h);"),
+        ("no read first", "window.scrollTo(0, 100000); window.__h = document.body.scrollHeight;"),
+    ] {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+            .expect("view");
+        engine.load_html(view, page).expect("load_html");
+        assert_eq!(engine.views[&view].max_scroll_offset.1, 800.0, "{case}");
+        engine
+            .execute_script(view, &format!("{append} {scroll} window.__y = window.scrollY;"))
+            .unwrap();
+        assert_eq!(read(&mut engine, view, "__h"), "2000", "{case}");
+        assert_eq!(read(&mut engine, view, "__y"), "1800", "{case}: scrollY in the task");
+        assert_eq!(engine.views[&view].scroll_offset.1, 1800.0, "{case}: the view after the task");
+        assert_eq!(read(&mut engine, view, "scrollY"), "1800", "{case}: scrollY after the task");
+    }
+}
+
+#[test]
 fn a_forced_layout_after_a_resize_lays_out_in_the_new_viewport() {
     let page = "<html><head><style>body{margin:0}</style></head><body>\
         <div id=a style='width:50%;height:10px'></div></body></html>";
