@@ -4730,9 +4730,7 @@ fn main() {
                     }
                     UserEvent::InspectorConsoleClear => {
                         // Clear console in inspector panel
-                        let _ = inspector_for_events.evaluate_script(
-                            "if (window.hiwaveInspector) { window.hiwaveInspector.clearConsole(); }"
-                        );
+                        devtools.clear_console(&inspector_for_events);
                     }
                     UserEvent::InspectorConsoleEval { code } => {
                         if with_rustkit_content!(content_for_events, view => devtools.eval(view, &code)) {
