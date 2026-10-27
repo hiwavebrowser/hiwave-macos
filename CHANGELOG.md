@@ -10,8 +10,20 @@ This file only summarizes them.
 
 ## [Unreleased]
 
-Everything merged into `develop` since V1.3.0. See the merged pull requests
+Everything merged into `develop` since V1.4.0. See the merged pull requests
 linked above.
+
+## [V1.4.0] - 2026-10-24
+
+develop promoted to master on Friday 2026-10-23 ET.
+
+- Pages run on their own content thread (on by default): the window no longer
+  waits on page script; the address bar and Stop answer while a page loads.
+- HiWave Inspector: Elements and Console panels for RustKit pages, JavaScript
+  error stacks, shape-only privacy.
+- CSS `:has()`, `@supports`, `color-mix()`, `-webkit-line-clamp`, scoped
+  shadow DOM styles; clicks reach transformed consent dialogs.
+- Quiet real-site board 28/60 (V1.3.0: 27/60); campaign 26/26 at 1.1%.
 
 ## [V1.3.0] - 2026-10-12
 

@@ -164,6 +164,12 @@ pub struct InsertedScript {
     /// "force async"): it runs after the in-order scripts inserted before
     /// it, not as soon as it arrives.
     pub in_order: bool,
+    /// Where the page's script that inserted it was (its innermost frame
+    /// in a named script), when the runtime could place it.
+    pub inserted_by: Option<rustkit_js::ScriptPosition>,
+    /// When the page inserted it. The engine takes the queue later, at its
+    /// next drain; the gap is the script's `queued_ms` in the Inspector.
+    pub inserted_at: std::time::Instant,
 }
 
 impl ListenerId {
@@ -1700,6 +1706,12 @@ impl DomBindings {
     /// (see [`JsRuntime::set_console_handler`]).
     pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
         self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Also hand each console call to `handler` as types and lengths only
+    /// (see [`JsRuntime::set_console_shape_handler`]).
+    pub fn set_console_shape_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_shape_handler(handler);
     }
 
     /// Console arguments reach the handler as type and length only (see

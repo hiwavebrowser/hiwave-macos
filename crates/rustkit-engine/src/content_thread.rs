@@ -415,6 +415,66 @@ mod tests {
     }
 
     #[test]
+    fn load_html_runs_the_documents_inline_scripts() {
+        // Red on develop ff6ad36a (dev-tools lane, 2026-10-25): the app
+        // loads New Tab, About and the report page (Chart.js inline) with
+        // `load_html`, which reaches `Engine::load_html_as`. That set up the
+        // bindings and laid out but ran no `<script>`.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\">before</p><script>document.getElementById('t').textContent = 'ran';</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut text = page.eval("document.getElementById('t').textContent");
+        let text = wait_recv(&mut text, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(text.contains("ran"), "the inline script did not run: {text}");
+    }
+
+    #[test]
+    fn load_html_fires_domcontentloaded_and_load_after_its_scripts() {
+        // The report page draws its charts from a `DOMContentLoaded`
+        // listener, so the lifecycle events matter as much as the scripts.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\"></p><script>\
+             var seen = [document.readyState];\
+             document.addEventListener('DOMContentLoaded', function () { seen.push('dcl:' + document.readyState); });\
+             window.addEventListener('load', function () { seen.push('load:' + document.readyState); });\
+             </script><script>seen.push('second');</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut seen = page.eval("seen.join(',')");
+        let seen = wait_recv(&mut seen, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            seen.contains("loading,second,dcl:interactive,load:complete"),
+            "scripts in order, then DOMContentLoaded, then load: {seen}"
+        );
+    }
+
+    #[test]
+    fn about_page_script_runs_and_sets_the_version_line() {
+        // about.html (New Tab / About in RustKit content mode) exposes
+        // `hiwaveAbout.setVersion`, which the shell calls with the version.
+        let page = page();
+        let mut loaded = page.load_html(include_str!("../../hiwave-app/src/ui/about.html"));
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut version = page.eval(
+            "window.hiwaveAbout.setVersion('v9.8.7'); document.getElementById('versionBadge').textContent",
+        );
+        let version = wait_recv(&mut version, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("the about page's script defined hiwaveAbout");
+        assert!(version.contains("v9.8.7"), "version line: {version}");
+    }
+
+    #[test]
     fn stop_during_a_script_returns_and_a_later_eval_runs() {
         let page = page();
         let mut loaded = page.load_html("<p id=\"t\">x</p>");
@@ -461,6 +521,70 @@ mod tests {
             .expect("eval reply")
             .expect("the old document's script is still stopped after the failed navigation");
         assert!(value.contains("x2"), "{value}");
+    }
+
+    fn ask_devtools(page: &ContentThread, query: crate::DevtoolsQuery) -> crate::DevtoolsAnswer {
+        let (reply, mut rx) = oneshot::channel();
+        page.enqueue(PageCmd::Devtools { query, reply });
+        wait_recv(&mut rx, Duration::from_secs(5)).expect("the page answered the Inspector")
+    }
+
+    fn find_by_id(node: &crate::DevtoolsNode, id: &str) -> Option<usize> {
+        if node.id.as_deref() == Some(id) {
+            return Some(node.node_id);
+        }
+        node.children.iter().find_map(|child| find_by_id(child, id))
+    }
+
+    #[test]
+    fn the_inspector_is_answered_on_the_content_thread() {
+        // #764 re-cut: the Inspector queried the engine on the window
+        // thread, which has no engine once the page runs on its own thread
+        // (the shipped default). Every question goes through the protocol.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html(
+            "<body style='margin:0'><div id=box class='a b' style='width:100px;height:50px;padding:5px'>hi</div></body>",
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Attach(true)), DevtoolsAnswer::Done);
+        let DevtoolsAnswer::Tree(Some(tree)) = ask_devtools(&page, DevtoolsQuery::DomTree { root: None, reveal: None })
+        else {
+            panic!("no DOM tree");
+        };
+        let node = find_by_id(&tree, "box").expect("the tree has #box");
+        let DevtoolsAnswer::Element(Some(element)) = ask_devtools(&page, DevtoolsQuery::Element(node)) else {
+            panic!("no element details");
+        };
+        assert_eq!(element.tag, "div");
+        assert_eq!(element.classes, vec!["a".to_string(), "b".to_string()]);
+        let rect = element.rect.expect("the element has a box");
+        assert_eq!((rect.width, rect.height), (110.0, 60.0));
+        assert_eq!(
+            ask_devtools(&page, DevtoolsQuery::NodeAt { x: 20.0, y: 20.0 }),
+            DevtoolsAnswer::Node(Some(node))
+        );
+        let _ = page.poll();
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Highlight(Some(node))), DevtoolsAnswer::Done);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut outlined = false;
+        while Instant::now() < deadline && !outlined {
+            outlined = page.poll().into_iter().any(|e| matches!(e, PageEvent::Commit(_)));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(outlined, "the outline was never drawn into a new frame");
+        let mut logged = page.eval("console.log('from the page'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let DevtoolsAnswer::Console(console) = ask_devtools(&page, DevtoolsQuery::Console { since: 0 }) else {
+            panic!("no console");
+        };
+        // The Inspector records a value's shape, not the page's text
+        // (inspector.rs): the line is there, as `<string len=13>`.
+        assert!(
+            console.entries.iter().any(|e| e.level == "log" && e.message == "<string len=13>"),
+            "{:?}",
+            console.entries
+        );
     }
 
     /// Events until `nav_id` fails or `budget` runs out.

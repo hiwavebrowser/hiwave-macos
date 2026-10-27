@@ -53,6 +53,8 @@ pub const MAX_STACK_CHARS: usize = 4096;
 pub const MAX_SHORT_CHARS: usize = 256;
 /// Most distinct unsupported members recorded per page.
 pub const MAX_UNSUPPORTED_MEMBERS: usize = 512;
+/// Most script-inserted scripts whose inserter is remembered per page.
+pub const MAX_INSERTERS: usize = 1024;
 
 /// How a view records (part of `EngineConfig`).
 #[derive(Debug, Clone)]
@@ -228,6 +230,14 @@ pub enum InspectorEvent {
         /// The message was longer than [`MAX_MESSAGE_CHARS`] and was cut.
         truncated: bool,
         location: Option<SourceLocation>,
+        /// `console.error` only: the page's frames, innermost first, as
+        /// [`ScriptError`](Self::ScriptError)'s `stack` writes them.
+        #[serde(default)]
+        stack: Option<String>,
+        /// `console.error` with an error among its arguments: the first
+        /// one's own frames (where it was made), written as `stack` is.
+        #[serde(default)]
+        error_stack: Option<String>,
     },
     /// An exception no script caught, or a promise rejected with no handler.
     ScriptError {
@@ -242,7 +252,8 @@ pub enum InspectorEvent {
         /// Where it was thrown: the innermost of the page's frames.
         location: Option<SourceLocation>,
         /// The page's frames, innermost first, one `    at url:line:col`
-        /// line each (no function names).
+        /// line each; with [`InspectorConfig::keep_error_text`] a named
+        /// function's frame is `    at name (url:line:col)`.
         stack: Option<String>,
         unhandled_rejection: bool,
         /// Which of the page's scripts it came from: a script URL,
@@ -256,6 +267,10 @@ pub enum InspectorEvent {
         /// The message's length in characters, when it has one (an error's
         /// message, a thrown string).
         message_len: Option<u64>,
+        /// When the innermost frame's script was inserted by page script
+        /// (`appendChild` of a `<script src>`): where that insertion was.
+        #[serde(default)]
+        inserted_by: Option<SourceLocation>,
     },
     /// Page script used a Web API member the engine does not implement.
     /// Recorded once per page per member; `Inspector::unsupported_apis`
@@ -310,6 +325,54 @@ pub enum InspectorEvent {
         reason: String,
         duration_ms: f64,
     },
+    /// One page script's life, recorded when it is over: run, thrown,
+    /// stopped, or given up on.
+    Script {
+        /// The script's URL (as `request` shows it), `inline#n`, or
+        /// `unparseable#n` for a `src` that is not a URL.
+        script: String,
+        /// `parser` (a parser-blocking classic `<script>`), `defer`,
+        /// `async`, `module`, or `inserted` (a `<script src>` page script
+        /// added).
+        kind: String,
+        /// `ran`, `threw`, `skipped`, `fetch_failed`, `over_budget` (not
+        /// started: the script budget was spent), `stopped` (started, and
+        /// stopped by the script budget), `engine_failed`, `cancelled` (its
+        /// document was left first).
+        outcome: String,
+        /// Why, in the engine's words, for every outcome but `ran` and
+        /// `threw`.
+        reason: Option<String>,
+        /// Source bytes (0 when nothing arrived).
+        bytes: u64,
+        /// `inserted` only: from the page inserting it to the engine taking
+        /// it from the insertion queue (its request starts then).
+        queued_ms: Option<f64>,
+        /// From its request starting to its body (or failure) arriving;
+        /// `null` for an inline script.
+        fetch_ms: Option<f64>,
+        /// From its body arriving (or its fetch failing) to the engine
+        /// running it (or giving up on it).
+        waited_ms: Option<f64>,
+        /// Running it: parse, compile and run, its microtasks included.
+        ran_ms: f64,
+        /// The event its element heard, or will hear when it is owed to a
+        /// later turn past a spent budget: `load` or `error`.
+        event: Option<String>,
+        /// The first lifecycle event that had not fired when it ended:
+        /// `DOMContentLoaded`, `load`, or `null` (after `load`, or
+        /// cancelled). When it ended, not that the event waited for it.
+        held: Option<String>,
+    },
+    /// The document's `DOMContentLoaded` or `window` `load` is firing.
+    Lifecycle {
+        event: String,
+        /// `load` only: the scripts it waited for after `DOMContentLoaded`
+        /// (first 16, in the order they ended).
+        held_by: Vec<String>,
+        /// How many there were.
+        held_by_count: u32,
+    },
 }
 
 impl InspectorEvent {
@@ -330,6 +393,8 @@ impl InspectorEvent {
             InspectorEvent::Request { .. } => "request",
             InspectorEvent::Response { .. } => "response",
             InspectorEvent::Failure { .. } => "failure",
+            InspectorEvent::Script { .. } => "script",
+            InspectorEvent::Lifecycle { .. } => "lifecycle",
         }
     }
 }
@@ -386,10 +451,40 @@ struct State {
     /// The names page scripts are evaluated under that are not their URL
     /// (`script#3`), and the URL each stands for (as events show it).
     aliases: Vec<(String, String)>,
+    /// Script-inserted scripts' evaluation names (`inserted#n`) and where
+    /// the page's script that inserted each was.
+    inserters: Vec<(String, SourceLocation)>,
     /// The last request id given out (per view, never reused).
     last_request_id: u64,
     /// Requests recorded and not yet answered.
     open_requests: std::collections::HashSet<u64>,
+    /// The lifecycle events this document has fired, and the scripts that
+    /// ended between `DOMContentLoaded` and `load` (first
+    /// [`MAX_HELD_BY`]) with their count.
+    dom_content_loaded: bool,
+    loaded: bool,
+    held_load: Vec<String>,
+    held_load_count: u32,
+}
+
+/// How many of the scripts `load` waited for its `lifecycle` record names.
+const MAX_HELD_BY: usize = 16;
+
+/// What [`Inspector::script_ended`] records about one page script.
+pub struct ScriptEnd<'a> {
+    /// Its log label: URL or `inline#n`.
+    pub source: &'a str,
+    /// `parser`, `defer`, `async`, `module` or `inserted`.
+    pub kind: &'static str,
+    pub outcome: &'a crate::ScriptOutcome,
+    /// It began running (an over-budget outcome is then `stopped`).
+    pub started: bool,
+    pub bytes: usize,
+    pub queued: Option<std::time::Duration>,
+    pub fetch: Option<std::time::Duration>,
+    pub waited: Option<std::time::Duration>,
+    pub ran_ms: u64,
+    pub event: Option<&'static str>,
 }
 
 /// A view's recorder and ring buffer. See the module docs.
@@ -420,8 +515,13 @@ impl Inspector {
                 laid_out: false,
                 painted: false,
                 aliases: Vec::new(),
+                inserters: Vec::new(),
                 last_request_id: 0,
                 open_requests: std::collections::HashSet::new(),
+                dom_content_loaded: false,
+                loaded: false,
+                held_load: Vec::new(),
+                held_load_count: 0,
             }),
         })
     }
@@ -538,6 +638,10 @@ impl Inspector {
     /// record its start.
     pub fn navigation_started(&self, url: Option<&Url>) {
         if !self.is_active() {
+            // The lifecycle flags are kept unlistened (see `lifecycle`).
+            let mut state = self.state();
+            state.dom_content_loaded = false;
+            state.loaded = false;
             return;
         }
         let url = url.map(|u| self.url(u));
@@ -547,7 +651,125 @@ impl Inspector {
         state.laid_out = false;
         state.painted = false;
         state.aliases.clear();
+        state.inserters.clear();
+        state.dom_content_loaded = false;
+        state.loaded = false;
+        state.held_load.clear();
+        state.held_load_count = 0;
         Self::push_locked(&mut state, InspectorEvent::NavigationStart { url });
+    }
+
+    /// The document is firing `DOMContentLoaded` or `load` (`event`).
+    /// From here on a script that ends is not that event's to wait for.
+    pub fn lifecycle(&self, event: &'static str) {
+        // Kept with nobody listening too (one lock, twice a document): a
+        // panel attached after `DOMContentLoaded` must not read the scripts
+        // that end later as ending before it.
+        let mut state = self.state();
+        if !self.is_active() {
+            if event == "load" {
+                state.loaded = true;
+            } else {
+                state.dom_content_loaded = true;
+            }
+            return;
+        }
+        let (held_by, held_by_count) = if event == "load" {
+            state.loaded = true;
+            (std::mem::take(&mut state.held_load), std::mem::take(&mut state.held_load_count))
+        } else {
+            state.dom_content_loaded = true;
+            (Vec::new(), 0)
+        };
+        Self::push_locked(&mut state, InspectorEvent::Lifecycle { event: event.to_string(), held_by, held_by_count });
+    }
+
+    /// A page script's life is over (see [`InspectorEvent::Script`]).
+    pub fn script_ended(&self, end: ScriptEnd<'_>) {
+        if !self.is_active() {
+            return;
+        }
+        use crate::{FetchFailure, ScriptOutcome};
+        let (outcome, reason): (&str, Option<String>) = match end.outcome {
+            ScriptOutcome::Ran => ("ran", None),
+            ScriptOutcome::Threw(_) => ("threw", None),
+            ScriptOutcome::Skipped(why) => ("skipped", Some((*why).to_string())),
+            ScriptOutcome::Nomodule => ("skipped", Some("nomodule".to_string())),
+            ScriptOutcome::FetchFailed(FetchFailure::Status(status)) => {
+                ("fetch_failed", Some(format!("HTTP {status}")))
+            }
+            // The transport error's own text can name hosts and paths; its
+            // request's `failure` record has the stage.
+            ScriptOutcome::FetchFailed(FetchFailure::Transport(_)) => ("fetch_failed", Some("network".to_string())),
+            ScriptOutcome::OverBudget if end.started => ("stopped", Some("script budget".to_string())),
+            ScriptOutcome::OverBudget => {
+                ("over_budget", Some("script budget spent before it started".to_string()))
+            }
+            ScriptOutcome::EngineFailed(crate::EngineFailure::Panic) => {
+                ("engine_failed", Some("JS engine panic".to_string()))
+            }
+            ScriptOutcome::EngineFailed(crate::EngineFailure::ImportMap(_)) => {
+                ("engine_failed", Some("import map rejected".to_string()))
+            }
+        };
+        let ms = |d: Option<std::time::Duration>| d.map(|d| round_ms(d.as_secs_f64() * 1000.0));
+        let script = self.url_text(end.source);
+        let mut state = self.state();
+        let held = if !state.dom_content_loaded {
+            Some("DOMContentLoaded")
+        } else if !state.loaded {
+            state.held_load_count = state.held_load_count.saturating_add(1);
+            if state.held_load.len() < MAX_HELD_BY {
+                state.held_load.push(script.clone());
+            }
+            Some("load")
+        } else {
+            None
+        };
+        Self::push_locked(
+            &mut state,
+            InspectorEvent::Script {
+                script,
+                kind: end.kind.to_string(),
+                outcome: outcome.to_string(),
+                reason,
+                bytes: end.bytes as u64,
+                queued_ms: ms(end.queued),
+                fetch_ms: ms(end.fetch),
+                waited_ms: ms(end.waited),
+                ran_ms: end.ran_ms as f64,
+                event: end.event.map(str::to_string),
+                held: held.map(str::to_string),
+            },
+        );
+    }
+
+    /// A page script given up on because its document was left (a
+    /// navigation, a cancelled load, a closed view) before it ended: its
+    /// one `script` record, `cancelled`. No lifecycle event of a document
+    /// still showing waits for it, so `held` is `null`.
+    pub fn script_cancelled(&self, source: &str, kind: &'static str, queued: Option<std::time::Duration>) {
+        if !self.is_active() {
+            return;
+        }
+        let script = self.url_text(source);
+        let mut state = self.state();
+        Self::push_locked(
+            &mut state,
+            InspectorEvent::Script {
+                script,
+                kind: kind.to_string(),
+                outcome: "cancelled".to_string(),
+                reason: Some("navigation or view closed".to_string()),
+                bytes: 0,
+                queued_ms: queued.map(|d| round_ms(d.as_secs_f64() * 1000.0)),
+                fetch_ms: None,
+                waited_ms: None,
+                ran_ms: 0.0,
+                event: None,
+                held: None,
+            },
+        );
     }
 
     /// The view laid this document out: `FirstLayout` the first time.
@@ -629,6 +851,25 @@ impl Inspector {
     /// a URL scrubbed) or its `inline#n` label.
     pub fn location(&self, path: &str, line: u32, column: u32) -> SourceLocation {
         SourceLocation { url: self.url_text(path), line, column }
+    }
+
+    /// The script to be evaluated as `name` (`inserted#n`) was inserted by
+    /// the page's script at `path:line:column` (as the JS runtime placed the
+    /// insertion call). A position that cannot be shown is not kept.
+    pub fn note_inserted(&self, name: &str, path: &str, line: u32, column: u32) {
+        if !self.is_active() {
+            return;
+        }
+        let Some(at) = self.frame_location(path, line, column) else { return };
+        let mut state = self.state();
+        if state.inserters.len() < MAX_INSERTERS {
+            state.inserters.push((name.to_string(), at));
+        }
+    }
+
+    /// Where the script evaluated as `name` was inserted by page script.
+    pub fn inserted_by(&self, name: &str) -> Option<SourceLocation> {
+        self.state().inserters.iter().find(|(n, _)| n == name).map(|(_, at)| at.clone())
     }
 
     /// What the engine named `name` with [`alias_script`](Self::alias_script).
@@ -848,11 +1089,47 @@ impl Inspector {
 
     /// A console call (`message` is capped here, and URLs in it scrubbed).
     pub fn console(&self, level: ConsoleLevel, message: &str, location: Option<SourceLocation>) {
+        self.console_with_stacks(level, message, location, &rustkit_js::ConsoleStacks::default());
+    }
+
+    /// [`console`](Self::console) with a `console.error`'s stacks.
+    pub fn console_with_stacks(
+        &self,
+        level: ConsoleLevel,
+        message: &str,
+        location: Option<SourceLocation>,
+        stacks: &rustkit_js::ConsoleStacks,
+    ) {
         self.emit_with(|inspector| {
             let (message, truncated) = cap(message, MAX_MESSAGE_CHARS);
             let message = inspector.scrub_text(&message);
-            InspectorEvent::Console { level, message, truncated, location }
+            let text = |frames: &[rustkit_js::ScriptFrame]| {
+                let named: Vec<_> = frames.iter().map(|f| (f.function.as_deref(), &f.at)).collect();
+                inspector.stack_text(&named)
+            };
+            let (stack, error_stack) = (text(&stacks.caller), text(&stacks.error));
+            InspectorEvent::Console { level, message, truncated, location, stack, error_stack }
         });
+    }
+
+    /// The page's frames as a `stack` field: one `    at url:line:col` line
+    /// each, `    at name (url:line:col)` for a named function when error
+    /// text is kept here (the runtime may hold names for the console mirror,
+    /// which this Inspector's setting does not follow); frames whose script
+    /// cannot be shown are dropped. `None` when none is left.
+    pub fn stack_text(&self, frames: &[(Option<&str>, &rustkit_js::ScriptPosition)]) -> Option<String> {
+        let lines: Vec<String> = frames
+            .iter()
+            .filter_map(|(function, at)| {
+                let place = self.frame_location(&at.path, at.line, at.column)?;
+                let place = format!("{}:{}:{}", place.url, place.line, place.column);
+                Some(match function.filter(|_| self.keep_error_text) {
+                    Some(name) => format!("    at {name} ({place})"),
+                    None => format!("    at {place}"),
+                })
+            })
+            .collect();
+        (!lines.is_empty()).then(|| cap(&lines.join("\n"), MAX_STACK_CHARS).0)
     }
 }
 

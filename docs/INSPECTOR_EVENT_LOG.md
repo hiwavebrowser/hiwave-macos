@@ -46,8 +46,8 @@ field that is `null` today may hold a value later.
 | `navigation_commit` | `url`, `status` (HTTP status; `null` for `load_html`) |
 | `load_finished` | `url`, `scripts_over_budget` (scripts not run, or stopped, because the script budget was spent) |
 | `load_ended_early` | `url`, `reason` (`navigated_away`, `failed`), `detail` (`stopped`, `another navigation started`, `HTTP 404`, or a one-word network stage: `dns`, `connect`, `tls`, `timeout`, `policy`, `redirect`, `http`, `network`, `invalid_url`, `over_budget`, `cancelled`) |
-| `console` | `level` (`log`, `info`, `warn`, `error`, `debug`), `message`, `truncated`, `location` |
-| `script_error` | `name` (a standard name, else `Error`; empty for a thrown non-error), `message` (`null` unless kept, below), `location`, `stack`, `unhandled_rejection`, `script`, `value` (what was thrown: `error`, `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined`, `object`, `array`, `function`; `engine` for the engine's own failure), `message_len` (characters in an error's message or a thrown string, else `null`) |
+| `console` | `level` (`log`, `info`, `warn`, `error`, `debug`), `message`, `truncated`, `location`, `stack` (`console.error` and a failed `console.assert` only: the caller's page frames, written as `script_error`'s `stack`; else `null`), `error_stack` (`console.error` with an error among its arguments, as a framework that catches and logs errors calls it: the first one's own frames, where it was made; else `null`) |
+| `script_error` | `name` (a standard name, else `Error`; empty for a thrown non-error), `message` (`null` unless kept, below), `location`, `stack`, `unhandled_rejection`, `script`, `value` (what was thrown: `error`, `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined`, `object`, `array`, `function`; `engine` for the engine's own failure), `message_len` (characters in an error's message or a thrown string, else `null`), `inserted_by` (when the innermost frame's script is a `<script src>` that page script inserted: the `location` of the insertion call, else `null`; `null` too when `location` is, as for an `eval` or `on*` throw) |
 | `unsupported_api` | `interface`, `member`, `location` (first sighting on the page) |
 | `first_layout` | — |
 | `first_paint` | — |
@@ -56,6 +56,8 @@ field that is `null` today may hold a value later.
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
 | `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
 | `failure` | `id`, `stage`, `reason`, `duration_ms` |
+| `script` | `script`, `kind`, `outcome`, `reason`, `bytes`, `queued_ms`, `fetch_ms`, `waited_ms`, `ran_ms`, `event`, `held`: one page script's life, recorded when it is over (see Scripts) |
+| `lifecycle` | `event` (`DOMContentLoaded`, `load`), `held_by`, `held_by_count`: recorded as the event fires (see Scripts) |
 
 `location` is `null` or `{ "url", "line", "column" }` (1-based). `url` is the
 script's URL, or `inline#n` for the page's n-th `<script>` when it is inline,
@@ -120,8 +122,14 @@ trap):
   (`EngineFailure`, never by their text), have a message: `JS engine panic`
   or `import map rejected`, with `value` `engine`.
 - `stack` is the page's frames, innermost first, one `    at url:line:col`
-  line each, capped at 4096 characters: no function names (a page can name a
-  function anything), and only frames in a script the engine evaluated
+  line each, capped at 4096 characters: no function names unless error text
+  is kept (a page can name a function anything; with it a named function's
+  frame is `    at name (url:line:col)`, the name capped at 128 characters,
+  and top-level or unnamed code stays `    at url:line:col`; a computed
+  name holding a control character or a parenthesis is dropped, so it
+  cannot forge a frame line). A call frame
+  is placed at its `(` (Boa's place; Chrome's is the callee's name). Only
+  frames in a script the engine evaluated
   (`inline#n`, or the script's URL as in Privacy). A frame that cannot be
   read (no position, an unknown script, a native or `eval` frame) is
   dropped, never copied. An error object's frames are the engine's record of
@@ -132,7 +140,10 @@ With `InspectorConfig::keep_error_text` (`parity-capture
 --event-log-error-text`) `message` is the page's text, verbatim, capped at
 1024 characters: an error's `message`, a thrown string, `Symbol(x)`, a
 number. It carries whatever the page put in it (cookies, form values,
-tokens): never for a log that will be shared.
+tokens): never for a log that will be shared. Messages and function names
+follow this Inspector setting only: `HIWAVE_CONSOLE_LOG=1` keeps the
+runtime's text for the tracing log, and none of that text reaches the
+event log unless `keep_error_text` is on.
 
 `cause` of a `relayout` names why the view was laid out again, in the
 engine's words: `initial_load`, `stylesheet_loaded`, `image_loaded(count=N)`,
@@ -191,6 +202,54 @@ A previous page's live script requests are dropped when the new document is
 committed, so their `cancelled` failures come after the new page's
 `navigation_start` (and its document request), before its `navigation_commit`.
 If the new document cannot be fetched, the old page and its requests stay.
+
+### Scripts
+
+Every page `<script>` the load path handles, and every `<script src>` page
+script inserts, ends in exactly one `script` record: after it ran (and after
+its console lines and errors), when the engine gave up on it, or as
+`cancelled` when its document was left first (a navigation, a cancelled
+load, a closed view). A navigation away while the page's own scripts are
+still being fetched leaves those with no `script` record; their requests'
+`failure` records (`cancelled`) carry it. Lifecycle
+steps, timers and callbacks are not scripts here; their errors stay
+`script_error`s.
+
+| field | meaning |
+|---|---|
+| `script` | its URL (as Privacy reduces it), `inline#n`, or `unparseable#n` for a `src` that is not a URL (n: its place among the document's scripts, or an inserted script's node id; the text itself is never recorded) |
+| `kind` | `parser` (a parser-blocking classic script), `defer`, `async`, `module`, `inserted` |
+| `outcome` | `ran`; `threw` (its `script_error` is above it); `skipped`; `fetch_failed`; `over_budget` (not started: the script budget was already spent); `stopped` (started, and stopped by the script budget's deadline); `engine_failed`; `cancelled` (its document was left before it ended) |
+| `reason` | for every outcome but `ran` and `threw`, in the engine's words: `nomodule`, `too large to run inside the script budget`, `unparseable src`, `JS engine panicked earlier on this page`, `HTTP <status>`, `network` (the request's `failure` has the stage), `script budget`, `script budget spent before it started`, `JS engine panic`, `navigation or view closed` |
+| `bytes` | source bytes; 0 when nothing arrived |
+| `queued_ms` | `inserted` only: from the page inserting it to the engine taking it from the insertion queue, which starts its request. A large value means the page inserted it long before the engine next drained the queue |
+| `fetch_ms` | from its request starting to its body or failure arriving; `null` for an inline script |
+| `waited_ms` | from its body arriving to the engine starting it (or giving up on it): time spent behind other scripts, or waiting for a turn |
+| `ran_ms` | parse, compile and run, its microtasks included (Boa does not separate them) |
+| `event` | the event its element heard, or will hear: `load` or `error` (modules and inserted scripts; a parser classic script fires none). When the script budget is spent the event is owed to the next turn that has budget, ahead of any other script, and the record already names it |
+| `held` | the first lifecycle event that had not fired when it ended: `DOMContentLoaded` (it ended before that fired), `load` (it ended between the two), or `null` (after `load`, or `cancelled`). An order, not a cause: see below |
+
+The engine runs `async` page scripts after the deferred ones and before
+`DOMContentLoaded` (Chrome runs them as they arrive and does not hold
+`DOMContentLoaded` for them), so they read `held: DOMContentLoaded`.
+Inserted scripts never hold `DOMContentLoaded`, yet one that ends before it
+fired reads `held: DOMContentLoaded` too: `held` says when a script ended,
+not that the event waited for it. A `lifecycle` record marks each event as
+it fires; `load`'s `held_by` names the scripts that ended between the two
+(first 16, in the order they ended) and `held_by_count` how many there
+were. Same caveat: a script in `held_by` ended in that window, which is a
+lead, not proof it held `load`. On a yielding load (the app) `load` fires
+in a live turn once the inserted chain is idle, so there the scripts in
+`held_by` are the chain that held it. The engine knows which events have
+fired with nobody listening, so a panel attached after `DOMContentLoaded`
+still reads the later scripts right; `held_by` lists only the scripts that
+ended after it attached.
+
+Cost: with nobody listening, each script costs one atomic load plus the
+clock reads its times need (two per external page script, one when page
+script inserts a script, one when its body arrives). Listening, one record
+per script. The lifecycle flags cost one lock per navigation and per
+lifecycle event either way.
 
 ### Unsupported APIs
 

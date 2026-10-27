@@ -683,6 +683,14 @@ struct InsertedJob {
     /// Tripped on navigation or a cancelled load. The in-flight fetch
     /// selects on it and drops the socket.
     cancel: Arc<FetchCancel>,
+    /// From the page inserting it to the engine taking it from the queue.
+    queued: std::time::Duration,
+    /// When the engine took it (its request started then), and when its
+    /// body or failure was stored.
+    requested_at: std::time::Instant,
+    arrived_at: Option<std::time::Instant>,
+    /// Records its `cancelled` end when the job is dropped unrun.
+    inspector: Arc<Inspector>,
 }
 
 /// How many inserted-script fetches may be on the wire at once. Script
@@ -744,6 +752,7 @@ fn cancel_inserted_jobs(board: &mut InsertedBoard) {
         if let Some(guard) = job.guard {
             guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
         }
+        job.inspector.script_cancelled(&job.url, "inserted", Some(job.queued));
     }
     board.owed.clear();
     board.notify.notify_waiters();
@@ -1050,9 +1059,15 @@ fn enqueue_inserted(
         return true;
     }
     let mut started = Vec::new();
+    let taken_at = std::time::Instant::now();
     {
         let mut board = lock_board(&scripts.board);
-        for rustkit_bindings::InsertedScript { node, url, in_order } in queued {
+        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by, inserted_at } in queued {
+            let queued = taken_at.saturating_duration_since(inserted_at);
+            if let Some(at) = inserted_by {
+                // The name `run_inserted` evaluates it under.
+                inspector.note_inserted(&format!("inserted#{node}"), &at.path, at.line, at.column);
+            }
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
@@ -1071,6 +1086,10 @@ fn enqueue_inserted(
                         body: None,
                         guard,
                         cancel: Arc::clone(&cancel),
+                        queued,
+                        requested_at: taken_at,
+                        arrived_at: None,
+                        inspector: Arc::clone(inspector),
                     });
                     started.push(FetchJob {
                         loader: Arc::clone(loader),
@@ -1087,13 +1106,19 @@ fn enqueue_inserted(
                     board.jobs.push(InsertedJob {
                         id,
                         node,
-                        url,
+                        // Not the text itself: what does not parse cannot be
+                        // reduced to origin and path for the log.
+                        url: format!("unparseable#{node}"),
                         nav_id,
                         in_order,
                         ready_seq,
                         body: Some(FetchedInserted::Skipped("unparseable src")),
                         guard: None,
                         cancel: FetchCancel::new(),
+                        queued,
+                        requested_at: taken_at,
+                        arrived_at: Some(taken_at),
+                        inspector: Arc::clone(inspector),
                     });
                 }
             }
@@ -1195,6 +1220,7 @@ fn store_inserted_result(board: &Mutex<InsertedBoard>, job_id: u64, nav_id: u64,
         let job = &mut board.jobs[index];
         job.ready_seq = ready_seq;
         job.body = Some(fetched);
+        job.arrived_at = Some(std::time::Instant::now());
     }
     let notify = Arc::clone(&board.notify);
     drop(board);
@@ -1310,6 +1336,11 @@ fn run_inserted(
         return false;
     };
     finish_inserted_guard(job.guard.take(), &fetched);
+    let taken_at = std::time::Instant::now();
+    let fetched_in = job.arrived_at.map(|at| at.saturating_duration_since(job.requested_at));
+    let waited = job.arrived_at.map(|at| taken_at.saturating_duration_since(at));
+    let unrequested = matches!(fetched, FetchedInserted::Skipped(_));
+    let mut began = false;
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
         FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
@@ -1341,6 +1372,7 @@ fn run_inserted(
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
             crate::console_log::alias(&name, &record.source);
+            began = true;
             let started = std::time::Instant::now();
             let (ran, stopped) = super::with_script_js(bindings, || {
                 let _ = bindings.set_current_script(Some(job.node));
@@ -1380,18 +1412,35 @@ fn run_inserted(
     let index = out.records.len();
     out.records.push(record);
     out.requests += 1;
+    if !poisoned {
+        if let Some(event) = event {
+            // A spent budget (the script itself may have spent it) owes the
+            // event to the next turn that has some, ahead of any other script.
+            if super::script_js_exhausted() {
+                scripts.owe(OwedEvent { node: job.node, event, source, record: None });
+            } else {
+                fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
+            }
+        }
+    }
+    // After its event: a listener the budget stopped is this script's stop.
+    if let Some(record) = out.records.get(index) {
+        inspector.script_ended(crate::inspector::ScriptEnd {
+            source: &record.source,
+            kind: "inserted",
+            outcome: &record.outcome,
+            started: began,
+            bytes: record.bytes,
+            queued: Some(job.queued),
+            fetch: if unrequested { None } else { fetched_in },
+            waited,
+            ran_ms: record.elapsed_ms,
+            event,
+        });
+    }
     if poisoned {
         out.poisoned = true;
         return true;
-    }
-    if let Some(event) = event {
-        // A spent budget (the script itself may have spent it) owes the
-        // event to the next turn that has some, ahead of any other script.
-        if super::script_js_exhausted() {
-            scripts.owe(OwedEvent { node: job.node, event, source, record: None });
-        } else {
-            fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
-        }
     }
     false
 }

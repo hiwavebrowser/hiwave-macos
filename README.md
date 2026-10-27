@@ -46,9 +46,10 @@ with pixel-level parity capture against Chrome.
 
 | | |
 |---|---|
-| Build | **passing**. CI compiles every workspace test (`cargo test --workspace --no-run`) and runs each crate's unit suite on every PR. |
-| Real-site parity | **19 / 60** on the top-20 live-site board against pinned Chrome for Testing 148, up from 10 a week earlier (`scripts/realsite_board.py`, `trench/realsite/trend.csv` on the `atlas/trench-realsite` branch, 2026-09-26) |
-| Fixed-page parity | **26 / 26 cases, 1.25% average diff** from Chrome, down from 2.48% on 2026-09-18 (`scripts/parity_test.py`, 2026-09-26) |
+| Release | **V1.4.0** (2026-10-24), the weekly promotion of `develop` to `master` |
+| Build | **passing**. CI compiles every workspace test (`cargo test --workspace --no-run`) and runs each crate's unit suite on every PR; develop runs a post-merge compile check. |
+| Real-site parity | **28 / 60** on the top-20 live-site board against pinned Chrome for Testing 148, **33 / 78** on the 26-site list (quiet board at develop `90d38b2b`, 2026-10-22; `scripts/realsite_board.py`) |
+| Fixed-page parity | **26 / 26 cases, 1.1% average diff** from Chrome (`scripts/parity_test.py`, every receipt on 2026-10-23) |
 | WPT Tier-1 conformance | 6 / 12 scored at last run (2026-07-31); see `trench/wpt/last-run.json` |
 
 The fixed-page campaign is saturated: every case passes. It guards against
@@ -56,28 +57,60 @@ regressions. **The real-site board is the number to watch:** it loads live
 sites and scores each one on *loads*, *readable* and *looks right* against the
 same Chrome.
 
+### Where macOS is (V1.4.0)
+
+- **Pages run on their own thread.** Page script, style, layout and loading
+  run on a content thread (on by default; `HIWAVE_CONTENT_THREAD=0` turns it
+  off). With it on, the window never stalled waiting on the page in 5 of 5
+  loads each of yahoo, cnn and lyft, and the address bar answers in about
+  50 ms while a page loads. Stop works in under 100 ms.
+- **HiWave Inspector.** An Elements and Console panel for RustKit pages, with
+  JavaScript error stacks (frames, script URL, line, column, and which script
+  inserted the failing one). It shows only the *shape* of page data
+  (`<string len=13>`, `<text len=N>`, URLs without query or fragment), not
+  the page's own text, by default. Known gap: with `HIWAVE_CONSOLE_LOG=1`,
+  console text still reaches the Inspector until #791 lands.
+- **CSS:** `:has()`, `@supports` conditions, `color-mix()`,
+  `-webkit-line-clamp`, shadow DOM styles (`:host`, `::slotted`, `:defined`),
+  `font-size: 0`, `box-sizing: inherit`, percentage `auto-fit` tracks, and an
+  invalid shorthand is dropped whole, as Chrome does.
+- **Input:** clicks reach transformed and nested-fixed consent dialogs
+  (OneTrust-style banners); typing in the address bar replaces the URL;
+  positioned form fields are drawn and clicked where they belong.
+- **Loading:** `window load` waits for scripts the page inserted while
+  loading, as the HTML standard says (cnn now shows its consent dialog, as
+  Chrome does); a 204 response leaves the page as it was; images decode on a
+  two-thread pool; `data:` fonts with a `#fragment` load.
+
 ### What landed recently
 
 See the [merged pull requests](https://github.com/hiwavebrowser/hiwave-macos/pulls?q=is%3Apr+is%3Amerged+base%3Adevelop)
-into `develop`.
+into `develop`, and [CHANGELOG.md](CHANGELOG.md).
 
 ### Known gaps — stated, not hidden
 
-- **JavaScript is partial.** Page scripts run in Boa with a limited set of DOM
-  APIs, so JS-rendered sites (youtube, instagram, bing) show their server HTML
-  only. Custom elements and Shadow DOM aren't implemented yet.
-- **No live-site gate in CI.** Unit suites gate every PR, but the real-site
-  board runs on a dedicated Mac every 3 hours, not in CI.
-- **Animations are parsed, not executed** — transition/animation properties
-  compute and survive the cascade; nothing ticks yet
+- **JavaScript is partial.** Page scripts run in Boa with a growing but
+  incomplete set of web APIs. Heavy JS-rendered sites (youtube, instagram)
+  still show little more than their server HTML; yahoo's below-the-fold feed
+  stays empty.
+- **Layout is not re-run when a script measures what it just changed** inside
+  one task, so "hide until it fits" loops can run long. This blocks
+  `display: contents`, which is still dropped.
+- **Not yet supported:** `@container` queries, `clip-path`, `filter`, CSS
+  `fill`/`stroke` on inline SVG, list markers, 3D transforms (all in review or
+  queued).
+- **The browser UI is still drawn by the system WebView (WRY).** Moving it
+  onto RustKit is the next major milestone.
+- **No live-site gate in CI.** Unit suites gate every PR; the real-site board
+  runs on a dedicated Mac.
+- **Animations are parsed, not executed.**
+- **Text metrics** remain the largest single source of parity diff vs Chrome.
 - **Two WPT cases render blank** (`empty-span-scroll`,
   `align-items-baseline-overflow-non-visible`) — recorded as render refusals
-  rather than scored, because two blank frames "match" each other for the
-  worst possible reason
-- **Text metrics** remain the largest single source of parity diff vs Chrome
+  rather than scored.
 - **No build/tests feed to the umbrella yet** — this repo's `metrics-history`
   branch carries parity data only, so the umbrella's macOS *build* badge
-  honestly reads "unknown" until we publish the Windows/Linux-shaped feed
+  reads "unknown".
 
 ### How these numbers are produced
 

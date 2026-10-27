@@ -363,6 +363,10 @@ pub enum IpcMessage {
     InspectorSelectElement {
         path: String,
     },
+    /// The children of a node the tree left out (from inspector, RustKit content)
+    InspectorExpandNode {
+        path: String,
+    },
     /// Close inspector (from inspector close button)
     InspectorClose,
 }
