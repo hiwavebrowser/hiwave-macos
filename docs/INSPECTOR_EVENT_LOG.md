@@ -85,6 +85,13 @@ other object a tag (`[object Object]`, `[object Array]`,
 they are, `Symbol(x)`, an error as `Name: message` from its own data
 properties, objects as the same tags, and URLs in it scrubbed (see Privacy).
 
+While somebody listens, a `console` event is recorded when the call is made,
+so a reader on another thread (the devtools panel) sees the console of a
+script that is still running. That is decided per call, at most 200 calls a
+second; past that, and with nobody listening, calls wait for the script's
+end (the `HIWAVE_CONSOLE_LOG` mirror alone included). Either way each call is
+recorded once, in the order it was made.
+
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
 `event:<mouse event>`, `timers`, `network`). An error thrown by a listener
@@ -322,7 +329,8 @@ The log is meant to be pasted into public issues and PRs.
   `toJSON`, getters, `Symbol.toPrimitive`) between a page value and a
   record.
 - Every queue is bounded: console lines between flushes (1024, oldest
-  dropped), error reports (256), listener error texts for the script log
+  dropped; a `warn` line `K console calls dropped (more than 1024 held)`
+  comes ahead of the ones kept), error reports (256), listener error texts for the script log
   (1024), unsupported members (64), unhandled rejections (256), the engine's
   own promises (1024), known script paths (4096), and the ring buffer.
 - Console messages carry no page text by default: each argument's type, and
