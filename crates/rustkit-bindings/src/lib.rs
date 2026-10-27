@@ -112,7 +112,9 @@ mod web_crypto;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, GeometrySource, HitTester, SelectorMatchFn};
+pub use dom::{
+    BoxGeometry, ControlWrites, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn,
+};
 pub mod events;
 
 pub use events::{
@@ -713,6 +715,44 @@ pub enum DomDirty {
     Style,
 }
 
+/// The pending `DomDirty` bucket, and whether script has written to the
+/// DOM since the engine last published a layout. The bucket is the
+/// engine's to take when script settles; the second is what a geometry
+/// read inside the task asks, to lay the page out first (forced layout).
+#[derive(Debug, Default)]
+pub(crate) struct DirtyMark {
+    bucket: Cell<DomDirty>,
+    since_layout: Cell<bool>,
+}
+
+impl DirtyMark {
+    /// A script write that invalidated `bucket`.
+    pub(crate) fn mark(&self, bucket: DomDirty) {
+        if bucket != DomDirty::Clean {
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.since_layout.set(true);
+        }
+    }
+
+    pub(crate) fn get(&self) -> DomDirty {
+        self.bucket.get()
+    }
+
+    fn take(&self) -> DomDirty {
+        self.bucket.replace(DomDirty::Clean)
+    }
+
+    /// Whether the published layout predates a script write.
+    pub(crate) fn written_since_layout(&self) -> bool {
+        self.since_layout.get()
+    }
+
+    /// A layout of the DOM as it is now was published.
+    pub(crate) fn laid_out(&self) {
+        self.since_layout.set(false);
+    }
+}
+
 /// Which kind of script DOM write dirtied the page. Diagnostics only: the
 /// engine logs it as the cause of the relayout that follows, and nothing
 /// decides on it.
@@ -858,7 +898,7 @@ pub struct DomBindings {
     _ipc_queue: RefCell<Vec<IpcMessage>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
-    dirty: Rc<Cell<DomDirty>>,
+    dirty: Rc<DirtyMark>,
     /// What the writes behind `dirty` were (see `ScriptMutations`).
     mutations: Rc<RefCell<ScriptMutations>>,
     /// The same writes per node (see `MutationLog`).
@@ -882,7 +922,7 @@ impl DomBindings {
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
-        let dirty = Rc::new(Cell::new(DomDirty::Clean));
+        let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
         let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
         dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
@@ -940,13 +980,15 @@ impl DomBindings {
     /// Record that script invalidated `bucket`. Marks combine: the pending
     /// bucket only grows until `take_dirty`.
     pub fn mark_dirty(&self, bucket: DomDirty) {
-        self.dirty.set(self.dirty.get().max(bucket));
+        // The embedder's marks are for its own flush, not script writes:
+        // they do not make a geometry read lay the page out.
+        self.dirty.bucket.set(self.dirty.get().max(bucket));
     }
 
     /// The invalidation pending since the last call, which is reset to
     /// `Clean`. The engine calls this once when script settles.
     pub fn take_dirty(&self) -> DomDirty {
-        self.dirty.replace(DomDirty::Clean)
+        self.dirty.take()
     }
 
     /// The writes that dirtied the page since the last call (what, not how
@@ -1532,6 +1574,7 @@ impl DomBindings {
     /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
     /// after a layout; script reads answer from the last one published.
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
+        self.dirty.laid_out();
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
         host.set_hit_tester(None);
@@ -1549,10 +1592,25 @@ impl DomBindings {
     /// script read of geometry or computed style after this call, once. The
     /// maps of the previous layout are dropped here, so no read sees them.
     pub fn set_geometry_source(&self, source: GeometrySource) {
+        // A layout is built from the live DOM, so it has every write so far.
+        self.dirty.laid_out();
         let mut host = self.dom_host.borrow_mut();
         host.geometry.clear();
         host.computed.clear();
         host.geometry_source = Some(source);
+    }
+
+    /// How a read of geometry after a script write in the same task lays
+    /// the page out (forced layout). The engine installs one with each
+    /// layout it publishes; a new document drops it. Without one, such a
+    /// read answers from the last layout.
+    pub fn set_forced_layout(&self, forced: Option<ForcedLayout>) {
+        self.dom_host.borrow_mut().forced_layout = forced;
+    }
+
+    /// Forced layouts since the last call, which resets the count.
+    pub fn take_forced_layouts(&self) -> u64 {
+        std::mem::take(&mut self.dom_host.borrow_mut().forced_layouts)
     }
 
     /// How many times a source from `set_geometry_source` was built.
@@ -1607,7 +1665,8 @@ impl DomBindings {
         // Update state. Marks against the previous document are moot: the
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
-        self.dirty.set(DomDirty::Clean);
+        self.dirty.take();
+        self.dirty.laid_out();
         self.mutations.take();
         self.mutation_log.take();
 

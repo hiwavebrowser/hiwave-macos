@@ -24,7 +24,7 @@
 use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -66,6 +66,28 @@ pub type GeometrySource =
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
 
+/// Control writes script made that the engine has not taken yet. A forced
+/// layout copies them into the engine's edit state before it builds, and
+/// drains what it applied (`ForcedLayout`).
+#[derive(Default)]
+pub struct ControlWrites {
+    pub values: Vec<(usize, String)>,
+    pub checked: Vec<(usize, Option<bool>)>,
+}
+
+/// A layout of the DOM as it is now: what a forced layout publishes.
+pub struct ForcedGeometry {
+    pub geometry: HashMap<usize, BoxGeometry>,
+    pub computed: HashMap<usize, String>,
+    pub hit_tester: Option<HitTester>,
+}
+
+/// Lays the page out again for a read of geometry or computed style that
+/// follows a script write in the same task (forced layout,
+/// `DomBindings::set_forced_layout`). `None` when it cannot now: the read
+/// answers from the last layout published.
+pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
+
 /// The document the host functions read, and its generation.
 #[derive(Default)]
 pub(crate) struct DomHost {
@@ -84,6 +106,11 @@ pub(crate) struct DomHost {
     pub(crate) geometry_source: Option<GeometrySource>,
     /// How many times a pending source was built (`DomBindings::geometry_builds`).
     pub(crate) geometry_builds: u64,
+    /// Lays out the document the engine last published a layout of.
+    pub(crate) forced_layout: Option<ForcedLayout>,
+    /// Forced layouts since the engine last took the count
+    /// (`DomBindings::take_forced_layouts`).
+    pub(crate) forced_layouts: u64,
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
@@ -135,6 +162,43 @@ impl DomHost {
         }
     }
 
+    /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
+    /// when script wrote to the DOM since the last layout was published, the
+    /// page is laid out again first (forced layout), as in a browser.
+    pub(crate) fn ensure_fresh_geometry(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        let forced = match dirty.written_since_layout() {
+            true => host.borrow().forced_layout.clone(),
+            false => None,
+        };
+        if let Some(forced) = forced {
+            // Outside the host borrow: the build does not read the host, and
+            // runs no script.
+            let mut writes = {
+                let mut h = host.borrow_mut();
+                ControlWrites {
+                    values: std::mem::take(&mut h.value_writes),
+                    checked: std::mem::take(&mut h.checked_writes),
+                }
+            };
+            let laid = forced(&mut writes);
+            let mut h = host.borrow_mut();
+            // What the layout did not apply stays for the engine's flush.
+            writes.values.append(&mut h.value_writes);
+            h.value_writes = writes.values;
+            writes.checked.append(&mut h.checked_writes);
+            h.checked_writes = writes.checked;
+            if let Some(laid) = laid {
+                h.geometry = laid.geometry;
+                h.computed = laid.computed;
+                h.geometry_source = None;
+                h.hit_tester = laid.hit_tester;
+                h.forced_layouts += 1;
+                dirty.laid_out();
+            }
+        }
+        host.borrow_mut().ensure_geometry();
+    }
+
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {
         self.scroll = offset;
     }
@@ -150,6 +214,8 @@ impl DomHost {
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
+        // The engine installs one for the new document with its first layout.
+        self.forced_layout = None;
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
@@ -1128,7 +1194,7 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
 pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
-    dirty: &Rc<Cell<DomDirty>>,
+    dirty: &Rc<crate::DirtyMark>,
     mutations: &Rc<RefCell<ScriptMutations>>,
     log: &Rc<RefCell<MutationLog>>,
 ) -> Result<(), JsError> {
@@ -1274,12 +1340,13 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
             if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
-                h.borrow_mut().ensure_geometry();
+                DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
@@ -1313,12 +1380,13 @@ pub(crate) fn install(
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_hit",
         2,
         Box::new(move |args| {
-            let mut host = h.borrow_mut();
-            host.ensure_geometry();
+            DomHost::ensure_fresh_geometry(&h, &d);
+            let host = h.borrow();
             if host.geometry.is_empty() {
                 return JsValue::Null;
             }
@@ -1374,7 +1442,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                d.set(d.get().max(DomDirty::Style));
+                d.mark(DomDirty::Style);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1402,7 +1470,7 @@ pub(crate) fn install(
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                d.set(d.get().max(bucket));
+                d.mark(bucket);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1434,7 +1502,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             result
         }),
     )?;
@@ -1454,7 +1522,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             JsValue::Null
         }),
     )?;
@@ -1533,7 +1601,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             node.set_adopted_styles(texts);
-            d.set(d.get().max(DomDirty::Style));
+            d.mark(DomDirty::Style);
             JsValue::Null
         }),
     )?;
