@@ -294,7 +294,7 @@ pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
     connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
-    PageHandle, PageInput,
+    PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
 pub use content_thread::{
@@ -330,6 +330,10 @@ pub use devtools::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
+mod devtools_service;
+pub use devtools_service::{
+    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+};
 #[cfg(test)]
 mod consent_click_tests;
 use presenter::Presenter;
@@ -1158,7 +1162,11 @@ pub struct EngineConfig {
     /// the page once what it asked for has arrived.
     pub post_load_requests_live: bool,
     /// Whether views keep an Inspector buffer, and how URLs in its events
-    /// are shown (see `inspector`). Off by default; a sink attached with
+    /// are shown (see `inspector`). By default a view records nothing until
+    /// a panel attaches, then keeps a
+    /// [`TAB_RING_CAPACITY`](inspector::TAB_RING_CAPACITY) ring
+    /// ([`InspectorConfig::tab`]; `HIWAVE_DEVTOOLS_RING=1` keeps it from
+    /// the start); a sink attached with
     /// [`Engine::add_inspector_sink`] turns recording on for its view.
     pub inspector: InspectorConfig,
 }
@@ -1182,7 +1190,7 @@ impl Default for EngineConfig {
             live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
             post_load_requests_live: false,
-            inspector: InspectorConfig::default(),
+            inspector: InspectorConfig::tab(),
         }
     }
 }
@@ -5444,9 +5452,13 @@ impl Engine {
                                 "no network policy for this page".into(),
                             ))),
                             Some(policy) => {
-                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
                                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
                                 inspector::answer_module(guard, &fetched);
                                 match fetched {

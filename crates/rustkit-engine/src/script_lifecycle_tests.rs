@@ -174,7 +174,9 @@ document.head.appendChild(s);
 #[test]
 fn with_nobody_listening_no_script_record_is_built() {
     let server = serve(vec![Route::html("/", "<html><body><script>var a = 1;</script></body></html>")]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    // No ring (the tab ring on would be a listener).
+    let config = EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
