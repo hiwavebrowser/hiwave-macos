@@ -1599,6 +1599,7 @@ impl DomBindings {
         host.geometry.clear();
         host.computed.clear();
         host.geometry_source = Some(source);
+        host.renew_forced_budget();
     }
 
     /// How a read of geometry after a script write in the same task lays
@@ -1609,9 +1610,10 @@ impl DomBindings {
         self.dom_host.borrow_mut().forced_layout = forced;
     }
 
-    /// Forced layouts since the last call, which resets the count.
+    /// Forced layouts since the last call, which resets the count and the
+    /// per-task budget (the engine calls this when a script task settles).
     pub fn take_forced_layouts(&self) -> u64 {
-        std::mem::take(&mut self.dom_host.borrow_mut().forced_layouts)
+        self.dom_host.borrow_mut().take_forced_layouts()
     }
 
     /// How many times a source from `set_geometry_source` was built.

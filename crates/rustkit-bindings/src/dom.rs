@@ -77,8 +77,9 @@ pub struct ControlWrites {
 
 /// A layout of the DOM as it is now: what a forced layout publishes.
 pub struct ForcedGeometry {
-    pub geometry: HashMap<usize, BoxGeometry>,
-    pub computed: HashMap<usize, String>,
+    /// Builds the geometry and computed-style maps of this layout, on the
+    /// first read that needs them (as `DomBindings::set_geometry_source`).
+    pub source: GeometrySource,
     pub hit_tester: Option<HitTester>,
     /// The furthest the view can scroll over this layout, as
     /// `DomBindings::set_scroll_state` takes it.
@@ -90,6 +91,13 @@ pub struct ForcedGeometry {
 /// `DomBindings::set_forced_layout`). `None` when it cannot now: the read
 /// answers from the last layout published.
 pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
+
+/// How many forced layouts one script task gets, and how long they may take
+/// together, before its reads answer from the last layout (Prometheus,
+/// #812 review): a write-read loop that never settles cannot hold the page
+/// thread forever. cnn's header loop needs 8.
+pub(crate) const FORCED_LAYOUTS_PER_TASK: u64 = 256;
+pub(crate) const FORCED_MS_PER_TASK: f64 = 1000.0;
 
 /// The document the host functions read, and its generation.
 #[derive(Default)]
@@ -114,6 +122,13 @@ pub(crate) struct DomHost {
     /// Forced layouts since the engine last took the count
     /// (`DomBindings::take_forced_layouts`).
     pub(crate) forced_layouts: u64,
+    /// The forced layouts and their time (ms) against this task's budget,
+    /// since the engine last published a layout or took the count.
+    forced_in_task: u64,
+    forced_ms: f64,
+    /// Whether a read since the count was taken answered from the last
+    /// layout instead (budget spent, or the build state busy): logged once.
+    forced_declined: bool,
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
@@ -180,44 +195,88 @@ impl DomHost {
     /// need the layout current but not the geometry maps (the scroll
     /// maximum).
     pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark) {
-        let forced = match dirty.written_since_layout() {
-            true => host.borrow().forced_layout.clone(),
-            false => None,
-        };
-        if let Some(forced) = forced {
-            // Outside the host borrow: the build does not read the host, and
-            // runs no script.
-            let mut writes = {
-                let mut h = host.borrow_mut();
-                ControlWrites {
-                    values: std::mem::take(&mut h.value_writes),
-                    checked: std::mem::take(&mut h.checked_writes),
-                }
-            };
-            let laid = forced(&mut writes);
-            let mut h = host.borrow_mut();
-            // What the layout did not apply stays for the engine's flush.
-            writes.values.append(&mut h.value_writes);
-            h.value_writes = writes.values;
-            writes.checked.append(&mut h.checked_writes);
-            h.checked_writes = writes.checked;
-            if let Some(laid) = laid {
-                h.geometry = laid.geometry;
-                h.computed = laid.computed;
-                h.geometry_source = None;
-                h.hit_tester = laid.hit_tester;
-                // The document may have grown or shrunk: scrollTo clamps to
-                // the new end, and an offset past it comes back to it.
-                let scroll = h.scroll_state.clone();
-                let mut s = scroll.borrow_mut();
-                (s.max_x, s.max_y) = laid.max_scroll;
-                s.x = s.x.min(s.max_x.max(0.0));
-                s.y = s.y.min(s.max_y.max(0.0));
-                h.scroll = (s.x, s.y);
-                h.forced_layouts += 1;
-                dirty.laid_out();
-            }
+        if !dirty.written_since_layout() {
+            return;
         }
+        let forced = {
+            let mut h = host.borrow_mut();
+            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK || h.forced_ms >= FORCED_MS_PER_TASK;
+            match (h.forced_layout.clone(), spent) {
+                (Some(_), true) => {
+                    h.note_forced_decline("budget spent");
+                    None
+                }
+                (forced, _) => forced,
+            }
+        };
+        let Some(forced) = forced else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        // Outside the host borrow: the build does not read the host, and
+        // runs no script.
+        let mut writes = {
+            let mut h = host.borrow_mut();
+            ControlWrites {
+                values: std::mem::take(&mut h.value_writes),
+                checked: std::mem::take(&mut h.checked_writes),
+            }
+        };
+        let laid = forced(&mut writes);
+        let mut h = host.borrow_mut();
+        h.forced_ms += started.elapsed().as_secs_f64() * 1000.0;
+        // What the layout did not apply stays for the engine's flush.
+        writes.values.append(&mut h.value_writes);
+        h.value_writes = writes.values;
+        writes.checked.append(&mut h.checked_writes);
+        h.checked_writes = writes.checked;
+        let Some(laid) = laid else {
+            h.note_forced_decline("build state in use");
+            return;
+        };
+        h.geometry.clear();
+        h.computed.clear();
+        h.geometry_source = Some(laid.source);
+        h.hit_tester = laid.hit_tester;
+        // The document may have grown or shrunk: scrollTo clamps to the new
+        // end, and an offset past it comes back to it.
+        let scroll = h.scroll_state.clone();
+        let mut s = scroll.borrow_mut();
+        (s.max_x, s.max_y) = laid.max_scroll;
+        s.x = s.x.min(s.max_x.max(0.0));
+        s.y = s.y.min(s.max_y.max(0.0));
+        h.scroll = (s.x, s.y);
+        h.forced_layouts += 1;
+        h.forced_in_task += 1;
+        dirty.laid_out();
+    }
+
+    /// A read that wanted a forced layout answers from the last layout:
+    /// one log line per script task (until `take_forced_layouts`).
+    fn note_forced_decline(&mut self, why: &'static str) {
+        if !std::mem::replace(&mut self.forced_declined, true) {
+            tracing::info!(
+                why,
+                forced_layouts = self.forced_in_task,
+                forced_ms = self.forced_ms,
+                "Forced layout declined; reads answer from the last layout"
+            );
+        }
+    }
+
+    /// A new budget for forced layouts: the engine took the task's count,
+    /// or published a layout of its own.
+    pub(crate) fn renew_forced_budget(&mut self) {
+        self.forced_in_task = 0;
+        self.forced_ms = 0.0;
+        self.forced_declined = false;
+    }
+
+    /// The forced layouts since the last call, which starts a new task's
+    /// count and budget.
+    pub(crate) fn take_forced_layouts(&mut self) -> u64 {
+        self.renew_forced_budget();
+        std::mem::take(&mut self.forced_layouts)
     }
 
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {

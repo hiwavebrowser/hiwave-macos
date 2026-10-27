@@ -152,6 +152,38 @@ fn script_scrolls_to_the_end_of_rows_it_appended_in_the_same_task() {
 }
 
 #[test]
+fn a_task_that_never_stops_writing_and_reading_runs_out_of_forced_layouts() {
+    // Prometheus (#812 review): a per-task budget (256 layouts or 1 s),
+    // then reads answer from the last forced layout. Each read here follows
+    // a write of width i+1, so the last answer is the number of forced
+    // layouts, whichever limit ran out first under the test's load.
+    let page = "<html><head><style>body{margin:0}</style></head><body>\
+        <div id=a style='width:1px;height:10px'></div></body></html>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 200 })
+        .expect("view");
+    engine.load_html(view, page).expect("load_html");
+    engine
+        .execute_script(
+            view,
+            "var a = document.getElementById('a'); var w = 0;\
+             for (var i = 0; i < 400; i++) { a.style.width = (i + 1) + 'px'; w = a.offsetWidth; }\
+             window.__last = w;",
+        )
+        .unwrap();
+    let forced = engine.relayout_stats(view).unwrap().forced_layouts;
+    assert!((1..=256).contains(&forced), "the budget stopped the forced layouts: {forced}");
+    assert_eq!(read(&mut engine, view, "__last"), forced.to_string());
+    // The next task has a new budget, and the relayout after this one laid
+    // the last write out.
+    engine
+        .execute_script(view, "a.style.width = '500px'; window.__next = a.offsetWidth;")
+        .unwrap();
+    assert_eq!(read(&mut engine, view, "__next"), "500");
+}
+
+#[test]
 fn a_forced_layout_after_a_resize_lays_out_in_the_new_viewport() {
     let page = "<html><head><style>body{margin:0}</style></head><body>\
         <div id=a style='width:50%;height:10px'></div></body></html>";

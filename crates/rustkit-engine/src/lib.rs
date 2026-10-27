@@ -18134,6 +18134,13 @@ impl Engine {
     /// The build goes through the shared `LayoutCtx`, never the engine, and
     /// nothing is painted: the engine's own relayout follows when script
     /// settles. `None` without a document or a viewport.
+    ///
+    /// What a forced build leaves behind: like any build it writes the
+    /// view's `rule_reads`, `html_clips`, the sheet cache and `RULE_INDEX`
+    /// for the DOM as it was at the read. Nothing reads them before the
+    /// end-of-task relayout, which rebuilds all of them from the DOM as
+    /// script left it; this relies on that relayout always following a
+    /// task that wrote. (Reusing the forced tree to skip it is a follow-up.)
     fn forced_layout_for(&self, id: EngineViewId) -> Option<rustkit_bindings::ForcedLayout> {
         let view = self.views.get(&id)?;
         let document = view.document.clone()?;
@@ -18165,8 +18172,9 @@ impl Engine {
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
-            // wrote: this build neither replays nor records.
-            let memo = STYLE_MEMO.with(|m| m.borrow_mut().take());
+            // wrote: this build neither replays nor records. The memo goes
+            // back when the guard drops, also if the build unwinds.
+            let memo_aside = StyleMemoAside::take();
             let built = lctx.lay_out_document(
                 layout_ctx::BuildView {
                     id,
@@ -18181,17 +18189,22 @@ impl Engine {
                 javascript_enabled,
                 bounds,
             );
-            STYLE_MEMO.with(|m| *m.borrow_mut() = memo);
+            drop(memo_aside);
             let root_element = document.document_element().map(|e| e.id.raw());
-            let (geometry, computed) = geometry_with_root(&built, root_element);
             // As the engine's relayout sets `max_scroll_offset`.
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
+            // The maps (with every element's computed style lines) are built
+            // on the first read that needs them, as `publish_geometry` does:
+            // a scrollTo after the write needs only `max_scroll`.
+            let snapshot_of = built.clone();
             Some(rustkit_bindings::ForcedGeometry {
-                geometry,
-                computed,
+                source: Box::new(move || {
+                    let _snapshot_time = time_stage(Stage::Snapshot);
+                    geometry_with_root(&snapshot_of, root_element)
+                }),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
                 max_scroll,
             })
@@ -36139,6 +36152,29 @@ thread_local! {
     /// Set by `StyleMemoScope` for the span of `load_subresources`.
     static STYLE_MEMO: std::cell::RefCell<Option<StyleMemo>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Holds the armed memo aside for one build that must neither replay nor
+/// record (a forced layout from script), and puts it back on drop, also
+/// when the build unwinds.
+struct StyleMemoAside(Option<StyleMemo>);
+
+impl StyleMemoAside {
+    fn take() -> Self {
+        Self(STYLE_MEMO.with(|m| m.borrow_mut().take()))
+    }
+}
+
+impl Drop for StyleMemoAside {
+    fn drop(&mut self) {
+        let memo = self.0.take();
+        // try_: a panic inside a memo borrow must not become a double panic.
+        STYLE_MEMO.with(|m| {
+            if let Ok(mut slot) = m.try_borrow_mut() {
+                *slot = memo;
+            }
+        });
+    }
 }
 
 /// Arms the memo for the builds inside one `load_subresources`: the first
