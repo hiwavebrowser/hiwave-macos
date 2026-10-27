@@ -313,6 +313,10 @@ pub struct ConsoleStacks {
 /// and a `console.error`'s stacks.
 pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
 
+/// Whether console calls reach the handler as they are made
+/// ([`JsRuntime::set_console_live`]).
+pub type ConsoleLive = Box<dyn Fn() -> bool + Send + Sync>;
+
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no
 /// handler. By default it holds no text the page chose (see `diag`): the
@@ -472,6 +476,9 @@ pub struct JsRuntime {
     config: JsRuntimeConfig,
     console_handler: Option<Arc<ConsoleHandler>>,
     console_shape_handler: Option<Arc<ConsoleHandler>>,
+    /// [`set_console_live`](Self::set_console_live)'s predicate, kept so the
+    /// live delivery is rebuilt whenever a handler is set.
+    console_live: Option<Arc<ConsoleLive>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
@@ -539,6 +546,7 @@ impl JsRuntime {
             config,
             console_handler: None,
             console_shape_handler: None,
+            console_live: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
@@ -602,6 +610,7 @@ impl JsRuntime {
         self.console_handler = Some(Arc::new(handler));
         #[cfg(feature = "boa")]
         self.diag.console_capturing.set(true);
+        self.rebuild_console_live();
     }
 
     /// Also hand each console call to `handler` as its shape line: each
@@ -614,6 +623,50 @@ impl JsRuntime {
         self.console_shape_handler = Some(Arc::new(handler));
         #[cfg(feature = "boa")]
         self.diag.console_shapes.set(true);
+        self.rebuild_console_live();
+    }
+
+    /// Hand each console call to the handlers as it is made, while `live`
+    /// says so (asked once per call), instead of at the next flush: an
+    /// embedder whose reader must see the console of a script that is
+    /// still running (T6d). Calls held from before go first, so each call
+    /// is handed over once and in order. Past 200 hand-overs in one second
+    /// the calls are held as before (a hand-over also carries what was
+    /// held, so this caps hand-overs, not calls), and a line saying how
+    /// many were dropped comes ahead of the next ones handed over. Calls
+    /// go to the handlers set at the time of the call, whichever order
+    /// they were set in. `None`: flushes only.
+    pub fn set_console_live(&mut self, live: Option<ConsoleLive>) {
+        self.console_live = live.map(Arc::new);
+        self.rebuild_console_live();
+    }
+
+    fn rebuild_console_live(&mut self) {
+        #[cfg(feature = "boa")]
+        {
+            let delivery = self.console_live.clone().zip(self.console_handler.clone()).map(|(on, handler)| {
+                diag::LiveConsole { on, handler, shapes: self.console_shape_handler.clone() }
+            });
+            *self.diag.console_live.borrow_mut() = delivery.map(std::rc::Rc::new);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = &self.console_live;
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter`, which any thread may read: past the live rate cap a
+    /// running script's calls wait for its end, and a script that hangs
+    /// after a hot loop never gets there (T6d review). `None`: not kept.
+    pub fn set_console_held_counter(&mut self, counter: Option<Arc<std::sync::atomic::AtomicUsize>>) {
+        #[cfg(feature = "boa")]
+        {
+            if let Some(counter) = &counter {
+                counter.store(self.diag.console_held_now(), std::sync::atomic::Ordering::Relaxed);
+            }
+            *self.diag.console_held.borrow_mut() = counter;
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = counter;
     }
 
     /// Hand the handler each console argument's type, and a string's length,
@@ -1077,14 +1130,8 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
-            let shapes = self.console_shape_handler.clone();
-            let logs = self.diag.take_console();
-            for (level, msg, shape, at, stack) in logs {
-                handler(level, &msg, at.as_ref(), &stack);
-                if let (Some(shapes), Some(shape)) = (&shapes, shape) {
-                    shapes(level, &shape, at.as_ref(), &stack);
-                }
-            }
+            let (dropped, logs, capped) = self.diag.take_console_counted();
+            diag::deliver_console(&handler, self.console_shape_handler.as_ref(), dropped, logs, capped);
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1722,6 +1769,141 @@ mod tests {
         assert_eq!(logs2[2], ("Error".to_string(), "oops".to_string()));
     }
 
+    /// When each console call reached the handler, and its line.
+    fn timed_handler(runtime: &mut JsRuntime) -> Arc<Mutex<Vec<(std::time::Instant, String)>>> {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            sink.lock().unwrap().push((std::time::Instant::now(), msg.to_string()));
+        }));
+        got
+    }
+
+    const SPIN_300_MS: &str = "console.log('first'); \
+        const t = Date.now(); while (Date.now() - t < 300) {} \
+        console.log('second');";
+
+    #[test]
+    fn a_live_console_call_reaches_the_handler_while_the_script_runs() {
+        // T6d: the calls were held until the script ended, so a panel saw
+        // nothing of a long script's console until it was over.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn with_live_off_the_calls_still_wait_for_the_flush() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| false)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        // Handed over live, 'first' would come a whole spin (300 ms) early.
+        assert!(got[1].0 - got[0].0 < std::time::Duration::from_millis(250), "not handed over together");
+    }
+
+    #[test]
+    fn live_calls_go_to_the_handler_set_last_whatever_the_order() {
+        // #810 R1 nit 1: the live delivery took the handlers set when
+        // `set_console_live` ran, so a handler set after it got only the
+        // flushed calls.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let first = timed_handler(&mut runtime);
+        let got = timed_handler(&mut runtime);
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        assert!(first.lock().unwrap().is_empty(), "a replaced handler got calls");
+        let got = got.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn calls_held_past_the_live_cap_are_counted_while_the_script_hangs() {
+        // #810 review: a hot loop past the cap, then a hang. The held calls
+        // wait for the script's end, and nothing outside the page could see
+        // that any were waiting.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.set_console_held_counter(Some(held.clone()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (held, got, done) = (held.clone(), got.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut last = None;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Count, delivered, count again: a flush landing between
+                    // the reads changes the count, and the pair is skipped.
+                    let n = held.load(std::sync::atomic::Ordering::SeqCst);
+                    let delivered = got.lock().unwrap().len();
+                    if n > 0 && held.load(std::sync::atomic::Ordering::SeqCst) == n {
+                        last = Some((n, delivered));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                last
+            })
+        };
+        runtime
+            .evaluate_script(
+                "for (let i = 0; i < 300; i++) console.log(i); \
+                 const t = Date.now(); while (Date.now() - t < 500) {}",
+            )
+            .unwrap();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (n, delivered) = reader.join().unwrap().expect("no held call was ever counted");
+        assert_eq!(n + delivered, 300, "held {n} + delivered {delivered}");
+        assert_eq!(held.load(std::sync::atomic::Ordering::Relaxed), 0, "the flush left a count");
+        assert_eq!(got.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn a_reader_arriving_mid_script_gets_each_call_once_in_order() {
+        // T6 R1 condition 4: decided per call. Calls held before the reader
+        // came go first, and the flush at the end repeats none of them.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = asked.clone();
+        // Off for the first two calls, on from the third.
+        runtime.set_console_live(Some(Box::new(move || n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2)));
+        runtime
+            .evaluate_script("console.log('a'); console.log('b'); console.log('c'); console.log('d');")
+            .unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(lines, ["a", "b", "c", "d"]);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 4, "not asked once per call");
+    }
+
+    #[test]
+    fn a_hot_loop_is_capped_and_says_how_many_were_dropped() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script("for (let i = 0; i < 3000; i++) console.log(i);").unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        let notes: Vec<_> = lines.iter().filter(|l| l.contains("console calls dropped")).collect();
+        assert!(!notes.is_empty(), "no dropped line");
+        let dropped: usize = notes.iter().map(|l| l.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert_eq!(lines.len() - notes.len() + dropped, 3000, "calls lost without a count");
+        assert!(dropped > 0, "not capped");
+        assert!(notes.iter().all(|l| l.ends_with("; console rate cap)")), "the dropped line names no cause: {notes:?}");
+        // The newest calls are the ones kept.
+        assert_eq!(lines.last().map(String::as_str), Some("2999"));
+    }
+
     /// Every member of the WHATWG Console namespace is a function. A page
     /// that calls one the engine lacked threw "not a callable function" and
     /// lost the rest of its code: squarespace's homepage bundle calls
@@ -2004,7 +2186,9 @@ mod tests {
         let _ = runtime.poll_module(&module.unwrap());
         runtime.flush_console();
         let lines = received.lock().unwrap().clone();
-        assert_eq!(lines.len(), 1024);
+        // The 1024 newest, after a line counting the rest (T6d).
+        assert_eq!(lines.len(), 1 + 1024);
+        assert_eq!(lines[0], "3976 console calls dropped (more than 1024 held)");
         assert_eq!(lines.last().map(String::as_str), Some("4999"));
     }
 

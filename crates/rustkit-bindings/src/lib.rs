@@ -1714,6 +1714,18 @@ impl DomBindings {
         self.runtime.borrow_mut().set_console_shape_handler(handler);
     }
 
+    /// Hand console calls over as they are made while `live` says so (see
+    /// [`JsRuntime::set_console_live`]).
+    pub fn set_console_live(&self, live: Option<rustkit_js::ConsoleLive>) {
+        self.runtime.borrow_mut().set_console_live(live);
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter` (see [`JsRuntime::set_console_held_counter`]).
+    pub fn set_console_held_counter(&self, counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>) {
+        self.runtime.borrow_mut().set_console_held_counter(counter);
+    }
+
     /// Console arguments reach the handler as type and length only (see
     /// [`JsRuntime::set_console_redaction`]).
     pub fn set_console_redaction(&self, on: bool) {
