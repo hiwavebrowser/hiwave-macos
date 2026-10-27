@@ -876,53 +876,17 @@ struct ViewState {
     decode_epoch: u64,
     #[allow(dead_code)]
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
-    /// Currently focused DOM node.
-    focused_node: Option<rustkit_dom::NodeId>,
-    /// Live text-editing state for this view's form controls, keyed by raw
-    /// `NodeId`.
-    ///
-    /// Per-VIEW, not engine-global: `NodeId` is per-DOCUMENT (every
-    /// `Document` restarts its counter at 1), so a global map lets one
-    /// document's node 4 collide with another's. Living on the view also
-    /// makes the lifetime obvious — drop the view, drop the map — and gives
-    /// document replacement one clear place to clear.
-    ///
-    /// This is the IDL-value side table browsers keep separate from the
-    /// content attribute: `getAttribute("value")` is the authored default,
-    /// this is the live value. Mutating the DOM instead would conflate the
-    /// two and break form-reset semantics.
-    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
-    /// Checkedness of the checkboxes and radio buttons a click or script
-    /// has set, keyed by raw NodeId: the other half of the same side table.
-    /// A control missing here is checked when it has the `checked`
-    /// attribute. Script owns the state (`input.checked`); style
-    /// (`:checked`), paint and form submission read it here.
-    checked_states: std::collections::HashMap<usize, bool>,
     /// A listener cancelled the `pointerdown` of the press in progress:
     /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
     compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
-    /// `hovered_node` and the elements above it (raw NodeIds): what
-    /// `:hover` matches in this view's next build.
-    hover_chain: Vec<usize>,
-    /// The element the press in progress landed on and the elements above
-    /// it: what `:active` matches, from the press to the release.
-    active_chain: Vec<usize>,
-    /// The rule index this view was last built with: its `reads` say
-    /// which elements a `:hover` or `:active` rule can match, so which
-    /// changes of the two chains are a restyle.
-    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
     /// What the script writes flushed for the next relayout could restyle
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
-    /// Whether `html` had a non-visible `overflow` at the last build. The
-    /// viewport then takes html's, and a body with its own is a scroller
-    /// that clips what it holds (see `scrollable_bottom`).
-    html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
     /// Set by `relayout` for the build it is about to run: nothing but a
@@ -952,8 +916,6 @@ struct ViewState {
     /// index can tell the same list from a new one by identity
     /// (`SheetsFingerprint`).
     external_stylesheets: Rc<Vec<Stylesheet>>,
-    /// The parsed `<style>` sheets of this view's document, by text.
-    sheet_cache: std::cell::RefCell<SheetCache>,
     /// The load skipped its pre-stylesheet layout because the document has
     /// `<link rel=stylesheet>` (render-blocking, as in Chrome): the layout
     /// with no sheets was cascaded in full and then thrown away.
@@ -1014,6 +976,10 @@ struct ViewState {
     relayout_stats: RelayoutStats,
     /// The view's Inspector record (see `inspector`).
     inspector: Arc<Inspector>,
+    /// What the style and layout build reads and writes of this view
+    /// (`layout_ctx::ViewLayout`): focus, the pointer chains, control
+    /// state, the sheet cache, the rule index, html's overflow.
+    lay: Rc<layout_ctx::ViewLayout>,
 }
 
 impl ViewState {
@@ -1023,7 +989,7 @@ impl ViewState {
         let Some(document) = self.document.as_deref() else {
             return restyle_invalidation::DirtySet::full("no_document");
         };
-        let index = self.rule_reads.borrow();
+        let index = self.lay.rule_reads.borrow();
         restyle_invalidation::DirtySet::compute(log, document, index.as_deref().map(|ix| &ix.reads.invalidation))
     }
 
@@ -1065,13 +1031,13 @@ impl ViewState {
         // did not, and asserting a lifetime the code does not implement is
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
-        self.edit_states.clear();
-        self.checked_states.clear();
-        self.focused_node = None;
+        self.lay.edit_states.borrow_mut().clear();
+        self.lay.checked_states.borrow_mut().clear();
+        self.lay.focused_node.set(None);
         self.hovered_node = None;
-        self.hover_chain.clear();
-        self.active_chain.clear();
-        self.rule_reads.get_mut().take();
+        self.lay.hover_chain.borrow_mut().clear();
+        self.lay.active_chain.borrow_mut().clear();
+        self.lay.rule_reads.borrow_mut().take();
         self.pending_dirty = None;
         self.last_dirty = None;
         self.pointer_restyle = false;
@@ -1103,7 +1069,7 @@ impl ViewState {
         self.external_stylesheets = Rc::default();
         // And the parsed `<style>` sheets: correct to keep (they are keyed
         // by text), but the new document is unlikely to share them.
-        self.sheet_cache.get_mut().clear();
+        self.lay.sheet_cache.borrow_mut().clear();
         self.initial_layout_deferred = false;
         self.images_attempted.clear();
     }
@@ -2553,6 +2519,7 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
+            lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2574,17 +2541,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2596,7 +2556,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2657,6 +2616,7 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            lay: Rc::default(),
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2678,17 +2638,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2700,7 +2653,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2778,6 +2730,7 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2799,17 +2752,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2821,7 +2767,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
@@ -3252,7 +3197,7 @@ impl Engine {
     /// The tag of the focused form control, if one is focused.
     fn focused_tag(&self, id: EngineViewId) -> Option<String> {
         let view = self.views.get(&id)?;
-        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        let node = view.document.as_ref()?.get_node(view.lay.focused_node.get()?)?;
         match &node.node_type {
             NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
             _ => None,
@@ -3283,9 +3228,9 @@ impl Engine {
                 _ => None,
             }
         });
-        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        let before = self.views.get(&id).and_then(|v| v.lay.focused_node.get());
         self.set_focus(id, control);
-        before != self.views.get(&id).and_then(|v| v.focused_node)
+        before != self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Make a form control (raw NodeId and tag) the focused node, or
@@ -3298,7 +3243,7 @@ impl Engine {
             let already_seeded = self
                 .views
                 .get(&id)
-                .map(|v| v.edit_states.contains_key(&raw))
+                .map(|v| v.lay.edit_states.borrow().contains_key(&raw))
                 .unwrap_or(false);
             if matches!(tag.as_str(), "input" | "textarea") && !already_seeded {
                 let seed = self
@@ -3320,7 +3265,7 @@ impl Engine {
                 let state = rustkit_dom::forms::TextEditState::with_value(seed);
                 state.move_to_end(false);
                 if let Some(v) = self.views.get_mut(&id) {
-                    v.edit_states.insert(raw, state);
+                    v.lay.edit_states.borrow_mut().insert(raw, state);
                 }
             }
         }
@@ -3330,10 +3275,10 @@ impl Engine {
         };
         match focusable {
             Some((raw, tag)) => {
-                view.focused_node = Some(rustkit_dom::NodeId::new(raw));
+                view.lay.focused_node.set(Some(rustkit_dom::NodeId::new(raw)));
                 debug!(?id, %tag, "Focused element");
             }
-            None => view.focused_node = None,
+            None => view.lay.focused_node.set(None),
         }
     }
 
@@ -3355,9 +3300,9 @@ impl Engine {
         // `:active` from here to the release, wherever the pointer goes.
         let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
         if let Some(view) = self.views.get_mut(&id) {
-            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            let changed = Self::in_one_chain(&view.lay.active_chain.borrow(), &pressed);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
-            view.active_chain = pressed;
+            *view.lay.active_chain.borrow_mut() = pressed;
         }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
@@ -3444,7 +3389,7 @@ impl Engine {
         if over != out {
             let changed = Self::in_one_chain(&before, &now);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
-            view.hover_chain = now.clone();
+            *view.lay.hover_chain.borrow_mut() = now.clone();
         }
 
         // (target, type, relatedTarget)
@@ -3519,7 +3464,7 @@ impl Engine {
         reads: fn(&SelectorReads) -> &PointerReads,
         changed: &[usize],
     ) -> bool {
-        let index = view.rule_reads.borrow();
+        let index = view.lay.rule_reads.borrow();
         let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
             return false;
         };
@@ -3692,7 +3637,7 @@ impl Engine {
         let _hold = wgate::hold("click");
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
-            let changed = std::mem::take(&mut view.active_chain);
+            let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
@@ -4873,7 +4818,7 @@ impl Engine {
         let _hold = wgate::hold("key");
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
-        let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
+        let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
             return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
         // The page hears the key first; a cancelled keydown types nothing.
@@ -4884,21 +4829,25 @@ impl Engine {
         {
             return false;
         }
-        let Some(state) = self
-            .views
-            .get(&id)
-            .and_then(|v| v.edit_states.get(&focused.raw()))
-        else {
+        let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
-
-        let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+        // The edit state is borrowed for the key only: the flush below
+        // writes script's control values into the same map.
+        let (result, value) = {
+            let edit_states = lay.edit_states.borrow();
+            let Some(state) = edit_states.get(&focused.raw()) else {
+                return false;
+            };
+            let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+            (result, state.value())
+        };
         if matches!(result, KeyHandleResult::ValueChanged) {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.sync_control_value(focused.raw(), state.value());
+                bindings.sync_control_value(focused.raw(), value);
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
                 let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
@@ -4933,7 +4882,7 @@ impl Engine {
         alt: bool,
     ) {
         let _hold = wgate::hold("key_up");
-        let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
+        let focused = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
         self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
 
@@ -4954,7 +4903,7 @@ impl Engine {
         id: EngineViewId,
     ) -> Option<rustkit_dom::forms::FormSubmission> {
         let view = self.views.get(&id)?;
-        let focused = view.focused_node?;
+        let focused = view.lay.focused_node.get()?;
         let document = view.document.as_ref()?;
 
         // Walk up to the enclosing <form>.
@@ -4983,7 +4932,7 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let _hold = wgate::hold("submit");
-        let focused = self.views.get(&id)?.focused_node?.raw();
+        let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
         }
@@ -5237,7 +5186,7 @@ impl Engine {
     fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &HashMap<String, String>) -> bool {
         self.views
             .get(&id)
-            .and_then(|v| v.checked_states.get(&node_raw).copied())
+            .and_then(|v| v.lay.checked_states.borrow().get(&node_raw).copied())
             .unwrap_or_else(|| attributes.contains_key("checked"))
     }
 
@@ -5259,14 +5208,14 @@ impl Engine {
         };
         let checked = match tag_lower {
             "input" => view
-                .checked_states
+                .lay.checked_states.borrow()
                 .get(&node_raw)
                 .copied()
                 .filter(|checked| *checked != attributes.contains_key("checked")),
             _ => None,
         };
-        let hovered = view.hover_chain.contains(&node_raw);
-        let active = view.active_chain.contains(&node_raw);
+        let hovered = view.lay.hover_chain.borrow().contains(&node_raw);
+        let active = view.lay.active_chain.borrow().contains(&node_raw);
         if checked.is_none() && !hovered && !active {
             return std::borrow::Cow::Borrowed(attributes);
         }
@@ -5300,7 +5249,7 @@ impl Engine {
     pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
         self.views
             .get(&id)?
-            .edit_states
+            .lay.edit_states.borrow()
             .get(&node_raw)
             .map(|s| (s.value(), s.caret_position()))
     }
@@ -5320,7 +5269,7 @@ impl Engine {
 
     /// The DOM node currently holding focus in a view, if any.
     pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
-        self.views.get(&id).and_then(|v| v.focused_node)
+        self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Get the current scroll offset of a view.
@@ -7892,7 +7841,7 @@ impl Engine {
         }
 
         // Update max scroll offset based on content size
-        let html_clips = self.views.get(&id).is_some_and(|v| v.html_clips.get());
+        let html_clips = self.views.get(&id).is_some_and(|v| v.lay.html_clips.get());
         let content_height = scrollable_bottom(&root_box, html_clips);
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
@@ -7905,9 +7854,9 @@ impl Engine {
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(Rc::new(root_box));
         view.laid_with = Some(LaidWith {
-            hover: view.hover_chain.clone(),
-            active: view.active_chain.clone(),
-            focused: view.focused_node.map(|node| node.raw()),
+            hover: view.lay.hover_chain.borrow().clone(),
+            active: view.lay.active_chain.borrow().clone(),
+            focused: view.lay.focused_node.get().map(|node| node.raw()),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -8071,10 +8020,10 @@ impl Engine {
         // both builds below would read the focus as it is now, and the
         // patch copies paint properties only, so the caret and the focus
         // state would never be drawn (or a blurred field would keep them).
-        if with.focused != view.focused_node.map(|node| node.raw()) {
+        if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
             return miss("focus moved");
         }
-        let unplaced = view.rule_reads.borrow().as_ref().is_none_or(|index| {
+        let unplaced = view.lay.rule_reads.borrow().as_ref().is_none_or(|index| {
             [&index.reads.hover, &index.reads.active]
                 .iter()
                 .any(|reads| reads.anywhere || reads.siblings)
@@ -8083,7 +8032,7 @@ impl Engine {
             return miss("a rule reads the pseudo-class beyond the element's subtree");
         }
         let before = (with.hover.clone(), with.active.clone());
-        let now = (view.hover_chain.clone(), view.active_chain.clone());
+        let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
         // Of the elements in one chain only, the ones a compound with the
         // pseudo-class can match: no rule sees the others change.
         let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
@@ -8140,7 +8089,7 @@ impl Engine {
         for chains in [before, now.clone()] {
             let _build_time = time_stage(Stage::Build);
             if let Some(view) = self.views.get_mut(&id) {
-                (view.hover_chain, view.active_chain) = chains;
+                (*view.lay.hover_chain.borrow_mut(), *view.lay.active_chain.borrow_mut()) = chains;
             }
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
@@ -8543,7 +8492,7 @@ impl Engine {
     ) -> LayoutBox {
         self.lctx.building_view.set(Some(id));
         self.lctx.building_focus
-            .set(self.views.get(&id).and_then(|v| v.focused_node));
+            .set(self.views.get(&id).and_then(|v| v.lay.focused_node.get()));
         let built = self.build_layout_from_document(document, external_stylesheets);
         self.lctx.building_focus.set(None);
         self.lctx.building_view.set(None);
@@ -8605,12 +8554,12 @@ impl Engine {
                 .lctx.building_view
                 .get()
                 .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.hover_chain.first().copied()),
+                .and_then(|v| v.lay.hover_chain.borrow().first().copied()),
             active: self
                 .lctx.building_view
                 .get()
                 .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.active_chain.first().copied()),
+                .and_then(|v| v.lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -8720,7 +8669,7 @@ impl Engine {
             false => {
                 let index = self.shared_rule_index(&stylesheets, fingerprint);
                 if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
-                    *view.rule_reads.borrow_mut() = Some(index.clone());
+                    *view.lay.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
             }
@@ -8794,7 +8743,7 @@ impl Engine {
             .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
         if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
-            view.html_clips.set(html_style.as_ref().is_some_and(|s| {
+            view.lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
                 s.overflow_x != rustkit_css::Overflow::Visible
                     || s.overflow_y != rustkit_css::Overflow::Visible
             }));
@@ -8923,7 +8872,7 @@ impl Engine {
         self.lctx.building_view
             .get()
             .and_then(|id| self.views.get(&id))
-            .is_some_and(|v| !v.edit_states.is_empty())
+            .is_some_and(|v| !v.lay.edit_states.borrow().is_empty())
     }
 
     /// The box tree an earlier build with this key left in the memo, with
@@ -13804,7 +13753,7 @@ impl Engine {
             sheets
         };
         match view.and_then(|id| self.views.get(&id)) {
-            Some(view) => lookup(&mut view.sheet_cache.borrow_mut()),
+            Some(view) => lookup(&mut view.lay.sheet_cache.borrow_mut()),
             None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
         }
     }
@@ -17917,7 +17866,7 @@ impl Engine {
         };
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+        Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
@@ -17989,7 +17938,7 @@ impl Engine {
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
         if let Some(view) = self.views.get_mut(&id) {
-            Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+            Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
@@ -18256,7 +18205,7 @@ impl Engine {
         }
 
         // Dispatch to focused element via DOM events
-        if let (Some(focused_id), Some(document)) = (view.focused_node, &view.document) {
+        if let (Some(focused_id), Some(document)) = (view.lay.focused_node.get(), &view.document) {
             use rustkit_dom::events::{DomEvent, Event, EventDispatcher, KeyboardEventData};
 
             if let Some(focused_node) = document.get_node(focused_id) {
@@ -18323,8 +18272,8 @@ impl Engine {
             .get_mut(&view_id)
             .ok_or(EngineError::ViewNotFound(view_id))?;
 
-        let old_focused = view.focused_node;
-        view.focused_node = Some(node_id);
+        let old_focused = view.lay.focused_node.get();
+        view.lay.focused_node.set(Some(node_id));
 
         // Dispatch blur event to old focused element
         if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
@@ -18383,7 +18332,7 @@ impl Engine {
             .get_mut(&view_id)
             .ok_or(EngineError::ViewNotFound(view_id))?;
 
-        let old_focused = view.focused_node.take();
+        let old_focused = view.lay.focused_node.take();
 
         // Dispatch blur event to old focused element
         if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
@@ -18413,7 +18362,7 @@ impl Engine {
 
     /// Get the currently focused node in a view.
     pub fn get_focused_element(&self, view_id: EngineViewId) -> Option<rustkit_dom::NodeId> {
-        self.views.get(&view_id).and_then(|v| v.focused_node)
+        self.views.get(&view_id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Load an image from a URL.
@@ -29706,14 +29655,14 @@ mod form_typing_tests {
                 .expect("form control box")
                 .0
         };
-        engine.views.get_mut(&id).unwrap().focused_node =
-            Some(rustkit_dom::NodeId::new(node_raw));
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(
+            Some(rustkit_dom::NodeId::new(node_raw)));
         let view = engine.views.get_mut(&id).unwrap();
-        view.edit_states.insert(
+        view.lay.edit_states.borrow_mut().insert(
             node_raw,
             rustkit_dom::forms::TextEditState::with_value("ab"),
         );
-        view.edit_states.get(&node_raw).unwrap().move_to_end(false);
+        view.lay.edit_states.borrow().get(&node_raw).unwrap().move_to_end(false);
 
         // 'c' (no modifiers) must insert.
         assert!(engine.handle_text_key(id, 0, "c", false, false, false));
@@ -29730,7 +29679,7 @@ mod form_typing_tests {
             .views
             .get(&id)
             .unwrap()
-            .edit_states
+            .lay.edit_states.borrow()
             .get(&node_raw)
             .unwrap()
             .insert_text("XY");
@@ -29807,8 +29756,8 @@ mod form_submit_tests {
             "https://example.com/page",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
-        engine.views.get_mut(&id).unwrap().edit_states.insert(
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
+        engine.views.get_mut(&id).unwrap().lay.edit_states.borrow_mut().insert(
             input.id.raw(),
             rustkit_dom::forms::TextEditState::with_value("typed"),
         );
@@ -29840,7 +29789,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
 
         let sub = engine.form_submission_for_focus(id).expect("submission");
         assert!(sub.url.contains("kept=1"));
@@ -29864,7 +29813,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
         assert!(engine.form_submission_for_focus(id).is_none());
     }
 
@@ -29876,7 +29825,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
         assert!(engine.form_submission_for_focus(id).is_none());
     }
 }
@@ -29919,8 +29868,8 @@ mod edit_state_lifecycle_tests {
         {
             let view = engine.views.get_mut(&id).expect("view");
             view.document = Some(doc1.clone());
-            view.focused_node = Some(input1.id);
-            view.edit_states.insert(
+            view.lay.focused_node.set(Some(input1.id));
+            view.lay.edit_states.borrow_mut().insert(
                 input1.id.raw(),
                 rustkit_dom::forms::TextEditState::with_value("secret"),
             );
@@ -39671,7 +39620,7 @@ mod script_dom_flush_tests {
         let q = document.get_element_by_id("q").unwrap();
         assert_eq!(q.get_attribute("value"), Some("authored"));
 
-        engine.views.get_mut(&view).unwrap().focused_node = Some(q.id);
+        engine.views.get_mut(&view).unwrap().lay.focused_node.set(Some(q.id));
         assert!(engine.handle_text_key(view, 0, "!", false, false, false));
         assert_eq!(
             engine
@@ -42099,7 +42048,7 @@ mod sheet_cache_tests {
             .expect("headless view");
         e.load_html(id, "<html><head><style>p { color: red }</style></head><body><p>a</p></body></html>")
             .expect("load_html");
-        let held = |e: &Engine| e.views[&id].sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
+        let held = |e: &Engine| e.views[&id].lay.sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
         assert_eq!(held(&e), ["p { color: red }"]);
         e.load_html(id, "<html><head><style>p { color: blue }</style></head><body><p>b</p></body></html>")
             .expect("load_html");

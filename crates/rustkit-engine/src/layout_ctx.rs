@@ -38,3 +38,48 @@ pub(crate) struct LayoutCtx {
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
 }
+
+/// What the build reads and writes of one view, shared the same way
+/// (`ViewState::lay`). The engine owns the writes outside a build; a build
+/// only reads, apart from the three outputs at the end.
+#[derive(Default)]
+pub(crate) struct ViewLayout {
+    /// Currently focused DOM node.
+    pub(crate) focused_node: Cell<Option<rustkit_dom::NodeId>>,
+    /// The element the pointer is over and the elements above it (raw
+    /// NodeIds): what `:hover` matches in this view's next build.
+    pub(crate) hover_chain: RefCell<Vec<usize>>,
+    /// The element the press in progress landed on and the elements above
+    /// it: what `:active` matches, from the press to the release.
+    pub(crate) active_chain: RefCell<Vec<usize>>,
+    /// Live text-editing state for this view's form controls, keyed by raw
+    /// `NodeId`.
+    ///
+    /// Per-VIEW, not engine-global: `NodeId` is per-DOCUMENT (every
+    /// `Document` restarts its counter at 1), so a global map lets one
+    /// document's node 4 collide with another's. Living on the view also
+    /// makes the lifetime obvious — drop the view, drop the map — and gives
+    /// document replacement one clear place to clear.
+    ///
+    /// This is the IDL-value side table browsers keep separate from the
+    /// content attribute: `getAttribute("value")` is the authored default,
+    /// this is the live value. Mutating the DOM instead would conflate the
+    /// two and break form-reset semantics.
+    pub(crate) edit_states: RefCell<HashMap<usize, rustkit_dom::forms::TextEditState>>,
+    /// Checkedness of the checkboxes and radio buttons a click or script
+    /// has set, keyed by raw NodeId: the other half of the same side table.
+    /// A control missing here is checked when it has the `checked`
+    /// attribute. Script owns the state (`input.checked`); style
+    /// (`:checked`), paint and form submission read it here.
+    pub(crate) checked_states: RefCell<HashMap<usize, bool>>,
+    /// The parsed `<style>` sheets of this view's document, by text.
+    pub(crate) sheet_cache: RefCell<crate::SheetCache>,
+    /// The rule index this view was last built with: its `reads` say
+    /// which elements a `:hover` or `:active` rule can match, so which
+    /// changes of the two chains are a restyle.
+    pub(crate) rule_reads: RefCell<Option<std::rc::Rc<crate::RuleIndex>>>,
+    /// Whether `html` had a non-visible `overflow` at the last build. The
+    /// viewport then takes html's, and a body with its own is a scroller
+    /// that clips what it holds (see `scrollable_bottom`).
+    pub(crate) html_clips: Cell<bool>,
+}
