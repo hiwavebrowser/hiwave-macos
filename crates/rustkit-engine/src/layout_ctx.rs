@@ -83,6 +83,24 @@ pub(crate) struct BuildView {
 }
 
 impl LayoutCtx {
+    /// Runs `build` with `view` as the view being built. What was there
+    /// before is put back when `build` returns or unwinds, so a build that
+    /// panics leaves no view (and no `ViewLayout`) held by the context.
+    pub(crate) fn with_building<R>(&self, view: BuildView, build: impl FnOnce() -> R) -> R {
+        struct Restore<'a> {
+            ctx: &'a LayoutCtx,
+            prev: Option<Rc<BuildView>>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                *self.ctx.building.borrow_mut() = self.prev.take();
+            }
+        }
+        let prev = self.building.replace(Some(Rc::new(view)));
+        let _restore = Restore { ctx: self, prev };
+        build()
+    }
+
     pub(crate) fn building_id(&self) -> Option<EngineViewId> {
         self.building.borrow().as_ref().map(|b| b.id)
     }
@@ -147,4 +165,49 @@ pub(crate) struct ViewLayout {
     /// viewport then takes html's, and a body with its own is a scroller
     /// that clips what it holds (see `scrollable_bottom`).
     pub(crate) html_clips: Cell<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_view(lay: &Rc<ViewLayout>) -> BuildView {
+        BuildView {
+            id: EngineViewId::new(),
+            lay: Some(lay.clone()),
+            url: None,
+            viewport: None,
+            focus: None,
+            external_sheets: Rc::default(),
+        }
+    }
+
+    #[test]
+    fn a_build_that_panics_leaves_no_view_held() {
+        let ctx = LayoutCtx::default();
+        let lay = Rc::new(ViewLayout::default());
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.with_building(build_view(&lay), || {
+                assert!(ctx.building_id().is_some());
+                panic!("a build that fails");
+            })
+        }));
+        assert!(unwound.is_err());
+        assert!(ctx.building.borrow().is_none());
+        assert_eq!(Rc::strong_count(&lay), 1, "the ViewLayout is released");
+    }
+
+    #[test]
+    fn a_build_inside_a_build_puts_the_outer_view_back() {
+        let ctx = LayoutCtx::default();
+        let lay = Rc::new(ViewLayout::default());
+        let outer = build_view(&lay);
+        let outer_id = outer.id;
+        ctx.with_building(outer, || {
+            ctx.with_building(build_view(&lay), || assert_ne!(ctx.building_id(), Some(outer_id)));
+            assert_eq!(ctx.building_id(), Some(outer_id));
+        });
+        assert!(ctx.building.borrow().is_none());
+        assert_eq!(Rc::strong_count(&lay), 1);
+    }
 }

@@ -8513,21 +8513,21 @@ impl Engine {
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
         let view = self.views.get(&id);
-        *self.lctx.building.borrow_mut() = Some(Rc::new(layout_ctx::BuildView {
+        let building = layout_ctx::BuildView {
             id,
             lay: view.map(|v| v.lay.clone()),
             url: view.and_then(|v| v.url.clone()),
             viewport: self.view_viewport(id),
             focus: view.and_then(|v| v.lay.focused_node.get()),
             external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
-        }));
-        let built = self.lctx.build_layout_from_document(
-            document,
-            external_stylesheets,
-            self.config.javascript_enabled,
-        );
-        *self.lctx.building.borrow_mut() = None;
-        built
+        };
+        self.lctx.with_building(building, || {
+            self.lctx.build_layout_from_document(
+                document,
+                external_stylesheets,
+                self.config.javascript_enabled,
+            )
+        })
     }
 
     /// Drops the rules (and `@layer` statements) whose `@media` queries do
