@@ -92,12 +92,13 @@ pub struct ForcedGeometry {
 /// answers from the last layout published.
 pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
 
-/// How many forced layouts one script task gets, and how long they may take
-/// together, before its reads answer from the last layout (Prometheus,
-/// #812 review): a write-read loop that never settles cannot hold the page
-/// thread forever. cnn's header loop needs 8.
+/// How many forced layouts one script task gets before its reads answer
+/// from the last layout (Prometheus, #812 review): a write-read loop that
+/// never settles cannot hold the page thread forever. cnn's header loop
+/// needs 8. A count, not a time: a time limit made the page's answer depend
+/// on the machine's load (at 1 s, cnn's loop ran out on a loaded seat and
+/// laid the header out as before forced layout).
 pub(crate) const FORCED_LAYOUTS_PER_TASK: u64 = 256;
-pub(crate) const FORCED_MS_PER_TASK: f64 = 1000.0;
 
 /// The document the host functions read, and its generation.
 #[derive(Default)]
@@ -122,8 +123,9 @@ pub(crate) struct DomHost {
     /// Forced layouts since the engine last took the count
     /// (`DomBindings::take_forced_layouts`).
     pub(crate) forced_layouts: u64,
-    /// The forced layouts and their time (ms) against this task's budget,
-    /// since the engine last published a layout or took the count.
+    /// The forced layouts against this task's budget, and their time (ms,
+    /// for the decline log), since the engine last published a layout or
+    /// took the count.
     forced_in_task: u64,
     forced_ms: f64,
     /// Whether a read since the count was taken answered from the last
@@ -200,7 +202,7 @@ impl DomHost {
         }
         let forced = {
             let mut h = host.borrow_mut();
-            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK || h.forced_ms >= FORCED_MS_PER_TASK;
+            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
             match (h.forced_layout.clone(), spent) {
                 (Some(_), true) => {
                     h.note_forced_decline("budget spent");

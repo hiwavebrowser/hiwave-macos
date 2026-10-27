@@ -153,10 +153,9 @@ fn script_scrolls_to_the_end_of_rows_it_appended_in_the_same_task() {
 
 #[test]
 fn a_task_that_never_stops_writing_and_reading_runs_out_of_forced_layouts() {
-    // Prometheus (#812 review): a per-task budget (256 layouts or 1 s),
-    // then reads answer from the last forced layout. Each read here follows
-    // a write of width i+1, so the last answer is the number of forced
-    // layouts, whichever limit ran out first under the test's load.
+    // Prometheus (#812 review): a per-task budget of 256 forced layouts,
+    // then reads answer from the last one. Each read here follows a write
+    // of width i+1, so the last answer is the number of forced layouts.
     let page = "<html><head><style>body{margin:0}</style></head><body>\
         <div id=a style='width:1px;height:10px'></div></body></html>";
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
@@ -173,7 +172,7 @@ fn a_task_that_never_stops_writing_and_reading_runs_out_of_forced_layouts() {
         )
         .unwrap();
     let forced = engine.relayout_stats(view).unwrap().forced_layouts;
-    assert!((1..=256).contains(&forced), "the budget stopped the forced layouts: {forced}");
+    assert_eq!(forced, 256, "the budget stopped the forced layouts");
     assert_eq!(read(&mut engine, view, "__last"), forced.to_string());
     // The next task has a new budget, and the relayout after this one laid
     // the last write out.
