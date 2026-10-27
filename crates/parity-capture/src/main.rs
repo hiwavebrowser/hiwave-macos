@@ -139,6 +139,18 @@ struct Args {
     #[arg(long)]
     event_log_error_text: bool,
 
+    /// Filter subresources through the app's shield (EasyList, EasyPrivacy
+    /// and the interim domain floor), so a block shows in the event log as
+    /// `failure.blocked_by`. Off by default: the board runs unfiltered.
+    #[arg(long)]
+    shield: bool,
+
+    /// With `--shield`: wait up to this long for the filter lists to be
+    /// built before loading. Until they are, blocks come from the domain
+    /// floor (`blocked_by.list = "domain-floor"`).
+    #[arg(long, default_value_t = 30_000, value_name = "MS")]
+    shield_wait_ms: u64,
+
     /// Print the element diagnostics record (JSON) of the first element
     /// matching this CSS selector. Repeatable.
     #[arg(long, value_name = "SELECTOR")]
@@ -646,11 +658,14 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         None => None,
     };
 
-    let engine_result = EngineBuilder::new()
+    let mut builder = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts)
-        .build();
+        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts);
+    if let Some(interceptor) = shield_interceptor(args) {
+        builder = builder.request_interceptor(interceptor);
+    }
+    let engine_result = builder.build();
 
     let mut engine = match engine_result {
         Ok(e) => e,
@@ -1535,6 +1550,19 @@ fn inline_script_failure(log: &[ScriptRecord]) -> Option<&ScriptRecord> {
 
 /// The engine configuration a capture runs with: the parity defaults, plus
 /// whatever the command line overrides.
+/// The app's shield as the engine's request interceptor, with `--shield`
+/// only, once its filter lists are built or `--shield-wait-ms` has passed.
+fn shield_interceptor(args: &Args) -> Option<rustkit_net::RequestInterceptor> {
+    if !args.shield {
+        return None;
+    }
+    // The event log names the list and rule of a block.
+    hiwave_shield_intercept::name_matched_rules();
+    let ready = hiwave_shield_intercept::wait_until_ready(Duration::from_millis(args.shield_wait_ms));
+    eprintln!("shield: on, filter lists {}", if ready { "ready" } else { "not ready (domain floor only)" });
+    Some(hiwave_shield_intercept::create_shield_interceptor())
+}
+
 fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     let mut config = EngineConfig::for_parity_testing();
     if let Some(horizon) = args.timer_horizon_ms {
@@ -1588,6 +1616,31 @@ mod tests {
 
     // The live loop is the app's, not the board's: a capture turns it only
     // when asked.
+    // The board runs unfiltered; `--shield` puts the app's shield in front
+    // of every subresource, and a block names its list and rule.
+    #[test]
+    fn the_shield_filters_requests_only_with_the_flag() {
+        assert!(shield_interceptor(&parsed(&[])).is_none());
+        let interceptor = shield_interceptor(&parsed(&["--shield", "--shield-wait-ms", "0"])).expect("an interceptor");
+        let request = |url: &str| {
+            let mut request = rustkit_net::Request::get(Url::parse(url).unwrap());
+            request.destination = rustkit_net::RequestDestination::Script;
+            request.referrer = Some(Url::parse("https://news.example/").unwrap());
+            request
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        match rt.block_on(interceptor.intercept(&request("https://doubleclick.net/pagead.js"))) {
+            rustkit_net::InterceptAction::BlockedBy(reason) => {
+                assert!(!reason.list.is_empty() && reason.rule.is_some(), "{reason:?}")
+            }
+            other => panic!("not blocked with a reason: {other:?}"),
+        }
+        assert!(matches!(
+            rt.block_on(interceptor.intercept(&request("https://news.example/app.js"))),
+            rustkit_net::InterceptAction::Allow
+        ));
+    }
+
     #[test]
     fn the_live_loop_is_turned_only_when_asked() {
         assert_eq!(parsed(&[]).live_ms, None);

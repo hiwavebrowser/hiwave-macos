@@ -331,7 +331,9 @@ pub enum InspectorEvent {
         method: String,
         resource_type: ResourceType,
         /// What asked for it: `parser` (the document's markup), `css` (a
-        /// stylesheet's `url()`), `script` (page script), `navigation`.
+        /// stylesheet's `url()`), `fetch`, `xhr`, `inserted_script` (a
+        /// `<script src>` page script inserted), `script` (other page
+        /// script: `import`, images it added), `navigation`.
         initiator: Option<String>,
     },
     /// The request's answer arrived (any status, 4xx and 5xx included).
@@ -347,6 +349,11 @@ pub enum InspectorEvent {
         decoded_size: Option<u64>,
         from_cache: bool,
         duration_ms: f64,
+        /// Of `duration_ms`, the time it waited for an in-flight slot (the
+        /// per-origin and per-page caps queue a script request; they do not
+        /// refuse it). `null` for a request no cap queues.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
     /// The request ended without a usable answer.
     Failure {
@@ -355,6 +362,14 @@ pub enum InspectorEvent {
         /// A short reason in the engine's words (no header, body or query).
         reason: String,
         duration_ms: f64,
+        /// The shield's list and rule, when the shield refused it and said
+        /// which; else `null`.
+        #[serde(default)]
+        blocked_by: Option<BlockedBy>,
+        /// As on `response`. A deadline that passes while the request is
+        /// still queued has the reason `in-flight cap`.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
     /// One page script's life, recorded when it is over: run, thrown,
     /// stopped, or given up on.
@@ -405,6 +420,30 @@ pub enum InspectorEvent {
         held_by_count: u32,
     },
 }
+
+/// Which filter list, and which of its rules, refused a request: the
+/// list's own public text, capped, never the page's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedBy {
+    pub list: String,
+    pub rule: Option<String>,
+}
+
+impl BlockedBy {
+    fn from_reason(reason: &rustkit_net::BlockReason) -> Self {
+        BlockedBy {
+            list: cap(&reason.list, MAX_SHORT_CHARS).0,
+            rule: reason.rule.as_deref().map(|r| cap(r, MAX_RULE_CHARS).0),
+        }
+    }
+}
+
+/// A failure's reason when its deadline passed while it was still queued
+/// behind an in-flight cap.
+pub const IN_FLIGHT_CAP: &str = "in-flight cap";
+
+/// Longest filter rule kept in `blocked_by`, in characters.
+const MAX_RULE_CHARS: usize = 256;
 
 impl InspectorEvent {
     /// The `type` tag.
@@ -1084,6 +1123,9 @@ impl Inspector {
             dropped_as: FailureStage::Cancelled,
             dropped_reason: "abandoned (navigation or view closed)",
             budget: None,
+            blocked_by: None,
+            slot: None,
+            deadline: None,
             done: false,
         })
     }
@@ -1290,6 +1332,12 @@ pub struct RequestGuard {
     /// Dropped at or past this deadline, it ran out of a budget: the stage
     /// and the reason to record.
     budget: Option<(Instant, FailureStage, &'static str)>,
+    /// The shield's list and rule, for the failure it ends in.
+    blocked_by: Option<BlockedBy>,
+    /// Its wait for an in-flight slot, when a cap can queue it.
+    slot: Option<rustkit_net::policy::SlotWait>,
+    /// The deadline that ends it as `timeout` / `over_budget`, if known.
+    deadline: Option<Instant>,
     done: bool,
 }
 
@@ -1297,6 +1345,57 @@ impl RequestGuard {
     /// The request's id in the events.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The shield refused it with `reason` (if it said which list and rule):
+    /// the failure this ends in carries them as `blocked_by`.
+    pub fn blocked_by(mut self, reason: Option<&rustkit_net::BlockReason>) -> Self {
+        self.blocked_by = reason.map(BlockedBy::from_reason);
+        self
+    }
+
+    /// The request can be queued behind an in-flight cap: `slot` is what the
+    /// policy stamps (see [`rustkit_net::policy::SlotWait`]); the outcome
+    /// records `queued_ms` from it.
+    pub fn waits_on(mut self, slot: &rustkit_net::policy::SlotWait) -> Self {
+        self.slot = Some(slot.clone());
+        self
+    }
+
+    /// Its slot wait, if it has one: hand it to the policy.
+    pub fn slot(&self) -> Option<&rustkit_net::policy::SlotWait> {
+        self.slot.as_ref()
+    }
+
+    /// The deadline the caller races it against: a `timeout` or
+    /// `over_budget` failure is an `in-flight cap` if it was still queued
+    /// then.
+    pub fn deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = Some(deadline.into_std());
+        self
+    }
+
+    fn queued_ms(&self) -> Option<f64> {
+        self.slot.as_ref()?.waited().map(|d| round_ms(d.as_secs_f64() * 1000.0))
+    }
+
+    /// `reason`, unless a deadline (`timeout`, `over_budget`) ended the
+    /// request while it was still queued behind a cap: then `in-flight cap`.
+    fn deadline_reason<'a>(&self, stage: FailureStage, reason: &'a str) -> &'a str {
+        if !matches!(stage, FailureStage::Timeout | FailureStage::OverBudget) {
+            return reason;
+        }
+        let at = self.deadline.or(self.budget.map(|(at, _, _)| at));
+        let queued = match (&self.slot, at) {
+            (Some(slot), Some(at)) => slot.waiting_at(at),
+            (Some(slot), None) => slot.is_waiting(),
+            (None, _) => false,
+        };
+        if queued {
+            IN_FLIGHT_CAP
+        } else {
+            reason
+        }
     }
 
     /// The stage and reason recorded if this is dropped unanswered.
@@ -1347,6 +1446,7 @@ impl RequestGuard {
             decoded_size,
             from_cache,
             duration_ms: self.duration_ms(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1355,8 +1455,16 @@ impl RequestGuard {
     /// are scrubbed and it is capped.
     pub fn fail(mut self, stage: FailureStage, reason: &str) {
         self.done = true;
+        let reason = self.deadline_reason(stage, reason);
         let reason = self.inspector.scrub_text(&cap(reason, MAX_SHORT_CHARS).0);
-        let event = InspectorEvent::Failure { id: self.id, stage, reason, duration_ms: self.duration_ms() };
+        let event = InspectorEvent::Failure {
+            id: self.id,
+            stage,
+            reason,
+            duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
+        };
         self.inspector.finish_request(self.id, event);
     }
 }
@@ -1373,8 +1481,10 @@ impl Drop for RequestGuard {
         let event = InspectorEvent::Failure {
             id: self.id,
             stage,
-            reason: reason.to_string(),
+            reason: self.deadline_reason(stage, reason).to_string(),
             duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1460,7 +1570,7 @@ pub fn answer_module(
         Ok(Err(rustkit_net::policy::Denial::BadStatus(status))) => guard.response(*status, None, None, None, false),
         Ok(Err(denial)) => {
             let (stage, reason) = denial_stage(denial);
-            guard.fail(stage, reason);
+            guard.blocked_by(denial_block_reason(denial)).fail(stage, reason);
         }
         Err(_) => guard.fail(FailureStage::Timeout, "timed out"),
     }
@@ -1470,7 +1580,23 @@ pub fn answer_module(
 pub fn fail_net(guard: Option<RequestGuard>, error: &rustkit_net::NetError) {
     if let Some(guard) = guard {
         let (stage, reason) = net_error_stage(error);
-        guard.fail(stage, reason);
+        guard.blocked_by(net_block_reason(error)).fail(stage, reason);
+    }
+}
+
+/// The shield's list and rule, when `error` is its block and it said which.
+pub fn net_block_reason(error: &rustkit_net::NetError) -> Option<&rustkit_net::BlockReason> {
+    match error {
+        rustkit_net::NetError::Blocked(reason) => reason.as_ref(),
+        _ => None,
+    }
+}
+
+/// The shield's list and rule, when `denial` is its block and it said which.
+pub fn denial_block_reason(denial: &rustkit_net::policy::Denial) -> Option<&rustkit_net::BlockReason> {
+    match denial {
+        rustkit_net::policy::Denial::Shield(reason) => reason.as_ref(),
+        _ => None,
     }
 }
 
@@ -1492,7 +1618,7 @@ pub fn denial_stage(denial: &rustkit_net::policy::Denial) -> (FailureStage, &'st
         Denial::ResponseTooLarge => (FailureStage::OverBudget, "response too large"),
         Denial::Timeout => (FailureStage::Timeout, "timed out"),
         Denial::BudgetExhausted => (FailureStage::OverBudget, "page request budget spent"),
-        Denial::Shield => (FailureStage::Policy, "blocked by the shield"),
+        Denial::Shield(_) => (FailureStage::Policy, "blocked by the shield"),
         Denial::BadMime(_) => (FailureStage::Mime, "not a JavaScript MIME type"),
         Denial::BadStatus(_) => (FailureStage::HttpError, "module answered with an error status"),
         Denial::Network(_) => (FailureStage::Connect, "network error"),
@@ -1509,7 +1635,7 @@ pub fn net_error_stage(error: &rustkit_net::NetError) -> (FailureStage, &'static
         "tls" => (FailureStage::Tls, "TLS failed"),
         "timeout" => (FailureStage::Timeout, "timed out"),
         "policy" => match error {
-            rustkit_net::NetError::Blocked => (FailureStage::Policy, "blocked by the shield"),
+            rustkit_net::NetError::Blocked(_) => (FailureStage::Policy, "blocked by the shield"),
             _ => (FailureStage::Policy, "address not allowed"),
         },
         "redirect" => (FailureStage::HttpError, "too many redirects"),
@@ -1949,7 +2075,7 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
     use rustkit_http::HttpError;
     use rustkit_net::NetError;
     match error {
-        NetError::Blocked => "policy",
+        NetError::Blocked(_) => "policy",
         NetError::Timeout(_) => "timeout",
         NetError::Cancelled => "cancelled",
         NetError::InvalidUrl(_) => "invalid_url",
