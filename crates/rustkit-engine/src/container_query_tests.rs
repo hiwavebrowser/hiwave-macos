@@ -339,3 +339,20 @@ fn container_query_grammar_drops_invalid_not_and_or() {
         [7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 25, 26]
     );
 }
+
+const NITS_PAGE: &str =
+    include_str!("../../../docs/diagnostics/2026-10-27/css_container_query_nits.html");
+
+/// #782 follow-up nits (Atlas #868, Prometheus on #782). k1: `foo(` opens a
+/// function, so `@container foo(width > 1px)` has no container name and its
+/// general-enclosed condition is unknown; the name was split off at `(` and
+/// the rule fired. k3: Chromium answers the style query (13); here it stays
+/// unknown, so false. k4-k9 pin the boxes that keep a float from narrowing
+/// a later container (`starts_context`): ruby, ruby-text, a table row, a
+/// block and a cell with `overflow` do in Chromium, an inline span does not.
+/// Every other row is Chromium 148's.
+#[test]
+fn container_query_nits_name_split_and_context_roots() {
+    let heights = offset_heights(NITS_PAGE, 800, 600, 9);
+    assert_eq!(heights, ["0", "12", "0", "14", "14", "14", "0", "14", "14"]);
+}

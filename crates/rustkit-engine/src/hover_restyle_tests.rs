@@ -634,3 +634,32 @@ fn a_hover_restyle_sees_an_earlier_siblings_float_in_a_container_query() {
         assert_same(&short, &painted_by_a_full_relayout(&mut engine, view), id);
     }
 }
+
+/// #782 follow-up (Atlas #868): with an `@container` rule on the page, the
+/// two builds of a pointer restyle built every sibling of the path, so each
+/// hover walked the whole document twice. The walk reads only what comes
+/// before the hovered element, and only until a float is on record there:
+/// later siblings, and earlier ones once a float is known, are skipped.
+/// The short path still paints what a full relayout does.
+#[test]
+fn a_container_query_hover_skips_siblings_the_walk_cannot_read() {
+    const CQ: &str = "#list{container-type:inline-size}\
+        @container (min-width: 100px) { .card:hover{color:navy} }";
+    // Measured: 74, 314 and 50 nodes; 966 for the third card before.
+    // Without a float the earlier cards are still built.
+    let float = ".card:first-child::before{content:'';float:left;width:1px;height:1px}";
+    for (float, at, most, what) in [
+        ("", card(2), 120, "no float, the third card"),
+        ("", card(12), 400, "no float, the 13th card"),
+        (float, card(12), 120, "a float in the first card, the 13th card"),
+    ] {
+        let (mut engine, view) = cards(&format!("{CQ}{float}"));
+        let at_rest = painted(&engine, view);
+        hover(&mut engine, view, at);
+        assert_eq!(skipped(&engine, view), 1, "{what}: colour is paint");
+        assert!(walked() < most, "{what}: the two builds went into {} nodes of about 1000", walked());
+        let short = painted(&engine, view);
+        assert_ne!(short.0, at_rest.0, "{what}");
+        assert_same(&short, &painted_by_a_full_relayout(&mut engine, view), what);
+    }
+}
