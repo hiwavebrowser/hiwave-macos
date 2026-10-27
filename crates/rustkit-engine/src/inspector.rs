@@ -107,16 +107,18 @@ impl Default for InspectorConfig {
 }
 
 impl InspectorConfig {
-    /// A tab's: a [`TAB_RING_CAPACITY`] ring from the moment the view is
-    /// made, so the panel has history when it opens. `HIWAVE_DEVTOOLS_RING=0`
-    /// (or false/off/no) leaves it off until a panel attaches.
+    /// A tab's: a [`TAB_RING_CAPACITY`] ring once a panel attaches.
+    /// `HIWAVE_DEVTOOLS_RING=1` (or true/on/yes) keeps it from the moment
+    /// the view is made, so a panel opened late has the history. Off by
+    /// default: it costs every view a record per console call, script and
+    /// request, and no quiet A/B has cleared that cost yet (#803 review).
     pub fn tab() -> Self {
-        let off = matches!(
+        let on = matches!(
             std::env::var("HIWAVE_DEVTOOLS_RING").ok().as_deref(),
-            Some("0" | "false" | "off" | "no")
+            Some("1" | "true" | "on" | "yes")
         );
         Self {
-            buffer: !off,
+            buffer: on,
             capacity: TAB_RING_CAPACITY,
             ..Self::default()
         }
@@ -657,11 +659,16 @@ impl Inspector {
         panic!("page thread panicked holding the Inspector lock (test)");
     }
 
-    /// The panel closed: recording goes back to the view's default, and
-    /// nothing recorded is dropped (T6b: the panel reopens with history).
+    /// The panel closed: recording goes back to the view's default. With
+    /// the tab ring on nothing recorded is dropped (T6b: the panel reopens
+    /// with history); with it off the session's records are, as nothing
+    /// will read them.
     pub fn detach_panel(&self) {
         let mut state = self.state();
         state.buffer = state.buffer_default;
+        if !state.buffer {
+            state.records.clear();
+        }
         self.refresh_active(&state);
     }
 

@@ -1195,9 +1195,11 @@ pub struct EngineConfig {
     /// the page once what it asked for has arrived.
     pub post_load_requests_live: bool,
     /// Whether views keep an Inspector buffer, and how URLs in its events
-    /// are shown (see `inspector`). By default each view keeps a
+    /// are shown (see `inspector`). By default a view records nothing until
+    /// a panel attaches, then keeps a
     /// [`TAB_RING_CAPACITY`](inspector::TAB_RING_CAPACITY) ring
-    /// ([`InspectorConfig::tab`]); a sink attached with
+    /// ([`InspectorConfig::tab`]; `HIWAVE_DEVTOOLS_RING=1` keeps it from
+    /// the start); a sink attached with
     /// [`Engine::add_inspector_sink`] turns recording on for its view.
     pub inspector: InspectorConfig,
 }

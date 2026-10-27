@@ -174,7 +174,7 @@ document.head.appendChild(s);
 #[test]
 fn with_nobody_listening_no_script_record_is_built() {
     let server = serve(vec![Route::html("/", "<html><body><script>var a = 1;</script></body></html>")]);
-    // The tab ring off (`HIWAVE_DEVTOOLS_RING=0`): the ring is a listener.
+    // No ring (the tab ring on would be a listener).
     let config = EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() };
     let mut engine = Engine::new(config).expect("engine");
     let view = engine

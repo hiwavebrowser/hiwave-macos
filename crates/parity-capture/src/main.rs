@@ -1628,8 +1628,8 @@ mod tests {
         assert!(capture_config(&parsed(&["--event-log-console-text"]), None).inspector.keep_console_text);
         assert!(!capture_config(&parsed(&["--event-log", "x.jsonl"]), None).inspector.keep_error_text);
         assert!(capture_config(&parsed(&["--event-log-error-text"]), None).inspector.keep_error_text);
-        // The flags add a sink; the buffer is the tab ring (T6b), off with
-        // HIWAVE_DEVTOOLS_RING=0.
+        // The flags add a sink; the buffer is the tab ring (T6b), on from
+        // the start only with HIWAVE_DEVTOOLS_RING=1.
         let config = capture_config(&parsed(&["--event-summary"]), None);
         assert_eq!(config.inspector.capacity, rustkit_engine::InspectorConfig::tab().capacity);
     }

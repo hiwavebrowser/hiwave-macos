@@ -256,12 +256,20 @@ pub(crate) fn records_arrived() {
 
 /// A panel opened (`on`) or closed on the view `inspector` records. While
 /// it is open, the window is woken when the view records something the
-/// panel has not read (counted on `counters`).
+/// panel has not read (counted on `counters`). Both the window (at once)
+/// and the page (when it handles the attach) call this, so a watch the
+/// window could not make (the page booting, or holding its endpoint) is
+/// still made; a second `on` keeps the first's read mark.
 pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: bool) {
     let service = service();
     let mut inbox = service.inbox();
     let weak = Arc::downgrade(inspector);
-    inbox.watches.retain(|w| !Weak::ptr_eq(&w.inspector, &weak) && w.inspector.strong_count() > 0);
+    inbox.watches.retain(|w| w.inspector.strong_count() > 0);
+    if on && inbox.watches.iter().any(|w| Weak::ptr_eq(&w.inspector, &weak)) {
+        inspector.set_watched(true);
+        return;
+    }
+    inbox.watches.retain(|w| !Weak::ptr_eq(&w.inspector, &weak));
     let watched = on && service.start(&mut inbox);
     if watched {
         inbox.watches.push(Watch {
@@ -327,12 +335,22 @@ pub fn ask_console(
         inbox.reads.push(read);
         service.ready.notify_one();
     } else {
-        // No thread could be started: answer on the caller's thread, still
-        // without the page.
         drop(inbox);
-        answer(read);
+        answer_unserved(read);
     }
     rx
+}
+
+/// No devtools thread could be started. The caller is the window (or the
+/// panel's) thread, which must not take the Inspector lock, so the read
+/// gets an empty answer and a log line instead.
+fn answer_unserved(read: ConsoleRead) {
+    tracing::warn!(target: "devtools", "devtools thread did not start; console read answered empty");
+    let console = crate::DevtoolsConsole {
+        next_seq: read.since,
+        ..Default::default()
+    };
+    let _ = read.reply.send(DevtoolsAnswer::Console(console));
 }
 
 #[cfg(test)]
@@ -446,5 +464,43 @@ mod tests {
         assert!(!served.contains("secret") && !served.contains("frag"), "{served}");
         assert!(served.contains("https://a.test/app.js"), "{served}");
         assert!(served.contains("https://a.test/x"), "{served}");
+    }
+
+    /// #803 review (2): the page repeats the window's watch when it handles
+    /// the attach. The second keeps the panel's read mark: nothing it has
+    /// read wakes the window again.
+    #[test]
+    fn the_page_repeating_a_watch_keeps_the_panels_read_mark() {
+        let inspector = tab();
+        let counters = Arc::new(DevtoolsCounters::default());
+        watch(&inspector, &counters, true);
+        inspector.console(ConsoleLevel::Log, "a", None);
+        assert!(until(Duration::from_secs(3), || counters.read().window_wakes == 1), "first line: no wake");
+        assert_eq!(read(&inspector, 0).next_seq, 1);
+        // The service marks the read after it has answered.
+        std::thread::sleep(Duration::from_millis(100));
+        watch(&inspector, &counters, true);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(counters.read().window_wakes, 1, "the repeated watch woke the window for a read line");
+        inspector.console(ConsoleLevel::Log, "b", None);
+        assert!(until(Duration::from_secs(3), || counters.read().window_wakes == 2), "a new line: no wake");
+        watch(&inspector, &counters, false);
+    }
+
+    /// #803 review nit: with no devtools thread the read is answered empty
+    /// on the caller's thread, without reading the view.
+    #[test]
+    fn an_unserved_console_read_is_answered_empty() {
+        let inspector = tab();
+        inspector.console(ConsoleLevel::Log, "a", None);
+        let (reply, mut rx) = oneshot::channel();
+        answer_unserved(ConsoleRead { inspector, since: 7, reply, wake_window: None });
+        match rx.try_recv() {
+            Ok(DevtoolsAnswer::Console(console)) => {
+                assert!(console.entries.is_empty(), "{:?}", console.entries);
+                assert_eq!(console.next_seq, 7);
+            }
+            other => panic!("no empty answer: {other:?}"),
+        }
     }
 }

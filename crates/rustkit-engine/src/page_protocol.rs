@@ -556,6 +556,12 @@ impl PageEndpoint {
             }
             PageCmd::Devtools { query, reply } => {
                 self.devtools_counters.page_command();
+                // The window watches at once when it can reach the page's
+                // Inspector; while the page boots or holds its endpoint it
+                // cannot, so the page watches too (#803 review (2)).
+                if let (DevtoolsQuery::Attach(on), Some(inspector)) = (&query, self.engine.inspector(self.view)) {
+                    crate::devtools_service::watch(&inspector, &self.devtools_counters, *on);
+                }
                 let (answer, frame_changed) = devtools_answer(&mut self.engine, self.view, query);
                 let wake = devtools_wakes_window(&answer, frame_changed);
                 let _ = reply.send(answer);

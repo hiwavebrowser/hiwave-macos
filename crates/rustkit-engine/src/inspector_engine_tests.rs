@@ -452,25 +452,44 @@ fn load_html_is_a_navigation_with_no_url() {
     );
 }
 
-// ---- A tab ring by default; free when off ----
+// ---- The tab ring: off by default, a ring from the start when on ----
 
-/// The engine config with the tab ring off (`HIWAVE_DEVTOOLS_RING=0`).
+/// The engine config with no ring and no sink.
 fn ring_off() -> EngineConfig {
     EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() }
 }
 
 #[test]
-fn a_tab_keeps_a_small_ring_from_the_start() {
-    // T6b (Atlas 10-24, Q1): a panel opened late has the history.
+fn a_tab_records_nothing_by_default_until_a_panel_attaches() {
+    // #803 review: the ring stays off until a quiet A/B clears its cost.
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let config = EngineConfig::default();
+    assert!(
+        std::env::var_os("HIWAVE_DEVTOOLS_RING").is_some() || !config.inspector.buffer,
+        "the tab ring is on by default"
+    );
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    assert!(engine.inspector(view).unwrap().snapshot_since(0).records.is_empty());
+    assert_eq!(InspectorConfig::tab().capacity, crate::inspector::TAB_RING_CAPACITY);
+}
+
+#[test]
+fn with_the_tab_ring_on_a_tab_keeps_a_ring_from_the_start() {
+    // T6b (Atlas 10-24, Q1), `HIWAVE_DEVTOOLS_RING=1`: a panel opened late
+    // has the history.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let inspector = InspectorConfig { buffer: true, ..InspectorConfig::tab() };
+    let mut engine = Engine::new(EngineConfig { inspector, ..EngineConfig::default() }).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
     runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
     let kept: Vec<String> = records(&engine, view).iter().map(|r| describe(r, server.port)).collect();
     assert_eq!(only(&kept, &["console"]).len(), 5, "{kept:?}");
-    assert_eq!(InspectorConfig::tab().capacity, crate::inspector::TAB_RING_CAPACITY);
 }
 
 #[test]

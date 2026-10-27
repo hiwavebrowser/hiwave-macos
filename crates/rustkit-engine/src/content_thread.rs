@@ -704,10 +704,16 @@ mod tests {
         let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
         assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
         page.enqueue(PageCmd::Block(3_000));
+        // Queued behind the block: no answer until it ends.
+        let mut behind = page.eval("1");
         std::thread::sleep(Duration::from_millis(100));
         let asked = Instant::now();
         let console = read_console(&page, 0, Duration::from_secs(1)).expect("no console answer while the page was blocked");
         assert!(asked.elapsed() < Duration::from_secs(1), "the read waited for the page");
+        assert!(
+            matches!(behind.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the page was not in its block when the read was served"
+        );
         assert!(
             console.entries.iter().any(|e| e.message == "<string len=6>"),
             "the line logged before the block is missing: {:?}",
@@ -808,12 +814,78 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_reopens_with_history_marked_by_document() {
-        // T6b: closing the panel no longer forgets, and records carry their
-        // document, so a panel opened after a navigation shows both pages'
-        // lines and can tell them apart.
+    fn a_panel_attached_while_the_page_boots_is_still_watched() {
+        // #803 review (2): before `boot()` returns the window cannot reach
+        // the Inspector, so it made no watch, and an idle page never woke
+        // the panel. The page now watches when it handles the attach.
+        use crate::DevtoolsQuery;
+        let page = page();
+        let before_boot = page.boot().is_none();
+        let _attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert!(before_boot, "the page booted before the attach: this test checks nothing");
+        let mut loaded = page.load_html("<p>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        std::thread::sleep(Duration::from_millis(300));
+        let since = read_console(&page, 0, Duration::from_secs(5)).expect("first read").next_seq;
+        std::thread::sleep(Duration::from_millis(200));
+        let from = page.devtools_counters().window_wakes;
+        let mut done = page.eval("console.log('late'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while page.devtools_counters().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(page.devtools_counters().window_wakes > from, "a line after boot never woke the panel");
+        let console = read_console(&page, since, Duration::from_secs(5)).expect("read");
+        assert!(console.entries.iter().any(|e| e.message == "<string len=4>"), "{:?}", console.entries);
+    }
+
+    #[test]
+    fn with_the_ring_off_a_closed_panel_drops_its_session() {
+        // #803 review nit: with the tab ring off nothing reads a closed
+        // panel's records, so they are not kept for the life of the view.
         use crate::{DevtoolsAnswer, DevtoolsQuery};
         let page = page();
+        let mut loaded = page.load_html("<p>one</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('one'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let inspector = page.devtools_inspector().expect("booted");
+        assert!(!inspector.snapshot_since(0).records.is_empty());
+        let mut detached = page.devtools_ask(DevtoolsQuery::Attach(false));
+        assert_eq!(wait_recv(&mut detached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        assert!(inspector.snapshot_since(0).records.is_empty(), "the closed panel's records were kept");
+    }
+
+    /// A page with the tab ring on (`HIWAVE_DEVTOOLS_RING=1`).
+    fn page_with_ring() -> ContentThread {
+        let mut config = EngineBuilder::new()
+            .script_budget_ms(5_000)
+            .interrupt_scripts_at_budget(true)
+            .config()
+            .clone();
+        config.inspector.buffer = true;
+        ContentThread::spawn(
+            EngineBuilder::new().with_config(config),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+        .expect("content thread spawns")
+    }
+
+    #[test]
+    fn the_panel_reopens_with_history_marked_by_document() {
+        // T6b: with the tab ring on, closing the panel does not forget, and
+        // records carry their document, so a panel opened after a navigation
+        // shows both pages' lines and can tell them apart.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page_with_ring();
         let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
         let _ = wait_recv(&mut attached, Duration::from_secs(5));
         let mut loaded = page.load_html("<p>one</p>");
