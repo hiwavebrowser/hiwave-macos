@@ -781,8 +781,6 @@ enum FetchedInserted {
         /// The shield's list and rule, when it refused the fetch and said.
         blocked_by: Option<rustkit_net::BlockReason>,
     },
-    /// Not fetched (`unparseable src`). No load or error event.
-    Skipped(&'static str),
 }
 
 struct InsertedSource {
@@ -890,11 +888,11 @@ fn lock_board(board: &Mutex<InsertedBoard>) -> std::sync::MutexGuard<'_, Inserte
 }
 
 /// A finished fetch that must not hold the queue: the element hears `error`
-/// (or, for an unparseable URL, nothing) and later scripts do not wait for it.
+/// and later scripts do not wait for it.
 fn does_not_block(body: &FetchedInserted) -> bool {
     match body {
         FetchedInserted::Source(_) => false,
-        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } | FetchedInserted::Skipped(_) => true,
+        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } => true,
     }
 }
 
@@ -1086,64 +1084,47 @@ fn enqueue_inserted(
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector
-                        .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
-                        .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
-                    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-                    if let Some(w) = &wait {
-                        w.queued();
-                    }
-                    let cancel = FetchCancel::new();
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq: 0,
-                        body: None,
-                        guard,
-                        cancel: Arc::clone(&cancel),
-                        queued,
-                        requested_at: taken_at,
-                        arrived_at: None,
-                        inspector: Arc::clone(inspector),
-                    });
-                    started.push(FetchJob {
-                        loader: Arc::clone(loader),
-                        request,
-                        board: Arc::clone(&scripts.board),
-                        job_id: id,
-                        nav_id,
-                        cancel,
-                        wait,
-                    });
-                }
-                Err(_) => {
-                    board.ready_seq = board.ready_seq.wrapping_add(1);
-                    let ready_seq = board.ready_seq;
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        // Not the text itself: what does not parse cannot be
-                        // reduced to origin and path for the log.
-                        url: format!("unparseable#{node}"),
-                        nav_id,
-                        in_order,
-                        ready_seq,
-                        body: Some(FetchedInserted::Skipped("unparseable src")),
-                        guard: None,
-                        cancel: FetchCancel::new(),
-                        queued,
-                        requested_at: taken_at,
-                        arrived_at: Some(taken_at),
-                        inspector: Arc::clone(inspector),
-                    });
-                }
+            // `web_scripts.js` queues only an `href` from the `url` crate's
+            // parser and fires `error` for a `src` it cannot resolve, so this
+            // always parses (`an_unparseable_inserted_src_never_reaches_the_engine_queue`).
+            let Ok(parsed) = Url::parse(&url) else {
+                tracing::warn!("inserted script #{node}: queued URL does not parse; skipped");
+                debug_assert!(false, "inserted script URL does not parse");
+                continue;
+            };
+            let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
+            let guard = inspector
+                .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
+                .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+            let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+            if let Some(w) = &wait {
+                w.queued();
             }
+            let cancel = FetchCancel::new();
+            board.jobs.push(InsertedJob {
+                id,
+                node,
+                url,
+                nav_id,
+                in_order,
+                ready_seq: 0,
+                body: None,
+                guard,
+                cancel: Arc::clone(&cancel),
+                queued,
+                requested_at: taken_at,
+                arrived_at: None,
+                inspector: Arc::clone(inspector),
+            });
+            started.push(FetchJob {
+                loader: Arc::clone(loader),
+                request,
+                board: Arc::clone(&scripts.board),
+                job_id: id,
+                nav_id,
+                cancel,
+                wait,
+            });
         }
     }
     for job in started {
@@ -1369,7 +1350,6 @@ fn run_inserted(
     let taken_at = std::time::Instant::now();
     let fetched_in = job.arrived_at.map(|at| at.saturating_duration_since(job.requested_at));
     let waited = job.arrived_at.map(|at| taken_at.saturating_duration_since(at));
-    let unrequested = matches!(fetched, FetchedInserted::Skipped(_));
     let mut began = false;
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
@@ -1380,13 +1360,12 @@ fn run_inserted(
         FetchedInserted::Source(source) => Ok(source.text),
         FetchedInserted::Http(http) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(http.status))),
         FetchedInserted::Transport { detail, .. } => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(detail))),
-        FetchedInserted::Skipped(reason) => Err(ScriptOutcome::Skipped(reason)),
     };
     let event = match text {
         Err(outcome) => {
             // Too large is not a network failure, but `error` is still the
             // one event that element gets: a loader waiting on it hears that
-            // it will not run. An unparseable `src` was never a request.
+            // it will not run.
             let event = match outcome {
                 ScriptOutcome::FetchFailed(_) => Some("error"),
                 ScriptOutcome::Skipped(reason) if reason.starts_with("too large") => Some("error"),
@@ -1462,7 +1441,7 @@ fn run_inserted(
             started: began,
             bytes: record.bytes,
             queued: Some(job.queued),
-            fetch: if unrequested { None } else { fetched_in },
+            fetch: fetched_in,
             waited,
             ran_ms: record.elapsed_ms,
             event,
@@ -1521,6 +1500,5 @@ fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched:
         FetchedInserted::Transport { stage, inspector_reason, blocked_by, .. } => {
             guard.blocked_by(blocked_by.as_ref()).fail(*stage, inspector_reason)
         }
-        FetchedInserted::Skipped(_) => drop(guard),
     }
 }

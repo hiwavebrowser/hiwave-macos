@@ -189,14 +189,28 @@ impl<'a> QueryParser<'a> {
     }
 
     /// The text inside the parenthesized group at the cursor; moves past it.
+    /// A parenthesis inside a quoted string (`style(--x: ")")`) neither
+    /// opens nor closes one; a backslash escapes the next character there.
     fn group(&mut self) -> Option<&'a str> {
         let rest = self.rest();
         if !rest.starts_with('(') {
             return None;
         }
         let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
         for (at, c) in rest.char_indices() {
+            if let Some(q) = quote {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    _ if c == q => quote = None,
+                    _ => {}
+                }
+                continue;
+            }
             match c {
+                '"' | '\'' => quote = Some(c),
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
@@ -929,6 +943,33 @@ mod tests {
         assert!(c("(min-width: clamp(100px, 200px, 400px))", 300.0, None));
         assert!(c("(max-width: min(500px, 40em, 20rem))", 300.0, None));
         assert!(!c("(max-width: min(500px, 40em, 10rem))", 300.0, None));
+    }
+
+    /// #782 follow-up (Prometheus on #782): a parenthesis inside a quoted
+    /// string does not open or close a group, so `style(--x: ")")` is one
+    /// general-enclosed part and the query stays valid (Chromium 148 keeps
+    /// `(width > 1px) or style(--x: ")")` in `cssRules` and applies it, see
+    /// docs/diagnostics/2026-10-27/css_container_query_nits.html k3). The
+    /// style part is still unknown here, so the answer is still false.
+    #[test]
+    fn a_quoted_paren_does_not_end_a_query_group() {
+        let q = |s: &str| super::parse_container_query(s).is_some();
+        for good in [
+            r#"style(--x: ")")"#,
+            r#"style(--x: "(")"#,
+            r#"style(--x: ')')"#,
+            r#"style(--x: "\")")"#,
+            r#"(width > 1px) or style(--x: ")")"#,
+            r#"style(--x: "a)b") and (width > 1px)"#,
+            r#"not style(--x: "((")"#,
+        ] {
+            assert!(q(good), "{good:?} should be valid");
+        }
+        for bad in [r#"style(--x: ")""#, r#"(width > 1px) or style(--x: "("#] {
+            assert!(!q(bad), "{bad:?} should be invalid");
+        }
+        assert!(!c(r#"(width > 1px) or style(--x: ")")"#, 300.0, None));
+        assert!(c(r#"(width > 1px) and ((width > 2px) or (width > 3px))"#, 300.0, None));
     }
 
     #[test]

@@ -85,6 +85,18 @@ other object a tag (`[object Object]`, `[object Array]`,
 they are, `Symbol(x)`, an error as `Name: message` from its own data
 properties, objects as the same tags, and URLs in it scrubbed (see Privacy).
 
+While somebody listens, a `console` event is recorded when the call is made,
+so a reader on another thread (the devtools panel) sees the console of a
+script that is still running. That is decided per call, at most 200
+hand-overs a second. A hand-over also records the calls held before it, so
+this caps hand-overs, not records: up to about 1,224 calls a second can be
+recorded. Past the cap, and with nobody listening, calls wait for the
+script's end (the `HIWAVE_CONSOLE_LOG` mirror alone included). Either way each
+call is recorded once, in the order it was made. A script that hangs after a
+hot loop never reaches its end, so how many calls are held is readable
+without the page (`Inspector::console_held`), and a panel can say "K console
+lines held by a running script".
+
 `script` names what ran the code: a script URL, `inline#n`, or the engine
 step (`event:DOMContentLoaded`, `event:load`, `event:resize`,
 `event:<mouse event>`, `timers`, `network`). An error thrown by a listener
@@ -229,7 +241,7 @@ steps, timers and callbacks are not scripts here; their errors stay
 
 | field | meaning |
 |---|---|
-| `script` | its URL (as Privacy reduces it), `inline#n`, or `unparseable#n` for a `src` that is not a URL (n: its place among the document's scripts, or an inserted script's node id; the text itself is never recorded) |
+| `script` | its URL (as Privacy reduces it), `inline#n`, or for a `src` that is not a URL `unparseable#n` (n: its place among the document's scripts); the text itself is never recorded. A script the page inserts with such a `src` is never queued: it fires `error` and gets no record |
 | `kind` | `parser` (a parser-blocking classic script), `defer`, `async`, `module`, `inserted` |
 | `outcome` | `ran`; `threw` (its `script_error` is above it); `skipped`; `fetch_failed`; `over_budget` (not started: the script budget was already spent); `stopped` (started, and stopped by the script budget's deadline); `engine_failed`; `cancelled` (its document was left before it ended) |
 | `reason` | for every outcome but `ran` and `threw`, in the engine's words: `nomodule`, `too large to run inside the script budget`, `unparseable src`, `JS engine panicked earlier on this page`, `HTTP <status>`, `network` (the request's `failure` has the stage), `script budget`, `script budget spent before it started`, `JS engine panic`, `navigation or view closed` |
@@ -322,7 +334,9 @@ The log is meant to be pasted into public issues and PRs.
   `toJSON`, getters, `Symbol.toPrimitive`) between a page value and a
   record.
 - Every queue is bounded: console lines between flushes (1024, oldest
-  dropped), error reports (256), listener error texts for the script log
+  dropped; a `warn` line `K console calls dropped (more than 1024 held)`,
+  with `; console rate cap` when the live cap held them, comes ahead of the
+  ones kept), error reports (256), listener error texts for the script log
   (1024), unsupported members (64), unhandled rejections (256), the engine's
   own promises (1024), known script paths (4096), and the ring buffer.
 - Console messages carry no page text by default: each argument's type, and

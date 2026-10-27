@@ -130,6 +130,9 @@ pub struct Devtools {
     console_seq: u64,
     /// "page crashed" is on the console (T6 R1 condition 2).
     crash_shown: bool,
+    /// The held console count on the panel's "K console lines held by a
+    /// running script" line (0: no line).
+    held_shown: usize,
     asked: Vec<Asked>,
     /// The newest live question of a kind asked while one of that kind
     /// was out, asked when it is answered (T6c: no repeats queue up).
@@ -274,6 +277,7 @@ impl Devtools {
         self.open = true;
         self.console_seq = 0;
         self.crash_shown = false;
+        self.held_shown = 0;
         self.ask(view, Want::Ack, DevtoolsQuery::Attach(true));
         // The element first: its breadcrumb is what the tree keeps open.
         if let Some(n) = self.selected {
@@ -424,6 +428,14 @@ impl Devtools {
         if !self.crash_shown && inspector.as_ref().is_some_and(|i| i.page_crashed()) {
             self.crash_shown = true;
             run(panel, "window.hiwaveInspector && window.hiwaveInspector.addConsoleResult('page crashed', true)");
+        }
+        // A script that hangs after a hot loop records nothing more; the
+        // calls it made past the live cap are only counted (#810 review).
+        // One atomic load; the devtools thread wakes the window when it moves.
+        let held = inspector.as_ref().map_or(0, |i| i.console_held());
+        if held != self.held_shown {
+            self.held_shown = held;
+            run(panel, &panel_call("setConsoleHeld", &rustkit_engine::devtools_held_text(held)));
         }
         let watermark = inspector.map(|inspector| inspector.watermark());
         if console_due(watermark, self.console_seq, self.waiting_for(Want::Console)) {

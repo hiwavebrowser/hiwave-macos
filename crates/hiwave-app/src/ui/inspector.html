@@ -907,6 +907,7 @@
                         </svg>
                     </button>
                 </div>
+                <div class="console-held" id="console-held" style="display: none; padding: 4px 8px; color: #b45309;"></div>
                 <div class="console-output" id="console-output">
                     <div class="console-empty" id="console-empty">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1680,6 +1681,15 @@
 
                 clearConsole: function() {
                     clearConsole();
+                    this.setConsoleHeld(null);
+                },
+
+                // Console calls a running script made past the live cap,
+                // not recorded until it ends (T6d). `null` hides the line.
+                setConsoleHeld: function(text) {
+                    const held = document.getElementById('console-held');
+                    held.textContent = text || '';
+                    held.style.display = text ? 'block' : 'none';
                 },
 
                 addConsoleResult: function(result, isError) {

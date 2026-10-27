@@ -1530,6 +1530,56 @@ mod tests {
     }
 
     #[test]
+    fn a_hung_scripts_held_console_lines_reach_the_panel_while_it_runs() {
+        // #810 review: a hot loop past the live cap, then a hang. The calls
+        // over the cap waited for the script's end and the panel showed
+        // nothing. The panel's line comes from `console_held` (what `pump`
+        // reads) and the devtools thread wakes the window for it.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let inspector = view.devtools_inspector().expect("no inspector");
+        let counters = view.endpoint.as_ref().unwrap().borrow().devtools_counters();
+        std::thread::sleep(Duration::from_millis(300));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                // The panel's line and the window wakes, from the moment a
+                // held count is first seen while the script still runs.
+                let mut seen: Option<(Option<String>, u64)> = None;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let held = inspector.console_held();
+                    if held > 0 {
+                        let line = rustkit_engine::devtools_held_text(held);
+                        let wakes = counters.read().window_wakes;
+                        match &mut seen {
+                            None => seen = Some((line, wakes)),
+                            Some((_, first)) if wakes > *first => return Some(line),
+                            Some(_) => {}
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None
+            })
+        };
+        // Two bursts in the same cap second: the second changes the held
+        // count well after the reader has seen the first, so the wake it
+        // waits for cannot have been posted before it looked.
+        let _ = view.execute_script_sync(
+            "for (let i = 0; i < 300; i++) console.log(i); \
+             let t = Date.now(); while (Date.now() - t < 300) {} \
+             for (let i = 0; i < 50; i++) console.log('b' + i); \
+             t = Date.now(); while (Date.now() - t < 2000) {} 1",
+        );
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let line = reader.join().unwrap().expect("no window wake while the script held console lines");
+        let line = line.expect("no line");
+        assert!(line.ends_with(" console lines held by a running script"), "{line}");
+    }
+
+    #[test]
     fn stop_cancels_a_slow_load_without_waiting_for_it() {
         let url = slow_server(Duration::from_secs(10), "<p>never</p>");
         let view = view();

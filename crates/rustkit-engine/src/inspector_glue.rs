@@ -48,6 +48,15 @@ pub(crate) fn attach(bindings: &DomBindings, inspector: &Arc<Inspector>) {
             console_record(&sink, level, shape, at, &nameless(stack))
         }));
     }
+    // T6d: while somebody listens, each call reaches the Inspector as it is
+    // made, so a panel reads the console of a script still running (the
+    // devtools thread answers it; the page is never asked). Otherwise the
+    // calls wait for the flush at the script's end, as before.
+    let live = inspector.clone();
+    bindings.set_console_live(Some(Box::new(move || live.is_active())));
+    // Past the live cap calls are held for the flush; a script that hangs
+    // after a hot loop never flushes, so the count is readable meanwhile.
+    bindings.set_console_held_counter(Some(inspector.console_held_counter()));
     let keep_text = if mirror { true } else { inspector.keeps_error_text() };
     let _ = bindings.set_error_details(true, keep_text);
     // The mirror quotes the source around a throw. The Inspector does not,

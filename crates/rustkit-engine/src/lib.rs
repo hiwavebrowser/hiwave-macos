@@ -324,7 +324,7 @@ pub use inspector_page::{
 mod inspector_page_tests;
 mod devtools;
 pub use devtools::{
-    devtools_console_entries, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
+    devtools_console_entries, devtools_held_text, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
     DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
     DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
 };
@@ -1268,6 +1268,11 @@ enum ScriptTiming {
 /// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
 /// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
 const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Why an inline HTML load (`load_html`) does not run a script: it runs
+/// inline classic scripts only. Every other `Skipped` there is a script it
+/// meant to run and could not.
+pub const HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY: &str = "an inline HTML load runs inline classic scripts only";
 
 /// One `<script>` after fetching: its log label, then its source text or
 /// the reason it will not run.
@@ -7440,7 +7445,7 @@ impl Engine {
             let body = match timing {
                 Err(outcome) => Err(outcome),
                 Ok(_) if external || is_module_script(node) => {
-                    Err(ScriptOutcome::Skipped("an inline HTML load runs inline classic scripts only"))
+                    Err(ScriptOutcome::Skipped(HTML_LOAD_RUNS_INLINE_CLASSIC_ONLY))
                 }
                 Ok(_) => Ok(node.text_content()),
             };
@@ -8100,6 +8105,19 @@ impl Engine {
             }
             path.extend(above[root].iter().copied());
         }
+        // Each element on the path, with how many of its children lead to a
+        // root (or are one); `above[root]` runs from the root's parent up.
+        let mut pending: HashMap<usize, usize> = HashMap::new();
+        let mut steps = std::collections::HashSet::new();
+        for root in &roots {
+            let mut child = *root;
+            for parent in &above[root] {
+                if steps.insert((*parent, child)) {
+                    *pending.entry(*parent).or_insert(0) += 1;
+                }
+                child = *parent;
+            }
+        }
         let started = std::time::Instant::now();
         let mut built = Vec::with_capacity(2);
         let mut walked = 0;
@@ -8112,6 +8130,7 @@ impl Engine {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
                     roots: roots.iter().copied().collect(),
+                    pending: pending.clone(),
                     found: HashMap::new(),
                     walked: 0,
                 })
@@ -12778,6 +12797,18 @@ impl layout_ctx::LayoutCtx {
                     style.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
+            "clip-path" | "-webkit-clip-path" => {
+                let value = value.trim();
+                style.clip_path = if value.eq_ignore_ascii_case("none") {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+            }
+            "filter" | "-webkit-filter" => {
+                let value = value.trim().to_ascii_lowercase();
+                style.filter = if value == "none" { String::new() } else { value };
+            }
             "object-fit" => {
                 // Layout and paint already honour every keyword; only this
                 // arm was missing, so every `object-fit: cover` painted as
@@ -13456,6 +13487,8 @@ impl layout_ctx::LayoutCtx {
                 style.webkit_box = None;
             }
             "opacity" => style.opacity = 1.0,
+            "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
+            "filter" | "-webkit-filter" => style.filter.clear(),
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
                 style.object_position = (0.5, 0.5);
@@ -17516,6 +17549,8 @@ impl Engine {
                 Cmd::PopTransform => serde_json::json!({ "op": "pop_transform" }),
                 Cmd::PushOpacity(alpha) => serde_json::json!({ "op": "push_opacity", "opacity": alpha }),
                 Cmd::PopOpacity => serde_json::json!({ "op": "pop_opacity" }),
+                Cmd::PushFilter(matrix) => serde_json::json!({ "op": "push_filter", "color_matrix": matrix }),
+                Cmd::PopFilter => serde_json::json!({ "op": "pop_filter" }),
                 Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
                 Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
                 // Not yet modelled: form controls, carets, focus rings, and
@@ -35728,6 +35763,10 @@ struct LaidWith {
 struct RestyleBuild {
     path: std::collections::HashSet<usize>,
     roots: std::collections::HashSet<usize>,
+    /// For each element on `path`, how many of its children on `path` or in
+    /// `roots` the build has still to reach: after the last one its other
+    /// children are skipped, as nothing they hold is read under a root.
+    pending: HashMap<usize, usize>,
     found: HashMap<usize, LayoutBox>,
     /// The child nodes the build went into.
     walked: usize,
@@ -35765,16 +35804,25 @@ fn restyle_child(parent: usize, child: usize) -> RestyleChild {
         };
         let what = if !build.path.contains(&parent) {
             RestyleChild::Build
-        } else if build.roots.contains(&child) {
-            RestyleChild::Root
-        } else if build.path.contains(&child) {
-            RestyleChild::Walk
-        } else if container_query::active() {
+        } else if build.roots.contains(&child) || build.path.contains(&child) {
+            if let Some(left) = build.pending.get_mut(&parent) {
+                *left = left.saturating_sub(1);
+            }
+            match build.roots.contains(&child) {
+                true => RestyleChild::Root,
+                false => RestyleChild::Walk,
+            }
+        } else if build.pending.get(&parent).is_some_and(|left| *left > 0)
+            && container_query::earlier_siblings_matter()
+        {
             // The `@container` walk reads earlier siblings (a float in one
             // makes later containers unknown): a placeholder would hide it
             // and the root's queries would answer otherwise than in the
             // full build (#782 R2). Build the sibling; its box is dropped
-            // with its parent's.
+            // with its parent's. Not one after the last child that leads to
+            // a root, which the walk reads only after the roots, nor one
+            // once a float is on record, which another cannot change
+            // (#782 follow-up: each hover built the whole page twice).
             RestyleChild::Build
         } else {
             RestyleChild::Skip
@@ -42166,5 +42214,244 @@ mod sheet_cache_tests {
         e.load_html(id, "<html><head><style>p { color: blue }</style></head><body><p>b</p></body></html>")
             .expect("load_html");
         assert_eq!(held(&e), ["p { color: blue }"]);
+    }
+}
+
+// `clip-path` basic shapes (CSS Masking 1 §5.1) were parsed by nothing and
+// painted by nothing: every clipped box painted whole. Reduced page:
+// docs/diagnostics/2026-10-23/css_clip_path.html.
+#[cfg(test)]
+mod clip_path_pins {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn engine() -> Engine {
+        Engine::new(EngineConfig::default()).expect("engine")
+    }
+
+    fn dl(e: &Engine, html: &str) -> Vec<String> {
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        // Height 0: a block is placed below its containing block's
+        // content, so this puts the page at y = 0.
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    /// Open clips at each command: +1 at a push, -1 at a pop.
+    fn depth_at(lines: &[String], at: usize) -> i32 {
+        lines[..at].iter().fold(0, |d, c| {
+            if c.starts_with("PushClip") {
+                d + 1
+            } else if c.starts_with("PopClip") {
+                d - 1
+            } else {
+                d
+            }
+        })
+    }
+
+    #[test]
+    fn clip_path_basic_shapes_clip_the_box_and_its_descendants() {
+        let e = engine();
+        // A 140px border box at the origin: 20px red border, green content.
+        let page = |style: &str, inner: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 5] = [
+            ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
+            ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
+            ("-webkit-clip-path:inset(20px round 10px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 10.0, v: 10.0 }")),
+            // closest-side from (90, 90) in the content box is 30px.
+            ("clip-path:circle(closest-side at 70px 70px) content-box", "PushClipRounded", "x: 60.0, y: 60.0, width: 60.0, height: 60.0", Some("CornerRadius { h: 30.0, v: 30.0 }")),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style, "");
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            // The box's own background and border paint inside the clip
+            // (only the page's canvas fill comes before it).
+            let painted: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .skip(push)
+                .filter(|(_, c)| !c.starts_with("PushClip") && !c.starts_with("PopClip"))
+                .map(|(i, _)| i)
+                .collect();
+            assert!(painted.len() >= 2, "background and border:\n{all}");
+            assert!(
+                lines[push + 1..].iter().any(|c| c.contains("r: 255, g: 0, b: 0")),
+                "`{style}`: the red border is painted inside the clip:\n{all}"
+            );
+            for i in painted {
+                assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{}` unclipped:\n{all}", lines[i]);
+            }
+        }
+
+        // An absolutely positioned child is clipped too.
+        let lines = page(
+            "-webkit-clip-path:inset(20px round 10px);position:relative",
+            r#"<i style="position:absolute;left:-20px;top:-20px;width:140px;height:20px;background:red"></i>"#,
+        );
+        let all = lines.join("\n");
+        let child = lines
+            .iter()
+            .position(|c| c.contains("width: 140.0, height: 20.0"))
+            .unwrap_or_else(|| panic!("no child paint:\n{all}"));
+        assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
+
+        // `none`, and shapes that are not a rounded rect, paint as before.
+        for style in ["clip-path:none", "clip-path:polygon(0 0, 100% 0, 0 100%)", ""] {
+            let lines = page(style, "");
+            assert!(
+                !lines.iter().any(|c| c.starts_with("PushClip")),
+                "`{style}`:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod filter_pins {
+    use super::*;
+    use rustkit_layout::{Dimensions, DisplayList, Rect};
+
+    fn dl(html: &str) -> Vec<String> {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let d = Document::parse_html(html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut cb = Dimensions::default();
+        // Height 0 puts the page at y = 0.
+        cb.content = Rect::new(0.0, 0.0, 800.0, 0.0);
+        root.layout(&cb);
+        DisplayList::build(&root)
+            .commands
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect()
+    }
+
+    fn page(style: &str) -> Vec<String> {
+        dl(&format!(
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="position:relative;width:100px;height:100px;background:#f0f;{style}"><i style="position:absolute;left:25px;top:25px;width:50px;height:50px;background:#f0f"></i></div></body></html>"#
+        ))
+    }
+
+    #[test]
+    fn filter_colour_functions_paint_the_box_and_its_descendants_as_one_filtered_group() {
+        let lines = page("filter:invert(1)");
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushFilter"))
+            .unwrap_or_else(|| panic!("`filter:invert(1)` opened no filter group:\n{all}"));
+        let pop = lines
+            .iter()
+            .position(|c| c.starts_with("PopFilter"))
+            .unwrap_or_else(|| panic!("filter group never closed:\n{all}"));
+        // invert(1): r' = 1 - r.
+        assert!(
+            lines[push].starts_with("PushFilter([-1.0, 0.0, 0.0, 0.0, 1.0,"),
+            "invert(1) matrix: {}",
+            lines[push]
+        );
+        let fills: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("SolidColor") && c.contains("r: 255, g: 0, b: 255"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(fills.len(), 2, "the box and its child each fill once:\n{all}");
+        assert!(
+            fills.iter().all(|&i| push < i && i < pop),
+            "both fills sit in the filter group:\n{all}"
+        );
+
+        // Applied before opacity: the filter group sits inside the fade.
+        let lines = page("filter:grayscale(1);opacity:.5");
+        let at = |p: &str| lines.iter().position(|c| c.starts_with(p));
+        let (o, f) = (at("PushOpacity"), at("PushFilter"));
+        assert!(o.is_some() && f.is_some() && o < f, "{}", lines.join("\n"));
+
+        // Nothing to apply: no group.
+        for style in ["filter:none", "filter:blur(2px)", "filter:grayscale(-1)", ""] {
+            let lines = page(style);
+            assert!(
+                !lines.iter().any(|c| c.starts_with("PushFilter")),
+                "`{style}` opened a filter group:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    /// Pins today's nesting for a box with both `filter` and `clip-path`
+    /// (docs/diagnostics/2026-10-27/css_filter_clip_path.html): the filter
+    /// group is outermost, then the transform, then the clip, so the clip
+    /// applies to the content before the filter does. For the colour
+    /// matrices supported now that order paints the same as Chrome's (filter
+    /// first, then clip, CSS Masking 1 §3/Filter Effects 1 §3), because a
+    /// colour matrix is per pixel. Once blur or drop-shadow paint, the clip
+    /// must wrap the filter, since they bleed past the box and Chrome clips
+    /// the filtered result; this pin is the one to change then.
+    #[test]
+    fn filter_with_clip_path_clips_inside_the_filter_group() {
+        let order = |lines: &[String]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|c| !c.starts_with("SolidColor(Color { r: 255, g: 255, b: 255"))
+                .map(|c| c.split(['(', ' ']).next().unwrap_or("").to_string())
+                .collect()
+        };
+        let lines = page("filter:invert(1);clip-path:inset(20px)");
+        let all = lines.join("\n");
+        assert_eq!(
+            order(&lines),
+            ["PushFilter", "PushClip", "SolidColor", "SolidColor", "PopClip", "PopFilter"],
+            "{all}"
+        );
+        assert!(lines.iter().any(|c| c.starts_with("PushFilter([-1.0, 0.0, 0.0, 0.0, 1.0,")), "{all}");
+        assert!(
+            lines.iter().any(|c| c == "PushClip(Rect { x: 20.0, y: 20.0, width: 60.0, height: 60.0 })"),
+            "inset(20px) of the 100px box:\n{all}"
+        );
+
+        // With a transform and a rounded shape: filter, transform, clip.
+        let lines = page("filter:invert(1);clip-path:circle(40px);transform:translateX(10px)");
+        let all = lines.join("\n");
+        assert_eq!(
+            order(&lines),
+            [
+                "PushFilter", "PushTransform", "PushClipRounded", "SolidColor", "SolidColor",
+                "PopClip", "PopTransform", "PopFilter",
+            ],
+            "{all}"
+        );
+
+        // A filter with nothing to apply leaves the clip alone.
+        let lines = page("filter:blur(2px);clip-path:inset(20px)");
+        assert_eq!(
+            order(&lines),
+            ["PushClip", "SolidColor", "SolidColor", "PopClip"],
+            "{}",
+            lines.join("\n")
+        );
     }
 }

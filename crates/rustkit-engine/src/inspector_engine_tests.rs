@@ -8,7 +8,7 @@ use crate::inspector::{scrub_url, CollectingSink, MAX_MESSAGE_CHARS};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One route of the test server.
 #[derive(Clone)]
@@ -558,6 +558,82 @@ console.log('done');
     assert!(most > 0);
 }
 
+#[test]
+fn a_console_line_is_read_while_the_script_that_logged_it_still_runs() {
+    // T6d: console calls waited for the script's end, so a reader on
+    // another thread (the devtools thread) saw nothing of a long script's
+    // console until it was over.
+    let page = "<html><body><script>
+console.log('started');
+var t = Date.now(); while (Date.now() - t < 1000) {}
+console.log('done');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let inspector = engine.inspector(view).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let snapshot = inspector.snapshot_since(0);
+                if snapshot.records.iter().any(|r| matches!(r.event, InspectorEvent::Console { .. })) {
+                    return Some(Instant::now());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let ended = Instant::now();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = reader.join().unwrap().expect("no console line at all");
+    let early = ended.saturating_duration_since(seen);
+    assert!(early >= Duration::from_millis(400), "the line was read only {early:?} before the load ended");
+}
+
+#[test]
+fn console_calls_held_by_a_hung_script_are_counted_without_the_page() {
+    // T6d review: a hot loop past the live cap, then a hang. The calls
+    // over the cap wait for the script's end, which a hung script never
+    // reaches, and nothing said any were waiting.
+    let page = "<html><body><script>
+for (var i = 0; i < 300; i++) console.log(i);
+var t = Date.now(); while (Date.now() - t < 1000) {}
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let inspector = engine.inspector(view).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (stop, inspector) = (stop.clone(), inspector.clone());
+        std::thread::spawn(move || {
+            // The last count seen while the script ran, with the console
+            // records there were then.
+            let mut last = None;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                // Count, records, count again: a flush landing between the
+                // reads zeroes the count first, and the pair is skipped.
+                let held = inspector.console_held();
+                let snapshot = inspector.snapshot_since(0);
+                let recorded =
+                    snapshot.records.iter().filter(|r| matches!(r.event, InspectorEvent::Console { .. })).count();
+                if held > 0 && inspector.console_held() == held {
+                    last = Some((held, recorded));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            last
+        })
+    };
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (held, recorded) = reader.join().unwrap().expect("no held calls were ever counted");
+    assert_eq!(held + recorded, 300, "held {held} + recorded {recorded}");
+    assert_eq!(inspector.console_held(), 0, "the flush at the script's end left a count");
+}
+
 // ---- Privacy ----
 
 #[test]
@@ -908,12 +984,13 @@ fn with_the_mirror_on_console_error_stacks_are_shapes_only() {
     crate::console_log::force_for_test(Some(true));
     let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
     crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
-    let page = "<html><body><script>
-function secretMaker() { return new Error('SECRET'); }
+    // Prometheus's nit: the frames come from a script whose URL carries a
+    // query, which must not reach the Inspector either.
+    let page = "<html><body><script src=\"/app.js?token=SECRET\"></script></body></html>";
+    let app = "function secretMaker() { return new Error('SECRET'); }
 function secretCaller() { console.error(secretMaker()); }
-secretCaller();
-</script></body></html>";
-    let server = serve(vec![Route::html("/", page)]);
+secretCaller();";
+    let server = serve(vec![Route::html("/", page), Route::ok("/app.js", "text/javascript", app)]);
     let mut error_text = EngineConfig::default();
     error_text.inspector.keep_error_text = true;
     for config in [EngineConfig::default(), error_text] {
@@ -929,8 +1006,124 @@ secretCaller();
         assert!(error["stack"].is_string() && error["error_stack"].is_string(), "{error:#}");
         let text = error.to_string();
         assert!(!text.contains("SECRET") && !text.contains("secret"), "page text in a shapes record: {text}");
+        assert!(!text.contains("token") && text.contains("/app.js"), "frames name the script, no query: {text}");
     }
     assert!(mirrored.lock().unwrap().join("\n").contains("SECRET"), "the mirror keeps its text");
+}
+
+/// Atlas 10-26 20:50 (3): a page-defined `Error` subclass, by its class
+/// name and by a `name` it sets, thrown uncaught and passed to
+/// `console.error`, with the mirror off and on. The record's error name is
+/// a standard one (`standard_name`), so the page's name reaches no record.
+#[test]
+fn a_page_defined_error_subclass_name_reaches_no_record() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    let page = "<html><body><script src=\"/app.js\"></script><script src=\"/throw.js\"></script></body></html>";
+    let app = "class SecretLeak extends Error {}
+class NamedLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+console.error(new SecretLeak('x'));
+console.error(new NamedLeak('y'));
+Promise.reject(new NamedLeak('z'));";
+    let throws = "class ThrownLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+function thrower() { throw new ThrownLeak('w'); }
+thrower();";
+    let server = serve(vec![
+        Route::html("/", page),
+        Route::ok("/app.js", "text/javascript", app),
+        Route::ok("/throw.js", "text/javascript", throws),
+    ]);
+    for mirror in [false, true] {
+        crate::console_log::force_for_test(Some(mirror));
+        let (mut engine, view) = inspected_engine(EngineConfig::default());
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+        let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+        assert!(kinds.contains(&"script_error"), "mirror {mirror}: no script_error in {kinds:?}");
+        assert!(kinds.iter().filter(|k| **k == "console").count() >= 2, "mirror {mirror}: {kinds:?}");
+        let text = serde_json::to_string(&records).unwrap();
+        for name in ["SecretLeak", "SecretName", "NamedLeak", "ThrownLeak"] {
+            assert!(!text.contains(name), "mirror {mirror}: the page's error name {name} reached a record: {text}");
+        }
+    }
+}
+
+/// Prometheus's #799 nit 3 (Atlas 20:50 (4)): an error thrown from a
+/// callback, not from a script's own run, still reaches the Inspector as a
+/// `script_error`: a timer, an animation frame and an event listener, each
+/// with its own error type so the three are told apart.
+#[test]
+fn errors_thrown_in_timer_frame_and_listener_callbacks_reach_the_inspector() {
+    let page = "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">x</p><script>
+setTimeout(function () { throw new TypeError('t'); }, 0);
+requestAnimationFrame(function () { throw new RangeError('r'); });
+document.getElementById('p').addEventListener('click', function () { throw new EvalError('l'); });
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    for _ in 0..5 {
+        runtime().block_on(engine.pump_live(view, 20));
+    }
+    engine.click_at_point(view, 20.0, 20.0);
+    let errors: Vec<String> = records(&engine, view)
+        .iter()
+        .filter(|r| r.event.kind() == "script_error")
+        .map(|r| serde_json::to_value(r).unwrap()["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for (callback, name) in [("timer", "TypeError"), ("animation frame", "RangeError"), ("listener", "EvalError")] {
+        assert!(errors.iter().any(|e| e == name), "the {callback}'s {name} never reached the Inspector: {errors:?}");
+    }
+}
+
+/// #791 review: `count` had the only shape-path test. A failed
+/// `console.assert` and a `console.timeLog` label reach the Inspector as
+/// shapes too, with the mirror on; with console text kept, the text is there
+/// (so the test can see it).
+#[test]
+fn with_the_mirror_on_assert_and_time_log_are_shapes_only() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.assert(false, 'secret-assert');
+console.time('secret-timer');
+console.timeLog('secret-timer');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut texts = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let console: Vec<String> = engine
+            .inspector(view)
+            .expect("inspector")
+            .snapshot_since(0)
+            .records
+            .iter()
+            .filter(|r| r.event.kind() == "console")
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        assert_eq!(console.len(), 2, "one record for the assert, one for timeLog: {console:#?}");
+        texts.push(console.join("\n"));
+    }
+    assert!(!texts[0].contains("secret"), "page text in a shapes record: {}", texts[0]);
+    assert!(texts[1].contains("secret-assert") && texts[1].contains("secret-timer"), "{}", texts[1]);
+    assert!(mirrored.lock().unwrap().join("\n").contains("secret-assert"), "the mirror keeps its text");
 }
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
