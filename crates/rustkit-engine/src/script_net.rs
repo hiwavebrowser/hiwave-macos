@@ -1071,59 +1071,39 @@ fn enqueue_inserted(
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
-                    let cancel = FetchCancel::new();
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq: 0,
-                        body: None,
-                        guard,
-                        cancel: Arc::clone(&cancel),
-                        queued,
-                        requested_at: taken_at,
-                        arrived_at: None,
-                        inspector: Arc::clone(inspector),
-                    });
-                    started.push(FetchJob {
-                        loader: Arc::clone(loader),
-                        request,
-                        board: Arc::clone(&scripts.board),
-                        job_id: id,
-                        nav_id,
-                        cancel,
-                    });
-                }
-                Err(_) => {
-                    board.ready_seq = board.ready_seq.wrapping_add(1);
-                    let ready_seq = board.ready_seq;
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        // Not the text itself: what does not parse cannot be
-                        // reduced to origin and path for the log. Its own
-                        // name: the load path's `unparseable#n` counts the
-                        // document's scripts, this one is a node id.
-                        url: format!("unparseable-inserted#{node}"),
-                        nav_id,
-                        in_order,
-                        ready_seq,
-                        body: Some(FetchedInserted::Skipped("unparseable src")),
-                        guard: None,
-                        cancel: FetchCancel::new(),
-                        queued,
-                        requested_at: taken_at,
-                        arrived_at: Some(taken_at),
-                        inspector: Arc::clone(inspector),
-                    });
-                }
-            }
+            // `web_scripts.js` queues only an `href` from the `url` crate's
+            // parser and fires `error` for a `src` it cannot resolve, so this
+            // always parses (`an_unparseable_inserted_src_never_reaches_the_engine_queue`).
+            let Ok(parsed) = Url::parse(&url) else {
+                debug_assert!(false, "inserted script URL does not parse");
+                continue;
+            };
+            let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
+            let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
+            let cancel = FetchCancel::new();
+            board.jobs.push(InsertedJob {
+                id,
+                node,
+                url,
+                nav_id,
+                in_order,
+                ready_seq: 0,
+                body: None,
+                guard,
+                cancel: Arc::clone(&cancel),
+                queued,
+                requested_at: taken_at,
+                arrived_at: None,
+                inspector: Arc::clone(inspector),
+            });
+            started.push(FetchJob {
+                loader: Arc::clone(loader),
+                request,
+                board: Arc::clone(&scripts.board),
+                job_id: id,
+                nav_id,
+                cancel,
+            });
         }
     }
     for job in started {
