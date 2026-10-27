@@ -31,12 +31,19 @@
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
 //! script is running. Reading runs no script.
 //!
+//! An open devtools panel is not polled for (T6b): every record moves the
+//! view's [`Inspector::watermark`], and while a panel watches the view the
+//! devtools thread is signalled after the lock is released. Each record
+//! carries its document ([`InspectorRecord::doc`]), and records outlive a
+//! navigation and the panel closing until the ring drops them.
+//!
 //! [`Engine::inspector`]: crate::Engine::inspector
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -45,6 +52,11 @@ use url::Url;
 
 /// Events a view's ring buffer holds by default.
 pub const DEFAULT_CAPACITY: usize = 4096;
+/// Events each tab keeps from the moment it is made, so an Inspector panel
+/// opened late has the history (T6b; Atlas 10-24, Q1).
+/// 2048: one yahoo load writes about 562 records with T3, so 512 lost its
+/// `navigation_start` (Atlas 10-26).
+pub const TAB_RING_CAPACITY: usize = 2048;
 /// Longest console message kept, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 1024;
 /// Longest error stack kept, in characters.
@@ -90,6 +102,25 @@ impl Default for InspectorConfig {
             keep_url_query: false,
             keep_console_text: false,
             keep_error_text: false,
+        }
+    }
+}
+
+impl InspectorConfig {
+    /// A tab's: a [`TAB_RING_CAPACITY`] ring once a panel attaches.
+    /// `HIWAVE_DEVTOOLS_RING=1` (or true/on/yes) keeps it from the moment
+    /// the view is made, so a panel opened late has the history. Off by
+    /// default: it costs every view a record per console call, script and
+    /// request, and no quiet A/B has cleared that cost yet (#803 review).
+    pub fn tab() -> Self {
+        let on = matches!(
+            std::env::var("HIWAVE_DEVTOOLS_RING").ok().as_deref(),
+            Some("1" | "true" | "on" | "yes")
+        );
+        Self {
+            buffer: on,
+            capacity: TAB_RING_CAPACITY,
+            ..Self::default()
         }
     }
 }
@@ -300,7 +331,9 @@ pub enum InspectorEvent {
         method: String,
         resource_type: ResourceType,
         /// What asked for it: `parser` (the document's markup), `css` (a
-        /// stylesheet's `url()`), `script` (page script), `navigation`.
+        /// stylesheet's `url()`), `fetch`, `xhr`, `inserted_script` (a
+        /// `<script src>` page script inserted), `script` (other page
+        /// script: `import`, images it added), `navigation`.
         initiator: Option<String>,
     },
     /// The request's answer arrived (any status, 4xx and 5xx included).
@@ -316,6 +349,11 @@ pub enum InspectorEvent {
         decoded_size: Option<u64>,
         from_cache: bool,
         duration_ms: f64,
+        /// Of `duration_ms`, the time it waited for an in-flight slot (the
+        /// per-origin and per-page caps queue a script request; they do not
+        /// refuse it). `null` for a request no cap queues.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
     /// The request ended without a usable answer.
     Failure {
@@ -324,6 +362,14 @@ pub enum InspectorEvent {
         /// A short reason in the engine's words (no header, body or query).
         reason: String,
         duration_ms: f64,
+        /// The shield's list and rule, when the shield refused it and said
+        /// which; else `null`.
+        #[serde(default)]
+        blocked_by: Option<BlockedBy>,
+        /// As on `response`. A deadline that passes while the request is
+        /// still queued has the reason `in-flight cap`.
+        #[serde(default)]
+        queued_ms: Option<f64>,
     },
     /// One page script's life, recorded when it is over: run, thrown,
     /// stopped, or given up on.
@@ -375,6 +421,30 @@ pub enum InspectorEvent {
     },
 }
 
+/// Which filter list, and which of its rules, refused a request: the
+/// list's own public text, capped, never the page's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedBy {
+    pub list: String,
+    pub rule: Option<String>,
+}
+
+impl BlockedBy {
+    fn from_reason(reason: &rustkit_net::BlockReason) -> Self {
+        BlockedBy {
+            list: cap(&reason.list, MAX_SHORT_CHARS).0,
+            rule: reason.rule.as_deref().map(|r| cap(r, MAX_RULE_CHARS).0),
+        }
+    }
+}
+
+/// A failure's reason when its deadline passed while it was still queued
+/// behind an in-flight cap.
+pub const IN_FLIGHT_CAP: &str = "in-flight cap";
+
+/// Longest filter rule kept in `blocked_by`, in characters.
+const MAX_RULE_CHARS: usize = 256;
+
 impl InspectorEvent {
     /// The `type` tag.
     pub fn kind(&self) -> &'static str {
@@ -404,6 +474,10 @@ impl InspectorEvent {
 pub struct InspectorRecord {
     /// 0-based, per view, never reused.
     pub seq: u64,
+    /// The document it belongs to: 0 before the view's first navigation,
+    /// then each navigation's start begins the next.
+    #[serde(default)]
+    pub doc: u32,
     /// Milliseconds since the current navigation started (monotonic clock).
     pub t_ms: f64,
     #[serde(flatten)]
@@ -439,7 +513,11 @@ pub struct UnsupportedApiCount {
 
 struct State {
     buffer: bool,
+    /// Whether the view's config keeps the ring on with no panel.
+    buffer_default: bool,
     capacity: usize,
+    /// [`InspectorRecord::doc`] of the next record.
+    doc: u32,
     records: VecDeque<InspectorRecord>,
     next_seq: u64,
     dropped: u64,
@@ -457,7 +535,10 @@ struct State {
     /// The last request id given out (per view, never reused).
     last_request_id: u64,
     /// Requests recorded and not yet answered.
-    open_requests: std::collections::HashSet<u64>,
+    /// Open request ids and the document each started in: the answer is
+    /// stamped with that one, not the document current when it arrives
+    /// (T6 R1 condition 6).
+    open_requests: std::collections::HashMap<u64, u32>,
     /// The lifecycle events this document has fired, and the scripts that
     /// ended between `DOMContentLoaded` and `load` (first
     /// [`MAX_HELD_BY`]) with their count.
@@ -493,7 +574,49 @@ pub struct Inspector {
     keep_url_query: bool,
     keep_console_text: bool,
     keep_error_text: bool,
+    /// The `seq` the next record gets, readable without the lock.
+    watermark: AtomicU64,
+    /// A panel watches this view: tell the devtools thread about records.
+    watched: AtomicBool,
     state: Mutex<State>,
+}
+
+/// The state, locked. Dropping it releases the lock first, then tells the
+/// devtools thread when records were pushed under it and a panel watches.
+struct Locked<'a> {
+    inspector: &'a Inspector,
+    guard: Option<MutexGuard<'a, State>>,
+    seq_at_lock: u64,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.take() else { return };
+        let next_seq = guard.next_seq;
+        drop(guard);
+        if next_seq != self.seq_at_lock {
+            // SeqCst with `set_watched`: a push that reads `watched` false
+            // has its watermark seen by the devtools thread's re-read
+            // before it sleeps (T6 R1 condition 1).
+            self.inspector.watermark.store(next_seq, Ordering::SeqCst);
+            if self.inspector.watched.load(Ordering::SeqCst) {
+                crate::devtools_service::records_arrived();
+            }
+        }
+    }
 }
 
 impl Inspector {
@@ -503,9 +626,13 @@ impl Inspector {
             keep_url_query: config.keep_url_query,
             keep_console_text: config.keep_console_text,
             keep_error_text: config.keep_error_text,
+            watermark: AtomicU64::new(0),
+            watched: AtomicBool::new(false),
             state: Mutex::new(State {
                 buffer: config.buffer,
+                buffer_default: config.buffer,
                 capacity: config.capacity.max(1),
+                doc: 0,
                 records: VecDeque::new(),
                 next_seq: 0,
                 dropped: 0,
@@ -517,7 +644,7 @@ impl Inspector {
                 aliases: Vec::new(),
                 inserters: Vec::new(),
                 last_request_id: 0,
-                open_requests: std::collections::HashSet::new(),
+                open_requests: std::collections::HashMap::new(),
                 dom_content_loaded: false,
                 loaded: false,
                 held_load: Vec::new(),
@@ -532,10 +659,56 @@ impl Inspector {
         self.active.load(Ordering::Relaxed)
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
+    fn state(&self) -> Locked<'_> {
         // A sink that panicked leaves the lock poisoned; the buffer is
         // still consistent (records are pushed whole).
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Locked {
+            inspector: self,
+            seq_at_lock: guard.next_seq,
+            guard: Some(guard),
+        }
+    }
+
+    /// The `seq` the next record will get. One atomic load: the window
+    /// thread reads it to know whether there is anything new, without the
+    /// lock (sinks run under it).
+    pub fn watermark(&self) -> u64 {
+        self.watermark.load(Ordering::SeqCst)
+    }
+
+    /// Whether the devtools thread is told about this view's records.
+    pub(crate) fn set_watched(&self, on: bool) {
+        self.watched.store(on, Ordering::SeqCst);
+    }
+
+    /// The page thread panicked while it held this view's lock (a sink or
+    /// a push unwound). What was recorded is still read (`state` recovers
+    /// with `into_inner`); the panel says the page crashed (T6 R1
+    /// condition 2).
+    pub fn page_crashed(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
+    /// Test hook: panic on this thread while holding the lock, as a page
+    /// thread whose sink panicked would.
+    #[cfg(test)]
+    pub(crate) fn panic_holding_lock(&self) {
+        let _held = self.state.lock();
+        panic!("page thread panicked holding the Inspector lock (test)");
+    }
+
+    /// The panel closed: recording goes back to the view's default. With
+    /// the tab ring on nothing recorded is dropped (T6b: the panel reopens
+    /// with history); with it off the session's records are, as nothing
+    /// will read them.
+    pub fn detach_panel(&self) {
+        let mut state = self.state();
+        state.buffer = state.buffer_default;
+        if !state.buffer {
+            state.records.clear();
+        }
+        self.refresh_active(&state);
     }
 
     fn refresh_active(&self, state: &State) {
@@ -616,8 +789,15 @@ impl Inspector {
     }
 
     fn push_locked(state: &mut State, event: InspectorEvent) {
+        let doc = state.doc;
+        Self::push_locked_in(state, doc, event);
+    }
+
+    /// Push `event` as a record of document `doc`.
+    fn push_locked_in(state: &mut State, doc: u32, event: InspectorEvent) {
         let record = InspectorRecord {
             seq: state.next_seq,
+            doc,
             t_ms: round_ms(state.navigation_started.elapsed().as_secs_f64() * 1000.0),
             event,
         };
@@ -650,6 +830,7 @@ impl Inspector {
         let url = url.map(|u| self.url(u));
         let mut state = self.state();
         state.navigation_started = Instant::now();
+        state.doc += 1;
         state.unsupported.clear();
         state.laid_out = false;
         state.painted = false;
@@ -934,7 +1115,8 @@ impl Inspector {
         let mut state = self.state();
         state.last_request_id += 1;
         let id = state.last_request_id;
-        state.open_requests.insert(id);
+        let doc = state.doc;
+        state.open_requests.insert(id, doc);
         Self::push_locked(&mut state, InspectorEvent::Request { id, url, method, resource_type, initiator });
         drop(state);
         Some(RequestGuard {
@@ -944,6 +1126,9 @@ impl Inspector {
             dropped_as: FailureStage::Cancelled,
             dropped_reason: "abandoned (navigation or view closed)",
             budget: None,
+            blocked_by: None,
+            slot: None,
+            deadline: None,
             done: false,
         })
     }
@@ -955,9 +1140,10 @@ impl Inspector {
 
     fn finish_request(&self, id: u64, event: InspectorEvent) {
         let mut state = self.state();
-        let was_open = state.open_requests.remove(&id);
-        debug_assert!(was_open, "request {id} answered twice, or never recorded");
-        Self::push_locked(&mut state, event);
+        let started_in = state.open_requests.remove(&id);
+        debug_assert!(started_in.is_some(), "request {id} answered twice, or never recorded");
+        let doc = started_in.unwrap_or(state.doc);
+        Self::push_locked_in(&mut state, doc, event);
     }
 
     /// The document's redirects, as `navigation_redirect` events.
@@ -1149,6 +1335,12 @@ pub struct RequestGuard {
     /// Dropped at or past this deadline, it ran out of a budget: the stage
     /// and the reason to record.
     budget: Option<(Instant, FailureStage, &'static str)>,
+    /// The shield's list and rule, for the failure it ends in.
+    blocked_by: Option<BlockedBy>,
+    /// Its wait for an in-flight slot, when a cap can queue it.
+    slot: Option<rustkit_net::policy::SlotWait>,
+    /// The deadline that ends it as `timeout` / `over_budget`, if known.
+    deadline: Option<Instant>,
     done: bool,
 }
 
@@ -1156,6 +1348,57 @@ impl RequestGuard {
     /// The request's id in the events.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The shield refused it with `reason` (if it said which list and rule):
+    /// the failure this ends in carries them as `blocked_by`.
+    pub fn blocked_by(mut self, reason: Option<&rustkit_net::BlockReason>) -> Self {
+        self.blocked_by = reason.map(BlockedBy::from_reason);
+        self
+    }
+
+    /// The request can be queued behind an in-flight cap: `slot` is what the
+    /// policy stamps (see [`rustkit_net::policy::SlotWait`]); the outcome
+    /// records `queued_ms` from it.
+    pub fn waits_on(mut self, slot: &rustkit_net::policy::SlotWait) -> Self {
+        self.slot = Some(slot.clone());
+        self
+    }
+
+    /// Its slot wait, if it has one: hand it to the policy.
+    pub fn slot(&self) -> Option<&rustkit_net::policy::SlotWait> {
+        self.slot.as_ref()
+    }
+
+    /// The deadline the caller races it against: a `timeout` or
+    /// `over_budget` failure is an `in-flight cap` if it was still queued
+    /// then.
+    pub fn deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = Some(deadline.into_std());
+        self
+    }
+
+    fn queued_ms(&self) -> Option<f64> {
+        self.slot.as_ref()?.waited().map(|d| round_ms(d.as_secs_f64() * 1000.0))
+    }
+
+    /// `reason`, unless a deadline (`timeout`, `over_budget`) ended the
+    /// request while it was still queued behind a cap: then `in-flight cap`.
+    fn deadline_reason<'a>(&self, stage: FailureStage, reason: &'a str) -> &'a str {
+        if !matches!(stage, FailureStage::Timeout | FailureStage::OverBudget) {
+            return reason;
+        }
+        let at = self.deadline.or(self.budget.map(|(at, _, _)| at));
+        let queued = match (&self.slot, at) {
+            (Some(slot), Some(at)) => slot.waiting_at(at),
+            (Some(slot), None) => slot.is_waiting(),
+            (None, _) => false,
+        };
+        if queued {
+            IN_FLIGHT_CAP
+        } else {
+            reason
+        }
     }
 
     /// The stage and reason recorded if this is dropped unanswered.
@@ -1206,6 +1449,7 @@ impl RequestGuard {
             decoded_size,
             from_cache,
             duration_ms: self.duration_ms(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1214,8 +1458,16 @@ impl RequestGuard {
     /// are scrubbed and it is capped.
     pub fn fail(mut self, stage: FailureStage, reason: &str) {
         self.done = true;
+        let reason = self.deadline_reason(stage, reason);
         let reason = self.inspector.scrub_text(&cap(reason, MAX_SHORT_CHARS).0);
-        let event = InspectorEvent::Failure { id: self.id, stage, reason, duration_ms: self.duration_ms() };
+        let event = InspectorEvent::Failure {
+            id: self.id,
+            stage,
+            reason,
+            duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
+        };
         self.inspector.finish_request(self.id, event);
     }
 }
@@ -1232,8 +1484,10 @@ impl Drop for RequestGuard {
         let event = InspectorEvent::Failure {
             id: self.id,
             stage,
-            reason: reason.to_string(),
+            reason: self.deadline_reason(stage, reason).to_string(),
             duration_ms: self.duration_ms(),
+            blocked_by: self.blocked_by.take(),
+            queued_ms: self.queued_ms(),
         };
         self.inspector.finish_request(self.id, event);
     }
@@ -1319,7 +1573,7 @@ pub fn answer_module(
         Ok(Err(rustkit_net::policy::Denial::BadStatus(status))) => guard.response(*status, None, None, None, false),
         Ok(Err(denial)) => {
             let (stage, reason) = denial_stage(denial);
-            guard.fail(stage, reason);
+            guard.blocked_by(denial_block_reason(denial)).fail(stage, reason);
         }
         Err(_) => guard.fail(FailureStage::Timeout, "timed out"),
     }
@@ -1329,7 +1583,23 @@ pub fn answer_module(
 pub fn fail_net(guard: Option<RequestGuard>, error: &rustkit_net::NetError) {
     if let Some(guard) = guard {
         let (stage, reason) = net_error_stage(error);
-        guard.fail(stage, reason);
+        guard.blocked_by(net_block_reason(error)).fail(stage, reason);
+    }
+}
+
+/// The shield's list and rule, when `error` is its block and it said which.
+pub fn net_block_reason(error: &rustkit_net::NetError) -> Option<&rustkit_net::BlockReason> {
+    match error {
+        rustkit_net::NetError::Blocked(reason) => reason.as_ref(),
+        _ => None,
+    }
+}
+
+/// The shield's list and rule, when `denial` is its block and it said which.
+pub fn denial_block_reason(denial: &rustkit_net::policy::Denial) -> Option<&rustkit_net::BlockReason> {
+    match denial {
+        rustkit_net::policy::Denial::Shield(reason) => reason.as_ref(),
+        _ => None,
     }
 }
 
@@ -1351,7 +1621,7 @@ pub fn denial_stage(denial: &rustkit_net::policy::Denial) -> (FailureStage, &'st
         Denial::ResponseTooLarge => (FailureStage::OverBudget, "response too large"),
         Denial::Timeout => (FailureStage::Timeout, "timed out"),
         Denial::BudgetExhausted => (FailureStage::OverBudget, "page request budget spent"),
-        Denial::Shield => (FailureStage::Policy, "blocked by the shield"),
+        Denial::Shield(_) => (FailureStage::Policy, "blocked by the shield"),
         Denial::BadMime(_) => (FailureStage::Mime, "not a JavaScript MIME type"),
         Denial::BadStatus(_) => (FailureStage::HttpError, "module answered with an error status"),
         Denial::Network(_) => (FailureStage::Connect, "network error"),
@@ -1368,7 +1638,7 @@ pub fn net_error_stage(error: &rustkit_net::NetError) -> (FailureStage, &'static
         "tls" => (FailureStage::Tls, "TLS failed"),
         "timeout" => (FailureStage::Timeout, "timed out"),
         "policy" => match error {
-            rustkit_net::NetError::Blocked => (FailureStage::Policy, "blocked by the shield"),
+            rustkit_net::NetError::Blocked(_) => (FailureStage::Policy, "blocked by the shield"),
             _ => (FailureStage::Policy, "address not allowed"),
         },
         "redirect" => (FailureStage::HttpError, "too many redirects"),
@@ -1808,7 +2078,7 @@ pub fn net_error_kind(error: &rustkit_net::NetError) -> &'static str {
     use rustkit_http::HttpError;
     use rustkit_net::NetError;
     match error {
-        NetError::Blocked => "policy",
+        NetError::Blocked(_) => "policy",
         NetError::Timeout(_) => "timeout",
         NetError::Cancelled => "cancelled",
         NetError::InvalidUrl(_) => "invalid_url",

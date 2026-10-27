@@ -452,12 +452,50 @@ fn load_html_is_a_navigation_with_no_url() {
     );
 }
 
-// ---- Off by default, and free when off ----
+// ---- The tab ring: off by default, a ring from the start when on ----
+
+/// The engine config with no ring and no sink.
+fn ring_off() -> EngineConfig {
+    EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() }
+}
+
+#[test]
+fn a_tab_records_nothing_by_default_until_a_panel_attaches() {
+    // #803 review: the ring stays off until a quiet A/B clears its cost.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let config = EngineConfig::default();
+    assert!(
+        std::env::var_os("HIWAVE_DEVTOOLS_RING").is_some() || !config.inspector.buffer,
+        "the tab ring is on by default"
+    );
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    assert!(engine.inspector(view).unwrap().snapshot_since(0).records.is_empty());
+    assert_eq!(InspectorConfig::tab().capacity, crate::inspector::TAB_RING_CAPACITY);
+}
+
+#[test]
+fn with_the_tab_ring_on_a_tab_keeps_a_ring_from_the_start() {
+    // T6b (Atlas 10-24, Q1), `HIWAVE_DEVTOOLS_RING=1`: a panel opened late
+    // has the history.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let inspector = InspectorConfig { buffer: true, ..InspectorConfig::tab() };
+    let mut engine = Engine::new(EngineConfig { inspector, ..EngineConfig::default() }).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let kept: Vec<String> = records(&engine, view).iter().map(|r| describe(r, server.port)).collect();
+    assert_eq!(only(&kept, &["console"]).len(), 5, "{kept:?}");
+}
 
 #[test]
 fn with_nobody_listening_nothing_is_recorded() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -472,7 +510,7 @@ fn with_nobody_listening_nothing_is_recorded() {
 #[test]
 fn a_sink_alone_turns_recording_on() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -1694,7 +1732,9 @@ fn a_page_throwing_any_engine_message_is_a_page_record_with_no_text() {
          Promise.reject(T(i)); \
          (async function () { await 0; throw T(i); })(); })(i);</script></body></html>",
     );
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    // 456 errors plus a script record per script outgrow the tab ring: keep
+    // the full buffer.
+    let (engine, view, _server) = load_page(ring_off(), vec![Route::html("/", page)]);
     let records = records(&engine, view);
     let all = serde_json::to_string(&records).unwrap();
     let errors: Vec<(&str, &str, Option<&String>)> = records

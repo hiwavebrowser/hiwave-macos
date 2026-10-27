@@ -294,7 +294,7 @@ pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
     connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
-    PageHandle, PageInput,
+    PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
 pub use content_thread::{
@@ -330,6 +330,10 @@ pub use devtools::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
+mod devtools_service;
+pub use devtools_service::{
+    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+};
 #[cfg(test)]
 mod consent_click_tests;
 use presenter::Presenter;
@@ -343,6 +347,7 @@ pub use inspector::{
 };
 pub use rustkit_bindings::MutationKind;
 mod script_net;
+mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
 #[cfg(test)]
@@ -875,53 +880,17 @@ struct ViewState {
     decode_epoch: u64,
     #[allow(dead_code)]
     nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
-    /// Currently focused DOM node.
-    focused_node: Option<rustkit_dom::NodeId>,
-    /// Live text-editing state for this view's form controls, keyed by raw
-    /// `NodeId`.
-    ///
-    /// Per-VIEW, not engine-global: `NodeId` is per-DOCUMENT (every
-    /// `Document` restarts its counter at 1), so a global map lets one
-    /// document's node 4 collide with another's. Living on the view also
-    /// makes the lifetime obvious — drop the view, drop the map — and gives
-    /// document replacement one clear place to clear.
-    ///
-    /// This is the IDL-value side table browsers keep separate from the
-    /// content attribute: `getAttribute("value")` is the authored default,
-    /// this is the live value. Mutating the DOM instead would conflate the
-    /// two and break form-reset semantics.
-    edit_states: std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
-    /// Checkedness of the checkboxes and radio buttons a click or script
-    /// has set, keyed by raw NodeId: the other half of the same side table.
-    /// A control missing here is checked when it has the `checked`
-    /// attribute. Script owns the state (`input.checked`); style
-    /// (`:checked`), paint and form submission read it here.
-    checked_states: std::collections::HashMap<usize, bool>,
     /// A listener cancelled the `pointerdown` of the press in progress:
     /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
     compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
-    /// `hovered_node` and the elements above it (raw NodeIds): what
-    /// `:hover` matches in this view's next build.
-    hover_chain: Vec<usize>,
-    /// The element the press in progress landed on and the elements above
-    /// it: what `:active` matches, from the press to the release.
-    active_chain: Vec<usize>,
-    /// The rule index this view was last built with: its `reads` say
-    /// which elements a `:hover` or `:active` rule can match, so which
-    /// changes of the two chains are a restyle.
-    rule_reads: std::cell::RefCell<Option<Rc<RuleIndex>>>,
     /// What the script writes flushed for the next relayout could restyle
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
     /// The set the last relayout logged.
     last_dirty: Option<restyle_invalidation::DirtySet>,
-    /// Whether `html` had a non-visible `overflow` at the last build. The
-    /// viewport then takes html's, and a body with its own is a scroller
-    /// that clips what it holds (see `scrollable_bottom`).
-    html_clips: std::cell::Cell<bool>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
     /// Set by `relayout` for the build it is about to run: nothing but a
@@ -951,8 +920,6 @@ struct ViewState {
     /// index can tell the same list from a new one by identity
     /// (`SheetsFingerprint`).
     external_stylesheets: Rc<Vec<Stylesheet>>,
-    /// The parsed `<style>` sheets of this view's document, by text.
-    sheet_cache: std::cell::RefCell<SheetCache>,
     /// The load skipped its pre-stylesheet layout because the document has
     /// `<link rel=stylesheet>` (render-blocking, as in Chrome): the layout
     /// with no sheets was cascaded in full and then thrown away.
@@ -1013,6 +980,10 @@ struct ViewState {
     relayout_stats: RelayoutStats,
     /// The view's Inspector record (see `inspector`).
     inspector: Arc<Inspector>,
+    /// What the style and layout build reads and writes of this view
+    /// (`layout_ctx::ViewLayout`): focus, the pointer chains, control
+    /// state, the sheet cache, the rule index, html's overflow.
+    lay: Rc<layout_ctx::ViewLayout>,
 }
 
 impl ViewState {
@@ -1022,7 +993,7 @@ impl ViewState {
         let Some(document) = self.document.as_deref() else {
             return restyle_invalidation::DirtySet::full("no_document");
         };
-        let index = self.rule_reads.borrow();
+        let index = self.lay.rule_reads.borrow();
         restyle_invalidation::DirtySet::compute(log, document, index.as_deref().map(|ix| &ix.reads.invalidation))
     }
 
@@ -1064,13 +1035,13 @@ impl ViewState {
         // did not, and asserting a lifetime the code does not implement is
         // how a silent correctness bug hides in plain sight.
         // (Prometheus, #110 R1 must-fix.)
-        self.edit_states.clear();
-        self.checked_states.clear();
-        self.focused_node = None;
+        self.lay.edit_states.borrow_mut().clear();
+        self.lay.checked_states.borrow_mut().clear();
+        self.lay.focused_node.set(None);
         self.hovered_node = None;
-        self.hover_chain.clear();
-        self.active_chain.clear();
-        self.rule_reads.get_mut().take();
+        self.lay.hover_chain.borrow_mut().clear();
+        self.lay.active_chain.borrow_mut().clear();
+        self.lay.rule_reads.borrow_mut().take();
         self.pending_dirty = None;
         self.last_dirty = None;
         self.pointer_restyle = false;
@@ -1102,7 +1073,7 @@ impl ViewState {
         self.external_stylesheets = Rc::default();
         // And the parsed `<style>` sheets: correct to keep (they are keyed
         // by text), but the new document is unlikely to share them.
-        self.sheet_cache.get_mut().clear();
+        self.lay.sheet_cache.borrow_mut().clear();
         self.initial_layout_deferred = false;
         self.images_attempted.clear();
     }
@@ -1191,7 +1162,11 @@ pub struct EngineConfig {
     /// the page once what it asked for has arrived.
     pub post_load_requests_live: bool,
     /// Whether views keep an Inspector buffer, and how URLs in its events
-    /// are shown (see `inspector`). Off by default; a sink attached with
+    /// are shown (see `inspector`). By default a view records nothing until
+    /// a panel attaches, then keeps a
+    /// [`TAB_RING_CAPACITY`](inspector::TAB_RING_CAPACITY) ring
+    /// ([`InspectorConfig::tab`]; `HIWAVE_DEVTOOLS_RING=1` keeps it from
+    /// the start); a sink attached with
     /// [`Engine::add_inspector_sink`] turns recording on for its view.
     pub inspector: InspectorConfig,
 }
@@ -1215,7 +1190,7 @@ impl Default for EngineConfig {
             live_turn_budget_ms: 5_000,
             follows_script_navigation: false,
             post_load_requests_live: false,
-            inspector: InspectorConfig::default(),
+            inspector: InspectorConfig::tab(),
         }
     }
 }
@@ -2270,39 +2245,12 @@ pub struct Engine {
     /// `None` leaves the default (1024) alone.
     host_reentry_override: Option<usize>,
     loader: Arc<ResourceLoader>,
-    image_manager: Arc<ImageManager>,
-    /// Webfont loader. PER-ENGINE AND Arc-SHARED per the 2026-08-08 design
-    /// pin: one loader for the whole engine, with cross-site isolation
-    /// provided by the partition key on every operation rather than by
-    /// handing each view its own object. Per-view loaders would refetch the
-    /// same face for every tab; an unpartitioned shared one would be a
-    /// cross-site timing oracle. The partitioned shared loader is the only
-    /// shape that is both.
-    font_loader: Arc<FontLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
-    /// Cascade provenance, recorded by the REAL cascade when armed.
-    ///
-    /// `None` = not recording, which is the default and costs nothing. See
-    /// [`Engine::set_style_recording`] for why this is a side table rather
-    /// than a field on `ComputedStyle`.
-    style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
-    /// View currently being laid out, so the view-agnostic recursive builder
-    /// can read that view's edit states (and only that view's).
-    building_view: std::cell::Cell<Option<EngineViewId>>,
-    /// Focused node of the view currently being laid out.
-    ///
-    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
-    /// so the alternative was checking "is this node focused in ANY view",
-    /// which would mark a node focused in one view while building another.
-    /// Set by `relayout` around the build; `None` outside one.
-    building_focus: std::cell::Cell<Option<rustkit_dom::NodeId>>,
-    /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
-    /// vector content — they bypass ImageManager's raster decode (which
-    /// rejects them as "Unknown image format") and are spliced into the
-    /// display list as vector commands at build time.
-    svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
+    /// The style and layout build's own state (`layout_ctx`): trace,
+    /// building view and focus, SVG cache.
+    lctx: Rc<layout_ctx::LayoutCtx>,
 }
 
 /// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
@@ -2497,9 +2445,6 @@ impl Engine {
                 .map_err(EngineError::NetworkError)?,
         );
 
-        // Initialize ImageManager
-        let image_manager = Arc::new(ImageManager::new());
-
         // Event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -2511,15 +2456,10 @@ impl Engine {
             nav_seq,
             host_reentry_override: None,
             loader,
-            image_manager,
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         })
     }
 
@@ -2540,7 +2480,7 @@ impl Engine {
     ///
     /// The trace is cleared and refilled on each layout build.
     pub fn set_style_recording(&mut self, on: bool) {
-        *self.style_trace.borrow_mut() = if on { Some(Vec::new()) } else { None };
+        *self.lctx.style_trace.borrow_mut() = if on { Some(Vec::new()) } else { None };
     }
 
     /// Take the event receiver.
@@ -2578,6 +2518,7 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
+            lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2599,17 +2540,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2621,7 +2555,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2682,6 +2615,7 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            lay: Rc::default(),
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2703,17 +2637,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2725,7 +2652,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
@@ -2803,6 +2729,7 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
+            lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             viewhost_id,
@@ -2824,17 +2751,10 @@ impl Engine {
             nav_signal: Arc::new(tokio::sync::Notify::new()),
             decode_epoch: 0,
             nav_event_rx: nav_rx,
-            focused_node: None,
-            edit_states: std::collections::HashMap::new(),
-            checked_states: std::collections::HashMap::new(),
             compat_mouse_suppressed: false,
             hovered_node: None,
-            hover_chain: Vec::new(),
-            active_chain: Vec::new(),
-            rule_reads: std::cell::RefCell::new(None),
             pending_dirty: None,
             last_dirty: None,
-            html_clips: std::cell::Cell::new(false),
             pointer_restyle: false,
             restyle_only: false,
             laid_with: None,
@@ -2846,7 +2766,6 @@ impl Engine {
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
             external_stylesheets: Rc::default(),
-            sheet_cache: std::cell::RefCell::default(),
             initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
@@ -2877,7 +2796,7 @@ impl Engine {
             .views
             .remove(&id)
             .ok_or(EngineError::ViewNotFound(id))?;
-        self.image_manager.forget_view(id.0);
+        self.lctx.image_manager.forget_view(id.0);
         self.page_commits.remove(&id);
 
         if let Some(presenter) = self.presenter.as_mut() {
@@ -3277,7 +3196,7 @@ impl Engine {
     /// The tag of the focused form control, if one is focused.
     fn focused_tag(&self, id: EngineViewId) -> Option<String> {
         let view = self.views.get(&id)?;
-        let node = view.document.as_ref()?.get_node(view.focused_node?)?;
+        let node = view.document.as_ref()?.get_node(view.lay.focused_node.get()?)?;
         match &node.node_type {
             NodeType::Element { tag_name, .. } => Some(tag_name.to_lowercase()),
             _ => None,
@@ -3308,9 +3227,9 @@ impl Engine {
                 _ => None,
             }
         });
-        let before = self.views.get(&id).and_then(|v| v.focused_node);
+        let before = self.views.get(&id).and_then(|v| v.lay.focused_node.get());
         self.set_focus(id, control);
-        before != self.views.get(&id).and_then(|v| v.focused_node)
+        before != self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Make a form control (raw NodeId and tag) the focused node, or
@@ -3323,7 +3242,7 @@ impl Engine {
             let already_seeded = self
                 .views
                 .get(&id)
-                .map(|v| v.edit_states.contains_key(&raw))
+                .map(|v| v.lay.edit_states.borrow().contains_key(&raw))
                 .unwrap_or(false);
             if matches!(tag.as_str(), "input" | "textarea") && !already_seeded {
                 let seed = self
@@ -3345,7 +3264,7 @@ impl Engine {
                 let state = rustkit_dom::forms::TextEditState::with_value(seed);
                 state.move_to_end(false);
                 if let Some(v) = self.views.get_mut(&id) {
-                    v.edit_states.insert(raw, state);
+                    v.lay.edit_states.borrow_mut().insert(raw, state);
                 }
             }
         }
@@ -3355,10 +3274,10 @@ impl Engine {
         };
         match focusable {
             Some((raw, tag)) => {
-                view.focused_node = Some(rustkit_dom::NodeId::new(raw));
+                view.lay.focused_node.set(Some(rustkit_dom::NodeId::new(raw)));
                 debug!(?id, %tag, "Focused element");
             }
-            None => view.focused_node = None,
+            None => view.lay.focused_node.set(None),
         }
     }
 
@@ -3380,9 +3299,9 @@ impl Engine {
         // `:active` from here to the release, wherever the pointer goes.
         let pressed = target.map_or_else(Vec::new, |target| self.element_chain(id, target));
         if let Some(view) = self.views.get_mut(&id) {
-            let changed = Self::in_one_chain(&view.active_chain, &pressed);
+            let changed = Self::in_one_chain(&view.lay.active_chain.borrow(), &pressed);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
-            view.active_chain = pressed;
+            *view.lay.active_chain.borrow_mut() = pressed;
         }
         let suppressed = !self.dispatch_mouse_at_point(id, "pointerdown", viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
@@ -3469,7 +3388,7 @@ impl Engine {
         if over != out {
             let changed = Self::in_one_chain(&before, &now);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
-            view.hover_chain = now.clone();
+            *view.lay.hover_chain.borrow_mut() = now.clone();
         }
 
         // (target, type, relatedTarget)
@@ -3544,7 +3463,7 @@ impl Engine {
         reads: fn(&SelectorReads) -> &PointerReads,
         changed: &[usize],
     ) -> bool {
-        let index = view.rule_reads.borrow();
+        let index = view.lay.rule_reads.borrow();
         let Some(reads) = index.as_ref().map(|index| reads(&index.reads)) else {
             return false;
         };
@@ -3717,7 +3636,7 @@ impl Engine {
         let _hold = wgate::hold("click");
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
-            let changed = std::mem::take(&mut view.active_chain);
+            let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
@@ -4898,7 +4817,7 @@ impl Engine {
         let _hold = wgate::hold("key");
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
-        let Some(focused) = self.views.get(&id).and_then(|v| v.focused_node) else {
+        let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
             return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
         // The page hears the key first; a cancelled keydown types nothing.
@@ -4909,21 +4828,25 @@ impl Engine {
         {
             return false;
         }
-        let Some(state) = self
-            .views
-            .get(&id)
-            .and_then(|v| v.edit_states.get(&focused.raw()))
-        else {
+        let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
-
-        let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+        // The edit state is borrowed for the key only: the flush below
+        // writes script's control values into the same map.
+        let (result, value) = {
+            let edit_states = lay.edit_states.borrow();
+            let Some(state) = edit_states.get(&focused.raw()) else {
+                return false;
+            };
+            let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+            (result, state.value())
+        };
         if matches!(result, KeyHandleResult::ValueChanged) {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.sync_control_value(focused.raw(), state.value());
+                bindings.sync_control_value(focused.raw(), value);
                 let typed = (!key.is_empty() && !ctrl).then_some(key);
                 let _turn = rustkit_js::DiagTurn::enter("live");
                 let armed = arm_live_turn(&self.config, bindings);
@@ -4958,7 +4881,7 @@ impl Engine {
         alt: bool,
     ) {
         let _hold = wgate::hold("key_up");
-        let focused = self.views.get(&id).and_then(|v| v.focused_node).map(|n| n.raw());
+        let focused = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
         self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
     }
 
@@ -4979,7 +4902,7 @@ impl Engine {
         id: EngineViewId,
     ) -> Option<rustkit_dom::forms::FormSubmission> {
         let view = self.views.get(&id)?;
-        let focused = view.focused_node?;
+        let focused = view.lay.focused_node.get()?;
         let document = view.document.as_ref()?;
 
         // Walk up to the enclosing <form>.
@@ -5008,7 +4931,7 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let _hold = wgate::hold("submit");
-        let focused = self.views.get(&id)?.focused_node?.raw();
+        let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
         }
@@ -5205,6 +5128,9 @@ impl Engine {
         Some(state.create_submission(&base, &entries))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -5213,8 +5139,12 @@ impl Engine {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than
         // guessing across views.
-        let view_id = self.building_view.get()?;
-        self.edit_value_in(view_id, node_raw)
+        self
+            .building_lay()?
+            .edit_states
+            .borrow()
+            .get(&node_raw)
+            .map(|s| (s.value(), s.caret_position()))
     }
 
     /// Resolve a possibly-relative resource URL against the document being
@@ -5229,9 +5159,15 @@ impl Engine {
     /// warnings in one live session). One resolution point, at build, fixes
     /// the cache key, the natural size, and the paint lookup together.
     fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
-        let id = self.building_view.get()?;
-        self.resolve_resource_url_in(id, raw)
+        self.building.borrow().as_ref()?;
+        match self.building_url() {
+            Some(base) => base.join(raw).ok(),
+            None => Url::parse(raw).ok(),
+        }
     }
+}
+
+impl Engine {
 
     /// A view's viewport in CSS px, as `relayout` sizes it: the headless
     /// bounds if it has them, otherwise its host surface.
@@ -5262,10 +5198,13 @@ impl Engine {
     fn checked_in(&self, id: EngineViewId, node_raw: usize, attributes: &HashMap<String, String>) -> bool {
         self.views
             .get(&id)
-            .and_then(|v| v.checked_states.get(&node_raw).copied())
+            .and_then(|v| v.lay.checked_states.borrow().get(&node_raw).copied())
             .unwrap_or_else(|| attributes.contains_key("checked"))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// An element's attributes as the build of the current view reads
     /// them: an `<input>`'s with `checked` present exactly when the control
     /// is checked, and the hovered (pressed) element's and its ancestors'
@@ -5279,19 +5218,19 @@ impl Engine {
         tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) else {
+        let Some(lay) = self.building_lay() else {
             return std::borrow::Cow::Borrowed(attributes);
         };
         let checked = match tag_lower {
-            "input" => view
-                .checked_states
+            "input" => lay
+                .checked_states.borrow()
                 .get(&node_raw)
                 .copied()
                 .filter(|checked| *checked != attributes.contains_key("checked")),
             _ => None,
         };
-        let hovered = view.hover_chain.contains(&node_raw);
-        let active = view.active_chain.contains(&node_raw);
+        let hovered = lay.hover_chain.borrow().contains(&node_raw);
+        let active = lay.active_chain.borrow().contains(&node_raw);
         if checked.is_none() && !hovered && !active {
             return std::borrow::Cow::Borrowed(attributes);
         }
@@ -5313,6 +5252,9 @@ impl Engine {
         }
         std::borrow::Cow::Owned(attributes)
     }
+}
+
+impl Engine {
 
     /// The HTTP status the view's document came with: 200 for an ordinary
     /// page, 403 or 404 for a server's error page shown as the page. None
@@ -5325,7 +5267,7 @@ impl Engine {
     pub fn edit_value_in(&self, id: EngineViewId, node_raw: usize) -> Option<(String, usize)> {
         self.views
             .get(&id)?
-            .edit_states
+            .lay.edit_states.borrow()
             .get(&node_raw)
             .map(|s| (s.value(), s.caret_position()))
     }
@@ -5345,7 +5287,7 @@ impl Engine {
 
     /// The DOM node currently holding focus in a view, if any.
     pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
-        self.views.get(&id).and_then(|v| v.focused_node)
+        self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Get the current scroll offset of a view.
@@ -5515,9 +5457,13 @@ impl Engine {
                                 "no network policy for this page".into(),
                             ))),
                             Some(policy) => {
-                                let guard = inspector.begin_request(&url, "GET", ResourceType::Module, Some("parser"));
-                                let fetch = policy.fetch_module(&loader, &url, &base);
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
                                 let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
                                 let fetched = tokio::time::timeout_at(deadline, fetch).await;
                                 inspector::answer_module(guard, &fetched);
                                 match fetched {
@@ -7795,9 +7741,9 @@ impl Engine {
             "Created containing block"
         );
 
-        // Inline <svg> subtrees parse into svg_cache before the tree build:
-        // the build runs with &self and can only look the documents up.
-        self.cache_inline_svgs(&document);
+        // Inline <svg> subtrees parse into svg_cache before the tree build,
+        // which only looks the documents up.
+        self.lctx.cache_inline_svgs(&document);
 
         // Get external stylesheets from view state
         let external_stylesheets = self
@@ -7917,7 +7863,7 @@ impl Engine {
         }
 
         // Update max scroll offset based on content size
-        let html_clips = self.views.get(&id).is_some_and(|v| v.html_clips.get());
+        let html_clips = self.views.get(&id).is_some_and(|v| v.lay.html_clips.get());
         let content_height = scrollable_bottom(&root_box, html_clips);
         let viewport_height = bounds.height as f32;
         let max_scroll_y = (content_height - viewport_height).max(0.0);
@@ -7930,9 +7876,9 @@ impl Engine {
         view.held_fixed = Some(root_box.held_fixed_paths());
         view.layout = Some(Rc::new(root_box));
         view.laid_with = Some(LaidWith {
-            hover: view.hover_chain.clone(),
-            active: view.active_chain.clone(),
-            focused: view.focused_node.map(|node| node.raw()),
+            hover: view.lay.hover_chain.borrow().clone(),
+            active: view.lay.active_chain.borrow().clone(),
+            focused: view.lay.focused_node.get().map(|node| node.raw()),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -8001,7 +7947,7 @@ impl Engine {
                     current_color,
                     ..
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         // The box's CSS color is what `currentColor`
                         // resolves to inside an inline <svg>; an <img>'s
                         // color is the initial black either way, so the
@@ -8024,7 +7970,7 @@ impl Engine {
                     offset,
                     repeat,
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
                         continue;
                     }
@@ -8042,7 +7988,7 @@ impl Engine {
                     offset,
                     repeat,
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         let mut cmds =
                             svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
                         rustkit_layout::tint_mask_commands(&mut cmds, *color);
@@ -8096,10 +8042,10 @@ impl Engine {
         // both builds below would read the focus as it is now, and the
         // patch copies paint properties only, so the caret and the focus
         // state would never be drawn (or a blurred field would keep them).
-        if with.focused != view.focused_node.map(|node| node.raw()) {
+        if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
             return miss("focus moved");
         }
-        let unplaced = view.rule_reads.borrow().as_ref().is_none_or(|index| {
+        let unplaced = view.lay.rule_reads.borrow().as_ref().is_none_or(|index| {
             [&index.reads.hover, &index.reads.active]
                 .iter()
                 .any(|reads| reads.anywhere || reads.siblings)
@@ -8108,7 +8054,7 @@ impl Engine {
             return miss("a rule reads the pseudo-class beyond the element's subtree");
         }
         let before = (with.hover.clone(), with.active.clone());
-        let now = (view.hover_chain.clone(), view.active_chain.clone());
+        let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
         // Of the elements in one chain only, the ones a compound with the
         // pseudo-class can match: no rule sees the others change.
         let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
@@ -8165,7 +8111,7 @@ impl Engine {
         for chains in [before, now.clone()] {
             let _build_time = time_stage(Stage::Build);
             if let Some(view) = self.views.get_mut(&id) {
-                (view.hover_chain, view.active_chain) = chains;
+                (*view.lay.hover_chain.borrow_mut(), *view.lay.active_chain.borrow_mut()) = chains;
             }
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
@@ -8555,7 +8501,7 @@ impl Engine {
 
     /// Build a layout tree FOR A SPECIFIC VIEW.
     ///
-    /// Owns the `building_view`/`building_focus` scoping so no caller can
+    /// Owns the `building` scoping so no caller can
     /// forget it: without them the view-agnostic recursive builder cannot
     /// find live edit state and SILENTLY falls back to the frozen DOM
     /// attribute — typed text vanishes with no error. Every layout build
@@ -8566,12 +8512,21 @@ impl Engine {
         document: &Document,
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
-        self.building_view.set(Some(id));
-        self.building_focus
-            .set(self.views.get(&id).and_then(|v| v.focused_node));
-        let built = self.build_layout_from_document(document, external_stylesheets);
-        self.building_focus.set(None);
-        self.building_view.set(None);
+        let view = self.views.get(&id);
+        *self.lctx.building.borrow_mut() = Some(Rc::new(layout_ctx::BuildView {
+            id,
+            lay: view.map(|v| v.lay.clone()),
+            url: view.and_then(|v| v.url.clone()),
+            viewport: self.view_viewport(id),
+            focus: view.and_then(|v| v.lay.focused_node.get()),
+            external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
+        }));
+        let built = self.lctx.build_layout_from_document(
+            document,
+            external_stylesheets,
+            self.config.javascript_enabled,
+        );
+        *self.lctx.building.borrow_mut() = None;
         built
     }
 
@@ -8606,36 +8561,35 @@ impl Engine {
         }
     }
 
+    /// A build outside `build_layout_for_view` (no view: tests and ad-hoc
+    /// builds), with the engine's scripting setting.
+    fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
+        self.lctx
+            .build_layout_from_document(document, external_stylesheets, self.config.javascript_enabled)
+    }
+}
+
+impl layout_ctx::LayoutCtx {
     fn build_layout_from_document(
         &self,
         document: &Document,
         external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
     ) -> LayoutBox {
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
         // `@media` rules apply only where their queries match this view's
         // viewport. Without a view (ad-hoc builds) there is no viewport to
         // ask, so conditional rules stay out rather than guessing a size.
-        let viewport = self
-            .building_view
-            .get()
-            .and_then(|id| self.view_viewport(id));
+        let viewport = self.building_viewport();
         let memo_key = StyleMemoKey {
-            view: self.building_view.get(),
+            view: self.building_id(),
             document: document as *const Document,
             external_sheets: external_stylesheets.len(),
             viewport,
-            focus: self.building_focus.get(),
-            hover: self
-                .building_view
-                .get()
-                .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.hover_chain.first().copied()),
-            active: self
-                .building_view
-                .get()
-                .and_then(|id| self.views.get(&id))
-                .and_then(|v| v.active_chain.first().copied()),
+            focus: self.building_focus(),
+            hover: self.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
+            active: self.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
         };
 
@@ -8664,7 +8618,7 @@ impl Engine {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
-        let inline_sheets = self.inline_sheets(document, self.building_view.get());
+        let inline_sheets = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
         let adopted = document.root().adopted_styles();
         // The fingerprint vouches for the `<style>` and `<link>` sheets
         // only. Adopted sheets are parsed fresh below, so with any the rule
@@ -8697,7 +8651,7 @@ impl Engine {
             }
         }
 
-        Self::keep_rules_for_viewport(&mut stylesheets, viewport);
+        Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
         rustkit_css::assign_layer_order(&mut stylesheets);
         // The document tree's sheets. Shared, so the build can hand them
@@ -8708,7 +8662,7 @@ impl Engine {
             document,
             &stylesheets,
             viewport,
-            self.config.javascript_enabled,
+            javascript_enabled,
         );
 
         // Sub-phase marks for the "Cascade timing" line: sheet copy and
@@ -8744,8 +8698,8 @@ impl Engine {
             true => None,
             false => {
                 let index = self.shared_rule_index(&stylesheets, fingerprint);
-                if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
-                    *view.rule_reads.borrow_mut() = Some(index.clone());
+                if let Some(lay) = self.building_lay() {
+                    *lay.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
             }
@@ -8818,8 +8772,8 @@ impl Engine {
             .as_deref()
             .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
-        if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
-            view.html_clips.set(html_style.as_ref().is_some_and(|s| {
+        if let Some(lay) = self.building_lay() {
+            lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
                 s.overflow_x != rustkit_css::Overflow::Visible
                     || s.overflow_y != rustkit_css::Overflow::Visible
             }));
@@ -8853,7 +8807,7 @@ impl Engine {
                 &root_ancestor,
                 html_style.as_deref(),
                 &[],
-                SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
+                SiblingContext::SOLE.with_children(Engine::node_has_children(&body)),
                 "body",
                 &element_ids,
                 false,
@@ -8941,16 +8895,25 @@ impl Engine {
         }
         root_box
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// True when the view being built holds typed text: a form control's
     /// box carries it, and the style memo's key does not cover it.
     fn building_view_has_edits(&self) -> bool {
-        self.building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .is_some_and(|v| !v.edit_states.is_empty())
+        self.building_lay().is_some_and(|lay| !lay.edit_states.borrow().is_empty())
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// The box tree an earlier build with this key left in the memo, with
     /// every `<img>` box's natural size resolved again: images are what
     /// loads between the two builds.
@@ -8967,7 +8930,13 @@ impl Engine {
         info!(boxes, images = images.len(), "Tree reuse");
         Some(tree)
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// Leave a recording build's tree for the next build with its key, or
     /// (RUSTKIT_TREE_REUSE=verify) compare it with the tree a replaying
     /// build has just walked.
@@ -9007,7 +8976,13 @@ impl Engine {
             });
         }
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// Resolve the natural size of every `<img>` box in a reused tree again,
     /// as the walk would now. Returns the number of boxes in the tree.
     fn refresh_image_sizes(
@@ -9062,7 +9037,7 @@ impl Engine {
         // Vector images: the SVG's own sizing (viewBox/width/height)
         // is the natural size the raster cache can't provide.
         let svg_size = Url::parse(src).ok().and_then(|u| {
-            self.svg_cache.get(u.as_str()).map(|svg| {
+            self.svg_cache.borrow().get(u.as_str()).map(|svg| {
                 svg.get_size(
                     explicit_width.unwrap_or(300.0),
                     explicit_height.unwrap_or(150.0),
@@ -9083,6 +9058,9 @@ impl Engine {
             },
         }
     }
+}
+
+impl Engine {
 
     /// Build a layout box from a DOM node with stylesheet support.
     /// Build the Chrome-compatible selector SEGMENT for one element, e.g.
@@ -9258,6 +9236,9 @@ impl Engine {
             .collect()
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     fn build_layout_from_node_with_styles(
         &self,
         node: &Rc<Node>,
@@ -9272,12 +9253,15 @@ impl Engine {
             ancestors,
             None,
             &[],
-            SiblingContext::SOLE.with_children(Self::node_has_children(node)),
+            SiblingContext::SOLE.with_children(Engine::node_has_children(node)),
             "",
             &Cell::new(0),
             false,
         )
     }
+}
+
+impl Engine {
 
     /// `:empty` input: any element or text child (whitespace included —
     /// Selectors 4 §14.5 counts it); comments do not count.
@@ -9290,6 +9274,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Build a layout box, additionally threading the element-identity context
     /// the geometry oracle needs.
     ///
@@ -9398,10 +9385,7 @@ impl Engine {
                     | rustkit_css::Length::Max(_)
                     | rustkit_css::Length::Clamp(_)
                     | rustkit_css::Length::Calc(_)) => {
-                        let viewport = self
-                            .building_view
-                            .get()
-                            .and_then(|id| self.view_viewport(id));
+                        let viewport = self.building_viewport();
                         match viewport {
                             Some((vw, vh)) => rustkit_css::Length::Px(
                                 other
@@ -9470,7 +9454,7 @@ impl Engine {
                     // exact cache-miss shape #113 fixed for relative URLs.
                     let src = attributes
                         .get("srcset")
-                        .and_then(|ss| Self::pick_from_srcset(ss))
+                        .and_then(|ss| Engine::pick_from_srcset(ss))
                         .or_else(|| attributes.get("src").cloned())
                         .unwrap_or_default();
 
@@ -9518,7 +9502,7 @@ impl Engine {
                         },
                         style,
                     );
-                    Self::attach_identity(
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9550,8 +9534,9 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
-                    let cached = self.svg_cache.get(&key);
+                    let key = Engine::inline_svg_key(&Engine::inline_svg_markup(node));
+                    let svg_cache = self.svg_cache.borrow();
+                    let cached = svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
                     // axes auto it takes the containing block's width
@@ -9601,8 +9586,8 @@ impl Engine {
                             },
                             style.clone(),
                         );
-                        Self::transfer_positioning(&mut svg_box, &style);
-                        Self::attach_identity(
+                        Engine::transfer_positioning(&mut svg_box, &style);
+                        Engine::attach_identity(
                             &mut svg_box,
                             selector_path,
                             attributes,
@@ -9613,8 +9598,8 @@ impl Engine {
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
-                    Self::transfer_positioning(&mut svg_box, &style);
-                    Self::attach_identity(
+                    Engine::transfer_positioning(&mut svg_box, &style);
+                    Engine::attach_identity(
                         &mut svg_box,
                         selector_path,
                         attributes,
@@ -9696,8 +9681,8 @@ impl Engine {
                     // positioning, so `position: absolute`/`fixed` and the
                     // offsets were never copied: a positioned <input> stayed
                     // in the flow, painted and hit there (#730 follow-up i).
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9705,7 +9690,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9745,8 +9730,8 @@ impl Engine {
                             }),
                             style,
                         );
-                        Self::transfer_own_positioning(&mut b);
-                        Self::attach_identity(
+                        Engine::transfer_own_positioning(&mut b);
+                        Engine::attach_identity(
                             &mut b,
                             selector_path,
                             attributes,
@@ -9789,8 +9774,8 @@ impl Engine {
                         }),
                         style,
                     );
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9798,7 +9783,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9867,8 +9852,8 @@ impl Engine {
                         }),
                         style,
                     );
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9876,7 +9861,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9914,7 +9899,7 @@ impl Engine {
                 let display = style.display;
                 let mut layout_box = LayoutBox::new(box_type, style);
 
-                Self::transfer_own_positioning(&mut layout_box);
+                Engine::transfer_own_positioning(&mut layout_box);
                 let unblockified = (layout_box.style.display != display).then(|| {
                     let mut s = (*layout_box.style).clone();
                     s.display = display;
@@ -9932,7 +9917,7 @@ impl Engine {
                     _ => unblockified,
                 };
 
-                Self::attach_identity(
+                Engine::attach_identity(
                     &mut layout_box,
                     selector_path,
                     attributes,
@@ -9951,7 +9936,7 @@ impl Engine {
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
                 // focus ring without reaching back into engine state.
-                if self.building_focus.get() == Some(node.id) {
+                if self.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                 }
 
@@ -10024,7 +10009,7 @@ impl Engine {
                     )
                 })
                 .inspect(container_query::note_pseudo)
-                .and_then(Self::pseudo_element_box)
+                .and_then(Engine::pseudo_element_box)
                 {
                     layout_box.children.push(before_box);
                 }
@@ -10062,9 +10047,9 @@ impl Engine {
                 // Selector segments are computed here, not in the child, because
                 // `:nth-of-type` needs the full same-tag sibling count.
                 let children_are_foreign =
-                    in_foreign_content || Self::enters_foreign_content(&tag_lower);
+                    in_foreign_content || Engine::enters_foreign_content(&tag_lower);
                 let child_segments =
-                    Self::child_selector_segments(&child_nodes, children_are_foreign);
+                    Engine::child_selector_segments(&child_nodes, children_are_foreign);
                 // Same-tag totals feed the `-of-type` pseudo-classes.
                 let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
@@ -10099,7 +10084,7 @@ impl Engine {
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = Self::child_selector_path(
+                    let child_path = Engine::child_selector_path(
                         selector_path,
                         child_segments.get(child_index).and_then(|s| s.as_deref()),
                     );
@@ -10112,7 +10097,7 @@ impl Engine {
                                 count: child_element_count,
                                 type_index,
                                 type_count: type_totals.get(&*t).copied().unwrap_or(1),
-                                has_children: Self::node_has_children(child),
+                                has_children: Engine::node_has_children(child),
                             }
                         }
                         _ => SiblingContext::SOLE,
@@ -10172,7 +10157,7 @@ impl Engine {
                     // its place.
                     if child_box.style.display == rustkit_css::Display::Contents {
                         for grandchild in child_box.children {
-                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
+                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
                         }
                         continue;
                     }
@@ -10183,14 +10168,14 @@ impl Engine {
                             // Include blocks if they have children, OR have visible styling,
                             // OR still take part in layout while empty.
                             !child_box.children.is_empty()
-                                || Self::has_visible_styling(&child_box.style)
-                                || Self::empty_block_affects_layout(&child_box, &layout_box.style)
+                                || Engine::has_visible_styling(&child_box.style)
+                                || Engine::empty_block_affects_layout(&child_box, &layout_box.style)
                         }
                         BoxType::Inline => {
                             // Include inline boxes if they have content children (text, images, form controls)
                             // or have visible styling (padding, border, background)
-                            Self::has_content_children(&child_box)
-                                || Self::has_visible_styling(&child_box.style)
+                            Engine::has_content_children(&child_box)
+                                || Engine::has_visible_styling(&child_box.style)
                         }
                         BoxType::Text(_)
                         | BoxType::Image { .. }
@@ -10200,7 +10185,7 @@ impl Engine {
 
                     let shown = !closed_details || details_summary == Some(child_index);
                     if should_include && shown {
-                        Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                        Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     } else if shown && matches!(child_box.box_type, BoxType::Inline) {
                         // An inline box with nothing in the flow is dropped,
                         // and so was everything in it. What it positions out
@@ -10213,7 +10198,7 @@ impl Engine {
                                 rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
                             )
                         }) {
-                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
                         }
                     }
                 }
@@ -10237,7 +10222,7 @@ impl Engine {
                     )
                 })
                 .inspect(container_query::note_pseudo)
-                .and_then(Self::pseudo_element_box)
+                .and_then(Engine::pseudo_element_box)
                 {
                     layout_box.children.push(after_box);
                 }
@@ -10299,9 +10284,9 @@ impl Engine {
                 let n = layout_box.children.len();
                 for i in 0..n {
                     let prev_inline =
-                        i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
+                        i > 0 && Engine::is_inline_level_box(&layout_box.children[i - 1]);
                     let next_inline =
-                        i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                        i + 1 < n && Engine::is_inline_level_box(&layout_box.children[i + 1]);
                     // Phase 2 only applies to COLLAPSIBLE spaces. Under
                     // pre/pre-wrap/break-spaces every space is preserved
                     // and renders (css-text §4.1.1): " XX" in a pre-wrap
@@ -10443,6 +10428,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Create a pseudo-element (::before or ::after) if applicable. The
     /// layout build calls the two halves itself, through the style memo.
@@ -10459,7 +10447,7 @@ impl Engine {
         sib: SiblingContext,
         pseudo: &str,
     ) -> Option<LayoutBox> {
-        let style = self.pseudo_element_style(
+        let style = self.lctx.pseudo_element_style(
             tag_name,
             attributes,
             stylesheets,
@@ -10472,6 +10460,9 @@ impl Engine {
         Self::pseudo_element_box(style)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Whether a rule that floats `::first-letter` (`floats_first_letter`)
     /// matches this element and holds where it is (`@container`). Fail-safe
     /// for the `@container` walk: a later `float: none` is not weighed.
@@ -10572,7 +10563,7 @@ impl Engine {
                     matched.is_none()
                         || ix.pseudo_keys[gi][which]
                             .as_deref()
-                            .is_none_or(|keys| Self::keys_may_match(keys, tag_name, attributes)),
+                            .is_none_or(|keys| Engine::keys_may_match(keys, tag_name, attributes)),
                     "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                     ix.rule(stylesheets, g).selector
                 );
@@ -10747,6 +10738,9 @@ impl Engine {
         // `*::before, *::after { box-sizing: … }` matches on every element.
         pseudo_style.content.is_some().then_some(pseudo_style)
     }
+}
+
+impl Engine {
 
     /// The box half of `create_pseudo_element`, from the cascaded style.
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
@@ -10777,6 +10771,9 @@ impl Engine {
         Some(pseudo_box)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Compute a basic style for an element based on its tag and attributes.
     fn compute_style_for_element(
         &self,
@@ -11311,7 +11308,7 @@ impl Engine {
                     );
                     debug_assert!(
                         matched.is_none()
-                            || Self::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
+                            || Engine::keys_may_match(&ix.keys[rule_index], tag_name, attributes),
                         "the subject prefilter rejects {:?}, which matches <{tag_name}>",
                         rule.selector
                     );
@@ -11468,7 +11465,7 @@ impl Engine {
                 }
             }
         }
-        let vars = Self::element_custom_properties(&inherited_vars, &declared_vars);
+        let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
         let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
@@ -11591,10 +11588,10 @@ impl Engine {
             // fixture sets padding via the `padding` shorthand, and an agent
             // asking for the computed `padding-left` should get 16px rather
             // than a hole because no rule spelled that longhand.
-            let computed = Self::COMPUTED_PROPERTIES
+            let computed = Engine::COMPUTED_PROPERTIES
                 .iter()
                 .filter_map(|p| {
-                    Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
+                    Engine::computed_value_of(&style, p).map(|v| (p.to_string(), v))
                 })
                 .collect();
             if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
@@ -11647,6 +11644,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Read one computed property back off the style the cascade produced.
     ///
@@ -11704,6 +11704,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Apply inline style attribute to computed style.
     fn apply_inline_style(
         &self,
@@ -11745,7 +11748,7 @@ impl Engine {
     ) {
         if value.trim().eq_ignore_ascii_case("inherit") {
             if let Some(parent) = parent_style {
-                if Self::inherit_property(style, parent, property) {
+                if Engine::inherit_property(style, parent, property) {
                     return;
                 }
             }
@@ -11781,6 +11784,9 @@ impl Engine {
             self.apply_style_property(style, property, &substituted);
         }
     }
+}
+
+impl Engine {
 
     /// Apply a single CSS property to a computed style.
     /// `property: inherit` — copy the parent's computed value (CSS Cascade 4
@@ -11846,6 +11852,9 @@ impl Engine {
         true
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
         let value = value.trim();
 
@@ -13464,6 +13473,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Stop the in-flight navigation for a view.
     ///
@@ -13512,7 +13524,7 @@ impl Engine {
                 if let Some(bindings) = view.bindings.as_ref() {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_inserted_scripts()));
                 }
-                self.image_manager.begin_navigation(id.0, view.decode_epoch);
+                self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
                 // Only a load that was actually in flight has anything to
                 // report: the state machine must leave Provisional/Committed
                 // (or `is_loading` stays true until the next start), and UI
@@ -13615,7 +13627,7 @@ impl Engine {
         view.devtools_highlight = None;
         view.control.begin_nav(view.nav_id);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
-        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
         Ok(NavWatch {
             canceller,
             nav_id: view.nav_id,
@@ -13649,7 +13661,7 @@ impl Engine {
         // hit-testing are not the previous page's.
         let unlaid = committed && std::mem::take(&mut view.initial_layout_deferred);
         view.decode_epoch = view.decode_epoch.wrapping_add(1);
-        self.image_manager.begin_navigation(id.0, view.decode_epoch);
+        self.lctx.image_manager.begin_navigation(id.0, view.decode_epoch);
         if view.navigation.is_loading() {
             info!(?id, nav_id, "Navigation cancelled");
             view.inspector
@@ -13773,39 +13785,43 @@ impl Engine {
     /// elements regardless, so the collectors leave them out here. Google's
     /// results page hides everything from such a sheet.
     fn sheet_element_counts(&self, element: &Rc<Node>) -> bool {
-        if !self.config.javascript_enabled {
-            return true;
-        }
-        let mut ancestor = element.parent();
-        while let Some(node) = ancestor {
-            if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
-                return false;
-            }
-            ancestor = node.parent();
-        }
-        true
+        sheet_element_counts(self.config.javascript_enabled, element)
+    }
+
+    /// The document's `<style>` sheets for `view` (see the ctx's).
+    fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
+        let lay = view.and_then(|id| self.views.get(&id)).map(|v| &*v.lay);
+        self.lctx.inline_sheets(document, lay, self.config.javascript_enabled)
     }
 
     /// The document's `<style>` sheets, as copies a test may change. The
     /// engine itself goes through `inline_sheets`.
     #[cfg(test)]
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
-        self.inline_sheets(document, self.building_view.get())
+        self.inline_sheets(document, self.lctx.building_id())
             .into_iter()
             .map(Rc::unwrap_or_clone)
             .collect()
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The parsed sheet of each `<style>` element the document has, in
     /// tree order. Parsing is a function of the text alone (no base URL,
     /// no `media` attribute, nothing from the element), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
-    fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
+    fn inline_sheets(
+        &self,
+        document: &Document,
+        lay: Option<&layout_ctx::ViewLayout>,
+        javascript_enabled: bool,
+    ) -> Vec<Rc<Stylesheet>> {
         let mut texts = Vec::new();
         for style_el in document.get_elements_by_tag_name("style") {
-            if !self.sheet_element_counts(&style_el) {
+            if !sheet_element_counts(javascript_enabled, &style_el) {
                 continue;
             }
             let mut css_text = String::new();
@@ -13827,11 +13843,29 @@ impl Engine {
             cache.end_lookup();
             sheets
         };
-        match view.and_then(|id| self.views.get(&id)) {
-            Some(view) => lookup(&mut view.sheet_cache.borrow_mut()),
+        match lay {
+            Some(lay) => lookup(&mut lay.sheet_cache.borrow_mut()),
             None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
         }
     }
+}
+
+/// [`Engine::sheet_element_counts`] for a given scripting setting.
+fn sheet_element_counts(javascript_enabled: bool, element: &Rc<Node>) -> bool {
+    if !javascript_enabled {
+        return true;
+    }
+    let mut ancestor = element.parent();
+    while let Some(node) = ancestor {
+        if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
+            return false;
+        }
+        ancestor = node.parent();
+    }
+    true
+}
+
+impl Engine {
 
     /// Discover external stylesheets from <link> elements.
     fn discover_external_stylesheets(
@@ -14076,20 +14110,23 @@ impl Engine {
         format!("inline-svg:{:016x}", hash)
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Parse every inline `<svg>` subtree in the document into svg_cache so
     /// the box build (which runs with `&self`) can size them and the
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
-    fn cache_inline_svgs(&mut self, document: &Document) {
+    fn cache_inline_svgs(&self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let xml = Self::inline_svg_markup(&svg_el);
-            let key = Self::inline_svg_key(&xml);
-            if self.svg_cache.contains_key(&key) {
+            let xml = Engine::inline_svg_markup(&svg_el);
+            let key = Engine::inline_svg_key(&xml);
+            if self.svg_cache.borrow().contains_key(&key) {
                 continue;
             }
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
-                    self.svg_cache.insert(key, doc);
+                    self.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
                     debug!(?e, "Inline SVG failed to parse; box stays unpainted");
@@ -14097,6 +14134,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Index every inline `<svg>` subtree's shape geometry by the same
     /// content-hash key the box build and the paint splice use.
@@ -14107,12 +14147,13 @@ impl Engine {
     /// each svg box resolves its OWN selector prefix from its own identity.
     fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
         let mut index = HashMap::new();
+        let svg_cache = self.lctx.svg_cache.borrow();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
             if index.contains_key(&key) {
                 continue;
             }
-            let Some(svg) = self.svg_cache.get(&key) else {
+            let Some(svg) = svg_cache.get(&key) else {
                 // No parsed document means the box build took its cache-MISS
                 // exit and painted nothing, so there is no geometry to report.
                 continue;
@@ -14190,8 +14231,8 @@ impl Engine {
     /// stand-in rasterizer drew only solid `<rect>`s (bing's gradient logo
     /// painted nothing). A data: url needs no request, so this runs at the
     /// splice: the first layout paints it, and so does any later one.
-    fn cache_data_svg(&mut self, url: &str) {
-        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.svg_cache.contains_key(url) {
+    fn cache_data_svg(&self, url: &str) {
+        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.lctx.svg_cache.borrow().contains_key(url) {
             return;
         }
         let Ok((media_type, body)) = rustkit_net::decode_data_url(url) else {
@@ -14203,7 +14244,7 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.svg_cache.insert(url.to_string(), image_svg(doc));
+                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), image_svg(doc));
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -14424,14 +14465,14 @@ impl Engine {
             view.images_attempted.extend(discovered);
         }
 
-        let image_manager = self.image_manager.clone();
+        let image_manager = self.lctx.image_manager.clone();
 
         let mut pending = Vec::new();
         let mut svg_urls = Vec::new();
         let mut loaded = 0;
         let mut requested = std::collections::HashSet::new();
         for (_src, url) in images {
-            if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
+            if image_manager.is_cached(&url) || self.lctx.svg_cache.borrow().contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 // The layout that found a script-added image already drew
                 // it from the cache; it is not a reason to lay out again.
@@ -14651,7 +14692,7 @@ impl Engine {
     /// The last part: keep what a fetch brought. Returns how many images
     /// the pass loaded.
     fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
-        self.svg_cache.extend(fetched.svgs);
+        self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         fetched.loaded
     }
 
@@ -14882,29 +14923,29 @@ impl Engine {
         for rule in rules {
             let face = Self::layout_font_face(rule);
             let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
-            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+            if self.lctx.font_loader.is_loaded_key(&key) || self.lctx.font_loader.is_failed(&key) {
                 continue;
             }
             match resolve_font_source(base, &rule.src) {
                 FontSource::Data(bytes) => {
-                    self.font_loader.insert_loaded(key, bytes);
+                    self.lctx.font_loader.insert_loaded(key, bytes);
                     loaded += 1;
                 }
                 FontSource::File(path) => match std::fs::read(&path) {
                     Ok(bytes) => {
                         debug!(family = %rule.family, ?path, len = bytes.len(), "@font-face: loaded local font");
-                        self.font_loader.insert_loaded(key, bytes);
+                        self.lctx.font_loader.insert_loaded(key, bytes);
                         loaded += 1;
                     }
                     Err(e) => {
                         warn!(family = %rule.family, ?path, ?e, "@font-face: could not read local font file");
-                        self.font_loader.mark_failed(key);
+                        self.lctx.font_loader.mark_failed(key);
                     }
                 },
                 FontSource::Remote(_) => {}
                 FontSource::Blocked(reason) => {
                     warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
-                    self.font_loader.mark_failed(key);
+                    self.lctx.font_loader.mark_failed(key);
                 }
             }
         }
@@ -14930,7 +14971,7 @@ impl Engine {
         for rule in self.view_font_face_rules(id) {
             let face = Self::layout_font_face(&rule);
             let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
-            if self.font_loader.is_loaded_key(&key) || self.font_loader.is_failed(&key) {
+            if self.lctx.font_loader.is_loaded_key(&key) || self.lctx.font_loader.is_failed(&key) {
                 continue;
             }
             if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
@@ -15000,18 +15041,21 @@ impl Engine {
         for (key, family, url, outcome) in fetched {
             match outcome {
                 Ok(bytes) => {
-                    self.font_loader.insert_loaded(key, bytes);
+                    self.lctx.font_loader.insert_loaded(key, bytes);
                     loaded += 1;
                 }
                 Err(reason) => {
                     warn!(%family, %url, %reason, "Web font not loaded");
-                    self.font_loader.mark_failed(key);
+                    self.lctx.font_loader.mark_failed(key);
                 }
             }
         }
         loaded
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Point the text stack at ONE partition's faces. Called before every
     /// layout and paint of a view, so a view only ever sees its own site's
     /// fonts — the registry is a slot the engine swaps, not a shared cache.
@@ -15029,23 +15073,31 @@ impl Engine {
             );
         }
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// Loaded faces in the partition of the view being built (the opaque one
     /// for a view-less build).
     fn web_font_count(&self) -> usize {
-        let base = self
-            .building_view
-            .get()
-            .and_then(|id| self.views.get(&id))
-            .and_then(|v| v.url.as_ref());
-        self.font_loader.faces_for(&Self::font_partition(base)).len()
+        let base = self.building_url();
+        self.font_loader.faces_for(&Engine::font_partition(base.as_ref())).len()
     }
+}
+
+impl Engine {
 
     fn install_web_fonts(&self, id: EngineViewId) {
         let base = self.views.get(&id).and_then(|v| v.url.as_ref());
-        self.install_web_fonts_for(&Self::font_partition(base));
+        self.lctx.install_web_fonts_for(&Self::font_partition(base));
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Extract CSS variables from :root rules.
     fn extract_css_variables(&self, stylesheets: &[Stylesheet]) -> HashMap<String, String> {
         let mut variables = HashMap::new();
@@ -15110,6 +15162,9 @@ impl Engine {
             &mut false,
         ))
     }
+}
+
+impl Engine {
 
     /// The custom properties in effect on one element: the inherited map
     /// with this element's winning `--*` declarations applied, each resolved
@@ -15187,6 +15242,9 @@ impl Engine {
         Arc::new(CustomProperties::over(inherited, layer))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Check if a selector matches an element.
     ///
     /// `ancestors` is a list of (tag_name, classes, id) tuples from parent to root.
@@ -15292,7 +15350,13 @@ impl Engine {
         }
         ix
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
     /// and the view's external list (likewise), plus the viewport the
@@ -15311,7 +15375,8 @@ impl Engine {
         let external = match external.is_empty() {
             true => None,
             false => {
-                let own = &self.views.get(&self.building_view.get()?)?.external_stylesheets;
+                let building = self.building.borrow();
+                let own = &building.as_ref()?.external_sheets;
                 if !std::ptr::eq(own.as_slice(), external) {
                     return None;
                 }
@@ -15324,7 +15389,13 @@ impl Engine {
             external,
         })
     }
+}
 
+impl Engine {
+
+}
+
+impl layout_ctx::LayoutCtx {
     /// `build_rule_index`, reused while the selectors don't change. A page
     /// load lays out 2-3 times over a freshly extracted copy of the same
     /// sheets, and rebuilding the index each time was ~38% of github's
@@ -15395,8 +15466,11 @@ impl Engine {
         tag_name: &str,
         attributes: &HashMap<String, String>,
     ) -> bool {
-        Self::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
+        Engine::keys_may_match(&self.subject_keys(selector), tag_name, attributes)
     }
+}
+
+impl Engine {
 
     /// `rule_may_match` with the subject keys already in hand (the rule
     /// index stores them per rule).
@@ -15429,6 +15503,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The subject requirements of each member of a selector list, cached
     /// per selector string. `rule_may_match` is true for an element only if
     /// some key's id/tag/class all hold, and the rule index buckets rules by
@@ -15443,7 +15520,7 @@ impl Engine {
         // simple_selector_matches_with_pseudo for the subject compound. The
         // compound matches an element only if one of the keys pushed holds;
         // pushing none means the matcher can never accept it.
-        fn keys_for_compound(engine: &Engine, compound: &str, out: &mut Vec<SubjectKey>) {
+        fn keys_for_compound(engine: &layout_ctx::LayoutCtx, compound: &str, out: &mut Vec<SubjectKey>) {
             if compound == "*" {
                 return out.push(SubjectKey::default());
             }
@@ -15514,7 +15591,7 @@ impl Engine {
         // and tokenized the string the way the matcher does (`Never` for an
         // invalid, pseudo-element or subject-less selector), so the index
         // no longer repeats that work per rule (~150 ms of github's index).
-        fn keys_for(engine: &Engine, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
+        fn keys_for(engine: &layout_ctx::LayoutCtx, prepared: &PreparedSelector, out: &mut Vec<SubjectKey>) {
             match prepared {
                 PreparedSelector::Never => {}
                 PreparedSelector::List(members) => {
@@ -15547,6 +15624,9 @@ impl Engine {
             v
         })
     }
+}
+
+impl Engine {
 }
 
 /// The selector matcher. It reads no `Engine` state (its caches are
@@ -17047,7 +17127,7 @@ impl Engine {
             && !frame
                 .missing_images
                 .iter()
-                .any(|url| self.image_manager.is_cached(url))
+                .any(|url| self.lctx.image_manager.is_cached(url))
             && frame.at.elapsed() < PRESENTED_FRAME_MAX_AGE
     }
 
@@ -17548,7 +17628,7 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
-        let borrowed = self.style_trace.borrow();
+        let borrowed = self.lctx.style_trace.borrow();
         let trace = borrowed.as_ref().ok_or_else(|| {
             EngineError::RenderError(
                 "style recording is off — call set_style_recording(true) before loading".into(),
@@ -17847,7 +17927,7 @@ impl Engine {
             id,
             viewhost_id,
             is_headless,
-            &self.image_manager,
+            &self.lctx.image_manager,
         )?;
 
         if let (Some(presented), Some(view)) = (presented, self.views.get_mut(&id)) {
@@ -17940,7 +18020,7 @@ impl Engine {
         };
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+        Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
@@ -18012,7 +18092,7 @@ impl Engine {
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
         if let Some(view) = self.views.get_mut(&id) {
-            Self::apply_script_control_writes(&mut view.edit_states, &mut view.checked_states, bindings);
+            Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
@@ -18279,7 +18359,7 @@ impl Engine {
         }
 
         // Dispatch to focused element via DOM events
-        if let (Some(focused_id), Some(document)) = (view.focused_node, &view.document) {
+        if let (Some(focused_id), Some(document)) = (view.lay.focused_node.get(), &view.document) {
             use rustkit_dom::events::{DomEvent, Event, EventDispatcher, KeyboardEventData};
 
             if let Some(focused_node) = document.get_node(focused_id) {
@@ -18346,8 +18426,8 @@ impl Engine {
             .get_mut(&view_id)
             .ok_or(EngineError::ViewNotFound(view_id))?;
 
-        let old_focused = view.focused_node;
-        view.focused_node = Some(node_id);
+        let old_focused = view.lay.focused_node.get();
+        view.lay.focused_node.set(Some(node_id));
 
         // Dispatch blur event to old focused element
         if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
@@ -18406,7 +18486,7 @@ impl Engine {
             .get_mut(&view_id)
             .ok_or(EngineError::ViewNotFound(view_id))?;
 
-        let old_focused = view.focused_node.take();
+        let old_focused = view.lay.focused_node.take();
 
         // Dispatch blur event to old focused element
         if let (Some(old_id), Some(document)) = (old_focused, &view.document) {
@@ -18436,12 +18516,12 @@ impl Engine {
 
     /// Get the currently focused node in a view.
     pub fn get_focused_element(&self, view_id: EngineViewId) -> Option<rustkit_dom::NodeId> {
-        self.views.get(&view_id).and_then(|v| v.focused_node)
+        self.views.get(&view_id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Load an image from a URL.
     pub async fn load_image(&self, view_id: EngineViewId, url: Url) -> Result<(), EngineError> {
-        let image_manager = self.image_manager.clone();
+        let image_manager = self.lctx.image_manager.clone();
         let event_tx = self.event_tx.clone();
         let referrer = self.subresource_referrer(view_id);
 
@@ -18489,24 +18569,24 @@ impl Engine {
 
     /// Preload an image (non-blocking).
     pub fn preload_image(&self, url: Url) {
-        self.image_manager.preload(url);
+        self.lctx.image_manager.preload(url);
     }
 
     /// Check if an image is cached.
     pub fn is_image_cached(&self, url: &Url) -> bool {
-        self.image_manager.is_cached(url)
+        self.lctx.image_manager.is_cached(url)
     }
 
     /// Get a cached image's dimensions.
     pub fn get_image_dimensions(&self, url: &Url) -> Option<(u32, u32)> {
-        self.image_manager
+        self.lctx.image_manager
             .get_cached(url)
             .map(|img| (img.natural_width, img.natural_height))
     }
 
     /// Get the image manager for direct access.
     pub fn image_manager(&self) -> Arc<ImageManager> {
-        self.image_manager.clone()
+        self.lctx.image_manager.clone()
     }
 
     /// The navigation counter this engine allocates from.
@@ -18540,7 +18620,7 @@ impl Engine {
 
     /// Clear the image cache.
     pub fn clear_image_cache(&self) {
-        self.image_manager.clear_cache();
+        self.lctx.image_manager.clear_cache();
     }
 
     /// Drain IPC messages from all views.
@@ -22045,7 +22125,6 @@ mod tests {
         Some(Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -22053,13 +22132,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         })
     }
 
@@ -22199,7 +22274,7 @@ mod tests {
     /// same word as one that passed.
     #[test]
     fn an_inline_svg_is_built_with_its_element_identity() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22248,7 +22323,7 @@ mod tests {
         // builds a plain Block. An empty svg_cache is the default state of
         // `layout_only_engine()`.
         assert!(
-            engine.svg_cache.is_empty(),
+            engine.lctx.svg_cache.borrow().is_empty(),
             "this half of the guard is only meaningful on a cache miss"
         );
         let miss = engine.build_layout_from_document(&document, &[]);
@@ -22270,9 +22345,9 @@ mod tests {
         // branch builds an Image sized from the viewBox. This is the exit the
         // real engine takes on every relayout, and the one the `shelf`
         // capture went through.
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         assert!(
-            !engine.svg_cache.is_empty(),
+            !engine.lctx.svg_cache.borrow().is_empty(),
             "the pre-pass did not parse the subtree, so the cache-hit exit \
              was never entered and this half asserted nothing"
         );
@@ -22400,7 +22475,7 @@ mod tests {
     /// rect), so what is under test is the viewBox mapping and the join key.
     #[test]
     fn inline_svg_shapes_are_exported_at_chromes_rects() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22430,7 +22505,7 @@ mod tests {
             </div>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         assert_eq!(
             index.len(),
@@ -22523,7 +22598,7 @@ mod tests {
     /// close would be compared and believed instead.
     #[test]
     fn an_unmodelled_svg_shape_is_refused_rather_than_approximated() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22554,7 +22629,7 @@ mod tests {
             </svg>
         </body></html>"##;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -22629,7 +22704,7 @@ mod tests {
     /// M5 it lands 10 right and 20 down.
     #[test]
     fn a_shape_at_the_viewbox_origin_paints_at_the_content_origin() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22649,7 +22724,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
 
         // The user-space bbox must be the viewBox's own origin, or the test
@@ -22725,7 +22800,7 @@ mod tests {
     /// transform on the shape itself, where a subtree bug cannot show.
     #[test]
     fn a_transformed_group_refuses_the_shapes_beneath_it() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22746,7 +22821,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -22790,7 +22865,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -22798,13 +22872,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         // Build layout tree from document
@@ -22864,7 +22934,6 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -22872,13 +22941,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -22955,19 +23020,14 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23142,7 +23202,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23150,13 +23209,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23239,7 +23294,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23247,13 +23301,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23356,7 +23406,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23364,13 +23413,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23437,7 +23482,6 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23445,13 +23489,9 @@ mod tests {
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23512,19 +23552,14 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23600,19 +23635,14 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23706,19 +23736,14 @@ mod tests {
             let engine = Engine {
                 config: EngineConfig::default(),
                 views: HashMap::new(),
-                font_loader: Arc::new(FontLoader::new()),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-                image_manager: Arc::new(ImageManager::new()),
                 event_tx,
                 event_rx: Some(event_rx),
-                style_trace: std::cell::RefCell::new(None),
-                svg_cache: std::collections::HashMap::new(),
-                building_focus: std::cell::Cell::new(None),
-                building_view: std::cell::Cell::new(None),
+                lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             };
             let mut layout = engine.build_layout_from_document(&document, &[]);
             let containing_block = Dimensions {
@@ -23812,19 +23837,14 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23896,19 +23916,14 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23982,19 +23997,14 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -24068,19 +24078,14 @@ mod tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -24145,28 +24150,24 @@ mod tests {
             }
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut engine = Engine {
+        let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
-        engine.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document);
         // Two identical svgs, one content-addressed entry.
-        assert_eq!(engine.svg_cache.len(), 1, "identical svgs must share a cache entry");
-        let (key, doc) = engine.svg_cache.iter().next().unwrap();
+        assert_eq!(engine.lctx.svg_cache.borrow().len(), 1, "identical svgs must share a cache entry");
+        let svg_cache = engine.lctx.svg_cache.borrow();
+        let (key, doc) = svg_cache.iter().next().unwrap();
         assert!(key.starts_with("inline-svg:"), "cache key must carry the inline-svg scheme: {key}");
         // The parsed document carries the svg's own sizing and its rect.
         assert_eq!(doc.get_size(300.0, 150.0), (200.0, 150.0));
@@ -24194,7 +24195,7 @@ mod tests {
                 natural_height,
             } = &b.box_type
             {
-                assert!(engine.svg_cache.contains_key(url), "Image box key must hit the cache: {url}");
+                assert!(engine.lctx.svg_cache.borrow().contains_key(url), "Image box key must hit the cache: {url}");
                 assert_eq!((*natural_width, *natural_height), (200.0, 150.0));
             }
             assert!(b.children.is_empty(), "svg children must not generate boxes");
@@ -24230,19 +24231,14 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -24943,7 +24939,7 @@ mod element_identity_tests {
         let empty = std::collections::HashMap::new();
         let vars = HashMap::new();
         let style_of = |tag: &str| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &empty,
                 &[],
@@ -24982,7 +24978,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -25050,7 +25046,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -25085,7 +25081,7 @@ mod element_identity_tests {
         let vars = HashMap::new();
         let style_under = |css: &str| {
             let sheet = Stylesheet::parse(css).expect("css");
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &attrs,
                 &[sheet],
@@ -25272,7 +25268,7 @@ mod element_identity_tests {
             if let Some(s) = inline {
                 a.insert("style".to_string(), s.to_string());
             }
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 "div",
                 &a,
                 std::slice::from_ref(&sheet),
@@ -25321,7 +25317,7 @@ mod element_identity_tests {
         parent.font_size = rustkit_css::Length::Px(14.0);
         parent.border_top_color = rustkit_css::Color::new(1, 2, 3, 1.0);
         let style = |tag: &str, a: HashMap<String, String>| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &a,
                 std::slice::from_ref(&sheet),
@@ -25793,7 +25789,7 @@ mod button_children_tests {
         for c in children {
             button.append_child(c);
         }
-        engine.build_layout_from_parent_style_and_path(
+        engine.lctx.build_layout_from_parent_style_and_path(
             &button,
             &[],
             &HashMap::new(),
@@ -25980,7 +25976,7 @@ div { height: 10px; }
 
         let at = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
         assert!(
-            engine.image_manager.is_cached(&at("/shown.png")),
+            engine.lctx.image_manager.is_cached(&at("/shown.png")),
             "the background image is in the cache paint reads"
         );
         assert!(!engine.is_image_cached(&at("/tracker.png")));
@@ -26147,7 +26143,7 @@ div { width: 50px; height: 20px; background: url(/bg.jpg) no-repeat; }
             );
             let at = Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
             assert!(
-                engine.image_manager.is_cached(&at),
+                engine.lctx.image_manager.is_cached(&at),
                 "{path} decodes: the server sent a format the request asked for"
             );
         }
@@ -26482,11 +26478,13 @@ mod svg_image_tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn cached_svg_supplies_natural_size_to_img_layout() {
-        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
             .expect("parse svg");
         engine
+            .lctx
             .svg_cache
+            .borrow_mut()
             .insert("https://example.com/logo.svg".to_string(), svg);
 
         let mut attrs = HashMap::new();
@@ -26500,7 +26498,7 @@ mod svg_image_tests {
             },
         );
 
-        let layout = engine.build_layout_from_parent_style_and_path(
+        let layout = engine.lctx.build_layout_from_parent_style_and_path(
             &img,
             &[],
             &HashMap::new(),
@@ -26747,7 +26745,7 @@ mod web_font_tests {
             .flat_map(|s| s.font_face_rules())
             .collect();
         engine.load_local_web_fonts_from(None, &rules);
-        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        engine.lctx.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
         let mut layout = engine.build_layout_from_document(&document, &[]);
         let containing_block = Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -26797,19 +26795,14 @@ mod web_font_tests {
         let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
-            font_loader: Arc::new(FontLoader::new()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
-            image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         Some(LockedEngine {
             engine,
@@ -26842,7 +26835,7 @@ mod web_font_tests {
             .flat_map(|s| s.font_face_rules())
             .collect();
         engine.load_local_web_fonts_from(None, &rules);
-        engine.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
+        engine.lctx.install_web_fonts_for(&rustkit_layout::TopLevelSite::opaque());
         let mut layout = engine.build_layout_from_document(&document, &[]);
         layout.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -29780,14 +29773,14 @@ mod form_typing_tests {
                 .expect("form control box")
                 .0
         };
-        engine.views.get_mut(&id).unwrap().focused_node =
-            Some(rustkit_dom::NodeId::new(node_raw));
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(
+            Some(rustkit_dom::NodeId::new(node_raw)));
         let view = engine.views.get_mut(&id).unwrap();
-        view.edit_states.insert(
+        view.lay.edit_states.borrow_mut().insert(
             node_raw,
             rustkit_dom::forms::TextEditState::with_value("ab"),
         );
-        view.edit_states.get(&node_raw).unwrap().move_to_end(false);
+        view.lay.edit_states.borrow().get(&node_raw).unwrap().move_to_end(false);
 
         // 'c' (no modifiers) must insert.
         assert!(engine.handle_text_key(id, 0, "c", false, false, false));
@@ -29804,7 +29797,7 @@ mod form_typing_tests {
             .views
             .get(&id)
             .unwrap()
-            .edit_states
+            .lay.edit_states.borrow()
             .get(&node_raw)
             .unwrap()
             .insert_text("XY");
@@ -29881,8 +29874,8 @@ mod form_submit_tests {
             "https://example.com/page",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
-        engine.views.get_mut(&id).unwrap().edit_states.insert(
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
+        engine.views.get_mut(&id).unwrap().lay.edit_states.borrow_mut().insert(
             input.id.raw(),
             rustkit_dom::forms::TextEditState::with_value("typed"),
         );
@@ -29914,7 +29907,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
 
         let sub = engine.form_submission_for_focus(id).expect("submission");
         assert!(sub.url.contains("kept=1"));
@@ -29938,7 +29931,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
         assert!(engine.form_submission_for_focus(id).is_none());
     }
 
@@ -29950,7 +29943,7 @@ mod form_submit_tests {
             "https://example.com/",
         );
         let input = find_by_tag(&doc.root(), "input").expect("input");
-        engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+        engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
         assert!(engine.form_submission_for_focus(id).is_none());
     }
 }
@@ -29993,8 +29986,8 @@ mod edit_state_lifecycle_tests {
         {
             let view = engine.views.get_mut(&id).expect("view");
             view.document = Some(doc1.clone());
-            view.focused_node = Some(input1.id);
-            view.edit_states.insert(
+            view.lay.focused_node.set(Some(input1.id));
+            view.lay.edit_states.borrow_mut().insert(
                 input1.id.raw(),
                 rustkit_dom::forms::TextEditState::with_value("secret"),
             );
@@ -31031,7 +31024,7 @@ mod rule_prefilter_tests {
         let vars = HashMap::new();
 
         FULL_SELECTOR_MATCHES.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit")]),
             std::slice::from_ref(&sheet),
@@ -31070,9 +31063,9 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("class", "hit"), ("id", "main")]),
             sheets,
@@ -31107,7 +31100,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         FULL_SELECTOR_MATCHES.with(|n| n.set(0));
         let before = engine.create_pseudo_element(
             "div",
@@ -31171,7 +31164,7 @@ mod rule_prefilter_tests {
             ),
         ];
         let styles = |indexed: bool| {
-            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.lctx.build_rule_index(sheets)));
             let mut out = Vec::new();
             for (tag, a) in &elements {
                 for ancestors in &ancestors_sets {
@@ -31179,7 +31172,7 @@ mod rule_prefilter_tests {
                         for pseudo in ["::before", "::after"] {
                             out.push(format!(
                                 "{tag} {a:?} {ancestors:?} {pseudo}: {:?}",
-                                engine.pseudo_element_style(
+                                engine.lctx.pseudo_element_style(
                                     tag, a, sheets, ancestors, siblings, *sib, pseudo, None,
                                 )
                             ));
@@ -31206,7 +31199,7 @@ mod rule_prefilter_tests {
         let sheet = Stylesheet::parse(css).expect("css");
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let ix = engine.build_rule_index(sheets);
+        let ix = engine.lctx.build_rule_index(sheets);
         assert_eq!(ix.specificity.len(), sheet.rules.len());
         for (g, rule) in sheet.rules.iter().enumerate() {
             assert_eq!(
@@ -31235,7 +31228,7 @@ mod rule_prefilter_tests {
         .expect("sheet");
         let vars = HashMap::new();
         let style = |tag: &str, pairs: &[(&str, &str)]| {
-            engine.compute_style_for_element(
+            engine.lctx.compute_style_for_element(
                 tag,
                 &attrs(pairs),
                 std::slice::from_ref(&sheet),
@@ -31256,7 +31249,7 @@ mod rule_prefilter_tests {
             assert_eq!(style("u", &[]).color, green, "{path}: source order");
         };
         check("string path");
-        let _scope = RuleIndexScope::install(engine.build_rule_index(std::slice::from_ref(&sheet)));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(std::slice::from_ref(&sheet)));
         check("indexed path");
     }
 
@@ -31280,7 +31273,7 @@ mod rule_prefilter_tests {
         let sheet = Stylesheet::parse(css).expect("css");
         let sheets = std::slice::from_ref(&sheet);
         let engine = Engine::new(EngineConfig::default()).expect("engine");
-        let ix = engine.build_rule_index(sheets);
+        let ix = engine.lctx.build_rule_index(sheets);
         assert_eq!(ix.prepared.len(), sheet.rules.len());
         let chain = vec![
             ancestor("section", &["a"], Some("d")),
@@ -31339,7 +31332,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
         let host = attrs(&[("class", "hit"), ("id", "main")]);
         let before = engine.create_pseudo_element(
@@ -31405,7 +31398,7 @@ mod rule_prefilter_tests {
             .iter()
             .flat_map(|h| [pseudo(h, "::before"), pseudo(h, "::after")])
             .collect();
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         let indexed: Vec<_> = hosts
             .iter()
             .flat_map(|h| [pseudo(h, "::before"), pseudo(h, "::after")])
@@ -31437,7 +31430,7 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
         for indexed in [false, true] {
-            let _scope = indexed.then(|| RuleIndexScope::install(engine.build_rule_index(sheets)));
+            let _scope = indexed.then(|| RuleIndexScope::install(engine.lctx.build_rule_index(sheets)));
             let pseudo = |class: &str, which: &str| {
                 engine
                     .create_pseudo_element(
@@ -31493,7 +31486,7 @@ mod rule_prefilter_tests {
             elements
                 .iter()
                 .map(|(tag, a)| {
-                    let s = engine.compute_style_for_element(
+                    let s = engine.lctx.compute_style_for_element(
                         tag,
                         a,
                         sheets,
@@ -31510,7 +31503,7 @@ mod rule_prefilter_tests {
 
         let unindexed = styles(&engine);
         let indexed = {
-            let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+            let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
             styles(&engine)
         };
         assert_eq!(indexed, unindexed);
@@ -31526,8 +31519,8 @@ mod rule_prefilter_tests {
         // different allocation (and possibly different declarations).
         let first = parse(".a { color: red } #b > p { color: blue }");
         let again = parse(".a { color: green } #b > p { color: blue }");
-        let ix = engine.shared_rule_index(&first, None);
-        assert!(Rc::ptr_eq(&ix, &engine.shared_rule_index(&again, None)));
+        let ix = engine.lctx.shared_rule_index(&first, None);
+        assert!(Rc::ptr_eq(&ix, &engine.lctx.shared_rule_index(&again, None)));
 
         // It is installed for the slice at hand, not the one it was built from.
         {
@@ -31544,7 +31537,7 @@ mod rule_prefilter_tests {
         ] {
             let sheets: Vec<Stylesheet> =
                 css.iter().map(|c| Stylesheet::parse(c).expect("css")).collect();
-            let rebuilt = engine.shared_rule_index(&sheets, None);
+            let rebuilt = engine.lctx.shared_rule_index(&sheets, None);
             assert!(!Rc::ptr_eq(&ix, &rebuilt), "{css:?} reused a stale index");
             assert_eq!(rebuilt.rules.len(), sheets.iter().map(|s| s.rules.len()).sum::<usize>());
         }
@@ -31570,9 +31563,9 @@ mod rule_prefilter_tests {
         let engine = Engine::new(EngineConfig::default()).expect("engine");
         let vars = HashMap::new();
 
-        let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+        let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
         CANDIDATE_VISITS.with(|n| n.set(0));
-        let style = engine.compute_style_for_element(
+        let style = engine.lctx.compute_style_for_element(
             "div",
             &attrs(&[("data-hit", ""), ("class", "card")]),
             sheets,
@@ -31635,7 +31628,7 @@ mod rule_prefilter_tests {
             elements
                 .iter()
                 .map(|(tag, a)| {
-                    let s = engine.compute_style_for_element(
+                    let s = engine.lctx.compute_style_for_element(
                         tag, a, sheets, &vars, &ancestors, &[], sib, None,
                     );
                     format!("{s:?}")
@@ -31646,7 +31639,7 @@ mod rule_prefilter_tests {
         for sib in [SiblingContext::SOLE, not_first] {
             let unindexed = styles(&engine, sib);
             let indexed = {
-                let _scope = RuleIndexScope::install(engine.build_rule_index(sheets));
+                let _scope = RuleIndexScope::install(engine.lctx.build_rule_index(sheets));
                 styles(&engine, sib)
             };
             assert_eq!(indexed, unindexed);
@@ -31690,16 +31683,16 @@ mod rule_prefilter_tests {
                 );
                 if full {
                     assert!(
-                        engine.rule_may_match(sel, tag, a),
+                        engine.lctx.rule_may_match(sel, tag, a),
                         "prefilter rejected `{sel}` for <{tag} {a:?}>, which the matcher accepts"
                     );
                 }
             }
         }
         // And it does reject the plain impossible cases.
-        assert!(!engine.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
-        assert!(!engine.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
-        assert!(!engine.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
+        assert!(!engine.lctx.rule_may_match(".z", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.lctx.rule_may_match("p.a", "div", &attrs(&[("class", "a")])));
+        assert!(!engine.lctx.rule_may_match("#nope", "div", &attrs(&[("id", "main")])));
     }
 }
 
@@ -31927,9 +31920,9 @@ mod cascade_wire_tests {
     fn an_invalid_transform_leaves_the_previous_value_untouched() {
         let e = engine();
         let mut style = ComputedStyle::default();
-        e.apply_style_property(&mut style, "transform", "scale(2)");
+        e.lctx.apply_style_property(&mut style, "transform", "scale(2)");
         let before = style.transform.ops.len();
-        e.apply_style_property(&mut style, "transform", "!!!garbage!!!");
+        e.lctx.apply_style_property(&mut style, "transform", "!!!garbage!!!");
         assert_eq!(
             style.transform.ops.len(),
             before,
@@ -31946,19 +31939,19 @@ mod cascade_wire_tests {
         let e = engine();
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "red");
-        e.apply_style_property(&mut s, "background", "invalid-junk(1)");
+        e.lctx.apply_style_property(&mut s, "background", "red");
+        e.lctx.apply_style_property(&mut s, "background", "invalid-junk(1)");
         assert_eq!(s.background_color, red, "the colour stays");
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
-        e.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
+        e.lctx.apply_style_property(&mut s, "background", "linear-gradient(red, blue) red");
+        e.lctx.apply_style_property(&mut s, "background", "url(a.png) no-repeat, bogus");
         assert_eq!(s.background_color, red, "one bad layer drops the whole value");
         assert_eq!(s.background_layers.len(), 1, "the image stays");
         assert!(s.background_gradient.is_some());
 
         // A valid value still resets what it does not name.
-        e.apply_style_property(&mut s, "background", "none");
+        e.lctx.apply_style_property(&mut s, "background", "none");
         assert_eq!(s.background_color, rustkit_css::Color::TRANSPARENT);
         assert!(s.background_layers.is_empty());
     }
@@ -31967,8 +31960,8 @@ mod cascade_wire_tests {
     fn an_invalid_background_color_keeps_the_earlier_colour() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background-color", "red");
-        e.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
+        e.lctx.apply_style_property(&mut s, "background-color", "red");
+        e.lctx.apply_style_property(&mut s, "background-color", "invalid-junk(1)");
         assert_eq!(s.background_color, rustkit_css::Color::new(255, 0, 0, 1.0));
     }
 
@@ -31978,12 +31971,12 @@ mod cascade_wire_tests {
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
         for property in ["border", "border-top"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "2px solid red");
-            e.apply_style_property(&mut s, property, "invalid-junk(1)");
+            e.lctx.apply_style_property(&mut s, property, "2px solid red");
+            e.lctx.apply_style_property(&mut s, property, "invalid-junk(1)");
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: width");
             assert_eq!(s.border_top_style, rustkit_css::BorderStyle::Solid, "{property}: style");
             assert_eq!(s.border_top_color, red, "{property}: colour");
-            e.apply_style_property(&mut s, property, "4px dashed bogus");
+            e.lctx.apply_style_property(&mut s, property, "4px dashed bogus");
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0), "{property}: bad colour");
         }
     }
@@ -31995,8 +31988,8 @@ mod cascade_wire_tests {
         // is `0` (`flex: 1 1 0` stays valid).
         for junk in ["1 junk", "junk 5", "1 2 3 4", "1 2 junk", "1 2 3", "1 1 1"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "flex", "2 3 10px");
-            e.apply_style_property(&mut s, "flex", junk);
+            e.lctx.apply_style_property(&mut s, "flex", "2 3 10px");
+            e.lctx.apply_style_property(&mut s, "flex", junk);
             assert_eq!(s.flex_grow, 2.0, "flex: {junk}");
             assert_eq!(s.flex_shrink, 3.0, "flex: {junk}");
             assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(10.0), "flex: {junk}");
@@ -32022,14 +32015,14 @@ mod cascade_wire_tests {
             "0 0 content",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "flex", "3 3 10px");
-            e.apply_style_property(&mut s, "flex", value);
+            e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
+            e.lctx.apply_style_property(&mut s, "flex", value);
             assert_eq!(s.flex_grow, 0.0, "flex: {value}");
             assert_eq!(s.flex_shrink, 0.0, "flex: {value}");
         }
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "3 3 10px");
-        e.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
+        e.lctx.apply_style_property(&mut s, "flex", "3 3 10px");
+        e.lctx.apply_style_property(&mut s, "flex", "2 calc(100% - 20px)");
         assert_eq!((s.flex_grow, s.flex_shrink), (2.0, 1.0), "flex: <grow> <calc basis>");
     }
 
@@ -32037,14 +32030,14 @@ mod cascade_wire_tests {
     fn an_invalid_font_shorthand_keeps_the_earlier_font() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "font", "italic bold 20px serif");
+        e.lctx.apply_style_property(&mut s, "font", "italic bold 20px serif");
         let (size, weight, font_style) = (s.font_size.clone(), s.font_weight, s.font_style);
-        e.apply_style_property(&mut s, "font", "bogus 30px serif");
+        e.lctx.apply_style_property(&mut s, "font", "bogus 30px serif");
         assert_eq!(s.font_size, size, "an unknown prefix token drops the value");
         assert_eq!(s.font_weight, weight);
         assert_eq!(s.font_style, font_style);
         // Every prefix keyword the grammar allows still parses.
-        e.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
+        e.lctx.apply_style_property(&mut s, "font", "normal small-caps 300 condensed 30px serif");
         assert_eq!(s.font_size, rustkit_css::Length::Px(30.0));
     }
 
@@ -32054,11 +32047,11 @@ mod cascade_wire_tests {
     fn a_background_shorthand_keeps_text_clip_and_math_positions() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
+        e.lctx.apply_style_property(&mut s, "background", "linear-gradient(red, blue) text");
         assert_eq!(s.background_layers.len(), 1, "text clip");
         assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
+        e.lctx.apply_style_property(&mut s, "background", "url(a.png) padding-box text");
         assert_eq!(s.background_layers[0].clip, rustkit_css::BackgroundClip::Text);
         for value in [
             "url(a.png) min(10px, 5%) 0 no-repeat",
@@ -32068,8 +32061,8 @@ mod cascade_wire_tests {
             "url(a.png) center / clamp(10px, 50%, 100px) auto",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "background", "red");
-            e.apply_style_property(&mut s, "background", value);
+            e.lctx.apply_style_property(&mut s, "background", "red");
+            e.lctx.apply_style_property(&mut s, "background", value);
             assert_eq!(s.background_layers.len(), 1, "{value}: the layer applies");
         }
     }
@@ -32080,8 +32073,8 @@ mod cascade_wire_tests {
         let e = engine();
         for junk in ["10deg 30px serif", "bolddeg 30px serif", "oblique xdeg 30px serif"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "font", "20px serif");
-            e.apply_style_property(&mut s, "font", junk);
+            e.lctx.apply_style_property(&mut s, "font", "20px serif");
+            e.lctx.apply_style_property(&mut s, "font", junk);
             assert_eq!(s.font_size, rustkit_css::Length::Px(20.0), "font: {junk}");
         }
         for valid in [
@@ -32092,8 +32085,8 @@ mod cascade_wire_tests {
             "oblique 0.05turn 30px serif",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "font", "20px serif");
-            e.apply_style_property(&mut s, "font", valid);
+            e.lctx.apply_style_property(&mut s, "font", "20px serif");
+            e.lctx.apply_style_property(&mut s, "font", valid);
             assert_eq!(s.font_size, rustkit_css::Length::Px(30.0), "font: {valid}");
         }
     }
@@ -32120,8 +32113,8 @@ mod cascade_wire_tests {
             ("border", "1px solid color-mix(in lab, red 50%, blue)"),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "4px dashed red");
-            e.apply_style_property(&mut s, property, value);
+            e.lctx.apply_style_property(&mut s, property, "4px dashed red");
+            e.lctx.apply_style_property(&mut s, property, value);
             assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
             assert_eq!(
                 s.border_top_style,
@@ -32132,8 +32125,8 @@ mod cascade_wire_tests {
         }
         // A token that is not colour-shaped still drops the declaration.
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "border", "2px solid red");
-        e.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
+        e.lctx.apply_style_property(&mut s, "border", "2px solid red");
+        e.lctx.apply_style_property(&mut s, "border", "1px dashed nonsense(1)");
         assert_eq!(s.border_top_width, rustkit_css::Length::Px(2.0));
     }
 
@@ -32145,12 +32138,12 @@ mod cascade_wire_tests {
         let half_green = rustkit_css::Color::new(0, 128, 0, 0.5);
         for property in ["background", "background-color"] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, property, "red");
-            e.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
+            e.lctx.apply_style_property(&mut s, property, "red");
+            e.lctx.apply_style_property(&mut s, property, "color-mix(in oklab, green 50%, transparent)");
             assert_eq!(s.background_color, half_green, "{property}");
         }
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
+        e.lctx.apply_style_property(&mut s, "border", "1px solid color-mix(in srgb, red, blue)");
         assert_eq!(s.border_top_color, rustkit_css::Color::new(128, 0, 128, 1.0));
     }
 
@@ -32166,8 +32159,8 @@ mod cascade_wire_tests {
             "url(a.png) light-dark(#fff, #000)",
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "background", "red");
-            e.apply_style_property(&mut s, "background", value);
+            e.lctx.apply_style_property(&mut s, "background", "red");
+            e.lctx.apply_style_property(&mut s, "background", value);
             assert_eq!(s.background_layers.len(), 1, "{value}: the image applies");
             match &s.background_layers[0].image {
                 rustkit_css::BackgroundImage::Url(u) => assert_eq!(u, "a.png", "{value}"),
@@ -32190,8 +32183,8 @@ mod cascade_wire_tests {
     fn an_unknown_keyword_falls_back_to_static_rather_than_keeping_the_old_value() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "position", "absolute");
-        e.apply_style_property(&mut s, "position", "notakeyword");
+        e.lctx.apply_style_property(&mut s, "position", "absolute");
+        e.lctx.apply_style_property(&mut s, "position", "notakeyword");
         assert_eq!(
             s.position,
             rustkit_css::Position::Static,
@@ -32219,7 +32212,7 @@ mod cascade_wire_tests {
     fn the_overflow_shorthand_sets_both_axes() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "overflow", "hidden");
+        e.lctx.apply_style_property(&mut s, "overflow", "hidden");
         assert_eq!(s.overflow_x, rustkit_css::Overflow::Hidden);
         assert_eq!(s.overflow_y, rustkit_css::Overflow::Hidden);
     }
@@ -32228,8 +32221,8 @@ mod cascade_wire_tests {
     fn the_axis_longhands_are_independent() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "overflow-x", "scroll");
-        e.apply_style_property(&mut s, "overflow-y", "hidden");
+        e.lctx.apply_style_property(&mut s, "overflow-x", "scroll");
+        e.lctx.apply_style_property(&mut s, "overflow-y", "hidden");
         assert_eq!(s.overflow_x, rustkit_css::Overflow::Scroll);
         assert_eq!(
             s.overflow_y,
@@ -32242,7 +32235,7 @@ mod cascade_wire_tests {
     fn a_shorthand_carrying_a_colour_still_sets_the_line() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "text-decoration", "underline red");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "underline red");
         assert!(
             s.text_decoration_line.underline,
             "a shorthand naming a colour as well as a line must still set the line"
@@ -32253,8 +32246,8 @@ mod cascade_wire_tests {
     fn a_value_naming_no_line_keyword_leaves_the_line_alone() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "text-decoration", "underline");
-        e.apply_style_property(&mut s, "text-decoration", "red");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "underline");
+        e.lctx.apply_style_property(&mut s, "text-decoration", "red");
         assert!(
             s.text_decoration_line.underline,
             "a colour-only value must not clear an already-set line"
@@ -32266,7 +32259,7 @@ mod cascade_wire_tests {
     fn the_single_number_shorthand_zeroes_the_basis() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1");
+        e.lctx.apply_style_property(&mut s, "flex", "1");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(s.flex_shrink, 1.0);
         assert_eq!(
@@ -32275,7 +32268,7 @@ mod cascade_wire_tests {
             "flex: 1 must zero the basis or the container is not divided; the zero is 0%"
         );
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 1");
+        e.lctx.apply_style_property(&mut s, "flex", "1 1");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Percent(0.0));
     }
 
@@ -32285,23 +32278,23 @@ mod cascade_wire_tests {
         // items evenly; as Auto they sized to content and split unevenly.
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 1 0");
+        e.lctx.apply_style_property(&mut s, "flex", "1 1 0");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex-basis", "0");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "0");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(0.0));
 
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "0 0 2.5rem");
+        e.lctx.apply_style_property(&mut s, "flex", "0 0 2.5rem");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(40.0));
-        e.apply_style_property(&mut s, "flex-basis", "1rem");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "1rem");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
 
         // An explicit auto still resets; garbage leaves the basis alone.
-        e.apply_style_property(&mut s, "flex-basis", "bogus");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "bogus");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Length(16.0));
-        e.apply_style_property(&mut s, "flex-basis", "auto");
+        e.lctx.apply_style_property(&mut s, "flex-basis", "auto");
         assert_eq!(s.flex_basis, rustkit_css::FlexBasis::Auto);
     }
 
@@ -32309,7 +32302,7 @@ mod cascade_wire_tests {
     fn a_two_value_shorthand_distinguishes_shrink_from_basis() {
         let e = engine();
         let mut s = ComputedStyle::default();
-        e.apply_style_property(&mut s, "flex", "1 200px");
+        e.lctx.apply_style_property(&mut s, "flex", "1 200px");
         assert_eq!(s.flex_grow, 1.0);
         assert_eq!(
             s.flex_basis,
@@ -32317,7 +32310,7 @@ mod cascade_wire_tests {
             "a length in position 2 is the BASIS"
         );
         let mut s2 = ComputedStyle::default();
-        e.apply_style_property(&mut s2, "flex", "2 3");
+        e.lctx.apply_style_property(&mut s2, "flex", "2 3");
         assert_eq!(s2.flex_grow, 2.0);
         assert_eq!(s2.flex_shrink, 3.0, "a bare number in position 2 is the SHRINK");
     }
@@ -32336,7 +32329,7 @@ mod cascade_wire_tests {
             ("legacy", JustifyItems::Stretch),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "justify-items", value);
+            e.lctx.apply_style_property(&mut s, "justify-items", value);
             assert_eq!(s.justify_items, expected, "justify-items: {value}");
         }
         for (value, expected) in [
@@ -32347,7 +32340,7 @@ mod cascade_wire_tests {
             ("normal", JustifySelf::Auto),
         ] {
             let mut s = ComputedStyle::default();
-            e.apply_style_property(&mut s, "justify-self", value);
+            e.lctx.apply_style_property(&mut s, "justify-self", value);
             assert_eq!(s.justify_self, expected, "justify-self: {value}");
         }
     }
@@ -32906,7 +32899,7 @@ document.currentScript.remove();
             "stalled raster image must not be cached after the budget"
         );
         assert!(
-            !engine.svg_cache.contains_key(slow_svg.as_str()),
+            !engine.lctx.svg_cache.borrow().contains_key(slow_svg.as_str()),
             "stalled SVG must not enter the SVG cache after the budget"
         );
     }
@@ -32968,11 +32961,11 @@ document.currentScript.remove();
             "waited for the stalled web font: {took:?}"
         );
         assert!(
-            engine.font_loader.is_failed(&key),
+            engine.lctx.font_loader.is_failed(&key),
             "timeout must mark the face failed so relayout stops retrying it"
         );
         assert!(
-            engine.font_loader.faces_for(&partition).is_empty(),
+            engine.lctx.font_loader.faces_for(&partition).is_empty(),
             "no face bytes may be installed after a budget timeout"
         );
     }
@@ -36566,7 +36559,7 @@ mod style_share_tests {
     fn matches_are_shared_only_for_the_slice_the_enclosing_scope_named() {
         let e = engine();
         let sheets = vec![rustkit_css::Stylesheet::parse("#top li { color: red } li { margin: 0 }").expect("css")];
-        let _index = RuleIndexScope::install(e.build_rule_index(&sheets));
+        let _index = RuleIndexScope::install(e.lctx.build_rule_index(&sheets));
         let ix = active_rule_index(&sheets).expect("index");
         let _scope = StyleShareScope::install(StyleShareMode::Share);
         let none = HashMap::new();
@@ -37584,7 +37577,7 @@ mod windows_engine_pins {
         let sizes: Vec<f32> = ["h1", "h2", "h3", "h4", "h5", "h6"]
             .iter()
             .map(|t| {
-                let s = e.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
+                let s = e.lctx.compute_style_for_element(t, &attrs, &[], &vars, &[], &[], SiblingContext::SOLE, None);
                 match s.font_size {
                     rustkit_css::Length::Px(px) => px,
                     other => panic!("<{t}> font-size is {other:?}, expected Px"),
@@ -37655,7 +37648,7 @@ mod windows_a_leg_pins {
     /// was 150×150.
     #[test]
     fn an_inline_svg_with_only_a_viewbox_is_sized_by_its_ratio() {
-        let mut e = engine();
+        let e = engine();
         let html = r#"<!DOCTYPE html><html><body style="margin:0">
             <style>.btn{display:inline-block;box-sizing:border-box;width:40px;height:40px;padding:8px}</style>
             <div style="width:24px"><svg viewBox="0 0 24 24"><rect width="24" height="24"/></svg></div>
@@ -37666,7 +37659,7 @@ mod windows_a_leg_pins {
             <div><a class="btn"><svg viewbox="0 0 24 24"><rect width="24" height="24"/></svg></a></div>
             </body></html>"#;
         let d = Document::parse_html(html).expect("parse");
-        e.cache_inline_svgs(&d);
+        e.lctx.cache_inline_svgs(&d);
         let mut root = e.build_layout_from_document(&d, &[]);
         root.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),
@@ -37720,13 +37713,13 @@ mod windows_a_leg_pins {
         vars.insert("--bg".to_string(), "#0f172a".to_string());
         vars.insert("--accent".to_string(), "#06b6d4".to_string());
         vars.insert("--alias".to_string(), "var(--accent)".to_string());
-        assert_eq!(e.resolve_css_variables("var(--bg)", &vars), "#0f172a");
-        assert_eq!(e.resolve_css_variables("1px solid var(--accent)", &vars), "1px solid #06b6d4");
-        assert_eq!(e.resolve_css_variables("var(--missing, red)", &vars), "red");
-        assert_eq!(e.resolve_css_variables("var(--bg, red)", &vars), "#0f172a");
-        assert_eq!(e.resolve_css_variables("var(--alias)", &vars), "#06b6d4");
-        assert_eq!(e.resolve_css_variables("var(--missing, rgb(1, 2, 3))", &vars), "rgb(1, 2, 3)");
-        assert_eq!(e.resolve_css_variables("#fff", &vars), "#fff");
+        assert_eq!(e.lctx.resolve_css_variables("var(--bg)", &vars), "#0f172a");
+        assert_eq!(e.lctx.resolve_css_variables("1px solid var(--accent)", &vars), "1px solid #06b6d4");
+        assert_eq!(e.lctx.resolve_css_variables("var(--missing, red)", &vars), "red");
+        assert_eq!(e.lctx.resolve_css_variables("var(--bg, red)", &vars), "#0f172a");
+        assert_eq!(e.lctx.resolve_css_variables("var(--alias)", &vars), "#06b6d4");
+        assert_eq!(e.lctx.resolve_css_variables("var(--missing, rgb(1, 2, 3))", &vars), "rgb(1, 2, 3)");
+        assert_eq!(e.lctx.resolve_css_variables("#fff", &vars), "#fff");
     }
 
     #[test]
@@ -37790,7 +37783,7 @@ mod windows_a_leg_pins {
         crate::test_gpu::on_helper_engine(
             std::time::Duration::from_secs(10),
             "resolve_css_variables did not terminate",
-            move |e| e.resolve_css_variables(&v, &vars),
+            move |e| e.lctx.resolve_css_variables(&v, &vars),
         )
     }
 
@@ -38216,26 +38209,26 @@ mod logical_property_tests {
 
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "inset-inline", "1px 2px");
-        e.apply_style_property(&mut style, "inset-block-start", "3px");
+        e.lctx.apply_style_property(&mut style, "inset-inline", "1px 2px");
+        e.lctx.apply_style_property(&mut style, "inset-block-start", "3px");
         assert_eq!(style.left, Some(rustkit_css::Length::Px(1.0)));
         assert_eq!(style.right, Some(rustkit_css::Length::Px(2.0)));
         assert_eq!(style.top, Some(rustkit_css::Length::Px(3.0)));
         // Three values is not a valid two-value shorthand: ignored.
-        e.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
+        e.lctx.apply_style_property(&mut style, "margin-inline", "1px 2px 3px");
         assert_eq!(style.margin_left, ComputedStyle::new().margin_left);
 
         // A single calc() with internal spaces is one value, not three.
         // Before #403's top-level split, `calc(1px + 2px)` was dropped.
         let mut calc_style = ComputedStyle::new();
-        e.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
+        e.lctx.apply_style_property(&mut calc_style, "margin-inline", "calc(1px + 2px)");
         assert_eq!(
             calc_style.margin_left,
             rustkit_css::Length::Px(3.0),
             "margin-inline: calc(1px + 2px) must apply to both sides"
         );
         assert_eq!(calc_style.margin_right, rustkit_css::Length::Px(3.0));
-        e.apply_style_property(
+        e.lctx.apply_style_property(
             &mut calc_style,
             "padding-inline",
             "calc(1px + 2px) calc(3px + 4px)",
@@ -38293,24 +38286,24 @@ mod logical_property_tests {
 
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "border-inline-end-style", "dashed");
-        e.apply_style_property(&mut style, "border-block-start-style", "solid");
+        e.lctx.apply_style_property(&mut style, "border-inline-end-style", "dashed");
+        e.lctx.apply_style_property(&mut style, "border-block-start-style", "solid");
         assert_eq!(style.border_right_style, BorderStyle::Dashed);
         assert_eq!(style.border_top_style, BorderStyle::Solid);
-        e.apply_style_property(&mut style, "border-inline-style", "dotted solid");
+        e.lctx.apply_style_property(&mut style, "border-inline-style", "dotted solid");
         assert_eq!((style.border_left_style, style.border_right_style), (BorderStyle::Dotted, BorderStyle::Solid));
-        e.apply_style_property(&mut style, "border-inline-end-width", "9px");
-        e.apply_style_property(&mut style, "border-block-start-width", "8px");
+        e.lctx.apply_style_property(&mut style, "border-inline-end-width", "9px");
+        e.lctx.apply_style_property(&mut style, "border-block-start-width", "8px");
         assert_eq!(style.border_right_width, Length::Px(9.0));
         assert_eq!(style.border_top_width, Length::Px(8.0));
         // Each colour may contain spaces: split at the top level only.
-        e.apply_style_property(&mut style, "border-inline-color", "rgb(10, 20, 30) rgba(0, 0, 0, 0.5)");
+        e.lctx.apply_style_property(&mut style, "border-inline-color", "rgb(10, 20, 30) rgba(0, 0, 0, 0.5)");
         assert_eq!(style.border_left_color, Color::from_rgb(10, 20, 30));
         assert_eq!(style.border_right_color.a, 0.5);
-        e.apply_style_property(&mut style, "border-block-color", "rgb(4, 5, 6)");
+        e.lctx.apply_style_property(&mut style, "border-block-color", "rgb(4, 5, 6)");
         assert_eq!(style.border_top_color, Color::from_rgb(4, 5, 6));
         assert_eq!(style.border_bottom_color, Color::from_rgb(4, 5, 6));
-        e.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
+        e.lctx.apply_style_property(&mut style, "border-block-end-color", "rgb(7, 8, 9)");
         assert_eq!(style.border_bottom_color, Color::from_rgb(7, 8, 9));
     }
 }
@@ -38329,12 +38322,12 @@ mod gap_shorthand_tests {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         for property in ["gap", "grid-gap"] {
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, property, "10px 20px");
+            e.lctx.apply_style_property(&mut style, property, "10px 20px");
             assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
             assert_eq!(style.column_gap, Length::Px(20.0), "{property}");
 
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
+            e.lctx.apply_style_property(&mut style, property, "calc(4px + 6px) 5%");
             assert_eq!(style.row_gap, Length::Px(10.0), "{property}");
             assert_eq!(style.column_gap, Length::Percent(5.0), "{property}");
         }
@@ -38344,7 +38337,7 @@ mod gap_shorthand_tests {
     fn gap_with_one_value_sets_both_and_a_bad_value_sets_neither() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::new();
-        e.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
+        e.lctx.apply_style_property(&mut style, "gap", "calc(4px + 6px)");
         assert_eq!(style.row_gap, Length::Px(10.0));
         assert_eq!(style.column_gap, Length::Px(10.0));
 
@@ -38355,7 +38348,7 @@ mod gap_shorthand_tests {
         // `gap: 10 20`), and so is the one-value form of either.
         for bad in ["1px 2px 3px", "1px red", "-5px 20px", "10px -1px", "10 20", "-5px", "10"] {
             let mut style = ComputedStyle::new();
-            e.apply_style_property(&mut style, "gap", bad);
+            e.lctx.apply_style_property(&mut style, "gap", bad);
             assert_eq!(style.row_gap, ComputedStyle::new().row_gap, "{bad}");
             assert_eq!(style.column_gap, ComputedStyle::new().column_gap, "{bad}");
         }
@@ -39427,9 +39420,10 @@ mod svg_content_type_tests {
         });
         let typed = format!("http://127.0.0.1:{port}/h/typed");
         let untyped = format!("http://127.0.0.1:{port}/h/untyped");
-        let doc = engine.svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
+        let svg_cache = engine.lctx.svg_cache.borrow();
+        let doc = svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
         assert_eq!(doc.get_size(0.0, 0.0), (40.0, 20.0));
-        assert!(!engine.svg_cache.contains_key(&untyped), "SVG is never sniffed from bytes");
+        assert!(!engine.lctx.svg_cache.borrow().contains_key(&untyped), "SVG is never sniffed from bytes");
     }
 }
 
@@ -39587,15 +39581,15 @@ mod grid_template_areas_tests {
     fn a_non_rectangular_areas_value_is_ignored() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'b c'");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "'a a' 'b c'");
         assert!(s.grid_template_areas.is_some());
         // L-shaped `a`: invalid, so the earlier value stands.
-        e.apply_style_property(&mut s, "grid-template-areas", "'a a' 'a b'");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "'a a' 'a b'");
         assert!(s.grid_template_areas.as_ref().unwrap().get_area("c").is_some());
         // Disjoint `a` and ragged rows are invalid too.
         assert!(rustkit_css::GridTemplateAreas::parse("'a b a'").is_none());
         assert!(rustkit_css::GridTemplateAreas::parse("'a b' 'c'").is_none());
-        e.apply_style_property(&mut s, "grid-template-areas", "none");
+        e.lctx.apply_style_property(&mut s, "grid-template-areas", "none");
         assert!(s.grid_template_areas.is_none());
     }
 
@@ -39603,20 +39597,20 @@ mod grid_template_areas_tests {
     fn grid_area_and_line_names_parse() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-area", "main");
+        e.lctx.apply_style_property(&mut s, "grid-area", "main");
         let main = GridLine::Name("main".into());
         assert_eq!(
             (&s.grid_row_start, &s.grid_column_start, &s.grid_row_end, &s.grid_column_end),
             (&main, &main, &main, &main)
         );
-        e.apply_style_property(&mut s, "grid-area", "1 / 2 / 3");
+        e.lctx.apply_style_property(&mut s, "grid-area", "1 / 2 / 3");
         assert_eq!(s.grid_row_start, GridLine::Number(1));
         assert_eq!(s.grid_column_start, GridLine::Number(2));
         assert_eq!(s.grid_row_end, GridLine::Number(3));
         assert_eq!(s.grid_column_end, GridLine::Auto);
-        e.apply_style_property(&mut s, "grid-column", "nav");
+        e.lctx.apply_style_property(&mut s, "grid-column", "nav");
         assert_eq!(s.grid_column_end, GridLine::Name("nav".into()));
-        e.apply_style_property(&mut s, "grid-row", "span hdr / 2");
+        e.lctx.apply_style_property(&mut s, "grid-row", "span hdr / 2");
         assert_eq!(s.grid_row_start, GridLine::SpanName("hdr".into()));
     }
 
@@ -39624,7 +39618,7 @@ mod grid_template_areas_tests {
     fn grid_template_shorthand_forms() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut s = ComputedStyle::new();
-        e.apply_style_property(&mut s, "grid-template", "auto / 15.5rem minmax(0,1fr)");
+        e.lctx.apply_style_property(&mut s, "grid-template", "auto / 15.5rem minmax(0,1fr)");
         assert_eq!(s.grid_template_rows.tracks.len(), 1);
         assert_eq!(s.grid_template_columns.tracks[0].size, TrackSize::Px(248.0));
         assert_eq!(
@@ -39633,7 +39627,7 @@ mod grid_template_areas_tests {
         );
         assert!(s.grid_template_areas.is_none());
 
-        e.apply_style_property(&mut s, "grid-template", "[top] 'a a' 40px [mid] 'b c' / 1fr 2fr");
+        e.lctx.apply_style_property(&mut s, "grid-template", "[top] 'a a' 40px [mid] 'b c' / 1fr 2fr");
         let areas = s.grid_template_areas.as_ref().expect("areas from the strings");
         assert_eq!(areas.get_area("c").unwrap().column_start, 2);
         let rows = &s.grid_template_rows.tracks;
@@ -39642,7 +39636,7 @@ mod grid_template_areas_tests {
         assert_eq!(rows[1].size, TrackSize::Auto, "a string with no size is an auto row");
         assert_eq!(rows[1].line_names, vec!["mid".to_string()]);
 
-        e.apply_style_property(&mut s, "grid-template", "none");
+        e.lctx.apply_style_property(&mut s, "grid-template", "none");
         assert!(s.grid_template_areas.is_none());
         assert!(s.grid_template_rows.tracks.is_empty());
     }
@@ -39744,7 +39738,7 @@ mod script_dom_flush_tests {
         let q = document.get_element_by_id("q").unwrap();
         assert_eq!(q.get_attribute("value"), Some("authored"));
 
-        engine.views.get_mut(&view).unwrap().focused_node = Some(q.id);
+        engine.views.get_mut(&view).unwrap().lay.focused_node.set(Some(q.id));
         assert!(engine.handle_text_key(view, 0, "!", false, false, false));
         assert_eq!(
             engine
@@ -40911,7 +40905,7 @@ mod individual_transform_tests {
         let e = Engine::new(EngineConfig::default()).expect("engine");
         let mut style = ComputedStyle::default();
         for (p, v) in decls {
-            e.apply_style_property(&mut style, p, v);
+            e.lctx.apply_style_property(&mut style, p, v);
         }
         style
     }
@@ -40994,7 +40988,7 @@ mod individual_transform_tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let r = |v: &str| e.resolve_css_variables(v, &vars);
+        let r = |v: &str| e.lctx.resolve_css_variables(v, &vars);
         assert_eq!(r("var(--x)var(--y)"), "0 -200%");
         // No space where the neighbours could not fuse anyway.
         assert_eq!(r("calc(var(--n)*2px)"), "calc(5*2px)");
@@ -42172,7 +42166,7 @@ mod sheet_cache_tests {
             .expect("headless view");
         e.load_html(id, "<html><head><style>p { color: red }</style></head><body><p>a</p></body></html>")
             .expect("load_html");
-        let held = |e: &Engine| e.views[&id].sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
+        let held = |e: &Engine| e.views[&id].lay.sheet_cache.borrow().entries.keys().cloned().collect::<Vec<_>>();
         assert_eq!(held(&e), ["p { color: red }"]);
         e.load_html(id, "<html><head><style>p { color: blue }</style></head><body><p>b</p></body></html>")
             .expect("load_html");

@@ -54,8 +54,8 @@ field that is `null` today may hold a value later.
 | `relayout` | `cause` (engine words only, below), `took_ms` |
 | `navigation_redirect` | `from`, `to`, `status`: one per redirect the document followed, between its `request` and `response` |
 | `request` | `id` (per view, from 1), `url`, `method`, `resource_type`, `initiator` |
-| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms` |
-| `failure` | `id`, `stage`, `reason`, `duration_ms` |
+| `response` | `id`, `status`, `mime` (essence only, `type/subtype`; `null` when the header is not a valid one), `encoded_size`, `decoded_size`, `from_cache`, `duration_ms`, `queued_ms` (see below) |
+| `failure` | `id`, `stage`, `reason`, `duration_ms`, `blocked_by` (when the shield refused it and said which: `{ "list": "EasyList", "rule": "<the rule as the list writes it, ≤256 chars, or null>" }`, the filter list's own public text; else `null`. Rules the filter engine joined into one are written each as its list writes it, separated by ` <+> `, and any of them may have matched: `list` is then named only when all are from that list, else `unattributed`. The rule is named only where the tool asked for rule names (parity-capture `--shield`; they cost about 8 MB); elsewhere `rule` is `null` and `list` is `unattributed` when several lists are loaded), `queued_ms` |
 | `script` | `script`, `kind`, `outcome`, `reason`, `bytes`, `queued_ms`, `fetch_ms`, `waited_ms`, `ran_ms`, `event`, `held`: one page script's life, recorded when it is over (see Scripts) |
 | `lifecycle` | `event` (`DOMContentLoaded`, `load`), `held_by`, `held_by_count`: recorded as the event fires (see Scripts) |
 
@@ -169,8 +169,11 @@ deadline, a navigation) is still answered.
 (a module script or an import), `image`, `font`, `fetch`, `xhr`, `other`.
 
 `initiator`: `navigation` (the document), `parser` (the document's markup),
-`css` (a stylesheet's `url()`: fonts, background images), `script` (page
-script: `fetch`, XHR, `import`, images scripts added).
+`css` (a stylesheet's `url()`: fonts, background images), `fetch` (page
+script's `fetch()`), `xhr` (an `XMLHttpRequest`), `inserted_script` (a
+`<script src>` page script inserted; `script_error.inserted_by` says where
+from), `script` (other page script: `import`, images scripts added). Before
+dev-tools T2, `fetch`, `xhr` and `inserted_script` were all `script`.
 
 A response with an error status (`404`) is a `response`: the server answered.
 `encoded_size` is the body as transferred (before gzip/deflate were undone),
@@ -184,7 +187,7 @@ engine read, `null` when it did not read the body.
 | `dns` | the host name did not resolve |
 | `connect` | no connection, or the connection broke mid-body |
 | `tls` | the TLS handshake failed |
-| `timeout` | the network did not answer in time (live script requests: 30 s) |
+| `timeout` | the network did not answer in time (live script requests: 30 s). Reason `in-flight cap` when the deadline passed while the request was still queued for a slot (see `queued_ms`) |
 | `http_error` | not usable HTTP (malformed, too many redirects) |
 | `policy` | refused by a rule: the shield, the private-network rule, mixed content, CSP, a malformed or oversized request, a request cap |
 | `cors` | a script request another origin did not allow (or a `same-origin` request to another origin) |
@@ -192,6 +195,15 @@ engine read, `null` when it did not read the body.
 | `decode` | the body arrived and was not usable: not UTF-8, an image that does not decode, an SVG that does not parse |
 | `cancelled` | abandoned before its budget ran out: the page navigated away or the view closed (reason `abandoned (navigation or view closed)`), or the navigation was superseded |
 | `over_budget` | the subresource phase's or the script budget ran out first, or the response was over the size cap |
+
+`queued_ms`: of `duration_ms`, how long the request waited for an in-flight
+slot. The caps queue a request and never refuse it: a script request (`fetch`,
+XHR, a module) waits for one of 6 per origin and 24 per page, and an inserted
+`<script src>` for one of the process's 8. `null` for a request no cap queues
+(the document, images, stylesheets, fonts, parser scripts) or one refused
+before it queued. A request still queued when its deadline passed is a
+`timeout` (or `over_budget`) with the reason `in-flight cap`, and its
+`queued_ms` is the whole wait.
 
 Not recorded as separate requests: CORS preflights and the hops of a script
 request's redirects (the policy follows them inside one request), `data:` URLs
@@ -217,7 +229,7 @@ steps, timers and callbacks are not scripts here; their errors stay
 
 | field | meaning |
 |---|---|
-| `script` | its URL (as Privacy reduces it), `inline#n`, or for a `src` that is not a URL `unparseable#n` (n: its place among the document's scripts); the text itself is never recorded. A script page script inserted with such a `src` is never queued: it fires `error` and gets no record |
+| `script` | its URL (as Privacy reduces it), `inline#n`, or for a `src` that is not a URL `unparseable#n` (n: its place among the document's scripts); the text itself is never recorded. A script the page inserts with such a `src` is never queued: it fires `error` and gets no record |
 | `kind` | `parser` (a parser-blocking classic script), `defer`, `async`, `module`, `inserted` |
 | `outcome` | `ran`; `threw` (its `script_error` is above it); `skipped`; `fetch_failed`; `over_budget` (not started: the script budget was already spent); `stopped` (started, and stopped by the script budget's deadline); `engine_failed`; `cancelled` (its document was left before it ended) |
 | `reason` | for every outcome but `ran` and `threw`, in the engine's words: `nomodule`, `too large to run inside the script budget`, `unparseable src`, `JS engine panicked earlier on this page`, `HTTP <status>`, `network` (the request's `failure` has the stage), `script budget`, `script budget spent before it started`, `JS engine panic`, `navigation or view closed` |
