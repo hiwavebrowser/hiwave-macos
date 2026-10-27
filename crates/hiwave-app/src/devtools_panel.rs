@@ -20,7 +20,7 @@
 use std::time::{Duration, Instant};
 
 use crate::webview_rustkit::RustKitView;
-use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsQuery};
+use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsConsole, DevtoolsQuery};
 use serde::Serialize;
 use tokio::sync::oneshot;
 use wry::WebView;
@@ -296,13 +296,38 @@ impl Devtools {
 
     /// The panel closed: no outline, no picking, no recording.
     pub fn close(&mut self, view: &RustKitView, panel: &WebView) {
-        self.stop_picker(view, panel);
+        self.close_with(&mut |q| view.devtools_ask(q), &mut |js| run(panel, js));
+    }
+
+    fn close_with(&mut self, send: &mut SendQuestion<'_>, show: &mut RunPanel<'_>) {
+        self.stop_picker_with(send, show);
         self.open = false;
         self.forget_questions();
-        run(panel, "window.hiwaveInspector && window.hiwaveInspector.setPageBusy(null)");
-        self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
-        self.ask(view, Want::Ack, DevtoolsQuery::Attach(false));
-        run(panel, "window.hiwaveInspector && window.hiwaveInspector.clearConsole()");
+        show("window.hiwaveInspector && window.hiwaveInspector.setPageBusy(null)");
+        self.ask_with(Want::Highlight, DevtoolsQuery::Highlight(None), send);
+        self.ask_with(Want::Ack, DevtoolsQuery::Attach(false), send);
+        self.clear_console_with(show);
+    }
+
+    /// The page cleared its console (WebKit content's `console.clear()`).
+    pub fn clear_console(&mut self, panel: &WebView) {
+        self.clear_console_with(&mut |js| run(panel, js));
+    }
+
+    /// The panel's `clearConsole()` hides the held line too, so the next
+    /// pump shows it again while lines are still held (#809 follow-up).
+    fn clear_console_with(&mut self, show: &mut RunPanel<'_>) {
+        show("window.hiwaveInspector && window.hiwaveInspector.clearConsole()");
+        self.held_shown = 0;
+    }
+
+    /// The "K console lines held by a running script" line, when `held`
+    /// differs from what it shows.
+    fn show_held(&mut self, held: usize, show: &mut RunPanel<'_>) {
+        if held != self.held_shown {
+            self.held_shown = held;
+            show(&panel_call("setConsoleHeld", &rustkit_engine::devtools_held_text(held)));
+        }
     }
 
     /// The DOM tree again, expanded down to the selection.
@@ -338,13 +363,17 @@ impl Devtools {
     }
 
     pub fn stop_picker(&mut self, view: &RustKitView, panel: &WebView) {
+        self.stop_picker_with(&mut |q| view.devtools_ask(q), &mut |js| run(panel, js));
+    }
+
+    fn stop_picker_with(&mut self, send: &mut SendQuestion<'_>, show: &mut RunPanel<'_>) {
         if self.picking {
             self.picking = false;
             self.hovered = None;
             self.hover_next = None;
-            self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
+            self.ask_with(Want::Highlight, DevtoolsQuery::Highlight(None), send);
         }
-        run(panel, "window.hiwaveInspector && window.hiwaveInspector.setPickerActive(false)");
+        show("window.hiwaveInspector && window.hiwaveInspector.setPickerActive(false)");
     }
 
     /// Picking, the pointer moved to (`x`, `y`) in the view (or left it):
@@ -440,10 +469,7 @@ impl Devtools {
         // calls it made past the live cap are only counted (#810 review).
         // One atomic load; the devtools thread wakes the window when it moves.
         let held = inspector.as_ref().map_or(0, |i| i.console_held());
-        if held != self.held_shown {
-            self.held_shown = held;
-            run(panel, &panel_call("setConsoleHeld", &rustkit_engine::devtools_held_text(held)));
-        }
+        self.show_held(held, &mut |js| run(panel, js));
         let watermark = inspector.map(|inspector| inspector.watermark());
         if console_due(watermark, self.console_seq, self.waiting_for(Want::Console)) {
             let since = self.console_seq;
@@ -499,31 +525,39 @@ impl Devtools {
                 self.send_tree(view);
             }
             (Want::Console, DevtoolsAnswer::Console(console)) => {
-                if console.next_seq == self.console_seq {
-                    return;
-                }
-                self.console_seq = console.next_seq;
-                if !console.entries.is_empty() {
-                    run(panel, &panel_call("addConsoleEntries", &console.entries));
-                }
-                if console.page_changed {
-                    self.forget_page();
-                    self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
-                    run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
-                }
-                // A first layout or the end of the load: the same page,
-                // a newer tree, the selection kept.
-                if console.tree_stale {
-                    self.send_tree(view);
-                }
+                self.console_answered(console, &mut |q| view.devtools_ask(q), &mut |js| run(panel, js));
             }
             _ => {}
+        }
+    }
+
+    fn console_answered(&mut self, console: DevtoolsConsole, send: &mut SendQuestion<'_>, show: &mut RunPanel<'_>) {
+        if console.next_seq == self.console_seq {
+            return;
+        }
+        self.console_seq = console.next_seq;
+        if !console.entries.is_empty() {
+            show(&panel_call("addConsoleEntries", &console.entries));
+        }
+        if console.page_changed {
+            self.forget_page();
+            self.ask_with(Want::Highlight, DevtoolsQuery::Highlight(None), send);
+            show("window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
+        }
+        // A first layout or the end of the load: the same page, a newer
+        // tree, the selection kept.
+        if console.tree_stale {
+            let reveal = self.selected;
+            self.ask_with(Want::Tree, DevtoolsQuery::DomTree { root: None, reveal }, send);
         }
     }
 }
 
 /// Sends a question to the page.
 type SendQuestion<'a> = dyn FnMut(DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> + 'a;
+
+/// Runs a script in the panel.
+type RunPanel<'a> = dyn FnMut(&str) + 'a;
 
 enum Arrived {
     Page(Want, DevtoolsAnswer),
@@ -702,33 +736,74 @@ mod tests {
 
     #[test]
     fn a_navigation_forgets_live_questions_and_a_close_forgets_all() {
+        // #809 follow-up: through the console answer that says the page
+        // changed, and through close(), not the helpers they call.
         let mut page = Page::default();
-        let mut tools = Devtools::default();
+        let mut shown = Vec::<String>::new();
+        let mut tools = Devtools { open: true, ..Default::default() };
         let now = Instant::now();
         tools.selected = Some(3);
         tools.ask_with(Want::Tree, tree(Some(3)), &mut page.send());
         tools.ask_with(Want::Tree, tree(Some(5)), &mut page.send());
-        tools.ask_with(Want::Console, DevtoolsQuery::Console { since: 0 }, &mut page.send());
         tools.take_page_answers(now + LIVE_DEADLINE, &mut page.send());
+        let old_page: Vec<_> = page.sent.drain(..).collect();
 
-        tools.forget_page();
+        let changed = DevtoolsConsole { next_seq: 1, page_changed: true, ..Default::default() };
+        tools.console_answered(changed, &mut page.send(), &mut |js| shown.push(js.into()));
         assert_eq!(tools.selected, None);
         assert!(tools.again.is_empty(), "a question about the old page waits to be asked");
+        assert_eq!(page.sent.len(), 1, "the outline is not cleared");
+        assert_eq!(page.sent[0].0, DevtoolsQuery::Highlight(None));
+        assert!(shown.iter().any(|js| js.contains("setElementStyles(null)")), "{shown:?}");
         // The old page's tree comes back: not shown, nothing asked, not busy.
-        for (_, tx) in page.sent.drain(..) {
+        for (_, tx) in old_page {
             let _ = tx.send(DevtoolsAnswer::Tree(None));
         }
+        page.sent.clear();
         let (arrived, busy) = tools.take_page_answers(now + LIVE_DEADLINE, &mut page.send());
-        assert!(arrived.iter().all(|(w, _)| *w == Want::Console), "an old page's answer was shown: {arrived:?}");
-        assert_eq!(arrived.len(), 1, "the console read is not a page snapshot and is kept");
+        assert!(arrived.iter().all(|(w, _)| *w == Want::Highlight), "an old page's answer was shown: {arrived:?}");
         assert!(page.sent.is_empty());
         assert_eq!(busy, None);
 
         tools.ask_with(Want::Tree, tree(None), &mut page.send());
         tools.ask_with(Want::Tree, tree(Some(1)), &mut page.send());
         tools.busy_shown = Some(3);
-        tools.forget_questions();
-        assert!(tools.asked.is_empty() && tools.again.is_empty() && tools.busy_shown.is_none());
+        let before_close = page.sent.len();
+        tools.close_with(&mut page.send(), &mut |js| shown.push(js.into()));
+        assert!(tools.again.is_empty() && tools.busy_shown.is_none());
+        // Only the close's own outline and recording switch are out.
+        let out: Vec<Want> = tools
+            .asked
+            .iter()
+            .filter_map(|a| match a {
+                Asked::Page(q) => Some(q.want),
+                Asked::Eval(..) => None,
+            })
+            .collect();
+        assert_eq!(out, vec![Want::Highlight, Want::Ack], "a question from before the close is still out");
+        assert_eq!(page.sent.len(), before_close + 2);
+    }
+
+    #[test]
+    fn clearing_the_console_brings_the_held_line_back_on_the_next_pump() {
+        // #809 follow-up: the panel's clearConsole() hides the held line,
+        // and the next pump, with the count unchanged, did not show it again.
+        let mut tools = Devtools::default();
+        let mut shown = Vec::<String>::new();
+        tools.show_held(4, &mut |js| shown.push(js.into()));
+        assert_eq!(shown.len(), 1);
+        tools.show_held(4, &mut |js| shown.push(js.into()));
+        assert_eq!(shown.len(), 1, "an unchanged count is shown again");
+        tools.clear_console_with(&mut |js| shown.push(js.into()));
+        assert!(shown[1].contains("clearConsole()"));
+        tools.show_held(4, &mut |js| shown.push(js.into()));
+        assert_eq!(shown.len(), 3, "the held line stays hidden while 4 lines are held");
+        assert!(shown[2].contains("setConsoleHeld"), "{shown:?}");
+        // Nothing held: a clear leaves nothing to show.
+        tools.show_held(0, &mut |js| shown.push(js.into()));
+        tools.clear_console_with(&mut |js| shown.push(js.into()));
+        tools.show_held(0, &mut |js| shown.push(js.into()));
+        assert!(!shown.last().unwrap().contains("setConsoleHeld"), "{shown:?}");
     }
 
     #[test]
