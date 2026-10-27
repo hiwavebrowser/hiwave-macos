@@ -248,4 +248,39 @@ mod tests {
         // A skipped function does not void the rest.
         assert!(filter_color_matrix("blur(2px) grayscale(1)").is_some());
     }
+
+    #[test]
+    fn follow_up_nits_from_790_void_the_whole_list() {
+        // #790 R1 nits 1-3: a value the cascade would drop gives no filter.
+        let applied = [
+            // 1. Not a CSS <number>: `inf`, `infinity` and `NaN` are idents.
+            "grayscale(inf)", "brightness(nan)", "brightness(NaN)", "contrast(infinity)",
+            "saturate(-inf)", "invert(inf%)", "hue-rotate(infdeg)", "hue-rotate(NaNdeg)",
+            "grayscale(1) brightness(nan)",
+            // 3. A function token is `name(`: whitespace before the paren is
+            //    an ident and a block, not a filter function.
+            "grayscale (1)", "invert\t(1)", "sepia(1) contrast (2)", "(1)",
+        ]
+        .into_iter()
+        .filter(|value| filter_color_matrix(value).is_some())
+        .collect::<Vec<_>>();
+        assert!(applied.is_empty(), "applied: {applied:?}");
+        // Still valid: adjacent functions, exponents, signs, case.
+        for value in ["grayscale(1)sepia(1)", "brightness(1e-1)", "brightness(+.5)", "INVERT(1)", " invert(1) "] {
+            assert!(filter_color_matrix(value).is_some(), "{value}");
+        }
+
+        // Nit 2 asked for url() to void the list, as Filter Effects 1 §5
+        // reads. Chrome 148 does not: a url() naming a missing element, an
+        // external document or a non-<filter> is passed through and the rest
+        // of the list applies (docs/diagnostics/2026-10-27/
+        // css_filter_clip_path.html, box d: rgb(51,51,51) for
+        // `url(#missing) grayscale(1)` on #e00). That is what skipping does,
+        // so url() stays skipped; only a url() to a real <filter> differs.
+        let gray = filter_color_matrix("grayscale(1)");
+        for value in ["url(#missing) grayscale(1)", "grayscale(1) url(x.svg#f)"] {
+            assert_eq!(filter_color_matrix(value), gray, "{value}");
+        }
+        assert_eq!(filter_color_matrix("url(#missing)"), None);
+    }
 }
