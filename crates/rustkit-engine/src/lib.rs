@@ -7705,8 +7705,8 @@ impl Engine {
             "Created containing block"
         );
 
-        // Inline <svg> subtrees parse into svg_cache before the tree build:
-        // the build runs with &self and can only look the documents up.
+        // Inline <svg> subtrees parse into svg_cache before the tree build,
+        // which only looks the documents up.
         self.cache_inline_svgs(&document);
 
         // Get external stylesheets from view state
@@ -13991,7 +13991,7 @@ impl Engine {
     /// the box build (which runs with `&self`) can size them and the
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
-    fn cache_inline_svgs(&mut self, document: &Document) {
+    fn cache_inline_svgs(&self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let xml = Self::inline_svg_markup(&svg_el);
             let key = Self::inline_svg_key(&xml);
@@ -14102,7 +14102,7 @@ impl Engine {
     /// stand-in rasterizer drew only solid `<rect>`s (bing's gradient logo
     /// painted nothing). A data: url needs no request, so this runs at the
     /// splice: the first layout paints it, and so does any later one.
-    fn cache_data_svg(&mut self, url: &str) {
+    fn cache_data_svg(&self, url: &str) {
         if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.lctx.svg_cache.borrow().contains_key(url) {
             return;
         }
@@ -22106,7 +22106,7 @@ mod tests {
     /// same word as one that passed.
     #[test]
     fn an_inline_svg_is_built_with_its_element_identity() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22307,7 +22307,7 @@ mod tests {
     /// rect), so what is under test is the viewBox mapping and the join key.
     #[test]
     fn inline_svg_shapes_are_exported_at_chromes_rects() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22430,7 +22430,7 @@ mod tests {
     /// close would be compared and believed instead.
     #[test]
     fn an_unmodelled_svg_shape_is_refused_rather_than_approximated() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22536,7 +22536,7 @@ mod tests {
     /// M5 it lands 10 right and 20 down.
     #[test]
     fn a_shape_at_the_viewbox_origin_paints_at_the_content_origin() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -22632,7 +22632,7 @@ mod tests {
     /// transform on the shape itself, where a subtree bug cannot show.
     #[test]
     fn a_transformed_group_refuses_the_shapes_beneath_it() {
-        let mut engine = match layout_only_engine() {
+        let engine = match layout_only_engine() {
             Some(engine) => engine,
             None => {
                 if cfg!(target_os = "macos") {
@@ -23982,7 +23982,7 @@ mod tests {
             }
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut engine = Engine {
+        let engine = Engine {
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
@@ -26310,7 +26310,7 @@ mod svg_image_tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn cached_svg_supplies_natural_size_to_img_layout() {
-        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let engine = Engine::new(EngineConfig::default()).expect("engine");
         let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
             .expect("parse svg");
         engine
@@ -37480,7 +37480,7 @@ mod windows_a_leg_pins {
     /// was 150×150.
     #[test]
     fn an_inline_svg_with_only_a_viewbox_is_sized_by_its_ratio() {
-        let mut e = engine();
+        let e = engine();
         let html = r#"<!DOCTYPE html><html><body style="margin:0">
             <style>.btn{display:inline-block;box-sizing:border-box;width:40px;height:40px;padding:8px}</style>
             <div style="width:24px"><svg viewBox="0 0 24 24"><rect width="24" height="24"/></svg></div>
