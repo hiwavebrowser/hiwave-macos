@@ -324,15 +324,16 @@ pub use inspector_page::{
 mod inspector_page_tests;
 mod devtools;
 pub use devtools::{
-    devtools_console_entries, devtools_held_text, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
-    DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
+    devtools_console_entries, devtools_held_text, devtools_network, devtools_node_of, devtools_path, DevtoolsBoxModel,
+    DevtoolsConsole, DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsNetwork, DevtoolsRequest, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
     DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
 mod devtools_service;
 pub use devtools_service::{
-    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+    ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount,
+    DevtoolsCounters,
 };
 #[cfg(test)]
 mod consent_click_tests;

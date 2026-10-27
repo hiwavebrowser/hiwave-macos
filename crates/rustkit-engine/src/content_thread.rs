@@ -25,7 +25,7 @@ use url::Url;
 use crate::nav_cancel::NavCanceller;
 use crate::page_protocol::{adopt, coalesce};
 use crate::devtools_service::{
-    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+    ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
 };
 use crate::inspector::Inspector;
 use crate::{DevtoolsAnswer, DevtoolsQuery, EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
@@ -344,6 +344,9 @@ impl ContentThread {
     pub fn devtools_ask(&self, query: DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> {
         if let (DevtoolsQuery::Console { since }, Some(Ok(boot))) = (&query, self.boot()) {
             return devtools_ask_console(boot.inspector, *since, Some(boot.devtools_counters));
+        }
+        if let (DevtoolsQuery::Network, Some(Ok(boot))) = (&query, self.boot()) {
+            return devtools_ask_network(boot.inspector);
         }
         // An open panel is woken when the view records, not on a clock (T6b).
         if let (DevtoolsQuery::Attach(on), Some(Ok(boot))) = (&query, self.boot()) {
@@ -1663,6 +1666,81 @@ mod tests {
         assert!((canvas[1] - 34.0 / 255.0).abs() < 0.02, "{canvas:?}");
         assert!((canvas[2] - 51.0 / 255.0).abs() < 0.02, "{canvas:?}");
         assert!((canvas[3] - 1.0).abs() < 0.02, "{canvas:?}");
+    }
+
+    /// The panel's network read, through the routing the window uses.
+    fn read_network(page: &ContentThread, budget: Duration) -> Option<crate::DevtoolsNetwork> {
+        let mut rx = page.devtools_ask(crate::DevtoolsQuery::Network);
+        match wait_recv(&mut rx, budget) {
+            Some(crate::DevtoolsAnswer::Network(network)) => Some(network),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_fetch_response_is_recorded_while_the_page_thread_is_blocked() {
+        // T7 acceptance (T7-design.md test 1): a fetch started before a
+        // host-side block gets its response record while the page is still
+        // blocked, read through the devtools service. On develop the request
+        // is polled only by the page thread, so nothing is read or recorded
+        // until the block ends.
+        let (port, _release, _seen) = serve(|path, _release| {
+            if path.starts_with("/slow") {
+                std::thread::sleep(Duration::from_millis(200));
+                return (200, "text/plain", b"ok".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(
+            loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the page never finished loading"
+        );
+        let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(crate::DevtoolsAnswer::Done));
+        let mut started = page.eval("fetch('/slow?token=SECRET'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let slow = |network: &crate::DevtoolsNetwork| {
+            network.requests.iter().find(|r| r.url.ends_with("/slow")).cloned()
+        };
+        // The request record is made at request start, on the page.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (start_doc, request) = loop {
+            let network = read_network(&page, Duration::from_secs(1)).expect("no network answer");
+            if let Some(request) = slow(&network) {
+                break (network.doc, request);
+            }
+            assert!(Instant::now() < deadline, "the fetch never started: {network:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(request.state, "pending", "the fetch ended before the block: {request:?}");
+        assert!(!request.url.contains("SECRET"), "{request:?}");
+
+        page.enqueue(PageCmd::Block(1_500));
+        let mut behind = page.eval("1");
+        let blocked_at = Instant::now();
+        let mut answered = None;
+        while blocked_at.elapsed() < Duration::from_millis(1_200) {
+            let network = read_network(&page, Duration::from_millis(500)).expect("no network answer while blocked");
+            if let Some(r) = slow(&network).filter(|r| r.state != "pending") {
+                answered = Some((network.doc, r));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            matches!(behind.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the page was not in its block when the record was read"
+        );
+        let (doc, response) = answered.expect("no response record while the page thread was blocked");
+        assert_eq!(response.state, "response", "{response:?}");
+        assert_eq!(response.status, Some(200));
+        assert_eq!(doc, start_doc, "the record is not in the document the fetch started in");
+        assert!(wait_recv(&mut behind, Duration::from_secs(5)).is_some());
     }
 
     /// A plain `fetch` queued while a response is delivered, in the same

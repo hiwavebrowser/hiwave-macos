@@ -186,6 +186,76 @@ pub struct DevtoolsConsole {
     pub held: usize,
 }
 
+/// One request of the current document, in the panel's shape (T7).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevtoolsRequest {
+    /// The view's request id.
+    pub id: u64,
+    /// Scrubbed when recorded: origin and path, no query or fragment.
+    pub url: String,
+    pub method: String,
+    pub initiator: Option<String>,
+    /// `pending`, `response` or `failure`.
+    pub state: &'static str,
+    /// The response's status.
+    pub status: Option<u16>,
+    /// The failure's stage and reason, in the engine's words.
+    pub failure: Option<String>,
+    pub duration_ms: Option<f64>,
+}
+
+/// The current document's requests, in the order they started (T7). Read
+/// by the devtools thread from the view's Inspector, without the page.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevtoolsNetwork {
+    /// The document they belong to (`InspectorRecord::doc`): records of
+    /// any other document, a late cancel of the last page's request
+    /// included, are not listed (T7 C5).
+    pub doc: u32,
+    pub requests: Vec<DevtoolsRequest>,
+    /// Records the view's ring buffer dropped.
+    pub dropped: u64,
+}
+
+/// The requests `snapshot` holds for document `doc`: each `request` with its
+/// `response` or `failure`, if one has been recorded.
+pub fn devtools_network(snapshot: &InspectorSnapshot, doc: u32) -> DevtoolsNetwork {
+    let mut requests: Vec<DevtoolsRequest> = Vec::new();
+    for record in snapshot.records.iter().filter(|r| r.doc == doc) {
+        match &record.event {
+            InspectorEvent::Request { id, url, method, initiator, .. } => requests.push(DevtoolsRequest {
+                id: *id,
+                url: url.clone(),
+                method: method.clone(),
+                initiator: initiator.clone(),
+                state: "pending",
+                status: None,
+                failure: None,
+                duration_ms: None,
+            }),
+            InspectorEvent::Response { id, status, duration_ms, .. } => {
+                if let Some(r) = requests.iter_mut().find(|r| r.id == *id) {
+                    r.state = "response";
+                    r.status = Some(*status);
+                    r.duration_ms = Some(*duration_ms);
+                }
+            }
+            InspectorEvent::Failure { id, stage, reason, duration_ms, .. } => {
+                if let Some(r) = requests.iter_mut().find(|r| r.id == *id) {
+                    let stage = serde_json::to_value(stage).ok().and_then(|v| v.as_str().map(str::to_string));
+                    r.state = "failure";
+                    r.failure = Some(format!("{}: {reason}", stage.unwrap_or_default()));
+                    r.duration_ms = Some(*duration_ms);
+                }
+            }
+            _ => {}
+        }
+    }
+    DevtoolsNetwork { doc, requests, dropped: snapshot.dropped }
+}
+
 /// `tag#id.class.class`.
 fn crumb_label(tag: &str, id: Option<&str>, classes: &[String]) -> String {
     let mut s = tag.to_string();
@@ -503,6 +573,13 @@ impl Engine {
     pub fn devtools_console(&self, id: EngineViewId, since: u64) -> Result<DevtoolsConsole, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         Ok(devtools_console_entries(&view.inspector.snapshot_since(since)))
+    }
+
+    /// View `id`'s requests for its current document (T7).
+    pub fn devtools_network(&self, id: EngineViewId) -> Result<DevtoolsNetwork, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let (snapshot, doc) = view.inspector.snapshot_and_doc(0);
+        Ok(devtools_network(&snapshot, doc))
     }
 
     /// The element under viewport point (`x`, `y`) in CSS px, as

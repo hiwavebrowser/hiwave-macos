@@ -779,6 +779,18 @@ impl Inspector {
         }
     }
 
+    /// The buffered records from `since` on, and the document the next
+    /// record belongs to (the current one), read under one lock (T7 C5).
+    pub fn snapshot_and_doc(&self, since: u64) -> (InspectorSnapshot, u32) {
+        let state = self.state();
+        let snapshot = InspectorSnapshot {
+            records: state.records.iter().filter(|r| r.seq >= since).cloned().collect(),
+            next_seq: state.next_seq,
+            dropped: state.dropped,
+        };
+        (snapshot, state.doc)
+    }
+
     /// The current page's unsupported members, in the order first seen.
     pub fn unsupported_apis(&self) -> Vec<UnsupportedApiCount> {
         self.state().unsupported.clone()
