@@ -7727,20 +7727,6 @@ impl Engine {
             "Performing layout"
         );
 
-        // Create containing block
-        // Note: height is 0 because layout_block_children uses content.height as the cursor position
-        // Children should start at y=0, not y=viewport_height
-        let containing_block = Dimensions {
-            content: Rect::new(0.0, 0.0, bounds.width as f32, 0.0),
-            ..Default::default()
-        };
-
-        debug!(
-            containing_width = containing_block.content.width,
-            containing_height = containing_block.content.height,
-            "Created containing block"
-        );
-
         // Inline <svg> subtrees parse into svg_cache before the tree build,
         // which only looks the documents up.
         self.lctx.cache_inline_svgs(&document);
@@ -7761,64 +7747,14 @@ impl Engine {
             return Ok(true);
         }
 
-        // Build layout tree from DOM with tracing
-        let root_box = {
-            let _build_span = tracing::info_span!("build_layout_tree").entered();
-            let _build_time = time_stage(Stage::Build);
-            // Scope the focused node to THIS view for the duration of the
-            // build; cleared immediately after so no later build inherits it.
-            self.build_layout_for_view(id, &document, &external_stylesheets)
-        };
-
-        // Layout computation
-        let mut root_box = root_box;
-        {
-            let _layout_span = tracing::info_span!("layout_compute").entered();
-            let _layout_time = time_stage(Stage::Layout);
-            // Set viewport dimensions for vh/vw unit resolution
-            root_box.set_viewport(bounds.width as f32, bounds.height as f32);
-            // Root establishes the initial BFC: lay out through the margin-collapse
-            // path so sibling margins collapse per CSS 2.1 §8.3.1. The plain
-            // layout() path stacks margins additively (gap = bottom + top), which
-            // ran every text page taller than Chrome.
-            let mut margin_context = rustkit_layout::MarginCollapseContext::new();
-            // The root element's margins never collapse with its children's
-            // (CSS 2.1 §8.3.1): body's top margin (and the h1 chain under it)
-            // collapses with body's siblings and stays under html's top edge.
-            margin_context.children_are_formatting_roots = true;
-            let mut float_context = rustkit_layout::FloatContext::new();
-            root_box.layout_with_collapse(
-                &containing_block,
-                &mut margin_context,
-                &mut float_context,
-            );
-        }
-
-        // Ensure body element fills viewport (common browser behavior)
-        // If body has zero or minimal height, extend it to viewport height
-        if !root_box.children.is_empty() {
-            let body_box = &mut root_box.children[0];
-            if body_box.dimensions.content.height < 1.0 {
-                // Body is empty or has no content - fill viewport
-                body_box.dimensions.content.height = bounds.height as f32;
-                debug!(
-                    "Extended empty body to fill viewport height: {}px",
-                    bounds.height
-                );
-            }
-        }
-
-        // The root (canvas) box always covers the FULL viewport: its
-        // background is the CSS canvas background (§14.2, set at build from
-        // html/body), which must paint to the viewport edges even when the
-        // page content is shorter.
-        root_box.dimensions.content.width =
-            root_box.dimensions.content.width.max(bounds.width as f32);
-        root_box.dimensions.content.height = root_box
-            .dimensions
-            .content
-            .height
-            .max(bounds.height as f32);
+        let javascript_enabled = self.config.javascript_enabled;
+        let root_box = self.lctx.lay_out_document(
+            self.build_view(id),
+            &document,
+            &external_stylesheets,
+            javascript_enabled,
+            (bounds.width, bounds.height),
+        );
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -7902,6 +7838,9 @@ impl Engine {
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
         view.inspector.laid_out();
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_forced_layout(self.forced_layout_for(id));
+        }
 
         // Render
         self.render(id)?;
@@ -8171,6 +8110,9 @@ impl Engine {
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_forced_layout(self.forced_layout_for(id));
+        }
         let snapshot = started.elapsed();
         self.render(id)?;
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
@@ -8512,22 +8454,26 @@ impl Engine {
         document: &Document,
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
-        let view = self.views.get(&id);
-        let building = layout_ctx::BuildView {
-            id,
-            lay: view.map(|v| v.lay.clone()),
-            url: view.and_then(|v| v.url.clone()),
-            viewport: self.view_viewport(id),
-            focus: view.and_then(|v| v.lay.focused_node.get()),
-            external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
-        };
-        self.lctx.with_building(building, || {
+        self.lctx.with_building(self.build_view(id), || {
             self.lctx.build_layout_from_document(
                 document,
                 external_stylesheets,
                 self.config.javascript_enabled,
             )
         })
+    }
+
+    /// What a build of view `id` reads of it, as it is now.
+    fn build_view(&self, id: EngineViewId) -> layout_ctx::BuildView {
+        let view = self.views.get(&id);
+        layout_ctx::BuildView {
+            id,
+            lay: view.map(|v| v.lay.clone()),
+            url: view.and_then(|v| v.url.clone()),
+            viewport: self.view_viewport(id),
+            focus: view.and_then(|v| v.lay.focused_node.get()),
+            external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
+        }
     }
 
     /// Drops the rules (and `@layer` statements) whose `@media` queries do
@@ -8566,6 +8512,87 @@ impl Engine {
     fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
         self.lctx
             .build_layout_from_document(document, external_stylesheets, self.config.javascript_enabled)
+    }
+}
+
+impl layout_ctx::LayoutCtx {
+    /// Build `document` for `building` and lay it out in a `bounds`
+    /// viewport: the box tree a relayout paints, and the one a forced
+    /// layout measures.
+    fn lay_out_document(
+        &self,
+        building: layout_ctx::BuildView,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
+        bounds: (u32, u32),
+    ) -> LayoutBox {
+        // Note: height is 0 because layout_block_children uses content.height as the cursor position
+        // Children should start at y=0, not y=viewport_height
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, bounds.0 as f32, 0.0),
+            ..Default::default()
+        };
+
+        // Build layout tree from DOM with tracing
+        let root_box = {
+            let _build_span = tracing::info_span!("build_layout_tree").entered();
+            let _build_time = time_stage(Stage::Build);
+            self.with_building(building, || {
+                self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
+            })
+        };
+
+        // Layout computation
+        let mut root_box = root_box;
+        {
+            let _layout_span = tracing::info_span!("layout_compute").entered();
+            let _layout_time = time_stage(Stage::Layout);
+            // Set viewport dimensions for vh/vw unit resolution
+            root_box.set_viewport(bounds.0 as f32, bounds.1 as f32);
+            // Root establishes the initial BFC: lay out through the margin-collapse
+            // path so sibling margins collapse per CSS 2.1 §8.3.1. The plain
+            // layout() path stacks margins additively (gap = bottom + top), which
+            // ran every text page taller than Chrome.
+            let mut margin_context = rustkit_layout::MarginCollapseContext::new();
+            // The root element's margins never collapse with its children's
+            // (CSS 2.1 §8.3.1): body's top margin (and the h1 chain under it)
+            // collapses with body's siblings and stays under html's top edge.
+            margin_context.children_are_formatting_roots = true;
+            let mut float_context = rustkit_layout::FloatContext::new();
+            root_box.layout_with_collapse(
+                &containing_block,
+                &mut margin_context,
+                &mut float_context,
+            );
+        }
+
+        // Ensure body element fills viewport (common browser behavior)
+        // If body has zero or minimal height, extend it to viewport height
+        if !root_box.children.is_empty() {
+            let body_box = &mut root_box.children[0];
+            if body_box.dimensions.content.height < 1.0 {
+                // Body is empty or has no content - fill viewport
+                body_box.dimensions.content.height = bounds.1 as f32;
+                debug!(
+                    "Extended empty body to fill viewport height: {}px",
+                    bounds.1
+                );
+            }
+        }
+
+        // The root (canvas) box always covers the FULL viewport: its
+        // background is the CSS canvas background (§14.2, set at build from
+        // html/body), which must paint to the viewport edges even when the
+        // page content is shorter.
+        root_box.dimensions.content.width =
+            root_box.dimensions.content.width.max(bounds.0 as f32);
+        root_box.dimensions.content.height = root_box
+            .dimensions
+            .content
+            .height
+            .max(bounds.1 as f32);
+        root_box
     }
 }
 
@@ -18020,6 +18047,7 @@ impl Engine {
         };
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
+        Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
         if dirty != DomDirty::Clean {
@@ -18062,9 +18090,23 @@ impl Engine {
         checked_states: &mut std::collections::HashMap<usize, bool>,
         bindings: &DomBindings,
     ) {
+        let mut writes = rustkit_bindings::ControlWrites {
+            values: bindings.take_value_writes(),
+            checked: bindings.take_checked_writes(),
+        };
+        Self::apply_control_writes(edit_states, checked_states, &mut writes);
+    }
+
+    /// [`Engine::apply_script_control_writes`] of writes already taken,
+    /// which are drained.
+    fn apply_control_writes(
+        edit_states: &mut std::collections::HashMap<usize, rustkit_dom::forms::TextEditState>,
+        checked_states: &mut std::collections::HashMap<usize, bool>,
+        writes: &mut rustkit_bindings::ControlWrites,
+    ) {
         // Script-set control values reach layout through edit state, the
         // same path typed text takes.
-        for (raw, value) in bindings.take_value_writes() {
+        for (raw, value) in writes.values.drain(..) {
             match edit_states.get(&raw) {
                 Some(state) => state.set_value(value),
                 None => {
@@ -18075,12 +18117,88 @@ impl Engine {
             }
         }
         // Checkedness is script's; style and paint read this copy.
-        for (raw, checked) in bindings.take_checked_writes() {
+        for (raw, checked) in writes.checked.drain(..) {
             match checked {
                 Some(checked) => checked_states.insert(raw, checked),
                 None => checked_states.remove(&raw),
             };
         }
+    }
+
+    /// The forced layouts of the script task that just settled: one log
+    /// line per task that had any, and the view's running count.
+    fn note_forced_layouts(id: EngineViewId, stats: &mut RelayoutStats, bindings: &DomBindings) {
+        let forced = bindings.take_forced_layouts();
+        if forced > 0 {
+            info!(?id, forced_layouts = forced, "Forced layouts in the script task");
+            stats.forced_layouts = stats.forced_layouts.saturating_add(forced);
+        }
+    }
+
+    /// How a script read of geometry after a DOM write in the same task
+    /// lays view `id` out again (forced layout), with what the view's last
+    /// layout was built from: the document, its sheets and the viewport.
+    /// The build goes through the shared `LayoutCtx`, never the engine, and
+    /// nothing is painted: the engine's own relayout follows when script
+    /// settles. `None` without a document or a viewport.
+    fn forced_layout_for(&self, id: EngineViewId) -> Option<rustkit_bindings::ForcedLayout> {
+        let view = self.views.get(&id)?;
+        let document = view.document.clone()?;
+        let building = self.build_view(id);
+        let (width, height) = building.viewport?;
+        let bounds = (width as u32, height as u32);
+        let lctx = self.lctx.clone();
+        let lay = view.lay.clone();
+        let sheets = view.external_stylesheets.clone();
+        let javascript_enabled = self.config.javascript_enabled;
+        Some(Rc::new(move |writes: &mut rustkit_bindings::ControlWrites| {
+            let restyling = RESTYLE_BUILD.with(|b| b.try_borrow().map_or(true, |b| b.is_some()));
+            let memo_held = STYLE_MEMO.with(|m| m.try_borrow_mut().is_err());
+            let busy = match (restyling, memo_held) {
+                (true, _) => Some("restyle build"),
+                (_, true) => Some("style memo"),
+                _ => lctx.busy_for_forced_layout(&lay),
+            };
+            if let Some(busy) = busy {
+                debug!(?id, busy, "Forced layout skipped: build state in use");
+                return None;
+            }
+            let started = std::time::Instant::now();
+            Engine::apply_control_writes(
+                &mut lay.edit_states.borrow_mut(),
+                &mut lay.checked_states.borrow_mut(),
+                writes,
+            );
+            lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
+            lctx.cache_inline_svgs(&document);
+            // The load's style memo replays cascades recorded before script
+            // wrote: this build neither replays nor records.
+            let memo = STYLE_MEMO.with(|m| m.borrow_mut().take());
+            let built = lctx.lay_out_document(
+                layout_ctx::BuildView {
+                    id,
+                    lay: Some(lay.clone()),
+                    url: building.url.clone(),
+                    viewport: building.viewport,
+                    focus: lay.focused_node.get(),
+                    external_sheets: sheets.clone(),
+                },
+                &document,
+                &sheets,
+                javascript_enabled,
+                bounds,
+            );
+            STYLE_MEMO.with(|m| *m.borrow_mut() = memo);
+            let root_element = document.document_element().map(|e| e.id.raw());
+            let (geometry, computed) = geometry_with_root(&built, root_element);
+            let built = Rc::new(built);
+            debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
+            Some(rustkit_bindings::ForcedGeometry {
+                geometry,
+                computed,
+                hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
+            })
+        }))
     }
 
     /// Lay the page out again if script's writes dirtied it, and publish the
@@ -18092,6 +18210,7 @@ impl Engine {
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
         if let Some(view) = self.views.get_mut(&id) {
+            Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
             if dirty != DomDirty::Clean {
@@ -18113,6 +18232,7 @@ impl Engine {
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
+        bindings.set_forced_layout(self.forced_layout_for(id));
         bindings.tick_observers();
         info!(?id, elapsed_ms = started.elapsed().as_millis() as u64, "Relaid out for script");
     }
@@ -21109,8 +21229,27 @@ fn first_named_box_id(layout: &LayoutBox) -> Option<usize> {
 fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element: Option<usize>) {
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
-    bindings.set_hit_tester(Some(std::rc::Rc::new(move |x, y, scroll| {
-        let layout = hit_layout.upgrade()?;
+    bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade())));
+    bindings.set_geometry_source(Box::new(move || {
+        let Some(layout) = layout.upgrade() else {
+            return Default::default();
+        };
+        let _snapshot_time = time_stage(Stage::Snapshot);
+        let started = std::time::Instant::now();
+        let snapshot = geometry_with_root(&layout, root_element);
+        debug!(
+            elements = snapshot.0.len(),
+            ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Geometry snapshot built on first read"
+        );
+        snapshot
+    }));
+}
+
+/// `elementFromPoint` over the tree `layout` gives.
+fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> rustkit_bindings::HitTester {
+    std::rc::Rc::new(move |x, y, scroll| {
+        let layout = layout()?;
         let hit = layout.hit_test_scrolled(x, y, scroll);
         if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
             return Some(id);
@@ -21120,24 +21259,19 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element
             return first_named_box_id(&layout);
         }
         None
-    })));
-    bindings.set_geometry_source(Box::new(move || {
-        let Some(layout) = layout.upgrade() else {
-            return Default::default();
-        };
-        let _snapshot_time = time_stage(Stage::Snapshot);
-        let started = std::time::Instant::now();
-        let mut snapshot = geometry_snapshot(&layout);
-        if let Some(root) = root_element {
-            snapshot.0.entry(root).or_insert_with(|| root_element_geometry(&layout));
-        }
-        debug!(
-            elements = snapshot.0.len(),
-            ms = started.elapsed().as_secs_f64() * 1000.0,
-            "Geometry snapshot built on first read"
-        );
-        snapshot
-    }));
+    })
+}
+
+/// `geometry_snapshot`, with the document element reported as the root box.
+fn geometry_with_root(
+    layout: &LayoutBox,
+    root_element: Option<usize>,
+) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    let mut snapshot = geometry_snapshot(layout);
+    if let Some(root) = root_element {
+        snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
+    }
+    snapshot
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads

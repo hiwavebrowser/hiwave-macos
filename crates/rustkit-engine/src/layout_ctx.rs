@@ -101,6 +101,24 @@ impl LayoutCtx {
         build()
     }
 
+    /// What a forced layout of `lay`'s view would find borrowed, `None`
+    /// when nothing is: a build in progress, or build state held by the
+    /// engine code that called the script now reading geometry.
+    pub(crate) fn busy_for_forced_layout(&self, lay: &ViewLayout) -> Option<&'static str> {
+        let free = [
+            ("building", self.building.try_borrow().is_ok_and(|b| b.is_none())),
+            ("svg_cache", self.svg_cache.try_borrow_mut().is_ok()),
+            ("style_trace", self.style_trace.try_borrow_mut().is_ok()),
+            ("hover_chain", lay.hover_chain.try_borrow_mut().is_ok()),
+            ("active_chain", lay.active_chain.try_borrow_mut().is_ok()),
+            ("edit_states", lay.edit_states.try_borrow_mut().is_ok()),
+            ("checked_states", lay.checked_states.try_borrow_mut().is_ok()),
+            ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
+            ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
+        ];
+        free.into_iter().find(|(_, free)| !free).map(|(name, _)| name)
+    }
+
     pub(crate) fn building_id(&self) -> Option<EngineViewId> {
         self.building.borrow().as_ref().map(|b| b.id)
     }
