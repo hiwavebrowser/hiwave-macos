@@ -117,6 +117,10 @@ pub struct RustKitView {
     /// again when it ends (#803 review (2)): the page never heard it, so
     /// it recorded nothing and nothing watched it.
     pending_attach: Cell<Option<bool>>,
+    /// The view's Inspector and devtools counters, taken once at build:
+    /// both live as long as the view, so a console read needs no borrow of
+    /// the endpoint a load is holding.
+    devtools_page: Option<(Arc<rustkit_engine::Inspector>, Arc<rustkit_engine::DevtoolsCounters>)>,
     /// Events the flag-off page published, kept for the tests.
     #[cfg(test)]
     seen_events: RefCell<Vec<PageEvent>>,
@@ -324,7 +328,12 @@ impl RustKitView {
         counter_clone: Option<Arc<AtomicU64>>,
         host_view: isize,
     ) -> Self {
+        let devtools_page = endpoint.as_ref().and_then(|endpoint| {
+            let endpoint = endpoint.borrow();
+            Some((endpoint.inspector()?, endpoint.devtools_counters()))
+        });
         Self {
+            devtools_page,
             handle,
             endpoint,
             content,
@@ -1085,7 +1094,9 @@ impl RustKitView {
             .as_ref()
             .filter(|_| self.is_open())
             .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| Some((e.inspector()?, e.devtools_counters()))));
-        if let (rustkit_engine::DevtoolsQuery::Console { since }, Some((inspector, counters))) = (&query, &page) {
+        // Not `page`: a load holding the endpoint must not drop the read.
+        let held = self.devtools_page.as_ref().filter(|_| self.is_open());
+        if let (rustkit_engine::DevtoolsQuery::Console { since }, Some((inspector, counters))) = (&query, held) {
             // The answer arrives on the devtools thread, after this returns:
             // the window is woken for it as on the content thread (#803
             // review (1)), or an idle page's line waits for an unrelated wake.
@@ -1115,9 +1126,7 @@ impl RustKitView {
         if let Some(thread) = self.content.as_ref() {
             return thread.devtools_inspector();
         }
-        self.endpoint
-            .as_ref()
-            .and_then(|endpoint| endpoint.try_borrow().ok().and_then(|e| e.inspector()))
+        self.devtools_page.as_ref().map(|(inspector, _)| Arc::clone(inspector))
     }
 
     /// Run the console's `code` in the page: the value, or the error. A
@@ -1456,6 +1465,36 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(counters.read().window_wakes > from, "a console line after the load never woke the panel");
+    }
+
+    #[test]
+    fn a_console_read_during_a_same_thread_load_is_answered() {
+        // #803 R1 (Prometheus, non-blocking): the load holds the endpoint, so
+        // the read could not reach the Inspector and fell through to a page
+        // command, which a load drops. The panel's console went quiet for the
+        // whole load.
+        let view = view();
+        view.load_html_internal("<p>x</p>").unwrap();
+        let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+        let _ = view.execute_script_sync("console.log('before the load'); 1");
+        let url = slow_server(Duration::from_millis(1_000), "<p>y</p>");
+        view.wry_load_url(&url).unwrap();
+        assert!(view.is_loading());
+        let mut rx = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let answer = loop {
+            match rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(oneshot::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("no console answer during the load: {e:?}"),
+            }
+        };
+        assert!(view.is_loading(), "answered only after the load");
+        let rustkit_engine::DevtoolsAnswer::Console(console) = answer else { panic!("{answer:?}") };
+        assert!(!console.entries.is_empty(), "the line from before the load is missing");
+        while view.step_load() {}
     }
 
     #[test]

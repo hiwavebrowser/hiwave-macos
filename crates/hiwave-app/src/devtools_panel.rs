@@ -29,6 +29,10 @@ use wry::WebView;
 /// given up and cancelled (T6c).
 const EVAL_DEADLINE: Duration = Duration::from_secs(5);
 
+/// How long a live snapshot (tree, element, node under the pointer,
+/// outline) waits before the panel says the page is busy (T6c).
+const LIVE_DEADLINE: Duration = Duration::from_secs(2);
+
 /// A call of the panel's API with `arg` as JSON. A JSON text is a JS
 /// expression, so a string the page chose (a class name, a console line)
 /// stays data.
@@ -66,12 +70,47 @@ enum Want {
     Pick,
     /// Console lines since the last ones shown.
     Console,
-    /// An outline or the recording switched; nothing to show.
+    /// The outline on the page moved; nothing to show.
+    Highlight,
+    /// The recording switched; nothing to show.
     Ack,
 }
 
+impl Want {
+    /// A snapshot only the page can answer: it gets a deadline, and one of
+    /// each kind is out at a time (T6c). Console reads are answered by the
+    /// devtools thread; the recording switch must reach the page.
+    fn live(self) -> bool {
+        !matches!(self, Want::Console | Want::Ack)
+    }
+}
+
+/// Which live questions replace each other: the newest of a kind, except
+/// that expanding two nodes asks two different questions (#809 review 1:
+/// the second expand replaced the first, whose "more" row then did nothing).
+type Slot = (Want, Option<usize>);
+
+fn slot(want: Want, query: &DevtoolsQuery) -> Slot {
+    match (want, query) {
+        (Want::Subtree, DevtoolsQuery::DomTree { root, .. }) => (want, *root),
+        _ => (want, None),
+    }
+}
+
+/// A question out to the page.
+struct Question {
+    want: Want,
+    /// Kept to ask again once a late answer has come and gone.
+    query: DevtoolsQuery,
+    rx: oneshot::Receiver<DevtoolsAnswer>,
+    asked_at: Instant,
+    /// Past [`LIVE_DEADLINE`]: its answer, when it comes, is stale and
+    /// discarded, and the newest question of its kind is asked instead.
+    late: bool,
+}
+
 enum Asked {
-    Page(Want, oneshot::Receiver<DevtoolsAnswer>),
+    Page(Question),
     /// The console's input line, and when it is given up.
     Eval(oneshot::Receiver<Result<String, String>>, Instant),
 }
@@ -95,6 +134,11 @@ pub struct Devtools {
     /// running script" line (0: no line).
     held_shown: usize,
     asked: Vec<Asked>,
+    /// The newest live question of a kind asked while one of that kind
+    /// was out, asked when it is answered (T6c: no repeats queue up).
+    again: Vec<(Want, DevtoolsQuery)>,
+    /// "page busy" is on the panel.
+    busy_shown: Option<u64>,
 }
 
 impl Devtools {
@@ -103,11 +147,128 @@ impl Devtools {
     }
 
     fn ask(&mut self, view: &RustKitView, want: Want, query: DevtoolsQuery) {
-        self.asked.push(Asked::Page(want, view.devtools_ask(query)));
+        self.ask_with(want, query, &mut |q| view.devtools_ask(q));
+    }
+
+    fn ask_with(&mut self, want: Want, query: DevtoolsQuery, send: &mut SendQuestion<'_>) {
+        let at = slot(want, &query);
+        if want.live() && self.waiting_in(at) {
+            self.again.retain(|(w, q)| slot(*w, q) != at);
+            self.again.push((want, query));
+            return;
+        }
+        let rx = send(query.clone());
+        self.asked.push(Asked::Page(Question { want, query, rx, asked_at: Instant::now(), late: false }));
     }
 
     fn waiting_for(&self, want: Want) -> bool {
-        self.asked.iter().any(|a| matches!(a, Asked::Page(w, _) if *w == want))
+        self.asked.iter().any(|a| matches!(a, Asked::Page(q) if q.want == want))
+    }
+
+    fn waiting_in(&self, at: Slot) -> bool {
+        self.asked.iter().any(|a| matches!(a, Asked::Page(q) if slot(q.want, &q.query) == at))
+    }
+
+    /// The page's answers that have arrived, in the order asked. A live
+    /// question past its deadline is marked late. A late answer is dropped
+    /// when a newer question of its slot was wanted meanwhile (the
+    /// pointer's newest position for a hover), and that one is asked;
+    /// otherwise it is shown, since a late answer beats none (#809 review
+    /// 2: a page always a little slower than the deadline was re-asked the
+    /// same question forever and never showed a tree). Returns how long the
+    /// oldest late question has waited, if one is out: the page is busy.
+    ///
+    /// Newer questions wait in `again` behind a late one until it answers,
+    /// so on a page that never answers they wait for good; the busy line
+    /// says why.
+    fn take_page_answers(&mut self, now: Instant, send: &mut SendQuestion<'_>) -> (Vec<(Want, DevtoolsAnswer)>, Option<Duration>) {
+        let mut arrived = Vec::new();
+        let mut answered = Vec::new();
+        let mut late = Vec::new();
+        self.asked.retain_mut(|asked| {
+            let Asked::Page(q) = asked else { return true };
+            let answer = match q.rx.try_recv() {
+                Ok(answer) => answer,
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    if q.want.live() && now.saturating_duration_since(q.asked_at) >= LIVE_DEADLINE {
+                        q.late = true;
+                    }
+                    return true;
+                }
+                // A closed view, or a command the same-thread path dropped
+                // while a load held the page.
+                Err(oneshot::error::TryRecvError::Closed) => DevtoolsAnswer::Unavailable,
+            };
+            if q.late {
+                late.push((q.want, slot(q.want, &q.query), answer));
+            } else {
+                answered.push(slot(q.want, &q.query));
+                arrived.push((q.want, answer));
+            }
+            false
+        });
+        for (want, at, answer) in late {
+            let newest = match want {
+                Want::Hover => match self.hover_next.take() {
+                    Some(Some((x, y))) => Some(DevtoolsQuery::NodeAt { x, y }),
+                    // The pointer left the view meanwhile: whatever was
+                    // under it, the outline goes (#809 review 3).
+                    Some(None) => {
+                        arrived.push((want, DevtoolsAnswer::Node(None)));
+                        continue;
+                    }
+                    None => None,
+                },
+                _ => self.take_again(at),
+            };
+            match newest {
+                Some(query) => self.ask_with(want, query, send),
+                None => arrived.push((want, answer)),
+            }
+        }
+        // Answered in time: what was wanted meanwhile is asked now.
+        for at in answered {
+            if !self.waiting_in(at) {
+                if let Some(query) = self.take_again(at) {
+                    self.ask_with(at.0, query, send);
+                }
+            }
+        }
+        let busy = self
+            .asked
+            .iter()
+            .filter_map(|a| match a {
+                Asked::Page(q) if q.late => Some(now.saturating_duration_since(q.asked_at)),
+                _ => None,
+            })
+            .max();
+        (arrived, busy)
+    }
+
+    fn take_again(&mut self, at: Slot) -> Option<DevtoolsQuery> {
+        let i = self.again.iter().position(|(w, q)| slot(*w, q) == at)?;
+        Some(self.again.remove(i).1)
+    }
+
+    /// The panel closed: nothing out is shown, nothing waiting is asked.
+    fn forget_questions(&mut self) {
+        self.asked.clear();
+        self.again.clear();
+        self.busy_shown = None;
+    }
+
+    /// A new page: node ids do not survive a navigation, so the selection
+    /// and outline go, and a live answer still out about the old page's
+    /// nodes, or one waiting to be asked, is not shown on the new one.
+    fn forget_page(&mut self) {
+        self.selected = None;
+        self.hovered = None;
+        self.hover_next = None;
+        self.asked.retain(|a| match a {
+            Asked::Eval(..) => true,
+            Asked::Page(q) => !q.want.live(),
+        });
+        self.again.clear();
     }
 
     /// The panel opened: record the page's console from now on, and send
@@ -130,8 +291,9 @@ impl Devtools {
     pub fn close(&mut self, view: &RustKitView, panel: &WebView) {
         self.stop_picker(view, panel);
         self.open = false;
-        self.asked.clear();
-        self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
+        self.forget_questions();
+        run(panel, "window.hiwaveInspector && window.hiwaveInspector.setPageBusy(null)");
+        self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
         self.ask(view, Want::Ack, DevtoolsQuery::Attach(false));
         run(panel, "window.hiwaveInspector && window.hiwaveInspector.clearConsole()");
     }
@@ -160,7 +322,7 @@ impl Devtools {
     /// Outline the node `path` names on the page (a tree row is hovered),
     /// or nothing.
     pub fn highlight(&mut self, view: &RustKitView, path: Option<&str>) {
-        self.ask(view, Want::Ack, DevtoolsQuery::Highlight(path.and_then(devtools_node_of)));
+        self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(path.and_then(devtools_node_of)));
     }
 
     pub fn start_picker(&mut self, panel: &WebView) {
@@ -173,7 +335,7 @@ impl Devtools {
             self.picking = false;
             self.hovered = None;
             self.hover_next = None;
-            self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
+            self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
         }
         run(panel, "window.hiwaveInspector && window.hiwaveInspector.setPickerActive(false)");
     }
@@ -211,23 +373,20 @@ impl Devtools {
     pub fn pump(&mut self, view: &RustKitView, panel: &WebView) {
         if !self.open {
             self.asked.clear();
+            self.again.clear();
             return;
         }
-        let mut arrived = Vec::new();
+        let (answers, busy) = self.take_page_answers(Instant::now(), &mut |q| view.devtools_ask(q));
+        // Whole seconds, so the line changes once a second at most.
+        let busy = busy.map(|waited| waited.as_secs());
+        if busy != self.busy_shown {
+            self.busy_shown = busy;
+            let text = busy.map(|s| format!("page busy (no answer for {s} s)"));
+            run(panel, &panel_call("setPageBusy", &text));
+        }
+        let mut arrived: Vec<Arrived> = answers.into_iter().map(|(want, answer)| Arrived::Page(want, answer)).collect();
         self.asked.retain_mut(|asked| match asked {
-            Asked::Page(want, rx) => match rx.try_recv() {
-                Ok(answer) => {
-                    arrived.push(Arrived::Page(*want, answer));
-                    false
-                }
-                Err(oneshot::error::TryRecvError::Empty) => true,
-                // A closed view, or a command the same-thread path dropped
-                // while a load held the page.
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    arrived.push(Arrived::Page(*want, DevtoolsAnswer::Unavailable));
-                    false
-                }
-            },
+            Asked::Page(_) => true,
             Asked::Eval(rx, deadline) => match rx.try_recv() {
                 Ok(result) => {
                     arrived.push(Arrived::Eval(result));
@@ -290,7 +449,7 @@ impl Devtools {
             return;
         }
         self.hovered = node;
-        self.ask(view, Want::Ack, DevtoolsQuery::Highlight(node));
+        self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(node));
         run(panel, &panel_call("highlightElement", &node.map(devtools_path)));
     }
 
@@ -336,16 +495,9 @@ impl Devtools {
                 if !console.entries.is_empty() {
                     run(panel, &panel_call("addConsoleEntries", &console.entries));
                 }
-                // Node ids do not survive a navigation: a new page loses
-                // its selection and outline, and an answer still out about
-                // the old page's nodes is not shown on the new one.
                 if console.page_changed {
-                    self.selected = None;
-                    self.hovered = None;
-                    self.hover_next = None;
-                    self.asked
-                        .retain(|a| matches!(a, Asked::Eval(..) | Asked::Page(Want::Console | Want::Ack, _)));
-                    self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
+                    self.forget_page();
+                    self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(None));
                     run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
                 }
                 // A first layout or the end of the load: the same page,
@@ -358,6 +510,9 @@ impl Devtools {
         }
     }
 }
+
+/// Sends a question to the page.
+type SendQuestion<'a> = dyn FnMut(DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> + 'a;
 
 enum Arrived {
     Page(Want, DevtoolsAnswer),
@@ -375,6 +530,208 @@ mod tests {
         let hostile = panel_call("addConsoleEntries", &["\"); alert(1); (\"", "</script>"]);
         assert!(hostile.ends_with(r#"addConsoleEntries(["\"); alert(1); (\"","</script>"])"#), "{hostile}");
         assert!(panel_call("highlightElement", &None::<String>).ends_with("highlightElement(null)"));
+    }
+
+    /// A page that answers nothing until the test does: every question sent
+    /// and its reply sender, in order.
+    #[derive(Default)]
+    struct Page {
+        sent: Vec<(DevtoolsQuery, oneshot::Sender<DevtoolsAnswer>)>,
+    }
+
+    impl Page {
+        fn send(&mut self) -> impl FnMut(DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> + '_ {
+            |query| {
+                let (tx, rx) = oneshot::channel();
+                self.sent.push((query, tx));
+                rx
+            }
+        }
+    }
+
+    fn tree(reveal: Option<usize>) -> DevtoolsQuery {
+        DevtoolsQuery::DomTree { root: None, reveal }
+    }
+
+    #[test]
+    fn a_busy_page_gets_one_live_question_per_kind_and_late_answers_are_dropped() {
+        // T6c: a page in a long script answered every queued question at
+        // once when it came back, oldest first, and the panel showed each.
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        let now = Instant::now();
+        tools.ask_with(Want::Tree, tree(None), &mut page.send());
+        tools.ask_with(Want::Tree, tree(Some(4)), &mut page.send());
+        tools.ask_with(Want::Tree, tree(Some(9)), &mut page.send());
+        tools.ask_with(Want::Element, DevtoolsQuery::Element(9), &mut page.send());
+        assert_eq!(page.sent.len(), 2, "a second tree question was sent while one was out");
+
+        let (arrived, busy) = tools.take_page_answers(now, &mut page.send());
+        assert!(arrived.is_empty() && busy.is_none(), "busy before the deadline");
+        let later = now + LIVE_DEADLINE + Duration::from_secs(1);
+        let (_, busy) = tools.take_page_answers(later, &mut page.send());
+        assert!(busy.is_some_and(|b| b >= LIVE_DEADLINE), "no busy state past the deadline: {busy:?}");
+
+        // The page comes back and answers the old tree: dropped, and only
+        // the newest tree question is asked.
+        let (_, tx) = page.sent.remove(0);
+        tx.send(DevtoolsAnswer::Tree(None)).unwrap();
+        let (arrived, busy) = tools.take_page_answers(later, &mut page.send());
+        assert!(arrived.is_empty(), "a late answer was shown: {arrived:?}");
+        assert!(busy.is_some(), "the element is still out and late");
+        assert_eq!(page.sent.len(), 2);
+        assert_eq!(page.sent[1].0, tree(Some(9)), "not the newest tree question");
+        // The element too was late, but nothing newer was wanted: shown,
+        // not asked again (#809 review 2).
+        let (_, element) = page.sent.remove(0);
+        element.send(DevtoolsAnswer::Element(None)).unwrap();
+        // Questions asked again are stamped now: judge them by the clock.
+        let (arrived, _) = tools.take_page_answers(Instant::now(), &mut page.send());
+        assert_eq!(arrived, vec![(Want::Element, DevtoolsAnswer::Element(None))]);
+        assert_eq!(page.sent.len(), 1, "the element was asked again");
+
+        // Answered in time: shown, and busy clears.
+        let (_, tx) = page.sent.remove(0);
+        tx.send(DevtoolsAnswer::Tree(None)).unwrap();
+        let (arrived, busy) = tools.take_page_answers(Instant::now(), &mut page.send());
+        assert_eq!(busy, None, "still busy");
+        assert_eq!(arrived, vec![(Want::Tree, DevtoolsAnswer::Tree(None))], "the fresh tree was not shown");
+        assert!(page.sent.is_empty(), "nothing more is asked: {}", page.sent.len());
+    }
+
+    fn subtree(root: usize) -> DevtoolsQuery {
+        DevtoolsQuery::DomTree { root: Some(root), reveal: None }
+    }
+
+    #[test]
+    fn expanding_two_nodes_while_one_expand_is_out_asks_both() {
+        // #809 review 1: Subtree was coalesced per kind, so expanding B and
+        // then C while A was out lost B, and B's "more" row did nothing.
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        for n in [1, 2, 3] {
+            tools.ask_with(Want::Subtree, subtree(n), &mut page.send());
+        }
+        let sent: Vec<_> = page.sent.iter().map(|(q, _)| q.clone()).collect();
+        assert_eq!(sent, vec![subtree(1), subtree(2), subtree(3)], "an expand was lost");
+        // The same node twice is one question.
+        tools.ask_with(Want::Subtree, subtree(2), &mut page.send());
+        assert_eq!(page.sent.len(), 3);
+        for (query, tx) in page.sent.drain(..) {
+            let DevtoolsQuery::DomTree { root, .. } = query else { unreachable!() };
+            tx.send(DevtoolsAnswer::Node(root)).unwrap();
+        }
+        let (arrived, _) = tools.take_page_answers(Instant::now(), &mut page.send());
+        assert_eq!(arrived.len(), 3, "every expand is answered");
+        assert_eq!(page.sent.len(), 1, "the repeated expand of 2 is asked once more");
+        assert_eq!(page.sent[0].0, subtree(2));
+    }
+
+    #[test]
+    fn a_page_that_always_answers_late_still_shows_its_answers() {
+        // #809 review 2: a page that answers every question at 2.5 s had
+        // each answer dropped and the same question asked again, forever.
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        let now = Instant::now();
+        let at_2_1 = now + Duration::from_millis(2100);
+        let at_2_5 = now + Duration::from_millis(2500);
+        tools.ask_with(Want::Tree, tree(None), &mut page.send());
+        tools.ask_with(Want::Element, DevtoolsQuery::Element(4), &mut page.send());
+        let (_, busy) = tools.take_page_answers(at_2_1, &mut page.send());
+        assert!(busy.is_some(), "not late at 2.1 s");
+        for (query, tx) in page.sent.drain(..) {
+            let answer = match query {
+                DevtoolsQuery::Element(_) => DevtoolsAnswer::Element(None),
+                _ => DevtoolsAnswer::Tree(None),
+            };
+            tx.send(answer).unwrap();
+        }
+        let (arrived, busy) = tools.take_page_answers(at_2_5, &mut page.send());
+        assert_eq!(
+            arrived,
+            vec![(Want::Tree, DevtoolsAnswer::Tree(None)), (Want::Element, DevtoolsAnswer::Element(None))],
+            "late answers with nothing newer wanted were not shown"
+        );
+        assert!(page.sent.is_empty(), "the same question was asked again: {:?}", page.sent.iter().map(|s| &s.0).collect::<Vec<_>>());
+        assert_eq!(busy, None);
+    }
+
+    #[test]
+    fn a_late_hover_after_the_pointer_left_clears_the_outline() {
+        // #809 review 3: the pointer left the view while a hover was late;
+        // the late answer was dropped and the outline stayed.
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        let later = Instant::now() + LIVE_DEADLINE + Duration::from_secs(1);
+        tools.ask_with(Want::Hover, DevtoolsQuery::NodeAt { x: 1.0, y: 1.0 }, &mut page.send());
+        let (_, busy) = tools.take_page_answers(later, &mut page.send());
+        assert!(busy.is_some(), "the hover is not late");
+        tools.hover_next = Some(None);
+        let (_, tx) = page.sent.remove(0);
+        tx.send(DevtoolsAnswer::Node(Some(7))).unwrap();
+        let (arrived, _) = tools.take_page_answers(later, &mut page.send());
+        assert_eq!(arrived, vec![(Want::Hover, DevtoolsAnswer::Node(None))], "the outline is not cleared");
+        assert_eq!(tools.hover_next, None);
+        assert!(page.sent.is_empty());
+    }
+
+    #[test]
+    fn a_navigation_forgets_live_questions_and_a_close_forgets_all() {
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        let now = Instant::now();
+        tools.selected = Some(3);
+        tools.ask_with(Want::Tree, tree(Some(3)), &mut page.send());
+        tools.ask_with(Want::Tree, tree(Some(5)), &mut page.send());
+        tools.ask_with(Want::Console, DevtoolsQuery::Console { since: 0 }, &mut page.send());
+        tools.take_page_answers(now + LIVE_DEADLINE, &mut page.send());
+
+        tools.forget_page();
+        assert_eq!(tools.selected, None);
+        assert!(tools.again.is_empty(), "a question about the old page waits to be asked");
+        // The old page's tree comes back: not shown, nothing asked, not busy.
+        for (_, tx) in page.sent.drain(..) {
+            let _ = tx.send(DevtoolsAnswer::Tree(None));
+        }
+        let (arrived, busy) = tools.take_page_answers(now + LIVE_DEADLINE, &mut page.send());
+        assert!(arrived.iter().all(|(w, _)| *w == Want::Console), "an old page's answer was shown: {arrived:?}");
+        assert_eq!(arrived.len(), 1, "the console read is not a page snapshot and is kept");
+        assert!(page.sent.is_empty());
+        assert_eq!(busy, None);
+
+        tools.ask_with(Want::Tree, tree(None), &mut page.send());
+        tools.ask_with(Want::Tree, tree(Some(1)), &mut page.send());
+        tools.busy_shown = Some(3);
+        tools.forget_questions();
+        assert!(tools.asked.is_empty() && tools.again.is_empty() && tools.busy_shown.is_none());
+    }
+
+    #[test]
+    fn a_question_answered_in_time_asks_what_was_wanted_meanwhile() {
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        tools.ask_with(Want::Element, DevtoolsQuery::Element(1), &mut page.send());
+        tools.ask_with(Want::Element, DevtoolsQuery::Element(2), &mut page.send());
+        tools.ask_with(Want::Element, DevtoolsQuery::Element(3), &mut page.send());
+        let (_, tx) = page.sent.remove(0);
+        tx.send(DevtoolsAnswer::Element(None)).unwrap();
+        let (arrived, _) = tools.take_page_answers(Instant::now(), &mut page.send());
+        assert_eq!(arrived.len(), 1);
+        assert_eq!(page.sent.len(), 1);
+        assert_eq!(page.sent[0].0, DevtoolsQuery::Element(3), "the newest element is asked next");
+    }
+
+    #[test]
+    fn console_reads_and_the_recording_switch_have_no_deadline() {
+        let mut page = Page::default();
+        let mut tools = Devtools::default();
+        tools.ask_with(Want::Ack, DevtoolsQuery::Attach(true), &mut page.send());
+        tools.ask_with(Want::Ack, DevtoolsQuery::Attach(false), &mut page.send());
+        tools.ask_with(Want::Console, DevtoolsQuery::Console { since: 0 }, &mut page.send());
+        assert_eq!(page.sent.len(), 3, "the switch must reach the page every time");
+        let (_, busy) = tools.take_page_answers(Instant::now() + Duration::from_secs(60), &mut page.send());
+        assert_eq!(busy, None);
     }
 
     #[test]

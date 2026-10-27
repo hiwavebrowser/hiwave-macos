@@ -812,6 +812,7 @@
             <!-- Elements Panel (default view) -->
             <div class="panel elements-panel" id="elements-panel">
                 <div class="panel-content" id="dom-tree-container">
+                    <div class="page-busy" id="page-busy" style="display: none; padding: 4px 8px; color: #b45309;"></div>
                     <div class="empty-state" id="elements-empty">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                             <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
@@ -1645,6 +1646,17 @@
                 setPickerActive: function(active) {
                     pickerActive = active;
                     pickerBtn.classList.toggle('active', active);
+                },
+
+                // The page has not answered a live query in time (T6c): say
+                // so and grey the last tree, which is kept. `null` clears it.
+                // `domTreeContainer` is `#dom-tree`, a sibling of the busy
+                // line, so the line itself is not greyed.
+                setPageBusy: function(text) {
+                    const busy = document.getElementById('page-busy');
+                    busy.textContent = text || '';
+                    busy.style.display = text ? 'block' : 'none';
+                    domTreeContainer.style.opacity = text ? '0.5' : '';
                 },
 
                 selectElementByPath: function(path) {
