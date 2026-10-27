@@ -1,0 +1,15 @@
+<!doctype html><!-- @container on boxes whose laid-out width is not their own `width` (#782 HOLD, Atlas #837): a shrunk flex item, a 100% main column beside a sidebar,
+ a %-width absolute box, a %-width grid item; plus a flex-shrink:0 item that keeps its width. PASS: four 100x100 boxes green at (60,60) (60,170) (60,280) (60,390); #k5 at (60,500) is red by design since #782 HOLD 3 (a flex item's width is unknown, so the query is false; Chrome shows it green). FAIL: any other red. -->
+<html><head><style>
+body { margin: 0; } .row { height: 110px; } .k { width: 100px; height: 100px; background: green; } #k5 { background: red; }
+.f { display: flex; width: 300px; } .s { width: 500px; min-width: 0; container-type: inline-size; }
+.f2 { display: flex; width: 600px; } .main { width: 100%; container-type: inline-size; } .side { width: 200px; flex-shrink: 0; }
+.p { position: relative; width: 200px; } .w { width: 600px; } .a { position: absolute; top: 0; left: 0; width: 100%; container-type: inline-size; }
+.g { display: grid; grid-template-columns: 200px; width: 600px; } .gi { width: 100%; container-type: inline-size; }
+.n { flex-shrink: 0; width: 300px; container-type: inline-size; }
+@container (min-width: 400px) { #k1, #k3, #k4 { background: red; } } @container (min-width: 500px) { #k2 { background: red; } } @container (min-width: 250px) { #k5 { background: green; } }
+</style></head><body>
+<div class="row f"><div class="s"><div class="k" id="k1"></div></div></div><div class="row f2"><div class="main"><div class="k" id="k2"></div></div><div class="side"></div></div>
+<div class="row p"><div class="w"><div class="a"><div class="k" id="k3"></div></div></div></div><div class="row g"><div class="gi"><div class="k" id="k4"></div></div></div>
+<div class="row f"><div class="n"><div class="k" id="k5"></div></div></div>
+</body></html>

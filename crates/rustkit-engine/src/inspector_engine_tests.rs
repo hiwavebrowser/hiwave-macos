@@ -192,6 +192,10 @@ pub(crate) fn describe(record: &InspectorRecord, port: u16) -> String {
             if *from_cache { " cache" } else { "" }
         ),
         InspectorEvent::Failure { id, stage, reason, .. } => format!("failure #{id} {} {reason}", stage.as_str()),
+        InspectorEvent::Script { script, kind, outcome, held, .. } => {
+            format!("script {kind} {} {outcome} held={}", local(script), held.as_deref().unwrap_or("-"))
+        }
+        InspectorEvent::Lifecycle { event, held_by_count, .. } => format!("lifecycle {event} held_by={held_by_count}"),
     }
 }
 
@@ -260,6 +264,9 @@ fn a_page_load_is_recorded_in_order() {
             "console Warn <string len=5> @inline#1:4:9",
             "console Error <string len=4> @inline#1:5:9",
             "console Debug <string len=4> @inline#1:6:9",
+            "script parser inline#1 ran held=DOMContentLoaded",
+            "lifecycle DOMContentLoaded held_by=0",
+            "lifecycle load held_by=0",
             "load_finished over_budget=0",
         ]
     );
@@ -445,12 +452,50 @@ fn load_html_is_a_navigation_with_no_url() {
     );
 }
 
-// ---- Off by default, and free when off ----
+// ---- The tab ring: off by default, a ring from the start when on ----
+
+/// The engine config with no ring and no sink.
+fn ring_off() -> EngineConfig {
+    EngineConfig { inspector: InspectorConfig::default(), ..EngineConfig::default() }
+}
+
+#[test]
+fn a_tab_records_nothing_by_default_until_a_panel_attaches() {
+    // #803 review: the ring stays off until a quiet A/B clears its cost.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let config = EngineConfig::default();
+    assert!(
+        std::env::var_os("HIWAVE_DEVTOOLS_RING").is_some() || !config.inspector.buffer,
+        "the tab ring is on by default"
+    );
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    assert!(engine.inspector(view).unwrap().snapshot_since(0).records.is_empty());
+    assert_eq!(InspectorConfig::tab().capacity, crate::inspector::TAB_RING_CAPACITY);
+}
+
+#[test]
+fn with_the_tab_ring_on_a_tab_keeps_a_ring_from_the_start() {
+    // T6b (Atlas 10-24, Q1), `HIWAVE_DEVTOOLS_RING=1`: a panel opened late
+    // has the history.
+    let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
+    let inspector = InspectorConfig { buffer: true, ..InspectorConfig::tab() };
+    let mut engine = Engine::new(EngineConfig { inspector, ..EngineConfig::default() }).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+        .expect("view");
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let kept: Vec<String> = records(&engine, view).iter().map(|r| describe(r, server.port)).collect();
+    assert_eq!(only(&kept, &["console"]).len(), 5, "{kept:?}");
+}
 
 #[test]
 fn with_nobody_listening_nothing_is_recorded() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -465,7 +510,7 @@ fn with_nobody_listening_nothing_is_recorded() {
 #[test]
 fn a_sink_alone_turns_recording_on() {
     let server = serve(vec![Route::html("/", CONSOLE_PAGE)]);
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut engine = Engine::new(ring_off()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
         .expect("view");
@@ -762,6 +807,247 @@ console.log('https://h.test/p?token=Q', 'x', 12, true, null, undefined, {a: 1}, 
             vec!["console Log https://h.test/p x 12 true null undefined [object Object] [object Array] TypeError: a secret @inline#1:2:9"],
         ]
     );
+}
+
+/// `HIWAVE_CONSOLE_LOG` mirrors the text the page logged into the tracing
+/// log. The Inspector's own rule still holds while it is on: without
+/// `keep_console_text` the record is shapes only, and the mirror keeps its
+/// text.
+#[test]
+fn the_console_mirror_does_not_put_page_text_in_the_inspector() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.log('secret-console-text', 12);
+console.count('secret-label');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut lines = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        lines.push(only(&described(&engine, view, server.port), &["console"]));
+    }
+    assert_eq!(
+        lines,
+        vec![
+            vec!["console Log <string len=19> <number> @inline#1:2:9", "console Info <string len=15> @inline#1:3:10"],
+            vec!["console Log secret-console-text 12 @inline#1:2:9", "console Info secret-label: 1 @inline#1:3:10"],
+        ]
+    );
+    let mirrored = mirrored.lock().unwrap().join("\n");
+    assert!(mirrored.contains("secret-console-text 12"), "{mirrored}");
+}
+
+/// Prometheus R1 on #791: with the mirror on, `attach` sets the runtime's
+/// error `keep_text`. An uncaught `throw` and a `console.error(new Error)`
+/// still reach the Inspector as shapes only: no page message and no page
+/// function name in any record (message, stack, error_stack).
+#[test]
+fn with_the_mirror_on_errors_and_error_stacks_reach_the_inspector_as_shapes() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+function secretOuter() { secretInner(); }
+function secretInner() {
+  console.error(new Error('secret-logged-text'));
+  throw new TypeError('secret-thrown-text');
+}
+secretOuter();
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+    let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+    assert!(kinds.contains(&"script_error"), "no script_error record: {kinds:?}");
+    let errors: Vec<String> = records
+        .iter()
+        .filter(|r| matches!(r.event.kind(), "console" | "script_error"))
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert!(errors.iter().any(|r| r.contains("\"level\":\"error\"")), "no console.error record: {errors:?}");
+    for record in &errors {
+        assert!(!record.contains("secret"), "page text reached the Inspector with the mirror on: {record}");
+    }
+}
+
+/// Atlas 09:40 on #791's develop merge (#784's console stacks against T1b's
+/// shapes): with the mirror on and console text off, a `console.error`'s
+/// caller stack and its error's own stack still reach the Inspector, as
+/// places only. The shapes path drops function names itself, so this holds
+/// even where the Inspector keeps error text.
+#[test]
+fn with_the_mirror_on_console_error_stacks_are_shapes_only() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    // Prometheus's nit: the frames come from a script whose URL carries a
+    // query, which must not reach the Inspector either.
+    let page = "<html><body><script src=\"/app.js?token=SECRET\"></script></body></html>";
+    let app = "function secretMaker() { return new Error('SECRET'); }
+function secretCaller() { console.error(secretMaker()); }
+secretCaller();";
+    let server = serve(vec![Route::html("/", page), Route::ok("/app.js", "text/javascript", app)]);
+    let mut error_text = EngineConfig::default();
+    error_text.inspector.keep_error_text = true;
+    for config in [EngineConfig::default(), error_text] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+        let console: Vec<serde_json::Value> = records
+            .iter()
+            .filter(|r| r.event.kind() == "console")
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        let error = console.iter().find(|r| r["level"] == "error").unwrap_or_else(|| panic!("{console:#?}"));
+        assert!(error["stack"].is_string() && error["error_stack"].is_string(), "{error:#}");
+        let text = error.to_string();
+        assert!(!text.contains("SECRET") && !text.contains("secret"), "page text in a shapes record: {text}");
+        assert!(!text.contains("token") && text.contains("/app.js"), "frames name the script, no query: {text}");
+    }
+    assert!(mirrored.lock().unwrap().join("\n").contains("SECRET"), "the mirror keeps its text");
+}
+
+/// Atlas 10-26 20:50 (3): a page-defined `Error` subclass, by its class
+/// name and by a `name` it sets, thrown uncaught and passed to
+/// `console.error`, with the mirror off and on. The record's error name is
+/// a standard one (`standard_name`), so the page's name reaches no record.
+#[test]
+fn a_page_defined_error_subclass_name_reaches_no_record() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    let page = "<html><body><script src=\"/app.js\"></script><script src=\"/throw.js\"></script></body></html>";
+    let app = "class SecretLeak extends Error {}
+class NamedLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+console.error(new SecretLeak('x'));
+console.error(new NamedLeak('y'));
+Promise.reject(new NamedLeak('z'));";
+    let throws = "class ThrownLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+function thrower() { throw new ThrownLeak('w'); }
+thrower();";
+    let server = serve(vec![
+        Route::html("/", page),
+        Route::ok("/app.js", "text/javascript", app),
+        Route::ok("/throw.js", "text/javascript", throws),
+    ]);
+    for mirror in [false, true] {
+        crate::console_log::force_for_test(Some(mirror));
+        let (mut engine, view) = inspected_engine(EngineConfig::default());
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+        let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+        assert!(kinds.contains(&"script_error"), "mirror {mirror}: no script_error in {kinds:?}");
+        assert!(kinds.iter().filter(|k| **k == "console").count() >= 2, "mirror {mirror}: {kinds:?}");
+        let text = serde_json::to_string(&records).unwrap();
+        for name in ["SecretLeak", "SecretName", "NamedLeak", "ThrownLeak"] {
+            assert!(!text.contains(name), "mirror {mirror}: the page's error name {name} reached a record: {text}");
+        }
+    }
+}
+
+/// Prometheus's #799 nit 3 (Atlas 20:50 (4)): an error thrown from a
+/// callback, not from a script's own run, still reaches the Inspector as a
+/// `script_error`: a timer, an animation frame and an event listener, each
+/// with its own error type so the three are told apart.
+#[test]
+fn errors_thrown_in_timer_frame_and_listener_callbacks_reach_the_inspector() {
+    let page = "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">x</p><script>
+setTimeout(function () { throw new TypeError('t'); }, 0);
+requestAnimationFrame(function () { throw new RangeError('r'); });
+document.getElementById('p').addEventListener('click', function () { throw new EvalError('l'); });
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    for _ in 0..5 {
+        runtime().block_on(engine.pump_live(view, 20));
+    }
+    engine.click_at_point(view, 20.0, 20.0);
+    let errors: Vec<String> = records(&engine, view)
+        .iter()
+        .filter(|r| r.event.kind() == "script_error")
+        .map(|r| serde_json::to_value(r).unwrap()["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for (callback, name) in [("timer", "TypeError"), ("animation frame", "RangeError"), ("listener", "EvalError")] {
+        assert!(errors.iter().any(|e| e == name), "the {callback}'s {name} never reached the Inspector: {errors:?}");
+    }
+}
+
+/// #791 review: `count` had the only shape-path test. A failed
+/// `console.assert` and a `console.timeLog` label reach the Inspector as
+/// shapes too, with the mirror on; with console text kept, the text is there
+/// (so the test can see it).
+#[test]
+fn with_the_mirror_on_assert_and_time_log_are_shapes_only() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    crate::console_log::install_sink(Some(Arc::clone(&mirrored)));
+    let page = "<html><body><script>
+console.assert(false, 'secret-assert');
+console.time('secret-timer');
+console.timeLog('secret-timer');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let mut texts = Vec::new();
+    for config in [EngineConfig::default(), console_text()] {
+        let (mut engine, view) = inspected_engine(config);
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let console: Vec<String> = engine
+            .inspector(view)
+            .expect("inspector")
+            .snapshot_since(0)
+            .records
+            .iter()
+            .filter(|r| r.event.kind() == "console")
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        assert_eq!(console.len(), 2, "one record for the assert, one for timeLog: {console:#?}");
+        texts.push(console.join("\n"));
+    }
+    assert!(!texts[0].contains("secret"), "page text in a shapes record: {}", texts[0]);
+    assert!(texts[1].contains("secret-assert") && texts[1].contains("secret-timer"), "{}", texts[1]);
+    assert!(mirrored.lock().unwrap().join("\n").contains("secret-assert"), "the mirror keeps its text");
 }
 
 // ---- Neighbouring behaviour: what naming the page's scripts must not change ----
@@ -1446,7 +1732,9 @@ fn a_page_throwing_any_engine_message_is_a_page_record_with_no_text() {
          Promise.reject(T(i)); \
          (async function () { await 0; throw T(i); })(); })(i);</script></body></html>",
     );
-    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    // 456 errors plus a script record per script outgrow the tab ring: keep
+    // the full buffer.
+    let (engine, view, _server) = load_page(ring_off(), vec![Route::html("/", page)]);
     let records = records(&engine, view);
     let all = serde_json::to_string(&records).unwrap();
     let errors: Vec<(&str, &str, Option<&String>)> = records
@@ -1505,4 +1793,224 @@ fn a_module_url_cannot_pass_for_an_inline_script() {
     assert_eq!(records.iter().filter(|r| r.event.kind() == "script_error").count(), 2, "{all}");
     assert!(!all.contains("inline#") && !all.contains("inline-module"), "{all}");
     assert!(all.contains("/evil.js:2:") && all.contains("/late.js"), "{all}");
+}
+
+/// The first script error's stack and inserter, ports dropped.
+fn first_error_stack(engine: &Engine, view: EngineViewId, port: u16) -> (Option<String>, Option<String>) {
+    let local = |s: &str| s.replace(&format!("http://127.0.0.1:{port}"), "");
+    records(engine, view)
+        .into_iter()
+        .find_map(|r| match r.event {
+            InspectorEvent::ScriptError { stack, inserted_by, .. } => Some((
+                stack.map(|s| local(&s)),
+                inserted_by.map(|at| format!("{}:{}:{}", local(&at.url), at.line, at.column)),
+            )),
+            _ => None,
+        })
+        .expect("a script error")
+}
+
+const DEEP_PAGE: &str = "<html><body><script>
+var s = document.createElement('script');
+s.src = '/deep.js'; document.body.appendChild(s);
+</script></body></html>";
+const DEEP_JS: &str = "function outer() {\n  middle();\n}\nfunction middle() {\n  inner();\n}\nfunction inner() {\n  null.deep;\n}\nouter();\n";
+
+/// Dev-tools T1: a throw three frames deep in a script that page script
+/// inserted shows every frame at its URL, line and column (calls placed at
+/// their `(`, as Boa places them), each named function's name when error
+/// text is kept, and where the script was inserted.
+#[test]
+fn a_deep_throw_shows_every_frame_and_where_its_script_was_inserted() {
+    let mut config = EngineConfig::default();
+    config.inspector.keep_error_text = true;
+    let (engine, view, server) =
+        load_page(config, vec![Route::html("/", DEEP_PAGE), Route::ok("/deep.js", "text/javascript", DEEP_JS)]);
+    let (stack, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(
+        stack.as_deref(),
+        Some("    at inner (/deep.js:8:8)\n    at middle (/deep.js:5:8)\n    at outer (/deep.js:2:9)\n    at /deep.js:10:6")
+    );
+    assert_eq!(inserted_by.as_deref(), Some("inline#1:3:46"));
+}
+
+/// Without error text a function's name (the page's text) is not kept:
+/// positions and the inserter only.
+#[test]
+fn a_deep_throw_keeps_positions_only_without_error_text() {
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", DEEP_PAGE), Route::ok("/deep.js", "text/javascript", DEEP_JS)],
+    );
+    let (stack, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(
+        stack.as_deref(),
+        Some("    at /deep.js:8:8\n    at /deep.js:5:8\n    at /deep.js:2:9\n    at /deep.js:10:6")
+    );
+    assert_eq!(inserted_by.as_deref(), Some("inline#1:3:46"));
+}
+
+/// Dev-tools T1: `console.error` carries its caller's stack; other levels
+/// do not.
+#[test]
+fn console_error_carries_its_callers_stack() {
+    let page = "<html><body><script>
+function a() { b(); }
+function b() { console.error('x'); console.log('y'); }
+a();
+</script></body></html>";
+    let stacks = |config: EngineConfig| {
+        let (engine, view, _server) = load_page(config, vec![Route::html("/", page)]);
+        records(&engine, view)
+            .into_iter()
+            .filter_map(|r| match r.event {
+                InspectorEvent::Console { level, stack, .. } => Some((level, stack)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut config = console_text();
+    config.inspector.keep_error_text = true;
+    assert_eq!(
+        stacks(config),
+        vec![
+            (ConsoleLevel::Error, Some("    at b (inline#1:3:29)\n    at a (inline#1:2:17)\n    at inline#1:4:2".to_string())),
+            (ConsoleLevel::Log, None),
+        ]
+    );
+    assert_eq!(
+        stacks(EngineConfig::default()),
+        vec![
+            (ConsoleLevel::Error, Some("    at inline#1:3:29\n    at inline#1:2:17\n    at inline#1:4:2".to_string())),
+            (ConsoleLevel::Log, None),
+        ]
+    );
+}
+
+/// Dev-tools T1 (#777's shape): a framework catches an error and hands it
+/// to `console.error`. The record carries the error's own frames (where it
+/// was thrown) as well as where `console.error` was called.
+#[test]
+fn a_caught_error_logged_with_console_error_keeps_where_it_was_thrown() {
+    let page = "<html><body><script>
+function three() { return Object.keys(null); }
+function two() { return three(); }
+function one() { return two(); }
+try { one(); } catch (e) { console.error('boundary', e); }
+console.error('no error argument');
+</script></body></html>";
+    let mut config = console_text();
+    config.inspector.keep_error_text = true;
+    let (engine, view, _server) = load_page(config, vec![Route::html("/", page)]);
+    let logged: Vec<(Option<String>, Option<String>)> = records(&engine, view)
+        .into_iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Console { stack, error_stack, .. } => Some((stack, error_stack)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![
+            (
+                Some("    at inline#1:5:41".to_string()),
+                Some(
+                    "    at three (inline#1:2:38)\n    at two (inline#1:3:30)\n    at one (inline#1:4:28)\n    at inline#1:5:10"
+                        .to_string()
+                ),
+            ),
+            (Some("    at inline#1:6:14".to_string()), None),
+        ]
+    );
+}
+
+/// #784 R1 nit 1: a computed function name cannot forge a frame line in
+/// the stack text; such a frame keeps its position, without a name.
+#[test]
+fn a_computed_function_name_cannot_forge_a_frame() {
+    let page = "<html><body><script>
+var o = { ['x (https://forged.test/f.js:9:9)\\n    at forged']() { null.deep; } };
+o['x (https://forged.test/f.js:9:9)\\n    at forged']();
+</script></body></html>";
+    let mut config = EngineConfig::default();
+    config.inspector.keep_error_text = true;
+    let (engine, view, server) = load_page(config, vec![Route::html("/", page)]);
+    let (stack, _) = first_error_stack(&engine, view, server.port);
+    let stack = stack.expect("a stack");
+    assert!(!stack.contains("forged"), "{stack}");
+    assert_eq!(stack.lines().count(), 2, "{stack}");
+}
+
+/// #784 R1 nit 2: a throw in `eval` code is not located in the script
+/// that called `eval`, so it does not take that script's inserter either.
+#[test]
+fn an_eval_throw_does_not_borrow_its_scripts_inserter() {
+    let page = "<html><body><script>
+var s = document.createElement('script');
+s.src = '/e.js'; document.body.appendChild(s);
+</script></body></html>";
+    let (engine, view, server) = load_page(
+        EngineConfig::default(),
+        vec![Route::html("/", page), Route::ok("/e.js", "text/javascript", "eval('null.deep');\n")],
+    );
+    let (_, inserted_by) = first_error_stack(&engine, view, server.port);
+    assert_eq!(inserted_by, None);
+}
+
+/// #784 R1 must-fix: the console mirror (`HIWAVE_CONSOLE_LOG`) keeps the
+/// runtime's text for the tracing log, but what reaches the Inspector
+/// follows the Inspector's own `keep_error_text`: with it off, a script
+/// error has no message and every stack (`script_error.stack`,
+/// `console.stack`, `console.error_stack`) is positions only.
+#[test]
+fn the_console_mirror_does_not_put_error_text_in_the_inspector() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+        }
+    }
+    let _reset = Reset;
+    crate::console_log::force_for_test(Some(true));
+    let page = "<html><body><script>
+function three() { return Object.keys(null); }
+function two() { return three(); }
+try { two(); } catch (e) { console.error('boundary', e); }
+</script><script>
+function outer() { inner(); }
+function inner() { throw new Error('secret-message'); }
+outer();
+</script></body></html>";
+    let (engine, view, _server) = load_page(EngineConfig::default(), vec![Route::html("/", page)]);
+    let records = records(&engine, view);
+    let all = serde_json::to_string(&records).unwrap();
+    assert!(!all.contains("secret-message"), "{all}");
+    for name in ["three", "two", "outer", "inner"] {
+        assert!(!all.contains(&format!("at {name} ")), "{name}: {all}");
+    }
+    let logged: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::Console { stack, error_stack, .. } => Some((stack.clone(), error_stack.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![(
+            Some("    at inline#1:4:41".to_string()),
+            Some("    at inline#1:2:38\n    at inline#1:3:30\n    at inline#1:4:10".to_string()),
+        )]
+    );
+    let errors: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            InspectorEvent::ScriptError { message, stack, .. } => Some((message.clone(), stack.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        vec![(None, Some("    at inline#2:3:26\n    at inline#2:2:25\n    at inline#2:4:6".to_string()))]
+    );
 }

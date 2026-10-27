@@ -75,7 +75,7 @@ fn log_denial(method: &str, url: &str, denial: &rustkit_net::policy::Denial) {
     }
     use rustkit_net::policy::Denial;
     let (disposition, status) = match denial {
-        Denial::Shield | Denial::Csp => ("blocked", "-".to_string()),
+        Denial::Shield(_) | Denial::Csp => ("blocked", "-".to_string()),
         Denial::Timeout => ("timeout", "-".to_string()),
         Denial::Cancelled => ("cancelled", "-".to_string()),
         Denial::BadStatus(code) => ("response", code.to_string()),
@@ -310,15 +310,20 @@ async fn execute(
     let log_net = crate::console_log::enabled();
     let method = if log_net { script_request.method.to_string() } else { String::new() };
     let url = if log_net { script_request.url.to_string() } else { String::new() };
-    let resource_type = match script_request.destination {
-        RequestDestination::Xhr => ResourceType::Xhr,
-        RequestDestination::Fetch => ResourceType::Fetch,
-        _ => ResourceType::Other,
+    let (resource_type, initiator) = match script_request.destination {
+        RequestDestination::Xhr => (ResourceType::Xhr, "xhr"),
+        RequestDestination::Fetch => (ResourceType::Fetch, "fetch"),
+        _ => (ResourceType::Other, "script"),
     };
     let guard = inspector
-        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some("script"))
-        .map(|g| g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)"));
-    match tokio::time::timeout_at(deadline, policy.execute(loader, script_request)).await {
+        .begin_request(&script_request.url, script_request.method.as_str(), resource_type, Some(initiator))
+        .map(|g| {
+            g.dropped_as(FailureStage::Cancelled, "abandoned (navigation or view closed)")
+                .waits_on(&rustkit_net::policy::SlotWait::new())
+                .deadline(deadline)
+        });
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    match tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -331,7 +336,7 @@ async fn execute(
             log_denial(&method, &url, &denial);
             if let Some(guard) = guard {
                 let (stage, reason) = inspector::denial_stage(&denial);
-                guard.fail(stage, reason);
+                guard.blocked_by(inspector::denial_block_reason(&denial)).fail(stage, reason);
             }
             NetDelivery::Error(NETWORK_ERROR.into())
         }
@@ -499,8 +504,12 @@ async fn fetch_module(
     inspector: &Arc<Inspector>,
 ) -> Result<rustkit_bindings::FetchedModule, String> {
     let parsed = Url::parse(url).map_err(|_| "unparseable module url".to_string())?;
-    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Module, Some("script"));
-    let fetched = tokio::time::timeout_at(deadline, policy.fetch_module(loader, &parsed, document)).await;
+    let guard = inspector
+        .begin_request(&parsed, "GET", ResourceType::Module, Some("script"))
+        .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()).deadline(deadline));
+    let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    let fetched =
+        tokio::time::timeout_at(deadline, policy.fetch_module_waited(loader, &parsed, document, wait.as_ref())).await;
     inspector::answer_module(guard, &fetched);
     match fetched {
         Ok(Ok(module)) => Ok(rustkit_bindings::FetchedModule {
@@ -683,6 +692,14 @@ struct InsertedJob {
     /// Tripped on navigation or a cancelled load. The in-flight fetch
     /// selects on it and drops the socket.
     cancel: Arc<FetchCancel>,
+    /// From the page inserting it to the engine taking it from the queue.
+    queued: std::time::Duration,
+    /// When the engine took it (its request started then), and when its
+    /// body or failure was stored.
+    requested_at: std::time::Instant,
+    arrived_at: Option<std::time::Instant>,
+    /// Records its `cancelled` end when the job is dropped unrun.
+    inspector: Arc<Inspector>,
 }
 
 /// How many inserted-script fetches may be on the wire at once. Script
@@ -735,6 +752,7 @@ fn cancelled_fetch() -> FetchedInserted {
         stage: FailureStage::Cancelled,
         inspector_reason: "abandoned (navigation or view closed)",
         detail: "cancelled".into(),
+        blocked_by: None,
     }
 }
 
@@ -744,6 +762,7 @@ fn cancel_inserted_jobs(board: &mut InsertedBoard) {
         if let Some(guard) = job.guard {
             guard.fail(FailureStage::Cancelled, "abandoned (navigation or view closed)");
         }
+        job.inspector.script_cancelled(&job.url, "inserted", Some(job.queued));
     }
     board.owed.clear();
     board.notify.notify_waiters();
@@ -759,9 +778,9 @@ enum FetchedInserted {
         stage: FailureStage,
         inspector_reason: &'static str,
         detail: String,
+        /// The shield's list and rule, when it refused the fetch and said.
+        blocked_by: Option<rustkit_net::BlockReason>,
     },
-    /// Not fetched (`unparseable src`). No load or error event.
-    Skipped(&'static str),
 }
 
 struct InsertedSource {
@@ -786,6 +805,9 @@ struct FetchJob {
     job_id: u64,
     nav_id: u64,
     cancel: Arc<FetchCancel>,
+    /// Stamped when it gets one of the process's in-flight permits, when
+    /// the Inspector is recording it.
+    wait: Option<rustkit_net::policy::SlotWait>,
 }
 
 impl InsertedScripts {
@@ -866,11 +888,11 @@ fn lock_board(board: &Mutex<InsertedBoard>) -> std::sync::MutexGuard<'_, Inserte
 }
 
 /// A finished fetch that must not hold the queue: the element hears `error`
-/// (or, for an unparseable URL, nothing) and later scripts do not wait for it.
+/// and later scripts do not wait for it.
 fn does_not_block(body: &FetchedInserted) -> bool {
     match body {
         FetchedInserted::Source(_) => false,
-        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } | FetchedInserted::Skipped(_) => true,
+        FetchedInserted::Http(_) | FetchedInserted::Transport { .. } => true,
     }
 }
 
@@ -1050,53 +1072,59 @@ fn enqueue_inserted(
         return true;
     }
     let mut started = Vec::new();
+    let taken_at = std::time::Instant::now();
     {
         let mut board = lock_board(&scripts.board);
-        for rustkit_bindings::InsertedScript { node, url, in_order } in queued {
+        for rustkit_bindings::InsertedScript { node, url, in_order, inserted_by, inserted_at } in queued {
+            let queued = taken_at.saturating_duration_since(inserted_at);
+            if let Some(at) = inserted_by {
+                // The name `run_inserted` evaluates it under.
+                inspector.note_inserted(&format!("inserted#{node}"), &at.path, at.line, at.column);
+            }
             let id = board.next_id;
             board.next_id = board.next_id.wrapping_add(1);
             let nav_id = board.nav_id;
-            match Url::parse(&url) {
-                Ok(parsed) => {
-                    let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
-                    let guard = inspector.begin_request(&parsed, "GET", ResourceType::Script, Some("script"));
-                    let cancel = FetchCancel::new();
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq: 0,
-                        body: None,
-                        guard,
-                        cancel: Arc::clone(&cancel),
-                    });
-                    started.push(FetchJob {
-                        loader: Arc::clone(loader),
-                        request,
-                        board: Arc::clone(&scripts.board),
-                        job_id: id,
-                        nav_id,
-                        cancel,
-                    });
-                }
-                Err(_) => {
-                    board.ready_seq = board.ready_seq.wrapping_add(1);
-                    let ready_seq = board.ready_seq;
-                    board.jobs.push(InsertedJob {
-                        id,
-                        node,
-                        url,
-                        nav_id,
-                        in_order,
-                        ready_seq,
-                        body: Some(FetchedInserted::Skipped("unparseable src")),
-                        guard: None,
-                        cancel: FetchCancel::new(),
-                    });
-                }
+            // `web_scripts.js` queues only an `href` from the `url` crate's
+            // parser and fires `error` for a `src` it cannot resolve, so this
+            // always parses (`an_unparseable_inserted_src_never_reaches_the_engine_queue`).
+            let Ok(parsed) = Url::parse(&url) else {
+                tracing::warn!("inserted script #{node}: queued URL does not parse; skipped");
+                debug_assert!(false, "inserted script URL does not parse");
+                continue;
+            };
+            let request = referrer.get_for(parsed.clone(), RequestDestination::Script);
+            let guard = inspector
+                .begin_request(&parsed, "GET", ResourceType::Script, Some("inserted_script"))
+                .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+            let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+            if let Some(w) = &wait {
+                w.queued();
             }
+            let cancel = FetchCancel::new();
+            board.jobs.push(InsertedJob {
+                id,
+                node,
+                url,
+                nav_id,
+                in_order,
+                ready_seq: 0,
+                body: None,
+                guard,
+                cancel: Arc::clone(&cancel),
+                queued,
+                requested_at: taken_at,
+                arrived_at: None,
+                inspector: Arc::clone(inspector),
+            });
+            started.push(FetchJob {
+                loader: Arc::clone(loader),
+                request,
+                board: Arc::clone(&scripts.board),
+                job_id: id,
+                nav_id,
+                cancel,
+                wait,
+            });
         }
     }
     for job in started {
@@ -1119,6 +1147,7 @@ fn spawn_inserted_fetch(job: FetchJob) {
             stage: FailureStage::Policy,
             inspector_reason: "too many script requests",
             detail: "inserted-script fetch queue is full".into(),
+            blocked_by: None,
         };
         if store_inserted_result(&board, job_id, nav_id, failed) {
             poke_live_turn();
@@ -1153,6 +1182,9 @@ fn fetch_sender() -> &'static tokio::sync::mpsc::Sender<FetchJob> {
                         };
                         if job.cancel.is_cancelled() {
                             continue;
+                        }
+                        if let Some(w) = &job.wait {
+                            w.granted();
                         }
                         tokio::task::spawn_local(async move {
                             let _permit = permit;
@@ -1195,6 +1227,7 @@ fn store_inserted_result(board: &Mutex<InsertedBoard>, job_id: u64, nav_id: u64,
         let job = &mut board.jobs[index];
         job.ready_seq = ready_seq;
         job.body = Some(fetched);
+        job.arrived_at = Some(std::time::Instant::now());
     }
     let notify = Arc::clone(&board.notify);
     drop(board);
@@ -1221,13 +1254,15 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             let (stage, reason) = inspector::net_error_stage(&e);
-            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string() };
+            let blocked_by = inspector::net_block_reason(&e).cloned();
+            return FetchedInserted::Transport { stage, inspector_reason: reason, detail: e.to_string(), blocked_by };
         }
         Err(_) => {
             return FetchedInserted::Transport {
                 stage: FailureStage::Timeout,
                 inspector_reason: "timed out",
                 detail: "timed out".into(),
+                blocked_by: None,
             };
         }
     };
@@ -1262,11 +1297,13 @@ async fn fetch_inserted(loader: &ResourceLoader, request: Request, cancel: &Fetc
             stage: FailureStage::Decode,
             inspector_reason: "body is not UTF-8",
             detail: e.to_string(),
+            blocked_by: None,
         },
         Err(_) => FetchedInserted::Transport {
             stage: FailureStage::Timeout,
             inspector_reason: "timed out",
             detail: "timed out".into(),
+            blocked_by: None,
         },
     }
 }
@@ -1310,6 +1347,10 @@ fn run_inserted(
         return false;
     };
     finish_inserted_guard(job.guard.take(), &fetched);
+    let taken_at = std::time::Instant::now();
+    let fetched_in = job.arrived_at.map(|at| at.saturating_duration_since(job.requested_at));
+    let waited = job.arrived_at.map(|at| taken_at.saturating_duration_since(at));
+    let mut began = false;
     let mut record = ScriptRecord { source: job.url, bytes: 0, elapsed_ms: 0, outcome: ScriptOutcome::Ran };
     let text = match fetched {
         FetchedInserted::Source(source) if source.text.len() > crate::MAX_PAGE_SCRIPT_BYTES => {
@@ -1319,13 +1360,12 @@ fn run_inserted(
         FetchedInserted::Source(source) => Ok(source.text),
         FetchedInserted::Http(http) => Err(ScriptOutcome::FetchFailed(FetchFailure::Status(http.status))),
         FetchedInserted::Transport { detail, .. } => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(detail))),
-        FetchedInserted::Skipped(reason) => Err(ScriptOutcome::Skipped(reason)),
     };
     let event = match text {
         Err(outcome) => {
             // Too large is not a network failure, but `error` is still the
             // one event that element gets: a loader waiting on it hears that
-            // it will not run. An unparseable `src` was never a request.
+            // it will not run.
             let event = match outcome {
                 ScriptOutcome::FetchFailed(_) => Some("error"),
                 ScriptOutcome::Skipped(reason) if reason.starts_with("too large") => Some("error"),
@@ -1341,6 +1381,7 @@ fn run_inserted(
             let name = format!("inserted#{}", job.node);
             inspector.alias_script(&name, &record.source);
             crate::console_log::alias(&name, &record.source);
+            began = true;
             let started = std::time::Instant::now();
             let (ran, stopped) = super::with_script_js(bindings, || {
                 let _ = bindings.set_current_script(Some(job.node));
@@ -1380,18 +1421,35 @@ fn run_inserted(
     let index = out.records.len();
     out.records.push(record);
     out.requests += 1;
+    if !poisoned {
+        if let Some(event) = event {
+            // A spent budget (the script itself may have spent it) owes the
+            // event to the next turn that has some, ahead of any other script.
+            if super::script_js_exhausted() {
+                scripts.owe(OwedEvent { node: job.node, event, source, record: None });
+            } else {
+                fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
+            }
+        }
+    }
+    // After its event: a listener the budget stopped is this script's stop.
+    if let Some(record) = out.records.get(index) {
+        inspector.script_ended(crate::inspector::ScriptEnd {
+            source: &record.source,
+            kind: "inserted",
+            outcome: &record.outcome,
+            started: began,
+            bytes: record.bytes,
+            queued: Some(job.queued),
+            fetch: fetched_in,
+            waited,
+            ran_ms: record.elapsed_ms,
+            event,
+        });
+    }
     if poisoned {
         out.poisoned = true;
         return true;
-    }
-    if let Some(event) = event {
-        // A spent budget (the script itself may have spent it) owes the
-        // event to the next turn that has some, ahead of any other script.
-        if super::script_js_exhausted() {
-            scripts.owe(OwedEvent { node: job.node, event, source, record: None });
-        } else {
-            fire_inserted_event(bindings, OwedEvent { node: job.node, event, source, record: Some(index) }, out);
-        }
     }
     false
 }
@@ -1439,7 +1497,8 @@ fn finish_inserted_guard(guard: Option<crate::inspector::RequestGuard>, fetched:
         FetchedInserted::Http(http) => {
             guard.response(http.status, http.mime.as_deref(), http.encoded_size, None, http.from_cache);
         }
-        FetchedInserted::Transport { stage, inspector_reason, .. } => guard.fail(*stage, inspector_reason),
-        FetchedInserted::Skipped(_) => drop(guard),
+        FetchedInserted::Transport { stage, inspector_reason, blocked_by, .. } => {
+            guard.blocked_by(blocked_by.as_ref()).fail(*stage, inspector_reason)
+        }
     }
 }

@@ -26,6 +26,8 @@ pub mod scroll;
 pub mod table;
 pub mod text;
 
+mod filter;
+pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
 #[cfg(test)]
 mod box_opacity_tests;
 
@@ -7747,6 +7749,13 @@ pub enum DisplayCommand {
     PushOpacity(f32),
     /// End the innermost opacity scope.
     PopOpacity,
+    /// Paint everything up to the matching `PopFilter` as one group and lay
+    /// it down through this 4x5 row-major colour matrix, applied to
+    /// unpremultiplied colour and clamped: the colour-matrix functions of
+    /// CSS `filter` (Filter Effects 1 §13), composed in order. Scopes nest.
+    PushFilter([f32; 20]),
+    /// End the innermost filter scope.
+    PopFilter,
 
     /// Start of a `position: fixed` box whose containing block is the
     /// viewport. What follows, up to the matching `PopViewportFixed`, does
@@ -8759,6 +8768,17 @@ impl DisplayList {
             self.commands.push(DisplayCommand::PushOpacity(opacity));
         }
 
+        // `filter` applies before opacity (Filter Effects 1 §5), so its
+        // group sits inside the opacity scope.
+        let filter_matrix = if layout_box.style.filter.is_empty() {
+            None
+        } else {
+            filter_color_matrix(&layout_box.style.filter)
+        };
+        if let Some(matrix) = filter_matrix {
+            self.commands.push(DisplayCommand::PushFilter(matrix));
+        }
+
         // Check if this box has a transform
         let transform = layout_box.style.effective_transform();
         let has_transform = !transform.is_identity();
@@ -8902,6 +8922,10 @@ impl DisplayList {
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
             self.transformed_ancestors -= 1;
+        }
+
+        if filter_matrix.is_some() {
+            self.commands.push(DisplayCommand::PopFilter);
         }
 
         if fades {

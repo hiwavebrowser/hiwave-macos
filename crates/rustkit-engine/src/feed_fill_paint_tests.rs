@@ -243,7 +243,7 @@ fn lazy_images_an_observer_swaps_in_paint_after_a_scroll() {
         let base = format!("http://127.0.0.1:{}", server.port);
         let cached = names
             .iter()
-            .filter(|n| engine.image_manager.is_cached(&Url::parse(&format!("{base}{n}")).unwrap()))
+            .filter(|n| engine.lctx.image_manager.is_cached(&Url::parse(&format!("{base}{n}")).unwrap()))
             .count();
         let share = inked(&mut engine, view, &format!("lazy-img-{early}"));
         eprintln!("lazy-img early={early}: offset={offset:?} swapped={swapped} cached={cached} inked={share:.3}");
