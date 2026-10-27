@@ -5139,12 +5139,13 @@ impl layout_ctx::LayoutCtx {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than
         // guessing across views.
-        self
-            .building_lay()?
-            .edit_states
-            .borrow()
-            .get(&node_raw)
-            .map(|s| (s.value(), s.caret_position()))
+        self.with_building_lay(|lay| {
+            lay.edit_states
+                .borrow()
+                .get(&node_raw)
+                .map(|s| (s.value(), s.caret_position()))
+        })
+        .flatten()
     }
 
     /// Resolve a possibly-relative resource URL against the document being
@@ -5218,19 +5219,22 @@ impl layout_ctx::LayoutCtx {
         tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let Some(lay) = self.building_lay() else {
+        let read = self.with_building_lay(|lay| {
+            let checked = match tag_lower {
+                "input" => lay
+                    .checked_states.borrow()
+                    .get(&node_raw)
+                    .copied()
+                    .filter(|checked| *checked != attributes.contains_key("checked")),
+                _ => None,
+            };
+            let hovered = lay.hover_chain.borrow().contains(&node_raw);
+            let active = lay.active_chain.borrow().contains(&node_raw);
+            (checked, hovered, active)
+        });
+        let Some((checked, hovered, active)) = read else {
             return std::borrow::Cow::Borrowed(attributes);
         };
-        let checked = match tag_lower {
-            "input" => lay
-                .checked_states.borrow()
-                .get(&node_raw)
-                .copied()
-                .filter(|checked| *checked != attributes.contains_key("checked")),
-            _ => None,
-        };
-        let hovered = lay.hover_chain.borrow().contains(&node_raw);
-        let active = lay.active_chain.borrow().contains(&node_raw);
         if checked.is_none() && !hovered && !active {
             return std::borrow::Cow::Borrowed(attributes);
         }
@@ -8924,21 +8928,15 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// True when the view being built holds typed text: a form control's
     /// box carries it, and the style memo's key does not cover it.
     fn building_view_has_edits(&self) -> bool {
-        self.building_lay().is_some_and(|lay| !lay.edit_states.borrow().is_empty())
+        self.with_building_lay(|lay| !lay.edit_states.borrow().is_empty()).unwrap_or(false)
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// The box tree an earlier build with this key left in the memo, with
@@ -8959,9 +8957,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// Leave a recording build's tree for the next build with its key, or
@@ -9005,9 +9000,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// Resolve the natural size of every `<img>` box in a reused tree again,
@@ -15102,9 +15094,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// Loaded faces in the partition of the view being built (the opaque one
@@ -15379,9 +15368,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// The identity of the sheets a build is about to index, when it can
@@ -15418,9 +15404,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-
-}
 
 impl layout_ctx::LayoutCtx {
     /// `build_rule_index`, reused while the selectors don't change. A page
@@ -15653,8 +15636,6 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
-impl Engine {
-}
 
 /// The selector matcher. It reads no `Engine` state (its caches are
 /// thread-locals), so it is a zero-sized type: the cascade reaches it

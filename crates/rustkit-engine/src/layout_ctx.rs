@@ -127,6 +127,13 @@ impl LayoutCtx {
         self.building.borrow().as_ref().and_then(|b| b.lay.clone())
     }
 
+    /// `f` over the `ViewLayout` of the view being built, without the
+    /// `Rc` clone of `building_lay`: for the lookups made once per node.
+    pub(crate) fn with_building_lay<R>(&self, f: impl FnOnce(&ViewLayout) -> R) -> Option<R> {
+        let building = self.building.borrow();
+        building.as_ref()?.lay.as_deref().map(f)
+    }
+
     pub(crate) fn building_focus(&self) -> Option<rustkit_dom::NodeId> {
         self.building.borrow().as_ref().and_then(|b| b.focus)
     }
