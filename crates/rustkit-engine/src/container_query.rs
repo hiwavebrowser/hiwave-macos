@@ -195,6 +195,28 @@ pub(crate) fn active() -> bool {
     STATE.with(|s| s.borrow().is_some())
 }
 
+/// Whether a sibling built now, before the element whose frame comes next,
+/// can still change what the walk answers under that element: the walk is
+/// running and no float is on record yet in the innermost frame's
+/// formatting context. A float only ever sets `floats` from the innermost
+/// frame up to its context's root, and every later frame below it asks
+/// that same chain, so once one is there another changes nothing.
+pub(crate) fn earlier_siblings_matter() -> bool {
+    STATE.with(|s| {
+        s.borrow().as_ref().is_some_and(|state| {
+            for f in state.frames.iter().rev() {
+                if f.floats {
+                    return false;
+                }
+                if f.new_context {
+                    break;
+                }
+            }
+            true
+        })
+    })
+}
+
 /// The walk is running and some rule floats a `::first-letter`, so an
 /// element's `::first-letter` rules are worth matching for it.
 pub(crate) fn wants_first_letter() -> bool {
@@ -272,12 +294,13 @@ pub(crate) fn applies(preludes: &[String]) -> bool {
 fn prelude_holds(prelude: &str, state: &State) -> bool {
     let frames = &state.frames;
     let prelude = prelude.trim();
-    // `<container-name>? <container-query>`: a leading ident that is not
-    // `not` and does not open a condition is the name.
-    let (name, condition) = match prelude.split_once(|c: char| c.is_whitespace() || c == '(') {
-        _ if prelude.starts_with('(') => (None, prelude),
-        Some((first, _)) if !first.eq_ignore_ascii_case("not") && !first.is_empty() => {
-            (Some(first), prelude[first.len()..].trim())
+    // `<container-name>? <container-query>`: a leading word that is not
+    // `not` and not a function (`foo(` is a function token, so
+    // `foo(width > 1px)` has no name and is a general-enclosed condition,
+    // as in Chromium) is the name.
+    let (name, condition) = match prelude.split_once(char::is_whitespace) {
+        Some((first, rest)) if !first.eq_ignore_ascii_case("not") && !first.contains('(') => {
+            (Some(first), rest.trim())
         }
         _ => (None, prelude),
     };
@@ -346,7 +369,13 @@ fn frame_for(
 /// `container-type` do that only for a block-level or atomic box: on a
 /// non-atomic inline box or a `display: contents` element a float inside
 /// still belongs to the outer context (#782 HOLD 5, q1-q3). Floats and
-/// absolute boxes are blockified, so they always do.
+/// absolute boxes are blockified, so they always do. The other displays
+/// that are not block-level count too, rightly (#782 follow-up, Chromium
+/// 148 on docs/diagnostics/2026-10-27/css_container_query_nits.html
+/// k4-k9): in `ruby` and `ruby-text` (which keep the element's previous
+/// display here) a float is inlinified and never floats, and in a table
+/// row or group an anonymous cell holds it, so none of them lets a float
+/// out. Without `overflow` they do not count, which is the safe side.
 fn starts_context(style: &ComputedStyle) -> bool {
     let boxed = style.display != Display::Inline && !style.display_contents_declared;
     out_of_flow(style)

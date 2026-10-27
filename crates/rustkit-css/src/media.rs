@@ -189,14 +189,28 @@ impl<'a> QueryParser<'a> {
     }
 
     /// The text inside the parenthesized group at the cursor; moves past it.
+    /// A parenthesis inside a quoted string (`style(--x: ")")`) neither
+    /// opens nor closes one; a backslash escapes the next character there.
     fn group(&mut self) -> Option<&'a str> {
         let rest = self.rest();
         if !rest.starts_with('(') {
             return None;
         }
         let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
         for (at, c) in rest.char_indices() {
+            if let Some(q) = quote {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    _ if c == q => quote = None,
+                    _ => {}
+                }
+                continue;
+            }
             match c {
+                '"' | '\'' => quote = Some(c),
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;

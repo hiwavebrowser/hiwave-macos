@@ -8105,6 +8105,19 @@ impl Engine {
             }
             path.extend(above[root].iter().copied());
         }
+        // Each element on the path, with how many of its children lead to a
+        // root (or are one); `above[root]` runs from the root's parent up.
+        let mut pending: HashMap<usize, usize> = HashMap::new();
+        let mut steps = std::collections::HashSet::new();
+        for root in &roots {
+            let mut child = *root;
+            for parent in &above[root] {
+                if steps.insert((*parent, child)) {
+                    *pending.entry(*parent).or_insert(0) += 1;
+                }
+                child = *parent;
+            }
+        }
         let started = std::time::Instant::now();
         let mut built = Vec::with_capacity(2);
         let mut walked = 0;
@@ -8117,6 +8130,7 @@ impl Engine {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
                     roots: roots.iter().copied().collect(),
+                    pending: pending.clone(),
                     found: HashMap::new(),
                     walked: 0,
                 })
@@ -35733,6 +35747,10 @@ struct LaidWith {
 struct RestyleBuild {
     path: std::collections::HashSet<usize>,
     roots: std::collections::HashSet<usize>,
+    /// For each element on `path`, how many of its children on `path` or in
+    /// `roots` the build has still to reach: after the last one its other
+    /// children are skipped, as nothing they hold is read under a root.
+    pending: HashMap<usize, usize>,
     found: HashMap<usize, LayoutBox>,
     /// The child nodes the build went into.
     walked: usize,
@@ -35770,16 +35788,25 @@ fn restyle_child(parent: usize, child: usize) -> RestyleChild {
         };
         let what = if !build.path.contains(&parent) {
             RestyleChild::Build
-        } else if build.roots.contains(&child) {
-            RestyleChild::Root
-        } else if build.path.contains(&child) {
-            RestyleChild::Walk
-        } else if container_query::active() {
+        } else if build.roots.contains(&child) || build.path.contains(&child) {
+            if let Some(left) = build.pending.get_mut(&parent) {
+                *left = left.saturating_sub(1);
+            }
+            match build.roots.contains(&child) {
+                true => RestyleChild::Root,
+                false => RestyleChild::Walk,
+            }
+        } else if build.pending.get(&parent).is_some_and(|left| *left > 0)
+            && container_query::earlier_siblings_matter()
+        {
             // The `@container` walk reads earlier siblings (a float in one
             // makes later containers unknown): a placeholder would hide it
             // and the root's queries would answer otherwise than in the
             // full build (#782 R2). Build the sibling; its box is dropped
-            // with its parent's.
+            // with its parent's. Not one after the last child that leads to
+            // a root, which the walk reads only after the roots, nor one
+            // once a float is on record, which another cannot change
+            // (#782 follow-up: each hover built the whole page twice).
             RestyleChild::Build
         } else {
             RestyleChild::Skip
