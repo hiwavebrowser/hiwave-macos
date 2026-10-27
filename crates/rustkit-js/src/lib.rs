@@ -1844,9 +1844,12 @@ mod tests {
             std::thread::spawn(move || {
                 let mut last = None;
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    let n = held.load(std::sync::atomic::Ordering::Relaxed);
-                    if n > 0 {
-                        last = Some((n, got.lock().unwrap().len()));
+                    // Count, delivered, count again: a flush landing between
+                    // the reads changes the count, and the pair is skipped.
+                    let n = held.load(std::sync::atomic::Ordering::SeqCst);
+                    let delivered = got.lock().unwrap().len();
+                    if n > 0 && held.load(std::sync::atomic::Ordering::SeqCst) == n {
+                        last = Some((n, delivered));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }

@@ -324,7 +324,7 @@ pub use inspector_page::{
 mod inspector_page_tests;
 mod devtools;
 pub use devtools::{
-    devtools_console_entries, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
+    devtools_console_entries, devtools_held_text, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
     DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
     DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
 };

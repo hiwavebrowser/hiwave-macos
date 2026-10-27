@@ -111,6 +111,10 @@ struct Watch {
     read_to: u64,
     /// A wake is out that the panel has not answered with a read.
     woken: bool,
+    /// The view's held console count when the window was last told: a
+    /// script that hangs after a hot loop holds calls and records nothing,
+    /// so this is the only news the panel gets of them (#810 review).
+    held_seen: usize,
 }
 
 #[derive(Default)]
@@ -197,12 +201,21 @@ impl Service {
                 // so a wake found by the re-read or the backstop is posted.
                 let mut inbox = self.inbox();
                 inbox.watches.retain(|w| w.inspector.strong_count() > 0);
-                for watch in inbox.watches.iter_mut().filter(|w| !w.woken) {
+                for watch in inbox.watches.iter_mut() {
                     let Some(inspector) = watch.inspector.upgrade() else { continue };
-                    if inspector.watermark() > watch.read_to {
+                    if !watch.woken && inspector.watermark() > watch.read_to {
                         watch.woken = true;
+                        watch.held_seen = inspector.console_held();
                         watch.counters.window_wake();
                         crate::script_net::poke_live_turn();
+                    }
+                    // The held count moved: the panel reads it from the
+                    // Inspector, so this wake asks for no read and leaves
+                    // `woken` alone (a read only comes for new records).
+                    let held = inspector.console_held();
+                    if held != watch.held_seen {
+                        watch.held_seen = held;
+                        watch.counters.window_wake();
                     }
                 }
             }
@@ -226,10 +239,10 @@ const BACKSTOP: Duration = Duration::from_secs(1);
 
 /// A watched view recorded past what its panel read, and no wake is out.
 fn unread(inbox: &Inbox) -> bool {
-    inbox.watches.iter().filter(|w| !w.woken).any(|w| {
-        w.inspector
-            .upgrade()
-            .is_some_and(|inspector| inspector.watermark() > w.read_to)
+    inbox.watches.iter().any(|w| {
+        w.inspector.upgrade().is_some_and(|inspector| {
+            (!w.woken && inspector.watermark() > w.read_to) || inspector.console_held() != w.held_seen
+        })
     })
 }
 
@@ -277,6 +290,7 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
             counters: Arc::clone(counters),
             read_to: 0,
             woken: false,
+            held_seen: 0,
         });
         // What the view already recorded is news to a panel that just opened.
         inbox.records = true;
@@ -289,6 +303,7 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
 fn answer(read: ConsoleRead) -> u64 {
     let mut console = devtools_console_entries(&read.inspector.snapshot_since(read.since));
     console.page_crashed = read.inspector.page_crashed();
+    console.held = read.inspector.console_held();
     guard(&read.inspector, &mut console);
     let next_seq = console.next_seq;
     let answer = DevtoolsAnswer::Console(console);
@@ -484,6 +499,35 @@ mod tests {
         assert_eq!(counters.read().window_wakes, 1, "the repeated watch woke the window for a read line");
         inspector.console(ConsoleLevel::Log, "b", None);
         assert!(until(Duration::from_secs(3), || counters.read().window_wakes == 2), "a new line: no wake");
+        watch(&inspector, &counters, false);
+    }
+
+    /// #810 review: a script that hangs after a hot loop holds console calls
+    /// past the live cap and records nothing, so nothing woke the panel to
+    /// show them. A held count that moves, with no new record, wakes the
+    /// window (at the backstop at the latest), and the console answer
+    /// carries it; a count that stays put wakes it no more.
+    #[test]
+    fn a_held_console_count_wakes_the_panel_without_a_record() {
+        let inspector = tab();
+        let counters = Arc::new(DevtoolsCounters::default());
+        watch(&inspector, &counters, true);
+        std::thread::sleep(Duration::from_millis(100));
+        let from = counters.read().window_wakes;
+        inspector.console_held_counter().store(100, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            until(Duration::from_secs(3), || counters.read().window_wakes > from),
+            "a held count with no record never woke the panel"
+        );
+        assert_eq!(read(&inspector, 0).held, 100);
+        let woken = counters.read().window_wakes;
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(counters.read().window_wakes, woken, "an unchanged count woke the window again");
+        // The script ended: its flush clears the count, and the panel hears.
+        inspector.console_held_counter().store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(until(Duration::from_secs(3), || counters.read().window_wakes > woken), "the cleared count woke nothing");
+        assert_eq!(crate::devtools_held_text(0), None);
+        assert_eq!(crate::devtools_held_text(3).as_deref(), Some("3 console lines held by a running script"));
         watch(&inspector, &counters, false);
     }
 

@@ -221,9 +221,9 @@ impl Diagnostics {
             deliver_console(&live.handler, live.shapes.as_ref(), dropped, calls, capped);
             return;
         }
-        if wanted_live {
-            self.console_capped.set(true);
-        }
+        // Held for the cap, or because nobody reads live: the dropped line
+        // names the cap only when that is why (the latest hold decides).
+        self.console_capped.set(wanted_live);
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
             pending.pop_front();

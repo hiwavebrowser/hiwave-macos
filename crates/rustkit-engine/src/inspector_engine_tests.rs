@@ -613,11 +613,13 @@ var t = Date.now(); while (Date.now() - t < 1000) {}
             // records there were then.
             let mut last = None;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                // Count, records, count again: a flush landing between the
+                // reads zeroes the count first, and the pair is skipped.
                 let held = inspector.console_held();
-                if held > 0 {
-                    let snapshot = inspector.snapshot_since(0);
-                    let recorded =
-                        snapshot.records.iter().filter(|r| matches!(r.event, InspectorEvent::Console { .. })).count();
+                let snapshot = inspector.snapshot_since(0);
+                let recorded =
+                    snapshot.records.iter().filter(|r| matches!(r.event, InspectorEvent::Console { .. })).count();
+                if held > 0 && inspector.console_held() == held {
                     last = Some((held, recorded));
                 }
                 std::thread::sleep(Duration::from_millis(5));

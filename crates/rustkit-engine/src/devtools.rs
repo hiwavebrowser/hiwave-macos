@@ -180,6 +180,10 @@ pub struct DevtoolsConsole {
     /// The page thread panicked holding the view's Inspector lock; the
     /// lines are what it recorded before (T6 R1 condition 2).
     pub page_crashed: bool,
+    /// Console calls a running script made and the view has not recorded
+    /// yet (past the live rate cap): "K console lines held by a running
+    /// script" (`Inspector::console_held`, read without the page).
+    pub held: usize,
 }
 
 /// `tag#id.class.class`.
@@ -465,7 +469,13 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
             )
         }),
         page_crashed: false,
+        held: 0,
     }
+}
+
+/// The panel's line for `held` console calls, or none.
+pub fn devtools_held_text(held: usize) -> Option<String> {
+    (held > 0).then(|| format!("{held} console lines held by a running script"))
 }
 
 impl Engine {
