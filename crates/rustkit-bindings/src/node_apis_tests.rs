@@ -76,9 +76,9 @@ fn remove_attribute_node_takes_the_attr_out_and_keeps_its_value() {
              m.setAttribute('class', 'again'); r.push(m.getAttributeNode('class') !== c, c.value); \
              for (var l = m.attributes; l.length;) m.removeAttributeNode(l[0]); \
              r.push(m.attributes.length, m.getAttributeNames().length); \
-             var d = document.createElement('div'); d.setAttributeNS('urn:x', 'p:k', 'v'); \
-             var ns = d.attributes.removeNamedItemNS('urn:x', 'k'); r.push(ns.value, d.attributes.length); \
-             try { d.attributes.removeNamedItemNS('urn:x', 'k'); r.push('no throw'); } catch (e) { r.push(e.name); } \
+             var d = document.createElement('div'); d.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', 'v'); \
+             var ns = d.attributes.removeNamedItemNS('http://www.w3.org/1999/xlink', 'href'); r.push(ns.value, d.attributes.length); \
+             try { d.attributes.removeNamedItemNS('http://www.w3.org/1999/xlink', 'href'); r.push('no throw'); } catch (e) { r.push(e.name); } \
              r.join(',')"
         ),
         "true,false,box,null,2,NotFoundError,NotFoundError,text,true,box,0,0,v,0,NotFoundError"
