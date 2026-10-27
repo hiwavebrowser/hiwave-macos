@@ -59,6 +59,41 @@ pub(crate) const EMBEDDER_PATH: &str = "rustkit#embedder";
 
 /// Console calls held between flushes; past it the oldest is dropped.
 const MAX_CONSOLE_PENDING: usize = 1024;
+
+/// Console calls handed over live in one second (T6d); a page logging
+/// in a hot loop has the rest held, as with no live reader.
+pub const MAX_CONSOLE_LIVE: u32 = 200;
+
+/// Where console calls go as they are made ([`crate::JsRuntime::set_console_live`]).
+pub(crate) struct LiveConsole {
+    pub(crate) on: crate::ConsoleLive,
+    pub(crate) handler: std::sync::Arc<crate::ConsoleHandler>,
+    pub(crate) shapes: Option<std::sync::Arc<crate::ConsoleHandler>>,
+}
+
+/// Hand `calls` to the handlers, after a line for the `dropped` ones
+/// before them, if any: engine text, so the shape handler gets it too.
+pub(crate) fn deliver_console(
+    handler: &crate::ConsoleHandler,
+    shapes: Option<&std::sync::Arc<crate::ConsoleHandler>>,
+    dropped: u64,
+    calls: Vec<ConsoleCall>,
+) {
+    if dropped > 0 {
+        let line = format!("{dropped} console calls dropped (more than {MAX_CONSOLE_PENDING} held)");
+        let none = ConsoleStacks::default();
+        handler(LogLevel::Warn, &line, None, &none);
+        if let Some(shapes) = shapes {
+            shapes(LogLevel::Warn, &line, None, &none);
+        }
+    }
+    for (level, msg, shape, at, stack) in calls {
+        handler(level, &msg, at.as_ref(), &stack);
+        if let (Some(shapes), Some(shape)) = (shapes, shape) {
+            shapes(level, &shape, at.as_ref(), &stack);
+        }
+    }
+}
 /// `console.count` and `console.time` labels held at once; a new label past
 /// it is not counted or timed.
 const MAX_CONSOLE_LABELS: usize = 1024;
@@ -127,6 +162,11 @@ pub(crate) struct Diagnostics {
     /// embedder set a shape handler).
     pub(crate) console_shapes: Cell<bool>,
     console: RefCell<VecDeque<ConsoleCall>>,
+    /// Calls dropped from `console` since it was last taken.
+    console_dropped: Cell<u64>,
+    pub(crate) console_live: RefCell<Option<std::rc::Rc<LiveConsole>>>,
+    /// The current second of live hand-overs: its start and how many.
+    console_live_window: Cell<(Option<Instant>, u32)>,
     console_counts: RefCell<HashMap<String, u64>>,
     console_timers: RefCell<HashMap<String, Instant>>,
     unsupported: RefCell<Vec<Unsupported>>,
@@ -160,11 +200,34 @@ impl Diagnostics {
             },
             _ => ConsoleStacks::default(),
         };
+        let call = (level, line, shape, at, stack);
+        // Decided per call: the reader may have come or gone since the last.
+        let live = self.console_live.borrow().clone().filter(|live| (live.on)());
+        if let Some(live) = live.filter(|_| self.live_slot()) {
+            // What was held goes first: each call once, in order.
+            let (dropped, mut calls) = self.take_console_counted();
+            calls.push(call);
+            deliver_console(&live.handler, live.shapes.as_ref(), dropped, calls);
+            return;
+        }
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
             pending.pop_front();
+            self.console_dropped.set(self.console_dropped.get() + 1);
         }
-        pending.push_back((level, line, shape, at, stack));
+        pending.push_back(call);
+    }
+
+    /// Whether one more call may be handed over live this second.
+    fn live_slot(&self) -> bool {
+        let now = Instant::now();
+        let (start, n) = match self.console_live_window.get() {
+            (Some(start), n) if now.saturating_duration_since(start) < std::time::Duration::from_secs(1) => (start, n),
+            _ => (now, 0),
+        };
+        let ok = n < MAX_CONSOLE_LIVE;
+        self.console_live_window.set((Some(start), n + u32::from(ok)));
+        ok
     }
 
     /// A Console namespace member other than the five logging ones, as
@@ -265,8 +328,9 @@ impl Diagnostics {
             .collect()
     }
 
-    pub(crate) fn take_console(&self) -> Vec<ConsoleCall> {
-        self.console.borrow_mut().drain(..).collect()
+    /// The held calls, and how many were dropped before them.
+    pub(crate) fn take_console_counted(&self) -> (u64, Vec<ConsoleCall>) {
+        (self.console_dropped.replace(0), self.console.borrow_mut().drain(..).collect())
     }
 
     /// The embedder's scripts saw page script reach `interface.member`,

@@ -8,7 +8,7 @@ use crate::inspector::{scrub_url, CollectingSink, MAX_MESSAGE_CHARS};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One route of the test server.
 #[derive(Clone)]
@@ -556,6 +556,41 @@ console.log('done');
     let (reads, most) = reader.join().unwrap();
     assert!(reads > 10, "the reader was never blocked for the whole load ({reads} reads)");
     assert!(most > 0);
+}
+
+#[test]
+fn a_console_line_is_read_while_the_script_that_logged_it_still_runs() {
+    // T6d: console calls waited for the script's end, so a reader on
+    // another thread (the devtools thread) saw nothing of a long script's
+    // console until it was over.
+    let page = "<html><body><script>
+console.log('started');
+var t = Date.now(); while (Date.now() - t < 600) {}
+console.log('done');
+</script></body></html>";
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(EngineConfig::default());
+    let inspector = engine.inspector(view).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let snapshot = inspector.snapshot_since(0);
+                if snapshot.records.iter().any(|r| matches!(r.event, InspectorEvent::Console { .. })) {
+                    return Some(Instant::now());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })
+    };
+    runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+    let ended = Instant::now();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = reader.join().unwrap().expect("no console line at all");
+    let early = ended.saturating_duration_since(seen);
+    assert!(early >= Duration::from_millis(400), "the line was read only {early:?} before the load ended");
 }
 
 // ---- Privacy ----

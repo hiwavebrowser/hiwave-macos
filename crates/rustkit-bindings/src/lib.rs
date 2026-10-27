@@ -1714,6 +1714,12 @@ impl DomBindings {
         self.runtime.borrow_mut().set_console_shape_handler(handler);
     }
 
+    /// Hand console calls over as they are made while `live` says so (see
+    /// [`JsRuntime::set_console_live`]). Set after the handlers.
+    pub fn set_console_live(&self, live: Option<rustkit_js::ConsoleLive>) {
+        self.runtime.borrow_mut().set_console_live(live);
+    }
+
     /// Console arguments reach the handler as type and length only (see
     /// [`JsRuntime::set_console_redaction`]).
     pub fn set_console_redaction(&self, on: bool) {
