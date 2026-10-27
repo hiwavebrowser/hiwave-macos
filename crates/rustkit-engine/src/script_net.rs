@@ -247,29 +247,45 @@ fn net_runtime_wanted() -> bool {
     *ON.get_or_init(|| !matches!(std::env::var("HIWAVE_NET_RUNTIME").ok().as_deref(), Some("0" | "off" | "false")))
 }
 
-/// The process's network runtime (T7): two `rustkit-net` workers that run
+/// The process's network runtime (T7): one `rustkit-net` thread that runs
 /// live script requests, so their bytes are read and their response and
 /// failure records written while the page thread is busy. Built on first
 /// use. `None` when it is switched off or could not be built; the page then
 /// polls its requests itself, as before. It is never shut down: requests
 /// still out at process exit end unrecorded, with the ring that would have
 /// held their records.
+///
+/// One current-thread runtime, not the note's two workers (deviation D1):
+/// the policy's in-flight slots are FIFO semaphores, taken at a request's
+/// first poll, and one thread first-polls new tasks in the order they were
+/// spawned, so slots still go in request order. With two workers the tasks
+/// raced and a later request could take an earlier one's slot (T2's
+/// combined fixture: `/hang/4` capped instead of `/hang/6`). The work on it
+/// is socket waits; nothing runs a page script.
 fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
-    static NET: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    static NET: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
+    #[cfg(test)]
+    if PAGE_POLLED.with(std::cell::Cell::get) {
+        return None;
+    }
     if !net_runtime_wanted() {
         return None;
     }
     NET.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("rustkit-net")
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| tracing::warn!(error = %e, "network runtime not built; the page polls its requests"))
-            .ok()
+            .ok()?;
+        let handle = runtime.handle().clone();
+        std::thread::Builder::new()
+            .name("rustkit-net".into())
+            .spawn(move || runtime.block_on(std::future::pending::<()>()))
+            .map_err(|e| tracing::warn!(error = %e, "network thread not started; the page polls its requests"))
+            .ok()?;
+        Some(handle)
     })
     .as_ref()
-    .map(|rt| rt.handle())
 }
 
 /// A task on the network runtime, aborted when its page side is dropped (a
@@ -325,6 +341,17 @@ impl<F: Future> Future for DiagContext<F> {
 /// What the engine records when a request task panics: engine words, never
 /// the page's.
 const TASK_PANICKED: &str = "engine failure: request task panicked";
+
+#[cfg(test)]
+thread_local! {
+    /// `HIWAVE_NET_RUNTIME=0` for requests this thread starts (T7 test 9).
+    static PAGE_POLLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_page_polled_for_test(on: bool) {
+    PAGE_POLLED.with(|cell| cell.set(on));
+}
 
 /// A request to this path panics where the policy runs (T7 test 10, C3).
 #[cfg(test)]

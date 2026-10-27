@@ -816,11 +816,11 @@ location.assign('/next');\
         assert!(text.contains("doc document-replace"), "{text}");
         assert!(text.contains("doc dom-remove") && text.contains("parent=div#feed") && text.contains("nodes="), "{text}");
         assert!(text.contains("doc location") && text.contains("assign") && text.contains("/next"), "{text}");
-        let gql: Vec<_> = lines.iter().filter(|line| line.contains("/gql?")).cloned().collect();
+        let gql: Vec<_> = lines.iter().filter(|line| line.contains("/gql")).cloned().collect();
         assert!(gql.iter().any(|line| line.contains("net start") && line.contains("GET")), "{gql:#?}\n{text}");
         assert!(gql.iter().any(|line| line.contains("status=200") && line.contains("response")), "{gql:#?}");
         assert!(gql.iter().any(|line| line.contains("delivered") || line.contains("nav=")), "{gql:#?}");
-        assert!(gql.iter().all(|line| !line.contains(&"q".repeat(60))), "query was not truncated: {gql:#?}");
-        assert!(gql.iter().any(|line| line.contains('…')), "long query should be marked truncated: {gql:#?}");
+        // T7 C1: the query is dropped, not truncated.
+        assert!(gql.iter().all(|line| !line.contains("/gql?") && !line.contains("qqq")), "a query reached the mirror: {gql:#?}");
     }
 }

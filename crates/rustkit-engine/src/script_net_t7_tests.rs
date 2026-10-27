@@ -218,6 +218,35 @@ fn mirror_lines_from_the_network_runtime_carry_the_pages_nav_and_no_query() {
 }
 
 #[test]
+fn the_kill_switch_and_an_unlistened_view_keep_requests_working() {
+    // T7 test 9. HIWAVE_NET_RUNTIME=0: the page-polled path of before,
+    // where nothing happens, not even the request record, until polled.
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::script_net::force_page_polled_for_test(false);
+        }
+    }
+    let _reset = Reset;
+    let rig = rig();
+    crate::script_net::force_page_polled_for_test(true);
+    let live = rig.start(1, "/hello", 0);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(rig.records().is_empty(), "the page-polled path ran unpolled: {:?}", rig.records());
+    assert_eq!(rig.hits.load(Ordering::SeqCst), 0);
+    let (_, outcome) = rig.rt.block_on(live);
+    assert!(matches!(outcome, NetDelivery::Response { status: 200, .. }), "{outcome:?}");
+    assert_eq!(rig.terminals(), vec![(1, 1)]);
+    crate::script_net::force_page_polled_for_test(false);
+
+    // Ring off and no panel: no guard, no records, and the request runs.
+    let quiet = Rig { inspector: Inspector::new(&InspectorConfig::default()), ..rig };
+    let (_, outcome) = quiet.rt.block_on(quiet.start(2, "/hello", 0));
+    assert!(matches!(outcome, NetDelivery::Response { status: 200, .. }), "{outcome:?}");
+    assert!(quiet.records().is_empty(), "{:?}", quiet.records());
+}
+
+#[test]
 fn records_written_on_the_network_runtime_carry_no_query() {
     // T7 test 7, the records half (the mirror half is with the
     // HIWAVE_CONSOLE_LOG tests).
