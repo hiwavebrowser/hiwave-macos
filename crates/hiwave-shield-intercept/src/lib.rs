@@ -621,12 +621,15 @@ mod tests {
             RequestDestination::Script,
             Some("https://news.example/"),
         ));
-        // Named either way: the list and rule once EasyList is ready, the
-        // floor and its domain before.
+        // Before the lists are ready: the floor and its domain. Once ready,
+        // with no `name_matched_rules()` (these tests never call it), two
+        // lists name neither list nor rule; with no lists on disk the engine
+        // is the defaults, one list that names its rule.
         match action {
             InterceptAction::BlockedBy(reason) => assert!(
                 reason.list == "domain-floor" && reason.rule.as_deref() == Some("doubleclick.net")
-                    || reason.list != "domain-floor" && reason.rule.as_deref().is_some_and(|r| r.contains("doubleclick")),
+                    || reason.list == hiwave_shield::UNATTRIBUTED && reason.rule.is_none()
+                    || reason.list == "HiWave defaults" && reason.rule.as_deref() == Some("||doubleclick.net^"),
                 "{reason:?}"
             ),
             other => panic!("not blocked with a reason: {other:?}"),

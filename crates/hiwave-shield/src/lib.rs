@@ -42,8 +42,11 @@ pub struct AdBlocker {
     trackers_blocked: AtomicU64,
     /// The list each rule came from, when rules came from more than one.
     rule_lists: HashMap<String, &'static str>,
-    /// The list every rule came from, when `rule_lists` is empty.
+    /// The list every rule came from, when rules came from one list.
     default_list: &'static str,
+    /// Rules came from more than one list. Without rule names a match then
+    /// cannot be traced to its list.
+    several_lists: bool,
     /// The engine keeps each rule's text, so a match names its rule. About
     /// 9 MB more for the full lists, so `with_filter_lists` leaves it off
     /// (`with_filter_lists_naming_rules` turns it on).
@@ -101,19 +104,21 @@ impl AdBlocker {
     pub fn new() -> Self {
         log::info!("Initializing ad blocker");
 
-        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults", true)
+        Self::from_parts(Self::DEFAULT_RULES, HashMap::new(), "HiWave defaults", false, true)
     }
 
-    /// Creates ad blocker with the given filter rules
+    /// Creates ad blocker with the given filter rules. A match names its
+    /// rule (the engine keeps every rule's text).
     pub fn with_rules(rules: &[&str]) -> Self {
         log::info!("Initializing ad blocker with {} rules", rules.len());
-        Self::from_parts(rules, HashMap::new(), "custom", true)
+        Self::from_parts(rules, HashMap::new(), "custom", false, true)
     }
 
     fn from_parts(
         rules: &[&str],
         rule_lists: HashMap<String, &'static str>,
         default_list: &'static str,
+        several_lists: bool,
         names_rules: bool,
     ) -> Self {
         let engine =
@@ -125,6 +130,7 @@ impl AdBlocker {
             trackers_blocked: AtomicU64::new(0),
             rule_lists,
             default_list,
+            several_lists,
             names_rules,
         }
     }
@@ -136,18 +142,23 @@ impl AdBlocker {
     }
 
     fn from_lists(lists: &[(&'static str, &str)], names_rules: bool) -> Self {
+        // One list: every match is from it, with or without rule names.
+        // Several: only a match's rule text can name its list, so without
+        // rule names the map would never be read (one key per list line).
+        let several_lists = lists.len() > 1;
+        let map = several_lists && names_rules;
         let mut rules = Vec::new();
         let mut rule_lists = HashMap::new();
         for (name, content) in lists {
             for line in content.lines() {
-                rule_lists.entry(line.trim().to_string()).or_insert(*name);
+                if map {
+                    rule_lists.entry(line.trim().to_string()).or_insert(*name);
+                }
                 rules.push(line);
             }
         }
         let default_list = lists.first().map(|(name, _)| *name).unwrap_or("custom");
-        // One list: every match is from it, with or without rule names.
-        let rule_lists = if lists.len() > 1 { rule_lists } else { HashMap::new() };
-        Self::from_parts(&rules, rule_lists, default_list, names_rules)
+        Self::from_parts(&rules, rule_lists, default_list, several_lists, names_rules)
     }
 
     /// Creates ad blocker from filter list content (e.g., EasyList)
@@ -206,7 +217,8 @@ impl AdBlocker {
         }
     }
 
-    /// Reload rules - creates a new engine (immutable design)
+    /// Reload rules - creates a new engine (immutable design). A match names
+    /// its rule from now on, and its list is `custom`.
     pub fn load_rules(&mut self, rules: &[String]) -> HiWaveResult<()> {
         log::info!("Reloading ad blocker with {} rules", rules.len());
 
@@ -214,6 +226,7 @@ impl AdBlocker {
         self.engine = Engine::from_rules_debug(rules_refs, ParseOptions::default());
         self.rule_lists.clear();
         self.default_list = "custom";
+        self.several_lists = false;
         self.names_rules = true;
         self.requests_blocked.store(0, Ordering::Relaxed);
         self.trackers_blocked.store(0, Ordering::Relaxed);
@@ -271,8 +284,11 @@ impl AdBlocker {
     /// several (` <+> `) is looked up part by part, and named only when
     /// every part is from the same list: any of them may have matched.
     fn list_of(&self, rule: Option<&str>) -> &'static str {
-        if self.rule_lists.is_empty() {
+        if !self.several_lists {
             return self.default_list;
+        }
+        if !self.names_rules {
+            return UNATTRIBUTED;
         }
         let Some(rule) = rule else { return UNATTRIBUTED };
         let mut lists = rule.split(JOINED).map(|part| self.rule_lists.get(part.trim()).copied());
@@ -474,6 +490,35 @@ mod tests {
             AdBlocker::from_lists(&lists, true).check(&ad, &source, ResourceType::Script),
             Some(BlockMatch { list: "EasyList".into(), rule: Some("||ads.example.com^".into()) })
         );
+    }
+
+    /// #792 independent review: the app's constructor (`with_filter_lists`:
+    /// two lists, no rule names) built a rule-to-list map it never read, one
+    /// key per list line, in each of the app's two engines.
+    #[test]
+    fn without_rule_names_two_lists_build_no_rule_map() {
+        let source = Url::parse("https://example.com/").unwrap();
+        let ad = Url::parse("https://ads.example.com/banner.js").unwrap();
+        let lists = [("EasyList", "||ads.example.com^\n"), ("EasyPrivacy", "||pixel.example.org^\n")];
+        let app = AdBlocker::from_lists(&lists, false);
+        assert!(app.rule_lists.is_empty(), "{} keys", app.rule_lists.len());
+        assert_eq!(
+            app.check(&ad, &source, ResourceType::Script),
+            Some(BlockMatch { list: UNATTRIBUTED.into(), rule: None })
+        );
+        assert_eq!(AdBlocker::from_lists(&lists, true).rule_lists.len(), 2);
+    }
+
+    /// A rule in both lists is credited to the first (`or_insert`).
+    #[test]
+    fn a_rule_in_both_lists_names_the_first() {
+        let source = Url::parse("https://example.com/").unwrap();
+        let ad = Url::parse("https://ads.example.com/banner.js").unwrap();
+        let blocker = AdBlocker::from_named_lists(&[
+            ("EasyList", "||ads.example.com^\n"),
+            ("EasyPrivacy", "||ads.example.com^\n||pixel.example.org^\n"),
+        ]);
+        assert_eq!(blocker.check(&ad, &source, ResourceType::Script).map(|m| m.list), Some("EasyList".into()));
     }
 
     #[test]
