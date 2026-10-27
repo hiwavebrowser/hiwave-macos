@@ -18030,7 +18030,8 @@ impl Engine {
         let log = bindings.take_mutation_log();
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
-        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+        let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
+        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
@@ -18045,6 +18046,17 @@ impl Engine {
         let writes = bindings.take_script_mutations();
         view.relayout_pending.note_script(trigger, writes);
         self.relayout(id).map(|_| true)
+    }
+
+    /// What a script scroll is clamped to when script settles. After DOM
+    /// writes the view's maximum is the old document's (a forced layout
+    /// told only the bindings the new one), and the relayout that follows
+    /// clamps the offset to the new end; so only a clean task clamps here.
+    fn script_scroll_clamp(max: (f32, f32), dirty: DomDirty) -> (f32, f32) {
+        match dirty {
+            DomDirty::Clean => max,
+            _ => (f32::INFINITY, f32::INFINITY),
+        }
     }
 
     /// Move the view to where script last scrolled the window, if it did.
@@ -18172,12 +18184,16 @@ impl Engine {
             STYLE_MEMO.with(|m| *m.borrow_mut() = memo);
             let root_element = document.document_element().map(|e| e.id.raw());
             let (geometry, computed) = geometry_with_root(&built, root_element);
+            // As the engine's relayout sets `max_scroll_offset`.
+            let content_height = scrollable_bottom(&built, lay.html_clips.get());
+            let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
             Some(rustkit_bindings::ForcedGeometry {
                 geometry,
                 computed,
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
+                max_scroll,
             })
         }))
     }
@@ -18193,7 +18209,8 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
-            Self::apply_script_scroll(&mut view.scroll_offset, view.max_scroll_offset, bindings);
+            let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
+            Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
                 view.pending_dirty = Some(view.dirty_set(&log));

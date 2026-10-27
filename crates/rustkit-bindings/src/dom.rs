@@ -80,6 +80,9 @@ pub struct ForcedGeometry {
     pub geometry: HashMap<usize, BoxGeometry>,
     pub computed: HashMap<usize, String>,
     pub hit_tester: Option<HitTester>,
+    /// The furthest the view can scroll over this layout, as
+    /// `DomBindings::set_scroll_state` takes it.
+    pub max_scroll: (f32, f32),
 }
 
 /// Lays the page out again for a read of geometry or computed style that
@@ -114,6 +117,9 @@ pub(crate) struct DomHost {
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
+    /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
+    /// a forced layout moves its maximum.
+    pub(crate) scroll_state: crate::web_scroll::SharedScroll,
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
@@ -166,6 +172,14 @@ impl DomHost {
     /// when script wrote to the DOM since the last layout was published, the
     /// page is laid out again first (forced layout), as in a browser.
     pub(crate) fn ensure_fresh_geometry(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        Self::force_layout_if_written(host, dirty);
+        host.borrow_mut().ensure_geometry();
+    }
+
+    /// The forced layout half of `ensure_fresh_geometry`, for reads that
+    /// need the layout current but not the geometry maps (the scroll
+    /// maximum).
+    pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark) {
         let forced = match dirty.written_since_layout() {
             true => host.borrow().forced_layout.clone(),
             false => None,
@@ -192,11 +206,18 @@ impl DomHost {
                 h.computed = laid.computed;
                 h.geometry_source = None;
                 h.hit_tester = laid.hit_tester;
+                // The document may have grown or shrunk: scrollTo clamps to
+                // the new end, and an offset past it comes back to it.
+                let scroll = h.scroll_state.clone();
+                let mut s = scroll.borrow_mut();
+                (s.max_x, s.max_y) = laid.max_scroll;
+                s.x = s.x.min(s.max_x.max(0.0));
+                s.y = s.y.min(s.max_y.max(0.0));
+                h.scroll = (s.x, s.y);
                 h.forced_layouts += 1;
                 dirty.laid_out();
             }
         }
-        host.borrow_mut().ensure_geometry();
     }
 
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {
