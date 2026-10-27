@@ -343,6 +343,7 @@ pub use inspector::{
 };
 pub use rustkit_bindings::MutationKind;
 mod script_net;
+mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
 #[cfg(test)]
@@ -2277,27 +2278,9 @@ pub struct Engine {
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
-    /// Cascade provenance, recorded by the REAL cascade when armed.
-    ///
-    /// `None` = not recording, which is the default and costs nothing. See
-    /// [`Engine::set_style_recording`] for why this is a side table rather
-    /// than a field on `ComputedStyle`.
-    style_trace: std::cell::RefCell<Option<Vec<StyleRecord>>>,
-    /// View currently being laid out, so the view-agnostic recursive builder
-    /// can read that view's edit states (and only that view's).
-    building_view: std::cell::Cell<Option<EngineViewId>>,
-    /// Focused node of the view currently being laid out.
-    ///
-    /// Focus is per-VIEW but the recursive layout builder is view-agnostic,
-    /// so the alternative was checking "is this node focused in ANY view",
-    /// which would mark a node focused in one view while building another.
-    /// Set by `relayout` around the build; `None` outside one.
-    building_focus: std::cell::Cell<Option<rustkit_dom::NodeId>>,
-    /// Parsed SVG documents keyed by URL. SVGs referenced from <img> are
-    /// vector content — they bypass ImageManager's raster decode (which
-    /// rejects them as "Unknown image format") and are spliced into the
-    /// display list as vector commands at build time.
-    svg_cache: std::collections::HashMap<String, rustkit_svg::SvgDocument>,
+    /// The style and layout build's own state (`layout_ctx`): trace,
+    /// building view and focus, SVG cache.
+    lctx: Rc<layout_ctx::LayoutCtx>,
 }
 
 /// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
@@ -2511,10 +2494,7 @@ impl Engine {
             font_loader: Arc::new(FontLoader::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         })
     }
 
@@ -2535,7 +2515,7 @@ impl Engine {
     ///
     /// The trace is cleared and refilled on each layout build.
     pub fn set_style_recording(&mut self, on: bool) {
-        *self.style_trace.borrow_mut() = if on { Some(Vec::new()) } else { None };
+        *self.lctx.style_trace.borrow_mut() = if on { Some(Vec::new()) } else { None };
     }
 
     /// Take the event receiver.
@@ -5208,7 +5188,7 @@ impl Engine {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than
         // guessing across views.
-        let view_id = self.building_view.get()?;
+        let view_id = self.lctx.building_view.get()?;
         self.edit_value_in(view_id, node_raw)
     }
 
@@ -5224,7 +5204,7 @@ impl Engine {
     /// warnings in one live session). One resolution point, at build, fixes
     /// the cache key, the natural size, and the paint lookup together.
     fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
-        let id = self.building_view.get()?;
+        let id = self.lctx.building_view.get()?;
         self.resolve_resource_url_in(id, raw)
     }
 
@@ -5274,7 +5254,7 @@ impl Engine {
         tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) else {
+        let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) else {
             return std::borrow::Cow::Borrowed(attributes);
         };
         let checked = match tag_lower {
@@ -7996,7 +7976,7 @@ impl Engine {
                     current_color,
                     ..
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         // The box's CSS color is what `currentColor`
                         // resolves to inside an inline <svg>; an <img>'s
                         // color is the initial black either way, so the
@@ -8019,7 +7999,7 @@ impl Engine {
                     offset,
                     repeat,
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         expanded.extend(svg_background_commands(svg, *rect, size, *position, *offset, *repeat));
                         continue;
                     }
@@ -8037,7 +8017,7 @@ impl Engine {
                     offset,
                     repeat,
                 } => {
-                    if let Some(svg) = self.svg_cache.get(url) {
+                    if let Some(svg) = self.lctx.svg_cache.borrow().get(url) {
                         let mut cmds =
                             svg_background_commands(svg, *rect, size, *position, *offset, *repeat);
                         rustkit_layout::tint_mask_commands(&mut cmds, *color);
@@ -8561,12 +8541,12 @@ impl Engine {
         document: &Document,
         external_stylesheets: &[Stylesheet],
     ) -> LayoutBox {
-        self.building_view.set(Some(id));
-        self.building_focus
+        self.lctx.building_view.set(Some(id));
+        self.lctx.building_focus
             .set(self.views.get(&id).and_then(|v| v.focused_node));
         let built = self.build_layout_from_document(document, external_stylesheets);
-        self.building_focus.set(None);
-        self.building_view.set(None);
+        self.lctx.building_focus.set(None);
+        self.lctx.building_view.set(None);
         built
     }
 
@@ -8612,22 +8592,22 @@ impl Engine {
         // viewport. Without a view (ad-hoc builds) there is no viewport to
         // ask, so conditional rules stay out rather than guessing a size.
         let viewport = self
-            .building_view
+            .lctx.building_view
             .get()
             .and_then(|id| self.view_viewport(id));
         let memo_key = StyleMemoKey {
-            view: self.building_view.get(),
+            view: self.lctx.building_view.get(),
             document: document as *const Document,
             external_sheets: external_stylesheets.len(),
             viewport,
-            focus: self.building_focus.get(),
+            focus: self.lctx.building_focus.get(),
             hover: self
-                .building_view
+                .lctx.building_view
                 .get()
                 .and_then(|id| self.views.get(&id))
                 .and_then(|v| v.hover_chain.first().copied()),
             active: self
-                .building_view
+                .lctx.building_view
                 .get()
                 .and_then(|id| self.views.get(&id))
                 .and_then(|v| v.active_chain.first().copied()),
@@ -8636,7 +8616,7 @@ impl Engine {
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
         // the sheets relayout built instead of walking the DOM again.
-        let traced = self.style_trace.borrow().is_some()
+        let traced = self.lctx.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
         if !traced && !self.building_view_has_edits() {
             if let Some(tree) = self.reused_tree(&memo_key) {
@@ -8659,7 +8639,7 @@ impl Engine {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
-        let inline_sheets = self.inline_sheets(document, self.building_view.get());
+        let inline_sheets = self.inline_sheets(document, self.lctx.building_view.get());
         let adopted = document.root().adopted_styles();
         // The fingerprint vouches for the `<style>` and `<link>` sheets
         // only. Adopted sheets are parsed fresh below, so with any the rule
@@ -8739,7 +8719,7 @@ impl Engine {
             true => None,
             false => {
                 let index = self.shared_rule_index(&stylesheets, fingerprint);
-                if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+                if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
                     *view.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
@@ -8761,7 +8741,7 @@ impl Engine {
         // page would let `hiwave_style` answer with a stale element that no
         // longer exists — the same class of lie as a gate reading a stale
         // snapshot.
-        if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
+        if let Some(trace) = self.lctx.style_trace.borrow_mut().as_mut() {
             trace.clear();
         }
 
@@ -8813,7 +8793,7 @@ impl Engine {
             .as_deref()
             .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
-        if let Some(view) = self.building_view.get().and_then(|id| self.views.get(&id)) {
+        if let Some(view) = self.lctx.building_view.get().and_then(|id| self.views.get(&id)) {
             view.html_clips.set(html_style.as_ref().is_some_and(|s| {
                 s.overflow_x != rustkit_css::Overflow::Visible
                     || s.overflow_y != rustkit_css::Overflow::Visible
@@ -8940,7 +8920,7 @@ impl Engine {
     /// True when the view being built holds typed text: a form control's
     /// box carries it, and the style memo's key does not cover it.
     fn building_view_has_edits(&self) -> bool {
-        self.building_view
+        self.lctx.building_view
             .get()
             .and_then(|id| self.views.get(&id))
             .is_some_and(|v| !v.edit_states.is_empty())
@@ -9057,7 +9037,7 @@ impl Engine {
         // Vector images: the SVG's own sizing (viewBox/width/height)
         // is the natural size the raster cache can't provide.
         let svg_size = Url::parse(src).ok().and_then(|u| {
-            self.svg_cache.get(u.as_str()).map(|svg| {
+            self.lctx.svg_cache.borrow().get(u.as_str()).map(|svg| {
                 svg.get_size(
                     explicit_width.unwrap_or(300.0),
                     explicit_height.unwrap_or(150.0),
@@ -9394,7 +9374,7 @@ impl Engine {
                     | rustkit_css::Length::Clamp(_)
                     | rustkit_css::Length::Calc(_)) => {
                         let viewport = self
-                            .building_view
+                            .lctx.building_view
                             .get()
                             .and_then(|id| self.view_viewport(id));
                         match viewport {
@@ -9546,7 +9526,8 @@ impl Engine {
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
                     let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
-                    let cached = self.svg_cache.get(&key);
+                    let svg_cache = self.lctx.svg_cache.borrow();
+                    let cached = svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
                     // axes auto it takes the containing block's width
@@ -9700,7 +9681,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9793,7 +9774,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9871,7 +9852,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.building_focus.get() == Some(node.id) {
+                    if self.lctx.building_focus.get() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9946,7 +9927,7 @@ impl Engine {
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
                 // focus ring without reaching back into engine state.
-                if self.building_focus.get() == Some(node.id) {
+                if self.lctx.building_focus.get() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                 }
 
@@ -11471,7 +11452,7 @@ impl Engine {
         // that decided it. A recorder that walked the rules again could
         // disagree with the cascade, and a diagnostic tool that disagrees
         // with the engine is worse than no tool.
-        let recording = self.style_trace.borrow().is_some();
+        let recording = self.lctx.style_trace.borrow().is_some();
         let mut records: Vec<DeclarationRecord> = Vec::new();
         let mut order = 0usize;
         // `ch` resolves against this element's own font, which is not final
@@ -11592,7 +11573,7 @@ impl Engine {
                     Self::computed_value_of(&style, p).map(|v| (p.to_string(), v))
                 })
                 .collect();
-            if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
+            if let Some(trace) = self.lctx.style_trace.borrow_mut().as_mut() {
                 trace.push(StyleRecord {
                     tag: tag_name.to_lowercase(),
                     id,
@@ -13785,7 +13766,7 @@ impl Engine {
     /// engine itself goes through `inline_sheets`.
     #[cfg(test)]
     fn extract_stylesheets(&self, document: &Document) -> Vec<Stylesheet> {
-        self.inline_sheets(document, self.building_view.get())
+        self.inline_sheets(document, self.lctx.building_view.get())
             .into_iter()
             .map(Rc::unwrap_or_clone)
             .collect()
@@ -14079,12 +14060,12 @@ impl Engine {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let xml = Self::inline_svg_markup(&svg_el);
             let key = Self::inline_svg_key(&xml);
-            if self.svg_cache.contains_key(&key) {
+            if self.lctx.svg_cache.borrow().contains_key(&key) {
                 continue;
             }
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
-                    self.svg_cache.insert(key, doc);
+                    self.lctx.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
                     debug!(?e, "Inline SVG failed to parse; box stays unpainted");
@@ -14102,12 +14083,13 @@ impl Engine {
     /// each svg box resolves its OWN selector prefix from its own identity.
     fn inline_svg_shape_index(&self, document: &Document) -> HashMap<String, InlineSvgShapes> {
         let mut index = HashMap::new();
+        let svg_cache = self.lctx.svg_cache.borrow();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
             if index.contains_key(&key) {
                 continue;
             }
-            let Some(svg) = self.svg_cache.get(&key) else {
+            let Some(svg) = svg_cache.get(&key) else {
                 // No parsed document means the box build took its cache-MISS
                 // exit and painted nothing, so there is no geometry to report.
                 continue;
@@ -14186,7 +14168,7 @@ impl Engine {
     /// painted nothing). A data: url needs no request, so this runs at the
     /// splice: the first layout paints it, and so does any later one.
     fn cache_data_svg(&mut self, url: &str) {
-        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.svg_cache.contains_key(url) {
+        if !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) || self.lctx.svg_cache.borrow().contains_key(url) {
             return;
         }
         let Ok((media_type, body)) = rustkit_net::decode_data_url(url) else {
@@ -14198,7 +14180,7 @@ impl Engine {
         }
         match rustkit_svg::SvgDocument::parse(&String::from_utf8_lossy(&body)) {
             Ok(doc) => {
-                self.svg_cache.insert(url.to_string(), image_svg(doc));
+                self.lctx.svg_cache.borrow_mut().insert(url.to_string(), image_svg(doc));
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -14426,7 +14408,7 @@ impl Engine {
         let mut loaded = 0;
         let mut requested = std::collections::HashSet::new();
         for (_src, url) in images {
-            if image_manager.is_cached(&url) || self.svg_cache.contains_key(url.as_str()) {
+            if image_manager.is_cached(&url) || self.lctx.svg_cache.borrow().contains_key(url.as_str()) {
                 debug!(%url, "Image already cached");
                 // The layout that found a script-added image already drew
                 // it from the cache; it is not a reason to lay out again.
@@ -14646,7 +14628,7 @@ impl Engine {
     /// The last part: keep what a fetch brought. Returns how many images
     /// the pass loaded.
     fn keep_fetched_images(&mut self, fetched: FetchedImages) -> usize {
-        self.svg_cache.extend(fetched.svgs);
+        self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         fetched.loaded
     }
 
@@ -15029,7 +15011,7 @@ impl Engine {
     /// for a view-less build).
     fn web_font_count(&self) -> usize {
         let base = self
-            .building_view
+            .lctx.building_view
             .get()
             .and_then(|id| self.views.get(&id))
             .and_then(|v| v.url.as_ref());
@@ -15306,7 +15288,7 @@ impl Engine {
         let external = match external.is_empty() {
             true => None,
             false => {
-                let own = &self.views.get(&self.building_view.get()?)?.external_stylesheets;
+                let own = &self.views.get(&self.lctx.building_view.get()?)?.external_stylesheets;
                 if !std::ptr::eq(own.as_slice(), external) {
                     return None;
                 }
@@ -17543,7 +17525,7 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
-        let borrowed = self.style_trace.borrow();
+        let borrowed = self.lctx.style_trace.borrow();
         let trace = borrowed.as_ref().ok_or_else(|| {
             EngineError::RenderError(
                 "style recording is off — call set_style_recording(true) before loading".into(),
@@ -22051,10 +22033,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         })
     }
 
@@ -22243,7 +22222,7 @@ mod tests {
         // builds a plain Block. An empty svg_cache is the default state of
         // `layout_only_engine()`.
         assert!(
-            engine.svg_cache.is_empty(),
+            engine.lctx.svg_cache.borrow().is_empty(),
             "this half of the guard is only meaningful on a cache miss"
         );
         let miss = engine.build_layout_from_document(&document, &[]);
@@ -22267,7 +22246,7 @@ mod tests {
         // capture went through.
         engine.cache_inline_svgs(&document);
         assert!(
-            !engine.svg_cache.is_empty(),
+            !engine.lctx.svg_cache.borrow().is_empty(),
             "the pre-pass did not parse the subtree, so the cache-hit exit \
              was never entered and this half asserted nothing"
         );
@@ -22796,10 +22775,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         // Build layout tree from document
@@ -22870,10 +22846,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -22959,10 +22932,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23148,10 +23118,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23245,10 +23212,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23362,10 +23326,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23443,10 +23404,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -23516,10 +23474,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23596,8 +23551,7 @@ mod tests {
             config: EngineConfig::default(),
             views: HashMap::new(),
             font_loader: Arc::new(FontLoader::new()),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
@@ -23606,8 +23560,6 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23710,10 +23662,7 @@ mod tests {
                 image_manager: Arc::new(ImageManager::new()),
                 event_tx,
                 event_rx: Some(event_rx),
-                style_trace: std::cell::RefCell::new(None),
-                svg_cache: std::collections::HashMap::new(),
-                building_focus: std::cell::Cell::new(None),
-                building_view: std::cell::Cell::new(None),
+                lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             };
             let mut layout = engine.build_layout_from_document(&document, &[]);
             let containing_block = Dimensions {
@@ -23816,10 +23765,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23900,10 +23846,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let mut layout = engine.build_layout_from_document(&document, &[]);
@@ -23986,10 +23929,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -24072,10 +24012,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -24152,16 +24089,14 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         engine.cache_inline_svgs(&document);
         // Two identical svgs, one content-addressed entry.
-        assert_eq!(engine.svg_cache.len(), 1, "identical svgs must share a cache entry");
-        let (key, doc) = engine.svg_cache.iter().next().unwrap();
+        assert_eq!(engine.lctx.svg_cache.borrow().len(), 1, "identical svgs must share a cache entry");
+        let svg_cache = engine.lctx.svg_cache.borrow();
+        let (key, doc) = svg_cache.iter().next().unwrap();
         assert!(key.starts_with("inline-svg:"), "cache key must carry the inline-svg scheme: {key}");
         // The parsed document carries the svg's own sizing and its rect.
         assert_eq!(doc.get_size(300.0, 150.0), (200.0, 150.0));
@@ -24189,7 +24124,7 @@ mod tests {
                 natural_height,
             } = &b.box_type
             {
-                assert!(engine.svg_cache.contains_key(url), "Image box key must hit the cache: {url}");
+                assert!(engine.lctx.svg_cache.borrow().contains_key(url), "Image box key must hit the cache: {url}");
                 assert_eq!((*natural_width, *natural_height), (200.0, 150.0));
             }
             assert!(b.children.is_empty(), "svg children must not generate boxes");
@@ -24234,10 +24169,7 @@ mod tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
         let layout = engine.build_layout_from_document(&document, &[]);
@@ -26481,7 +26413,9 @@ mod svg_image_tests {
         let svg = rustkit_svg::SvgDocument::parse(r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"></svg>"#)
             .expect("parse svg");
         engine
+            .lctx
             .svg_cache
+            .borrow_mut()
             .insert("https://example.com/logo.svg".to_string(), svg);
 
         let mut attrs = HashMap::new();
@@ -26801,10 +26735,7 @@ mod web_font_tests {
             image_manager: Arc::new(ImageManager::new()),
             event_tx,
             event_rx: Some(event_rx),
-            style_trace: std::cell::RefCell::new(None),
-            svg_cache: std::collections::HashMap::new(),
-            building_focus: std::cell::Cell::new(None),
-            building_view: std::cell::Cell::new(None),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         Some(LockedEngine {
             engine,
@@ -32901,7 +32832,7 @@ document.currentScript.remove();
             "stalled raster image must not be cached after the budget"
         );
         assert!(
-            !engine.svg_cache.contains_key(slow_svg.as_str()),
+            !engine.lctx.svg_cache.borrow().contains_key(slow_svg.as_str()),
             "stalled SVG must not enter the SVG cache after the budget"
         );
     }
@@ -39422,9 +39353,10 @@ mod svg_content_type_tests {
         });
         let typed = format!("http://127.0.0.1:{port}/h/typed");
         let untyped = format!("http://127.0.0.1:{port}/h/untyped");
-        let doc = engine.svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
+        let svg_cache = engine.lctx.svg_cache.borrow();
+        let doc = svg_cache.get(&typed).expect("image/svg+xml img must land in the SVG cache");
         assert_eq!(doc.get_size(0.0, 0.0), (40.0, 20.0));
-        assert!(!engine.svg_cache.contains_key(&untyped), "SVG is never sniffed from bytes");
+        assert!(!engine.lctx.svg_cache.borrow().contains_key(&untyped), "SVG is never sniffed from bytes");
     }
 }
 
