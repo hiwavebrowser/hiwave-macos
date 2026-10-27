@@ -10,7 +10,14 @@
          cascade drops, so the red box paints unfiltered:
          e. grayscale (1)   f. grayscale(inf)
          g. brightness(NaN)
-  Results: see the header of the PR (#790 follow-up).
+  RustKit vs Chrome (parity-capture vs headless CfT 148, exact RGB compare):
+    develop 4a657f08: 30344 px (e-g greyed: `name (`, inf, NaN accepted;
+                      plus 344 px antialiasing on b and c's curved edges)
+    this branch:        344 px, bbox [190,30,409,109], the curved clip
+                      edges of b and c only (as css_clip_path.html's 770).
+  Order today: filter > transform > clip, i.e. clip then filter; same
+  pixels as Chrome's filter-then-clip for colour matrices. Once blur or
+  drop-shadow paint, the clip must wrap the filter.
 -->
 <html><head><style>
 body { margin: 0; background: #fff; }

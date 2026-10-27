@@ -4,8 +4,14 @@
   MAX_OPACITY_LAYERS (256) budget that filter and opacity layers share, so
   every group falls back to the per-command path. 800x600, DPR 1, against
   Chrome 148.0.7778.216. Even cells: invert(1) on red with a blue child
-  (-> cyan, yellow). Odd cells: grayscale(1) + opacity:.5. Nothing overlaps
-  inside a group, so the per-vertex fallback is exact here.
+  (-> cyan, yellow). Odd cells: grayscale(1) + opacity:.5.
+  RustKit vs Chrome (parity-capture vs headless CfT 148, exact RGB compare):
+    develop 4a657f08: 252000 px (every cell unfiltered past the budget)
+    this branch:       27440 px = 140 odd cells x the 14x14 child. Per
+                      vertex, the child is faded over its faded parent;
+                      Chrome fades the group as one picture. That is the
+                      opacity fallback's existing approximation. Even
+                      (invert) cells match exactly.
 -->
 <html><head><style>
 body { margin: 0; background: #fff; }

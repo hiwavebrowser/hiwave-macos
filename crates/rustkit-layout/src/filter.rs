@@ -4,7 +4,14 @@
 //! equivalent `feColorMatrix` / `feComponentTransfer`, composed in order.
 //!
 //! `blur()`, `drop-shadow()` and `url()` are not colour matrices; they are
-//! skipped, so the rest of the list still applies.
+//! skipped, so the rest of the list still applies. For `url()` that is what
+//! Chrome 148 paints when the reference is missing, external or not a
+//! `<filter>`; a list mixing in `blur()` or `drop-shadow()` paints only its
+//! colour functions.
+//!
+//! Invalid values give `None`, as the cascade would drop the declaration:
+//! a non-finite or negative amount, an unknown function, or whitespace
+//! between a function's name and its `(`.
 
 /// A 4x5 row-major colour matrix: `[r' g' b' a']` from `[r g b a 1]`.
 pub type ColorMatrix = [f32; 20];
@@ -27,7 +34,13 @@ pub fn filter_color_matrix(value: &str) -> Option<ColorMatrix> {
     }
     while !rest.is_empty() {
         let open = rest.find('(')?;
-        let name = rest[..open].trim().to_ascii_lowercase();
+        // A function token is `name(` (CSS Syntax 3 §4.3.4): an empty name
+        // or whitespace before the paren is not a filter function.
+        let name = &rest[..open];
+        if name.is_empty() || name.contains(|c: char| c.is_whitespace()) {
+            return None;
+        }
+        let name = name.to_ascii_lowercase();
         let close = matching_paren(rest, open)?;
         let arg = rest[open + 1..close].trim();
         rest = rest[close + 1..].trim_start();
@@ -138,19 +151,27 @@ fn function_matrix(name: &str, arg: &str) -> Option<Option<ColorMatrix>> {
 /// `<number> | <percentage>`.
 fn amount(arg: &str) -> Option<f32> {
     match arg.strip_suffix('%') {
-        Some(pct) => pct.trim().parse::<f32>().ok().map(|v| v / 100.0),
-        None => arg.parse::<f32>().ok(),
+        Some(pct) => number(pct.trim()).map(|v| v / 100.0),
+        None => number(arg),
     }
+}
+
+/// A CSS `<number>`. `f32::from_str` also takes `inf`, `infinity` and
+/// `NaN`, which in CSS are identifiers, so they void the declaration. A
+/// finite value past `f32`'s range saturates rather than becoming infinite.
+fn number(s: &str) -> Option<f32> {
+    let v = s.parse::<f64>().ok().filter(|v| v.is_finite())?;
+    Some(v.clamp(f32::MIN as f64, f32::MAX as f64) as f32)
 }
 
 /// `<angle> | <zero>` in degrees.
 fn angle_deg(arg: &str) -> Option<f32> {
     for (unit, per) in [("deg", 1.0), ("grad", 0.9), ("rad", 180.0 / std::f32::consts::PI), ("turn", 360.0)] {
         if let Some(v) = arg.strip_suffix(unit) {
-            return v.trim().parse::<f32>().ok().map(|v| v * per);
+            return number(v.trim()).map(|v| v * per);
         }
     }
-    (arg.parse::<f32>().ok()? == 0.0).then_some(0.0)
+    (number(arg)? == 0.0).then_some(0.0)
 }
 
 fn hue_rotate(deg: f32) -> ColorMatrix {
@@ -266,7 +287,7 @@ mod tests {
         .collect::<Vec<_>>();
         assert!(applied.is_empty(), "applied: {applied:?}");
         // Still valid: adjacent functions, exponents, signs, case.
-        for value in ["grayscale(1)sepia(1)", "brightness(1e-1)", "brightness(+.5)", "INVERT(1)", " invert(1) "] {
+        for value in ["grayscale(1)sepia(1)", "brightness(1e-1)", "brightness(+.5)", "brightness(1e39)", "INVERT(1)", " invert(1) "] {
             assert!(filter_color_matrix(value).is_some(), "{value}");
         }
 

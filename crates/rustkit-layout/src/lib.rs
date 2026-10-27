@@ -8770,6 +8770,17 @@ impl DisplayList {
 
         // `filter` applies before opacity (Filter Effects 1 §5), so its
         // group sits inside the opacity scope.
+        //
+        // TODO(filter blur/drop-shadow): the filter group is opened outside
+        // the transform and the `clip-path` clip below, so today the clip
+        // runs on the content first and the filter after. For the colour
+        // matrices supported now that paints the same as Chrome, which
+        // filters first and then clips (filter -> clip -> mask -> opacity,
+        // in the element's transformed space), because a matrix is per
+        // pixel. Once `blur()` or `drop-shadow()` paint, the clip must wrap
+        // the filter: they bleed past the box, and Chrome clips that bleed
+        // away. Pinned by
+        // `rustkit_engine::filter_pins::filter_with_clip_path_clips_inside_the_filter_group`.
         let filter_matrix = if layout_box.style.filter.is_empty() {
             None
         } else {
