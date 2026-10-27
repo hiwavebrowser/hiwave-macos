@@ -1822,7 +1822,10 @@ const WRAPPERS_JS: &str = r#"
         }
         return o[SLOT];
     }
-    function write(op, parent, node, child, method) {
+    // `replacing`: `child` is the node this call takes out (replaceChild,
+    // and replaceWith while `this` is still in place), so the Document
+    // checks do not count it.
+    function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
         function here(s) { return s.gen === gen ? s.id : -1; }
@@ -1830,8 +1833,7 @@ const WRAPPERS_JS: &str = r#"
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c,
-                           method === 'replaceChild' || method === 'replaceWith');
+        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
@@ -1872,7 +1874,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var self = this;
         return batch(function () {
-            write('insert', self, node, child, 'replaceChild');
+            write('insert', self, node, child, 'replaceChild', true);
             return write('remove', self, child, null, 'replaceChild');
         });
     };
@@ -1890,8 +1892,8 @@ const WRAPPERS_JS: &str = r#"
         nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
         return nodes;
     }
-    function insertAll(parent, nodes, ref, method) {
-        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    function insertAll(parent, nodes, ref, method, replacing) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method, replacing); });
     }
     // DOM queues one record per call of these; they make several writes,
     // which an observer merges into one while `fn` runs.
@@ -1948,7 +1950,7 @@ const WRAPPERS_JS: &str = r#"
             var self = this, nodes = toNodes(args);
             batch(function () {
                 if (self.parentNode === p) {
-                    insertAll(p, nodes, self, 'replaceWith');
+                    insertAll(p, nodes, self, 'replaceWith', true);
                     p.removeChild(self);
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');
