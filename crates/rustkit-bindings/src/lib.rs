@@ -3534,6 +3534,22 @@ mod tests {
         assert_eq!(threw("document.appendChild(document.createTextNode('x'))"), "HierarchyRequestError");
         // A comment is fine anywhere in a document.
         assert_eq!(threw("document.appendChild(document.createComment('c'))"), "no throw");
+        // replaceWith of a node that is one of its own arguments: it leaves
+        // first, so nothing is replaced and the root still counts (#804 R1).
+        assert_eq!(
+            threw(
+                "var c = document.createComment('r'); document.insertBefore(c, document.documentElement); \
+                 c.replaceWith(c, document.createElement('html'))"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "String(Array.prototype.filter.call(document.childNodes, function (n) { return n.nodeType === 1; }).length)"
+            ),
+            "1"
+        );
         // Without a root: no element before the doctype, no two elements
         // from one fragment.
         assert_eq!(
@@ -3553,7 +3569,7 @@ mod tests {
         );
         assert_eq!(
             eval_string(&b, "[document.documentElement, document.childNodes.length].join()"),
-            ",2"
+            ",3"
         );
     }
 
