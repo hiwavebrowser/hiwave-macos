@@ -1649,6 +1649,8 @@
 
                 // The page has not answered a live query in time (T6c): say
                 // so and grey the last tree, which is kept. `null` clears it.
+                // `domTreeContainer` is `#dom-tree`, a sibling of the busy
+                // line, so the line itself is not greyed.
                 setPageBusy: function(text) {
                     const busy = document.getElementById('page-busy');
                     busy.textContent = text || '';
