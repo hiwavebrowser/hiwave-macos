@@ -2726,6 +2726,10 @@ pub struct ComputedStyle {
 
     // Backdrop filter (blur, grayscale, etc.)
     pub backdrop_filter: BackdropFilter,
+    /// `filter` (Filter Effects 1 §5) as declared, lowercased; empty is
+    /// `none`. Paint reads the colour-matrix functions from it
+    /// (`rustkit_layout::filter_color_matrix`). Not inherited.
+    pub filter: String,
 
     // Image/replaced element
     pub image_url: Option<String>,
