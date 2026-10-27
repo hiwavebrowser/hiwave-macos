@@ -39,8 +39,15 @@ def main():
     args = ap.parse_args()
 
     binary = args.binary or find_binary()
-    out = args.keep or pathlib.Path(tempfile.mkdtemp(prefix="diagnose-"))
-    out.mkdir(parents=True, exist_ok=True)
+    if args.keep:
+        args.keep.mkdir(parents=True, exist_ok=True)
+        return diagnose(args, binary, args.keep)
+    # The capture's files go with the temporary directory.
+    with tempfile.TemporaryDirectory(prefix="diagnose-") as out:
+        return diagnose(args, binary, pathlib.Path(out))
+
+
+def diagnose(args, binary, out):
     cmd = [
         str(binary),
         "--url", args.url,
@@ -52,10 +59,11 @@ def main():
     ]
     if args.shield:
         cmd.append("--shield")
-    run = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    run = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     text = out / "report.txt"
     if not text.exists():
-        sys.exit(f"no report (exit {run.returncode}): {run.stdout[-500:]}")
+        # The capture says why on stderr.
+        sys.exit(f"no report (exit {run.returncode})\nstdout: {run.stdout[-500:]}\nstderr: {run.stderr[-1500:]}")
     print(text.read_text(), end="")
     if args.keep:
         print(f"\nkept: {out}/report.json, {out}/events.jsonl")
