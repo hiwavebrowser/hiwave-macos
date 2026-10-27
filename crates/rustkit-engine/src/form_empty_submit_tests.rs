@@ -43,7 +43,7 @@ fn a_get_form_with_only_unnamed_controls_still_submits_to_action() {
         "https://example.com/page",
     );
     let input = find_by_tag(&doc.root(), "input").expect("input");
-    engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+    engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
 
     let sub = engine
         .form_submission_for_focus(id)
@@ -70,7 +70,7 @@ fn a_get_form_with_a_named_control_keeps_only_successful_entries() {
         "https://example.com/",
     );
     let input = find_by_tag(&doc.root(), "input").expect("input");
-    engine.views.get_mut(&id).unwrap().focused_node = Some(input.id);
+    engine.views.get_mut(&id).unwrap().lay.focused_node.set(Some(input.id));
 
     let sub = engine.form_submission_for_focus(id).expect("submission");
     assert!(
