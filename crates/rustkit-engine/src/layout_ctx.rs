@@ -67,7 +67,8 @@ impl Default for LayoutCtx {
 /// build starts.
 pub(crate) struct BuildView {
     pub(crate) id: EngineViewId,
-    pub(crate) lay: Rc<ViewLayout>,
+    /// `None` when the view is not (or no longer) in the engine.
+    pub(crate) lay: Option<Rc<ViewLayout>>,
     /// The document's URL: relative resource URLs and the font partition.
     pub(crate) url: Option<Url>,
     /// The viewport in CSS px: the headless bounds, else the host surface.
@@ -76,6 +77,9 @@ pub(crate) struct BuildView {
     /// so the alternative was checking "is this node focused in ANY view",
     /// which would mark a node focused in one view while building another.
     pub(crate) focus: Option<rustkit_dom::NodeId>,
+    /// The view's `<link>` sheets: the rule-index fingerprint vouches for
+    /// them only when the build was handed this very list.
+    pub(crate) external_sheets: Rc<Vec<rustkit_css::Stylesheet>>,
 }
 
 impl LayoutCtx {
@@ -84,7 +88,7 @@ impl LayoutCtx {
     }
 
     pub(crate) fn building_lay(&self) -> Option<Rc<ViewLayout>> {
-        self.building.borrow().as_ref().map(|b| b.lay.clone())
+        self.building.borrow().as_ref().and_then(|b| b.lay.clone())
     }
 
     pub(crate) fn building_focus(&self) -> Option<rustkit_dom::NodeId> {

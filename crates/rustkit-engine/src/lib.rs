@@ -8498,12 +8498,17 @@ impl Engine {
         let view = self.views.get(&id);
         *self.lctx.building.borrow_mut() = Some(Rc::new(layout_ctx::BuildView {
             id,
-            lay: view.map(|v| v.lay.clone()).unwrap_or_default(),
+            lay: view.map(|v| v.lay.clone()),
             url: view.and_then(|v| v.url.clone()),
             viewport: self.view_viewport(id),
             focus: view.and_then(|v| v.lay.focused_node.get()),
+            external_sheets: view.map(|v| v.external_stylesheets.clone()).unwrap_or_default(),
         }));
-        let built = self.build_layout_from_document(document, external_stylesheets);
+        let built = self.lctx.build_layout_from_document(
+            document,
+            external_stylesheets,
+            self.config.javascript_enabled,
+        );
         *self.lctx.building.borrow_mut() = None;
         built
     }
@@ -8539,34 +8544,44 @@ impl Engine {
         }
     }
 
+    /// A build outside `build_layout_for_view` (no view: tests and ad-hoc
+    /// builds), with the engine's scripting setting.
+    fn build_layout_from_document(&self, document: &Document, external_stylesheets: &[Stylesheet]) -> LayoutBox {
+        self.lctx
+            .build_layout_from_document(document, external_stylesheets, self.config.javascript_enabled)
+    }
+}
+
+impl layout_ctx::LayoutCtx {
     fn build_layout_from_document(
         &self,
         document: &Document,
         external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
     ) -> LayoutBox {
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
         // `@media` rules apply only where their queries match this view's
         // viewport. Without a view (ad-hoc builds) there is no viewport to
         // ask, so conditional rules stay out rather than guessing a size.
-        let viewport = self.lctx.building_viewport();
+        let viewport = self.building_viewport();
         let memo_key = StyleMemoKey {
-            view: self.lctx.building_id(),
+            view: self.building_id(),
             document: document as *const Document,
             external_sheets: external_stylesheets.len(),
             viewport,
-            focus: self.lctx.building_focus(),
-            hover: self.lctx.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
-            active: self.lctx.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
-            fonts: self.lctx.web_font_count(),
+            focus: self.building_focus(),
+            hover: self.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
+            active: self.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
+            fonts: self.web_font_count(),
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
         // the sheets relayout built instead of walking the DOM again.
-        let traced = self.lctx.style_trace.borrow().is_some()
+        let traced = self.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
-        if !traced && !self.lctx.building_view_has_edits() {
-            if let Some(tree) = self.lctx.reused_tree(&memo_key) {
+        if !traced && !self.building_view_has_edits() {
+            if let Some(tree) = self.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -8586,7 +8601,7 @@ impl Engine {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
-        let inline_sheets = self.inline_sheets(document, self.lctx.building_id());
+        let inline_sheets = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
         let adopted = document.root().adopted_styles();
         // The fingerprint vouches for the `<style>` and `<link>` sheets
         // only. Adopted sheets are parsed fresh below, so with any the rule
@@ -8619,7 +8634,7 @@ impl Engine {
             }
         }
 
-        Self::keep_rules_for_viewport(&mut stylesheets, viewport);
+        Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
         // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
         rustkit_css::assign_layer_order(&mut stylesheets);
         // The document tree's sheets. Shared, so the build can hand them
@@ -8630,14 +8645,14 @@ impl Engine {
             document,
             &stylesheets,
             viewport,
-            self.config.javascript_enabled,
+            javascript_enabled,
         );
 
         // Sub-phase marks for the "Cascade timing" line: sheet copy and
         // `@media` filter, custom-property extraction, rule index, walk.
         let mark = || cascade_started.map(|_| std::time::Instant::now());
         let vars_started = mark();
-        let css_vars = self.lctx.extract_css_variables(&stylesheets);
+        let css_vars = self.extract_css_variables(&stylesheets);
         let index_started = mark();
         // The `::first-letter` scan runs only on a page with some
         // `@container` rule (#782 R2 nit).
@@ -8665,8 +8680,8 @@ impl Engine {
         let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
             true => None,
             false => {
-                let index = self.lctx.shared_rule_index(&stylesheets, fingerprint);
-                if let Some(lay) = self.lctx.building_lay() {
+                let index = self.shared_rule_index(&stylesheets, fingerprint);
+                if let Some(lay) = self.building_lay() {
                     *lay.rule_reads.borrow_mut() = Some(index.clone());
                 }
                 Some(RuleIndexScope::install_for(RuleIndex::source_of(&stylesheets), index))
@@ -8688,7 +8703,7 @@ impl Engine {
         // page would let `hiwave_style` answer with a stale element that no
         // longer exists — the same class of lie as a gate reading a stale
         // snapshot.
-        if let Some(trace) = self.lctx.style_trace.borrow_mut().as_mut() {
+        if let Some(trace) = self.style_trace.borrow_mut().as_mut() {
             trace.clear();
         }
 
@@ -8719,7 +8734,7 @@ impl Engine {
             {
                 let _relational = RelationalNodeScope::enter(Some(html.clone()));
                 Some(memoized_style(html.id, || {
-                    self.lctx.compute_style_for_element(
+                    self.compute_style_for_element(
                         tag_name,
                         attributes,
                         &stylesheets,
@@ -8740,7 +8755,7 @@ impl Engine {
             .as_deref()
             .map(|s| container_query::ElementScope::enter(s, None, Some("html")));
 
-        if let Some(lay) = self.lctx.building_lay() {
+        if let Some(lay) = self.building_lay() {
             lay.html_clips.set(html_style.as_ref().is_some_and(|s| {
                 s.overflow_x != rustkit_css::Overflow::Visible
                     || s.overflow_y != rustkit_css::Overflow::Visible
@@ -8768,14 +8783,14 @@ impl Engine {
                 })
                 .into_iter()
                 .collect();
-            let body_box = self.lctx.build_layout_from_parent_style_and_path(
+            let body_box = self.build_layout_from_parent_style_and_path(
                 &body,
                 &stylesheets,
                 &css_vars,
                 &root_ancestor,
                 html_style.as_deref(),
                 &[],
-                SiblingContext::SOLE.with_children(Self::node_has_children(&body)),
+                SiblingContext::SOLE.with_children(Engine::node_has_children(&body)),
                 "body",
                 &element_ids,
                 false,
@@ -8836,7 +8851,7 @@ impl Engine {
             // Fallback: use html element if no body
             debug!("No body found, using html element");
             let html_box =
-                self.lctx.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
+                self.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
             root_box.children.push(html_box);
         } else {
             warn!("No body or html element found!");
@@ -8859,10 +8874,13 @@ impl Engine {
             );
         }
         if let Some(build) = &style_memo {
-            self.lctx.snapshot_tree(build, &root_box);
+            self.snapshot_tree(build, &root_box);
         }
         root_box
     }
+}
+
+impl Engine {
 
 }
 
@@ -13750,17 +13768,13 @@ impl Engine {
     /// elements regardless, so the collectors leave them out here. Google's
     /// results page hides everything from such a sheet.
     fn sheet_element_counts(&self, element: &Rc<Node>) -> bool {
-        if !self.config.javascript_enabled {
-            return true;
-        }
-        let mut ancestor = element.parent();
-        while let Some(node) = ancestor {
-            if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
-                return false;
-            }
-            ancestor = node.parent();
-        }
-        true
+        sheet_element_counts(self.config.javascript_enabled, element)
+    }
+
+    /// The document's `<style>` sheets for `view` (see the ctx's).
+    fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
+        let lay = view.and_then(|id| self.views.get(&id)).map(|v| &*v.lay);
+        self.lctx.inline_sheets(document, lay, self.config.javascript_enabled)
     }
 
     /// The document's `<style>` sheets, as copies a test may change. The
@@ -13773,16 +13787,24 @@ impl Engine {
             .collect()
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The parsed sheet of each `<style>` element the document has, in
     /// tree order. Parsing is a function of the text alone (no base URL,
     /// no `media` attribute, nothing from the element), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
-    fn inline_sheets(&self, document: &Document, view: Option<EngineViewId>) -> Vec<Rc<Stylesheet>> {
+    fn inline_sheets(
+        &self,
+        document: &Document,
+        lay: Option<&layout_ctx::ViewLayout>,
+        javascript_enabled: bool,
+    ) -> Vec<Rc<Stylesheet>> {
         let mut texts = Vec::new();
         for style_el in document.get_elements_by_tag_name("style") {
-            if !self.sheet_element_counts(&style_el) {
+            if !sheet_element_counts(javascript_enabled, &style_el) {
                 continue;
             }
             let mut css_text = String::new();
@@ -13804,11 +13826,29 @@ impl Engine {
             cache.end_lookup();
             sheets
         };
-        match view.and_then(|id| self.views.get(&id)) {
-            Some(view) => lookup(&mut view.lay.sheet_cache.borrow_mut()),
+        match lay {
+            Some(lay) => lookup(&mut lay.sheet_cache.borrow_mut()),
             None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
         }
     }
+}
+
+/// [`Engine::sheet_element_counts`] for a given scripting setting.
+fn sheet_element_counts(javascript_enabled: bool, element: &Rc<Node>) -> bool {
+    if !javascript_enabled {
+        return true;
+    }
+    let mut ancestor = element.parent();
+    while let Some(node) = ancestor {
+        if node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("noscript")) {
+            return false;
+        }
+        ancestor = node.parent();
+    }
+    true
+}
+
+impl Engine {
 
     /// Discover external stylesheets from <link> elements.
     fn discover_external_stylesheets(
@@ -15297,6 +15337,9 @@ impl layout_ctx::LayoutCtx {
 
 impl Engine {
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
     /// and the view's external list (likewise), plus the viewport the
@@ -15315,7 +15358,8 @@ impl Engine {
         let external = match external.is_empty() {
             true => None,
             false => {
-                let own = &self.views.get(&self.lctx.building_id()?)?.external_stylesheets;
+                let building = self.building.borrow();
+                let own = &building.as_ref()?.external_sheets;
                 if !std::ptr::eq(own.as_slice(), external) {
                     return None;
                 }
@@ -15328,6 +15372,9 @@ impl Engine {
             external,
         })
     }
+}
+
+impl Engine {
 
 }
 
