@@ -283,18 +283,26 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// Runs `inner` with the page's diagnostic nav id set around every poll,
-/// restoring the worker's own after: a task on the multi-thread runtime can
-/// move between workers between polls, so setting it once at the start is
-/// not enough (T7 B2).
+/// Runs `inner` with the page's diagnostic nav id (and, in tests, the
+/// `HIWAVE_CONSOLE_LOG` switch and sink) set around every poll, restoring
+/// the worker's own after: a task on the multi-thread runtime can move
+/// between workers between polls, so setting them once at the start is not
+/// enough (T7 B2). Taken on the page thread when the task is spawned.
 struct DiagContext<F> {
     nav: u64,
+    #[cfg(test)]
+    hooks: crate::console_log::TestHooks,
     inner: Pin<Box<F>>,
 }
 
 impl<F: Future> DiagContext<F> {
     fn new(inner: F) -> Self {
-        DiagContext { nav: rustkit_js::diag_nav(), inner: Box::pin(inner) }
+        DiagContext {
+            nav: rustkit_js::diag_nav(),
+            #[cfg(test)]
+            hooks: crate::console_log::test_hooks(),
+            inner: Box::pin(inner),
+        }
     }
 }
 
@@ -304,7 +312,11 @@ impl<F: Future> Future for DiagContext<F> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<F::Output> {
         let before = rustkit_js::diag_nav();
         rustkit_js::set_diag_nav(self.nav);
+        #[cfg(test)]
+        let hooks_before = crate::console_log::swap_test_hooks(self.hooks.clone());
         let polled = self.inner.as_mut().poll(cx);
+        #[cfg(test)]
+        crate::console_log::swap_test_hooks(hooks_before);
         rustkit_js::set_diag_nav(before);
         polled
     }
@@ -314,19 +326,37 @@ impl<F: Future> Future for DiagContext<F> {
 /// the page's.
 const TASK_PANICKED: &str = "engine failure: request task panicked";
 
+/// A request to this path panics where the policy runs (T7 test 10, C3).
+#[cfg(test)]
+pub(crate) const TASK_PANIC_PATH: &str = "/__t7_task_panic";
+
+/// Most live script requests one view has out on the network runtime
+/// (T7 S2). In flight is capped by the policy (24 per page, 6 per origin),
+/// but a task parked behind those caps still holds its request; this bounds
+/// what one page can park in the process-wide runtime. Ten times the page
+/// cap, so a page within the policy's caps never meets it.
+pub(crate) const MAX_LIVE_NET_TASKS: usize = 240;
+
+/// The reason a request past [`MAX_LIVE_NET_TASKS`] is refused with, as the
+/// inserted-script queue says it.
+const TOO_MANY_REQUESTS: &str = "too many script requests";
+
 /// Start `request` for the live loop; it fails as a network error at
 /// `deadline`. On the network runtime the request record is made here, on
 /// the page thread at request start (its document, the URL scrub), and the
 /// rest runs and is recorded on a `rustkit-net` worker; [`settle_live`]
 /// only takes the outcome. Without it, nothing runs until [`settle_live`]
 /// polls it. Which of the two is chosen before the request record, so it is
-/// never made twice (T7 C2).
+/// never made twice (T7 C2). `out` is how many the view has out already:
+/// past [`MAX_LIVE_NET_TASKS`] nothing is spawned and the request fails at
+/// once, recorded on the page.
 pub(crate) fn start_live(
     policy: Arc<FetchPolicy>,
     loader: Arc<ResourceLoader>,
     request: NetRequest,
     deadline: tokio::time::Instant,
     inspector: Arc<Inspector>,
+    out: usize,
 ) -> LiveRequest {
     let id = request.id;
     let Some(net) = net_runtime() else {
@@ -339,6 +369,14 @@ pub(crate) fn start_live(
         Ok(started) => started,
         Err(refused) => return Box::pin(std::future::ready((id, refused))),
     };
+    if out >= MAX_LIVE_NET_TASKS {
+        debug!(id, out, "Script request over the view's task cap");
+        log_request(&started.method, &started.url, "-", "error");
+        if let Some(guard) = started.guard {
+            guard.fail(FailureStage::Policy, TOO_MANY_REQUESTS);
+        }
+        return Box::pin(std::future::ready((id, NetDelivery::Error(NETWORK_ERROR.into()))));
+    }
     let task = net.spawn(DiagContext::new(async move {
         let outcome = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
         // The outcome is ready: the page's next live turn takes it now,
@@ -466,10 +504,13 @@ async fn finish(
     use futures::FutureExt as _;
     let Started { id, script_request, guard, method, url } = started;
     let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-    let sent = AssertUnwindSafe(tokio::time::timeout_at(
-        deadline,
-        policy.execute_waited(loader, script_request, wait.as_ref()),
-    ))
+    let sent = AssertUnwindSafe(async {
+        #[cfg(test)]
+        if script_request.url.path() == TASK_PANIC_PATH {
+            panic!("injected request task panic");
+        }
+        tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await
+    })
     .catch_unwind()
     .await;
     let Ok(sent) = sent else {

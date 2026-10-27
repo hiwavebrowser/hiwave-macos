@@ -1743,6 +1743,109 @@ mod tests {
         assert!(wait_recv(&mut behind, Duration::from_secs(5)).is_some());
     }
 
+    /// A server whose `/hang` answers only when released (or after 10 s),
+    /// and a loaded page from it with the panel attached.
+    fn hanging_page() -> (ContentThread, u16, Arc<AtomicBool>) {
+        let (port, release, _seen) = serve(|path, release| {
+            if path.starts_with("/hang") {
+                let until = Instant::now() + Duration::from_secs(10);
+                while !release.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return (200, "text/plain", b"late".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })));
+        let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(crate::DevtoolsAnswer::Done));
+        let mut started = page.eval("fetch('/hang'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !read_network(&page, Duration::from_secs(1))
+            .is_some_and(|n| n.requests.iter().any(|r| r.url.ends_with("/hang")))
+        {
+            assert!(Instant::now() < deadline, "the fetch never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (page, port, release)
+    }
+
+    #[test]
+    fn a_navigation_mid_flight_records_one_cancel_in_the_old_document() {
+        // T7 test 2: the task is aborted; its guard records the cancel in
+        // the document the request started in, never a response, and the
+        // new document's list does not show it.
+        let (page, port, release) = hanging_page();
+        let old_doc = read_network(&page, Duration::from_secs(1)).unwrap().doc;
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/next.html")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })));
+        let inspector = page.devtools_inspector().unwrap();
+        let hang_id = |records: &[crate::InspectorRecord]| {
+            records.iter().find_map(|r| match &r.event {
+                crate::InspectorEvent::Request { id, url, .. } if url.ends_with("/hang") => Some(*id),
+                _ => None,
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let terminals = loop {
+            let records = inspector.snapshot_since(0).records;
+            let id = hang_id(&records).expect("the request record is gone");
+            let terminals: Vec<_> = records
+                .into_iter()
+                .filter(|r| {
+                    matches!(&r.event, crate::InspectorEvent::Response { id: i, .. } | crate::InspectorEvent::Failure { id: i, .. } if *i == id)
+                })
+                .collect();
+            if !terminals.is_empty() || Instant::now() >= deadline {
+                break terminals;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Let the server answer now: an aborted task writes nothing more.
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(terminals.len(), 1, "not exactly one terminal record: {terminals:?}");
+        assert!(
+            matches!(&terminals[0].event, crate::InspectorEvent::Failure { stage: crate::inspector::FailureStage::Cancelled, .. }),
+            "{terminals:?}"
+        );
+        assert_eq!(terminals[0].doc, old_doc, "the cancel is not in the document the request started in");
+        let records = inspector.snapshot_since(0).records;
+        let id = hang_id(&records).unwrap();
+        let after = records
+            .iter()
+            .filter(|r| matches!(&r.event, crate::InspectorEvent::Response { id: i, .. } | crate::InspectorEvent::Failure { id: i, .. } if *i == id))
+            .count();
+        assert_eq!(after, 1, "a record was written after the cancel");
+        let network = read_network(&page, Duration::from_secs(1)).unwrap();
+        assert_ne!(network.doc, old_doc);
+        assert!(!network.requests.iter().any(|r| r.url.ends_with("/hang")), "the old page's request is listed: {network:?}");
+    }
+
+    #[test]
+    fn a_closed_view_frees_its_inspector_with_a_request_out() {
+        // T7 test 3 (S5): the task holds the view's Inspector only until its
+        // abort is processed.
+        let (page, _port, release) = hanging_page();
+        let weak = Arc::downgrade(&page.devtools_inspector().unwrap());
+        drop(page);
+        let closed = Instant::now();
+        while weak.upgrade().is_some() && closed.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(weak.upgrade().is_none(), "the closed view's Inspector is still held after 3 s");
+    }
+
     /// A plain `fetch` queued while a response is delivered, in the same
     /// turn as `location.href`, is handed to the network before the
     /// document can be replaced. That is h16's start beacon: not

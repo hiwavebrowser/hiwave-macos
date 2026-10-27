@@ -352,6 +352,8 @@ mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
 #[cfg(test)]
+mod script_net_t7_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -4523,13 +4525,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(
-                        requests
-                            .into_iter()
-                            .map(|request| {
-                                script_net::start_live(policy.clone(), loader.clone(), request, deadline, inspector.clone())
-                            }),
-                    );
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
+                            policy.clone(),
+                            loader.clone(),
+                            request,
+                            deadline,
+                            inspector.clone(),
+                            out,
+                        ));
+                    }
                 }
                 Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
@@ -4588,15 +4594,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) if !requests.is_empty() => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(requests.into_iter().map(|request| {
-                        script_net::start_live(
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
                             policy.clone(),
                             loader.clone(),
                             request,
                             deadline,
                             inspector.clone(),
-                        )
-                    }));
+                            out,
+                        ));
+                    }
                     let handed =
                         script_net::settle_live(live_requests, LIVE_HANDOFF_SLICE).await;
                     for (at, answer) in handed.into_iter().enumerate() {

@@ -4,8 +4,12 @@
 //! When it is off, every function here returns before taking a lock, reading
 //! an error report, or writing a line. The Inspector is unchanged: it stays
 //! off unless something else turns it on, and this mirror does not use its
-//! URL scrubbing. Script names such as `inserted#N` are recorded here, only
-//! while the switch is on, so a line can show the script's URL.
+//! URL scrubbing; its own [`brief_url`] drops every URL's query and fragment
+//! (T7 C1). Script names such as `inserted#N` are recorded here, only while
+//! the switch is on, so a line can show the script's URL. Lines for live
+//! script requests are also written on the `rustkit-net` runtime (T7); its
+//! tasks carry the page's nav id, and in tests the switch and sink, from the
+//! page thread.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
@@ -56,6 +60,24 @@ pub(crate) fn force_for_test(on: Option<bool>) {
 #[cfg(test)]
 pub(crate) fn install_sink(sink: Option<std::sync::Arc<Mutex<Vec<String>>>>) {
     SINK.with(|slot| *slot.borrow_mut() = sink);
+}
+
+/// This thread's forced switch and sink, carried to a network-runtime task.
+#[cfg(test)]
+pub(crate) type TestHooks = (Option<bool>, Option<std::sync::Arc<Mutex<Vec<String>>>>);
+
+#[cfg(test)]
+pub(crate) fn test_hooks() -> TestHooks {
+    (FORCE.with(std::cell::Cell::get), SINK.with(|slot| slot.borrow().clone()))
+}
+
+/// Install `hooks` on this thread; returns the ones they replace.
+#[cfg(test)]
+pub(crate) fn swap_test_hooks(hooks: TestHooks) -> TestHooks {
+    let before = test_hooks();
+    FORCE.with(|cell| cell.set(hooks.0));
+    SINK.with(|slot| *slot.borrow_mut() = hooks.1);
+    before
 }
 
 /// `name` (an engine script label) was loaded from `url`. Ignored when the
@@ -274,22 +296,13 @@ pub(crate) fn sync_diag_armed() {
     }
 }
 
-/// Path, query truncated to 48 characters, whole string capped at 180.
+/// Origin and path only, capped at 180 characters. The query and fragment
+/// are dropped, as everywhere else devtools writes a URL (Pete 10-23, shapes
+/// only; T7 C1): they carry tokens, and since T7 these lines are written on
+/// the network runtime too.
 pub(crate) fn brief_url(url: &str) -> String {
-    let (path, query) = match url.split_once('?') {
-        Some((path, query)) => {
-            let mut q: String = query.chars().take(48).collect();
-            if query.chars().count() > 48 {
-                q.push('…');
-            }
-            (path, Some(q))
-        }
-        None => (url, None),
-    };
-    let mut brief = match query {
-        Some(q) => format!("{path}?{q}"),
-        None => path.to_string(),
-    };
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    let mut brief = url[..end].to_string();
     if brief.chars().count() > 180 {
         brief = brief.chars().take(179).collect();
         brief.push('…');
@@ -512,13 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn brief_url_keeps_a_short_query_and_cuts_a_long_one() {
+    fn brief_url_drops_the_query_and_fragment() {
+        // T7 C1: shapes only, URL queries too.
         assert_eq!(brief_url("https://www.reddit.com/svc/shreddit"), "https://www.reddit.com/svc/shreddit");
         let long = format!("https://www.reddit.com/svc/shreddit/gql?{}", "q".repeat(80));
-        let brief = brief_url(&long);
-        assert!(brief.starts_with("https://www.reddit.com/svc/shreddit/gql?"), "{brief}");
-        assert!(brief.ends_with('…'), "{brief}");
-        assert!(brief.chars().count() < long.chars().count(), "{brief}");
+        assert_eq!(brief_url(&long), "https://www.reddit.com/svc/shreddit/gql");
+        assert_eq!(brief_url("https://a.test/p?token=SECRET#frag"), "https://a.test/p");
+        assert_eq!(brief_url("https://a.test/p#SECRET?x"), "https://a.test/p");
         assert!(brief_url(&format!("https://example.test/{}", "p".repeat(300))).chars().count() <= 180);
     }
 
