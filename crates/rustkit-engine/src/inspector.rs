@@ -31,12 +31,19 @@
 //! hands out an `Arc`), so another thread can take a snapshot while the page's
 //! script is running. Reading runs no script.
 //!
+//! An open devtools panel is not polled for (T6b): every record moves the
+//! view's [`Inspector::watermark`], and while a panel watches the view the
+//! devtools thread is signalled after the lock is released. Each record
+//! carries its document ([`InspectorRecord::doc`]), and records outlive a
+//! navigation and the panel closing until the ring drops them.
+//!
 //! [`Engine::inspector`]: crate::Engine::inspector
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -45,6 +52,11 @@ use url::Url;
 
 /// Events a view's ring buffer holds by default.
 pub const DEFAULT_CAPACITY: usize = 4096;
+/// Events each tab keeps from the moment it is made, so an Inspector panel
+/// opened late has the history (T6b; Atlas 10-24, Q1).
+/// 2048: one yahoo load writes about 562 records with T3, so 512 lost its
+/// `navigation_start` (Atlas 10-26).
+pub const TAB_RING_CAPACITY: usize = 2048;
 /// Longest console message kept, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 1024;
 /// Longest error stack kept, in characters.
@@ -90,6 +102,25 @@ impl Default for InspectorConfig {
             keep_url_query: false,
             keep_console_text: false,
             keep_error_text: false,
+        }
+    }
+}
+
+impl InspectorConfig {
+    /// A tab's: a [`TAB_RING_CAPACITY`] ring once a panel attaches.
+    /// `HIWAVE_DEVTOOLS_RING=1` (or true/on/yes) keeps it from the moment
+    /// the view is made, so a panel opened late has the history. Off by
+    /// default: it costs every view a record per console call, script and
+    /// request, and no quiet A/B has cleared that cost yet (#803 review).
+    pub fn tab() -> Self {
+        let on = matches!(
+            std::env::var("HIWAVE_DEVTOOLS_RING").ok().as_deref(),
+            Some("1" | "true" | "on" | "yes")
+        );
+        Self {
+            buffer: on,
+            capacity: TAB_RING_CAPACITY,
+            ..Self::default()
         }
     }
 }
@@ -404,6 +435,10 @@ impl InspectorEvent {
 pub struct InspectorRecord {
     /// 0-based, per view, never reused.
     pub seq: u64,
+    /// The document it belongs to: 0 before the view's first navigation,
+    /// then each navigation's start begins the next.
+    #[serde(default)]
+    pub doc: u32,
     /// Milliseconds since the current navigation started (monotonic clock).
     pub t_ms: f64,
     #[serde(flatten)]
@@ -439,7 +474,11 @@ pub struct UnsupportedApiCount {
 
 struct State {
     buffer: bool,
+    /// Whether the view's config keeps the ring on with no panel.
+    buffer_default: bool,
     capacity: usize,
+    /// [`InspectorRecord::doc`] of the next record.
+    doc: u32,
     records: VecDeque<InspectorRecord>,
     next_seq: u64,
     dropped: u64,
@@ -457,7 +496,10 @@ struct State {
     /// The last request id given out (per view, never reused).
     last_request_id: u64,
     /// Requests recorded and not yet answered.
-    open_requests: std::collections::HashSet<u64>,
+    /// Open request ids and the document each started in: the answer is
+    /// stamped with that one, not the document current when it arrives
+    /// (T6 R1 condition 6).
+    open_requests: std::collections::HashMap<u64, u32>,
     /// The lifecycle events this document has fired, and the scripts that
     /// ended between `DOMContentLoaded` and `load` (first
     /// [`MAX_HELD_BY`]) with their count.
@@ -493,7 +535,49 @@ pub struct Inspector {
     keep_url_query: bool,
     keep_console_text: bool,
     keep_error_text: bool,
+    /// The `seq` the next record gets, readable without the lock.
+    watermark: AtomicU64,
+    /// A panel watches this view: tell the devtools thread about records.
+    watched: AtomicBool,
     state: Mutex<State>,
+}
+
+/// The state, locked. Dropping it releases the lock first, then tells the
+/// devtools thread when records were pushed under it and a panel watches.
+struct Locked<'a> {
+    inspector: &'a Inspector,
+    guard: Option<MutexGuard<'a, State>>,
+    seq_at_lock: u64,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.guard.as_ref().expect("held until drop")
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.guard.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.take() else { return };
+        let next_seq = guard.next_seq;
+        drop(guard);
+        if next_seq != self.seq_at_lock {
+            // SeqCst with `set_watched`: a push that reads `watched` false
+            // has its watermark seen by the devtools thread's re-read
+            // before it sleeps (T6 R1 condition 1).
+            self.inspector.watermark.store(next_seq, Ordering::SeqCst);
+            if self.inspector.watched.load(Ordering::SeqCst) {
+                crate::devtools_service::records_arrived();
+            }
+        }
+    }
 }
 
 impl Inspector {
@@ -503,9 +587,13 @@ impl Inspector {
             keep_url_query: config.keep_url_query,
             keep_console_text: config.keep_console_text,
             keep_error_text: config.keep_error_text,
+            watermark: AtomicU64::new(0),
+            watched: AtomicBool::new(false),
             state: Mutex::new(State {
                 buffer: config.buffer,
+                buffer_default: config.buffer,
                 capacity: config.capacity.max(1),
+                doc: 0,
                 records: VecDeque::new(),
                 next_seq: 0,
                 dropped: 0,
@@ -517,7 +605,7 @@ impl Inspector {
                 aliases: Vec::new(),
                 inserters: Vec::new(),
                 last_request_id: 0,
-                open_requests: std::collections::HashSet::new(),
+                open_requests: std::collections::HashMap::new(),
                 dom_content_loaded: false,
                 loaded: false,
                 held_load: Vec::new(),
@@ -532,10 +620,56 @@ impl Inspector {
         self.active.load(Ordering::Relaxed)
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
+    fn state(&self) -> Locked<'_> {
         // A sink that panicked leaves the lock poisoned; the buffer is
         // still consistent (records are pushed whole).
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Locked {
+            inspector: self,
+            seq_at_lock: guard.next_seq,
+            guard: Some(guard),
+        }
+    }
+
+    /// The `seq` the next record will get. One atomic load: the window
+    /// thread reads it to know whether there is anything new, without the
+    /// lock (sinks run under it).
+    pub fn watermark(&self) -> u64 {
+        self.watermark.load(Ordering::SeqCst)
+    }
+
+    /// Whether the devtools thread is told about this view's records.
+    pub(crate) fn set_watched(&self, on: bool) {
+        self.watched.store(on, Ordering::SeqCst);
+    }
+
+    /// The page thread panicked while it held this view's lock (a sink or
+    /// a push unwound). What was recorded is still read (`state` recovers
+    /// with `into_inner`); the panel says the page crashed (T6 R1
+    /// condition 2).
+    pub fn page_crashed(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
+    /// Test hook: panic on this thread while holding the lock, as a page
+    /// thread whose sink panicked would.
+    #[cfg(test)]
+    pub(crate) fn panic_holding_lock(&self) {
+        let _held = self.state.lock();
+        panic!("page thread panicked holding the Inspector lock (test)");
+    }
+
+    /// The panel closed: recording goes back to the view's default. With
+    /// the tab ring on nothing recorded is dropped (T6b: the panel reopens
+    /// with history); with it off the session's records are, as nothing
+    /// will read them.
+    pub fn detach_panel(&self) {
+        let mut state = self.state();
+        state.buffer = state.buffer_default;
+        if !state.buffer {
+            state.records.clear();
+        }
+        self.refresh_active(&state);
     }
 
     fn refresh_active(&self, state: &State) {
@@ -616,8 +750,15 @@ impl Inspector {
     }
 
     fn push_locked(state: &mut State, event: InspectorEvent) {
+        let doc = state.doc;
+        Self::push_locked_in(state, doc, event);
+    }
+
+    /// Push `event` as a record of document `doc`.
+    fn push_locked_in(state: &mut State, doc: u32, event: InspectorEvent) {
         let record = InspectorRecord {
             seq: state.next_seq,
+            doc,
             t_ms: round_ms(state.navigation_started.elapsed().as_secs_f64() * 1000.0),
             event,
         };
@@ -647,6 +788,7 @@ impl Inspector {
         let url = url.map(|u| self.url(u));
         let mut state = self.state();
         state.navigation_started = Instant::now();
+        state.doc += 1;
         state.unsupported.clear();
         state.laid_out = false;
         state.painted = false;
@@ -931,7 +1073,8 @@ impl Inspector {
         let mut state = self.state();
         state.last_request_id += 1;
         let id = state.last_request_id;
-        state.open_requests.insert(id);
+        let doc = state.doc;
+        state.open_requests.insert(id, doc);
         Self::push_locked(&mut state, InspectorEvent::Request { id, url, method, resource_type, initiator });
         drop(state);
         Some(RequestGuard {
@@ -952,9 +1095,10 @@ impl Inspector {
 
     fn finish_request(&self, id: u64, event: InspectorEvent) {
         let mut state = self.state();
-        let was_open = state.open_requests.remove(&id);
-        debug_assert!(was_open, "request {id} answered twice, or never recorded");
-        Self::push_locked(&mut state, event);
+        let started_in = state.open_requests.remove(&id);
+        debug_assert!(started_in.is_some(), "request {id} answered twice, or never recorded");
+        let doc = started_in.unwrap_or(state.doc);
+        Self::push_locked_in(&mut state, doc, event);
     }
 
     /// The document's redirects, as `navigation_redirect` events.

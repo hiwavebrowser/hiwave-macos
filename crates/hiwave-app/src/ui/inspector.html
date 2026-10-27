@@ -615,6 +615,18 @@
             background: var(--bg-hover);
         }
 
+        .console-entry.stale-doc {
+            opacity: 0.55;
+        }
+
+        .console-doc-divider {
+            padding: 2px 12px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
         .console-entry.log {
             color: var(--text-primary);
         }
@@ -1024,12 +1036,41 @@
                 return '';
             }
 
-            function renderConsoleEntry(entry) {
+            // Console lines grouped by document (T6b): the panel keeps old
+            // documents' lines, so a divider goes wherever the document
+            // changes and lines from before the newest one are marked stale.
+            // One document in view: no dividers. A line without a doc (the
+            // console's input and results) belongs to the line before it.
+            // Pure; scripts/tests/test_inspector_console_groups.py runs it.
+            function consoleRows(entries) {
+                const docs = entries.map(e => e.doc).filter(d => d != null);
+                const newest = docs.length ? Math.max(...docs) : null;
+                const several = docs.some(d => d !== newest);
+                const rows = [];
+                let last = null;
+                for (const entry of entries) {
+                    const doc = entry.doc != null ? entry.doc : last;
+                    if (several && doc != null && doc !== last) {
+                        rows.push({ divider: doc, stale: doc !== newest });
+                    }
+                    rows.push({ entry, stale: doc != null && doc !== newest });
+                    last = doc;
+                }
+                return rows;
+            }
+
+            function renderConsoleRow(row) {
+                if (row.entry) return renderConsoleEntry(row.entry, row.stale);
+                const label = row.stale ? `Document ${row.divider} (earlier page)` : `Document ${row.divider}`;
+                return `<div class="console-doc-divider" data-doc="${row.divider}">${label}</div>`;
+            }
+
+            function renderConsoleEntry(entry, stale) {
                 const icon = getConsoleIcon(entry.level);
                 const time = formatTime(entry.timestamp);
                 const source = formatSource(entry.stack);
 
-                return `<div class="console-entry ${entry.level}" data-id="${entry.id}" data-level="${entry.level}">
+                return `<div class="console-entry ${entry.level}${stale ? ' stale-doc' : ''}" data-id="${entry.id}" data-level="${entry.level}">
                     <span class="console-entry-time">${time}</span>
                     ${icon ? `<span class="console-entry-icon">${icon}</span>` : ''}
                     <span class="console-entry-content">${escapeHtml(entry.message)}</span>
@@ -1045,11 +1086,11 @@
                 if (filteredEntries.length === 0) {
                     consoleEmpty.style.display = 'flex';
                     // Remove all entries except empty state
-                    const entries = consoleOutput.querySelectorAll('.console-entry');
+                    const entries = consoleOutput.querySelectorAll('.console-entry, .console-doc-divider');
                     entries.forEach(e => e.remove());
                 } else {
                     consoleEmpty.style.display = 'none';
-                    consoleOutput.innerHTML = filteredEntries.map(renderConsoleEntry).join('');
+                    consoleOutput.innerHTML = consoleRows(filteredEntries).map(renderConsoleRow).join('');
                     // Scroll to bottom
                     consoleOutput.scrollTop = consoleOutput.scrollHeight;
                 }
@@ -1062,6 +1103,10 @@
             }
 
             function addConsoleEntry(entry) {
+                // Input and results belong to the document showing now.
+                if (entry.doc == null && consoleEntries.length) {
+                    entry.doc = consoleEntries[consoleEntries.length - 1].doc;
+                }
                 consoleEntries.push(entry);
                 updateConsoleDisplay();
             }

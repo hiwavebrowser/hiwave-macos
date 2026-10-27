@@ -13,14 +13,21 @@
 //! shipped default), so nothing here waits: a question is sent, and the
 //! answer is acted on by [`Devtools::pump`], which the event loop calls on
 //! every live wake. On the same-thread path the answer is ready when the
-//! question returns and the next pump takes it.
+//! question returns and the next pump takes it. Console reads are not page
+//! questions: the devtools thread answers them from the view's Inspector
+//! (`rustkit_engine::devtools_ask_console`, T6a).
+
+use std::time::{Duration, Instant};
 
 use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsQuery};
 use serde::Serialize;
-use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use wry::WebView;
+
+/// How long the console's input line waits for a busy page before it is
+/// given up and cancelled (T6c).
+const EVAL_DEADLINE: Duration = Duration::from_secs(5);
 
 /// A call of the panel's API with `arg` as JSON. A JSON text is a JS
 /// expression, so a string the page chose (a class name, a console line)
@@ -34,34 +41,14 @@ fn run(panel: &WebView, script: &str) {
     let _ = panel.evaluate_script(script);
 }
 
-/// How often an open panel asks the page for new console lines.
-const CONSOLE_POLL: Duration = Duration::from_millis(250);
-
-/// When the open panel asks the page for new console lines: on its own
-/// clock, never because an answer arrived. Asking again the moment one
-/// arrived, while every answer woke the window, kept an idle page and an
-/// open panel waking each other without pause (#785 R1).
-#[derive(Default)]
-struct ConsolePoll {
-    asked_at: Option<Instant>,
-}
-
-impl ConsolePoll {
-    /// At `now`, with a console question out or not: whether to ask now,
-    /// and when the window should wake for the panel next (always later
-    /// than `now`, or the loop would spin).
-    fn at(&mut self, now: Instant, waiting: bool) -> (bool, Instant) {
-        let due = self.asked_at.map_or(now, |t| t + CONSOLE_POLL);
-        let ask = !waiting && due <= now;
-        if ask {
-            self.asked_at = Some(now);
-        }
-        let next = match self.asked_at {
-            Some(t) if t + CONSOLE_POLL > now => t + CONSOLE_POLL,
-            _ => now + CONSOLE_POLL,
-        };
-        (ask, next)
-    }
+/// Whether the open panel asks for new console lines now: only when the
+/// view has recorded past what the panel has shown, and no question is
+/// out. There is no clock (T6b): the devtools thread wakes the window when
+/// a watched view records, so an idle page and an open panel cost nothing.
+/// (#785 R1: asking again on every answer, while every answer woke the
+/// window, kept the two waking each other without pause.)
+fn console_due(watermark: Option<u64>, shown_to: u64, waiting: bool) -> bool {
+    !waiting && watermark.is_some_and(|w| w > shown_to)
 }
 
 /// What an answer is for.
@@ -85,7 +72,8 @@ enum Want {
 
 enum Asked {
     Page(Want, oneshot::Receiver<DevtoolsAnswer>),
-    Eval(oneshot::Receiver<Result<String, String>>),
+    /// The console's input line, and when it is given up.
+    Eval(oneshot::Receiver<Result<String, String>>, Instant),
 }
 
 /// The Inspector's state for the current tab.
@@ -101,7 +89,8 @@ pub struct Devtools {
     selected: Option<usize>,
     /// The next Inspector record the console has not shown.
     console_seq: u64,
-    console_poll: ConsolePoll,
+    /// "page crashed" is on the console (T6 R1 condition 2).
+    crash_shown: bool,
     asked: Vec<Asked>,
 }
 
@@ -123,6 +112,7 @@ impl Devtools {
     pub fn open(&mut self, view: &RustKitView, _panel: &WebView) {
         self.open = true;
         self.console_seq = 0;
+        self.crash_shown = false;
         self.ask(view, Want::Ack, DevtoolsQuery::Attach(true));
         // The element first: its breadcrumb is what the tree keeps open.
         if let Some(n) = self.selected {
@@ -207,16 +197,17 @@ impl Devtools {
 
     /// The console's input line: run `code` in the page and show the result.
     pub fn eval(&mut self, view: &RustKitView, code: &str) {
-        self.asked.push(Asked::Eval(view.devtools_eval(code)));
+        let deadline = Instant::now() + EVAL_DEADLINE;
+        self.asked.push(Asked::Eval(view.devtools_eval(code, deadline), deadline));
     }
 
     /// Act on the answers that have arrived, then ask for new console
-    /// lines when they are due. Called on every live wake of the content
-    /// view; returns when the open panel wants the next one.
-    pub fn pump(&mut self, view: &RustKitView, panel: &WebView) -> Option<Instant> {
+    /// lines when the view has recorded any. Called on every live wake of
+    /// the content view.
+    pub fn pump(&mut self, view: &RustKitView, panel: &WebView) {
         if !self.open {
             self.asked.clear();
-            return None;
+            return;
         }
         let mut arrived = Vec::new();
         self.asked.retain_mut(|asked| match asked {
@@ -233,9 +224,16 @@ impl Devtools {
                     false
                 }
             },
-            Asked::Eval(rx) => match rx.try_recv() {
+            Asked::Eval(rx, deadline) => match rx.try_recv() {
                 Ok(result) => {
                     arrived.push(Arrived::Eval(result));
+                    false
+                }
+                // Past its deadline the line is given up: the receiver is
+                // dropped, so a late answer is discarded, and a page that
+                // has not reached it yet skips it (R1 condition 5).
+                Err(oneshot::error::TryRecvError::Empty) if Instant::now() >= *deadline => {
+                    arrived.push(Arrived::Eval(Err(rustkit_engine::EVAL_CANCELLED.into())));
                     false
                 }
                 Err(oneshot::error::TryRecvError::Empty) => true,
@@ -261,13 +259,18 @@ impl Devtools {
                 }
             }
         }
-        let waiting = self.waiting_for(Want::Console);
-        let (ask, next) = self.console_poll.at(Instant::now(), waiting);
-        if ask {
+        let inspector = view.devtools_inspector();
+        // A page thread that panicked holding the Inspector lock records
+        // nothing more; its history still reads, and the panel says so.
+        if !self.crash_shown && inspector.as_ref().is_some_and(|i| i.page_crashed()) {
+            self.crash_shown = true;
+            run(panel, "window.hiwaveInspector && window.hiwaveInspector.addConsoleResult('page crashed', true)");
+        }
+        let watermark = inspector.map(|inspector| inspector.watermark());
+        if console_due(watermark, self.console_seq, self.waiting_for(Want::Console)) {
             let since = self.console_seq;
             self.ask(view, Want::Console, DevtoolsQuery::Console { since });
         }
-        Some(next)
     }
 
     fn hovered_now(&mut self, view: &RustKitView, panel: &WebView, node: Option<usize>) {
@@ -329,7 +332,7 @@ impl Devtools {
                     self.hovered = None;
                     self.hover_next = None;
                     self.asked
-                        .retain(|a| matches!(a, Asked::Eval(_) | Asked::Page(Want::Console | Want::Ack, _)));
+                        .retain(|a| matches!(a, Asked::Eval(..) | Asked::Page(Want::Console | Want::Ack, _)));
                     self.ask(view, Want::Ack, DevtoolsQuery::Highlight(None));
                     run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
                 }
@@ -363,24 +366,15 @@ mod tests {
     }
 
     #[test]
-    fn an_open_panel_on_an_idle_page_asks_for_the_console_a_few_times_a_second() {
-        // #785 R1 HOLD 1: the pump asked again the moment an answer arrived,
-        // and every answer woke the window, so an idle page and an open
-        // panel woke each other without pause. Worst case here: the answer
-        // arrives 1 ms after each question and wakes the window at once.
-        let start = Instant::now();
-        let mut poll = ConsolePoll::default();
-        let (mut now, mut asks) = (start, 0);
-        while now < start + Duration::from_millis(500) {
-            let (ask, next) = poll.at(now, false);
-            assert!(next > now, "a wake that is already due spins the loop");
-            asks += usize::from(ask);
-            now = if ask { now + Duration::from_millis(1) } else { next };
-        }
-        assert!(asks <= 3, "{asks} console questions in 500 ms");
-        // A question still out is not asked again, and the panel still gets
-        // a wake to read its answer.
-        let (ask, next) = poll.at(now, true);
-        assert!(!ask && next > now);
+    fn an_open_panel_asks_for_the_console_only_when_the_view_recorded() {
+        // #785 R1 HOLD 1: asking again on every answer, while every answer
+        // woke the window, kept an idle page and an open panel waking each
+        // other. T6b: no clock at all; an answer that brought nothing new
+        // leaves the watermark where the panel has read, so it is not asked
+        // again however often the window wakes.
+        assert!(console_due(Some(1), 0, false), "a new record is asked for");
+        assert!(!console_due(Some(5), 5, false), "nothing new, nothing asked");
+        assert!(!console_due(Some(9), 5, true), "one question out at a time");
+        assert!(!console_due(None, 0, false), "no view, nothing asked");
     }
 }
