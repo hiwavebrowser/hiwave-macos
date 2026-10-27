@@ -239,8 +239,88 @@ pub(crate) type LiveFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 /// A script request that is out: its id and, in the end, its outcome.
 pub(crate) type LiveRequest = LiveFuture<(u64, NetDelivery)>;
 
-/// Start `request` for the live loop. Nothing runs until
-/// [`settle_live`] polls it; it fails as a network error at `deadline`.
+/// Whether live script requests run on the network runtime (T7). On
+/// unless `HIWAVE_NET_RUNTIME=0`, which selects the page-polled path of
+/// before, for bisects and the A/B.
+fn net_runtime_wanted() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("HIWAVE_NET_RUNTIME").ok().as_deref(), Some("0" | "off" | "false")))
+}
+
+/// The process's network runtime (T7): two `rustkit-net` workers that run
+/// live script requests, so their bytes are read and their response and
+/// failure records written while the page thread is busy. Built on first
+/// use. `None` when it is switched off or could not be built; the page then
+/// polls its requests itself, as before. It is never shut down: requests
+/// still out at process exit end unrecorded, with the ring that would have
+/// held their records.
+fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
+    static NET: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    if !net_runtime_wanted() {
+        return None;
+    }
+    NET.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("rustkit-net")
+            .enable_all()
+            .build()
+            .map_err(|e| tracing::warn!(error = %e, "network runtime not built; the page polls its requests"))
+            .ok()
+    })
+    .as_ref()
+    .map(|rt| rt.handle())
+}
+
+/// A task on the network runtime, aborted when its page side is dropped (a
+/// navigation cleared the live requests, or the view closed). Abort is
+/// cooperative: a task that already finished has written its record.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs `inner` with the page's diagnostic nav id set around every poll,
+/// restoring the worker's own after: a task on the multi-thread runtime can
+/// move between workers between polls, so setting it once at the start is
+/// not enough (T7 B2).
+struct DiagContext<F> {
+    nav: u64,
+    inner: Pin<Box<F>>,
+}
+
+impl<F: Future> DiagContext<F> {
+    fn new(inner: F) -> Self {
+        DiagContext { nav: rustkit_js::diag_nav(), inner: Box::pin(inner) }
+    }
+}
+
+impl<F: Future> Future for DiagContext<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<F::Output> {
+        let before = rustkit_js::diag_nav();
+        rustkit_js::set_diag_nav(self.nav);
+        let polled = self.inner.as_mut().poll(cx);
+        rustkit_js::set_diag_nav(before);
+        polled
+    }
+}
+
+/// What the engine records when a request task panics: engine words, never
+/// the page's.
+const TASK_PANICKED: &str = "engine failure: request task panicked";
+
+/// Start `request` for the live loop; it fails as a network error at
+/// `deadline`. On the network runtime the request record is made here, on
+/// the page thread at request start (its document, the URL scrub), and the
+/// rest runs and is recorded on a `rustkit-net` worker; [`settle_live`]
+/// only takes the outcome. Without it, nothing runs until [`settle_live`]
+/// polls it. Which of the two is chosen before the request record, so it is
+/// never made twice (T7 C2).
 pub(crate) fn start_live(
     policy: Arc<FetchPolicy>,
     loader: Arc<ResourceLoader>,
@@ -248,9 +328,37 @@ pub(crate) fn start_live(
     deadline: tokio::time::Instant,
     inspector: Arc<Inspector>,
 ) -> LiveRequest {
+    let id = request.id;
+    let Some(net) = net_runtime() else {
+        return Box::pin(async move {
+            let outcome = execute(&policy, &loader, deadline, &request, &inspector, FailureStage::Timeout).await;
+            (id, outcome)
+        });
+    };
+    let started = match begin(&request, &inspector, deadline) {
+        Ok(started) => started,
+        Err(refused) => return Box::pin(std::future::ready((id, refused))),
+    };
+    let task = net.spawn(DiagContext::new(async move {
+        let outcome = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
+        // The outcome is ready: the page's next live turn takes it now,
+        // not at its next scheduled turn (T7 S1).
+        poke_live_turn();
+        outcome
+    }));
+    let task = AbortOnDrop(task);
     Box::pin(async move {
-        let outcome = execute(&policy, &loader, deadline, &request, &inspector, FailureStage::Timeout).await;
-        (request.id, outcome)
+        let mut task = task;
+        match (&mut task.0).await {
+            Ok(outcome) => (id, outcome),
+            // A panic is answered in the task; this is the belt. An
+            // unexpected cancel (the runtime is never shut down) is the
+            // same network error (T7 C2).
+            Err(e) => {
+                tracing::warn!(id, panic = e.is_panic(), "live request task ended without an outcome");
+                (id, NetDelivery::Error(NETWORK_ERROR.into()))
+            }
+        }
     })
 }
 
@@ -299,12 +407,31 @@ async fn execute(
     inspector: &Arc<Inspector>,
     on_deadline: FailureStage,
 ) -> NetDelivery {
+    match begin(request, inspector, deadline) {
+        Ok(started) => finish(policy, loader, deadline, started, on_deadline).await,
+        Err(refused) => refused,
+    }
+}
+
+/// A script request whose request record is made, not yet sent.
+struct Started {
+    id: u64,
+    script_request: ScriptRequest,
+    guard: Option<inspector::RequestGuard>,
+    /// For the `HIWAVE_CONSOLE_LOG` lines; empty when that is off.
+    method: String,
+    url: String,
+}
+
+/// The start of [`execute`], on the page thread: refuse what is malformed,
+/// and make the request record (its document, the URL scrub).
+fn begin(request: &NetRequest, inspector: &Arc<Inspector>, deadline: tokio::time::Instant) -> Result<Started, NetDelivery> {
     let script_request = match script_request(request) {
         Ok(r) => r,
         Err(reason) => {
             debug!(id = request.id, %reason, "Script request refused before the policy");
             log_request(&request.method, &request.url, "-", "error");
-            return NetDelivery::Error(NETWORK_ERROR.into());
+            return Err(NetDelivery::Error(NETWORK_ERROR.into()));
         }
     };
     let log_net = crate::console_log::enabled();
@@ -322,8 +449,37 @@ async fn execute(
                 .waits_on(&rustkit_net::policy::SlotWait::new())
                 .deadline(deadline)
         });
+    Ok(Started { id: request.id, script_request, guard, method, url })
+}
+
+/// The rest of [`execute`]: send, and record the response or failure where
+/// it runs. A panic in the policy is a failure in engine words, never
+/// "abandoned": the guard is held outside the unwind (T7 B3a). A panic in
+/// `guard.response`/`guard.fail` themselves is outside it (T7 C3).
+async fn finish(
+    policy: &FetchPolicy,
+    loader: &ResourceLoader,
+    deadline: tokio::time::Instant,
+    started: Started,
+    on_deadline: FailureStage,
+) -> NetDelivery {
+    use futures::FutureExt as _;
+    let Started { id, script_request, guard, method, url } = started;
     let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-    match tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await {
+    let sent = AssertUnwindSafe(tokio::time::timeout_at(
+        deadline,
+        policy.execute_waited(loader, script_request, wait.as_ref()),
+    ))
+    .catch_unwind()
+    .await;
+    let Ok(sent) = sent else {
+        tracing::warn!(id, "{TASK_PANICKED}");
+        if let Some(guard) = guard {
+            guard.fail(FailureStage::Policy, TASK_PANICKED);
+        }
+        return NetDelivery::Error(NETWORK_ERROR.into());
+    };
+    match sent {
         Ok(Ok(response)) => {
             if let Some(guard) = guard {
                 let mime = response.headers.get("content-type").and_then(|v| v.to_str().ok());
@@ -332,7 +488,7 @@ async fn execute(
             delivery(response)
         }
         Ok(Err(denial)) => {
-            debug!(id = request.id, ?denial, "Script request denied");
+            debug!(id, ?denial, "Script request denied");
             log_denial(&method, &url, &denial);
             if let Some(guard) = guard {
                 let (stage, reason) = inspector::denial_stage(&denial);
@@ -341,7 +497,7 @@ async fn execute(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
         Err(_) => {
-            debug!(id = request.id, "Script request hit its network cap");
+            debug!(id, "Script request hit its network cap");
             log_request(&method, &url, "-", "timeout");
             if let Some(guard) = guard {
                 let reason = match on_deadline {
