@@ -5115,6 +5115,9 @@ impl Engine {
         Some(state.create_submission(&base, &entries))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -5123,7 +5126,7 @@ impl Engine {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than
         // guessing across views.
-        self.lctx
+        self
             .building_lay()?
             .edit_states
             .borrow()
@@ -5143,12 +5146,15 @@ impl Engine {
     /// warnings in one live session). One resolution point, at build, fixes
     /// the cache key, the natural size, and the paint lookup together.
     fn resolve_resource_url(&self, raw: &str) -> Option<Url> {
-        self.lctx.building.borrow().as_ref()?;
-        match self.lctx.building_url() {
+        self.building.borrow().as_ref()?;
+        match self.building_url() {
             Some(base) => base.join(raw).ok(),
             None => Url::parse(raw).ok(),
         }
     }
+}
+
+impl Engine {
 
     /// A view's viewport in CSS px, as `relayout` sizes it: the headless
     /// bounds if it has them, otherwise its host surface.
@@ -5183,6 +5189,9 @@ impl Engine {
             .unwrap_or_else(|| attributes.contains_key("checked"))
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// An element's attributes as the build of the current view reads
     /// them: an `<input>`'s with `checked` present exactly when the control
     /// is checked, and the hovered (pressed) element's and its ancestors'
@@ -5196,7 +5205,7 @@ impl Engine {
         tag_lower: &str,
         attributes: &'a HashMap<String, String>,
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
-        let Some(lay) = self.lctx.building_lay() else {
+        let Some(lay) = self.building_lay() else {
             return std::borrow::Cow::Borrowed(attributes);
         };
         let checked = match tag_lower {
@@ -5230,6 +5239,9 @@ impl Engine {
         }
         std::borrow::Cow::Owned(attributes)
     }
+}
+
+impl Engine {
 
     /// The HTTP status the view's document came with: 200 for an ordinary
     /// page, 403 or 404 for a server's error page shown as the page. None
@@ -8546,14 +8558,14 @@ impl Engine {
             focus: self.lctx.building_focus(),
             hover: self.lctx.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
             active: self.lctx.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
-            fonts: self.web_font_count(),
+            fonts: self.lctx.web_font_count(),
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
         // the sheets relayout built instead of walking the DOM again.
         let traced = self.lctx.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
-        if !traced && !self.building_view_has_edits() {
+        if !traced && !self.lctx.building_view_has_edits() {
             if let Some(tree) = self.lctx.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
@@ -8756,7 +8768,7 @@ impl Engine {
                 })
                 .into_iter()
                 .collect();
-            let body_box = self.build_layout_from_parent_style_and_path(
+            let body_box = self.lctx.build_layout_from_parent_style_and_path(
                 &body,
                 &stylesheets,
                 &css_vars,
@@ -8824,7 +8836,7 @@ impl Engine {
             // Fallback: use html element if no body
             debug!("No body found, using html element");
             let html_box =
-                self.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
+                self.lctx.build_layout_from_node_with_styles(&html, &stylesheets, &css_vars, &[]);
             root_box.children.push(html_box);
         } else {
             warn!("No body or html element found!");
@@ -8847,16 +8859,22 @@ impl Engine {
             );
         }
         if let Some(build) = &style_memo {
-            self.snapshot_tree(build, &root_box);
+            self.lctx.snapshot_tree(build, &root_box);
         }
         root_box
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// True when the view being built holds typed text: a form control's
     /// box carries it, and the style memo's key does not cover it.
     fn building_view_has_edits(&self) -> bool {
-        self.lctx.building_lay().is_some_and(|lay| !lay.edit_states.borrow().is_empty())
+        self.building_lay().is_some_and(|lay| !lay.edit_states.borrow().is_empty())
     }
+}
+
+impl Engine {
 
 }
 
@@ -8881,6 +8899,9 @@ impl layout_ctx::LayoutCtx {
 
 impl Engine {
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Leave a recording build's tree for the next build with its key, or
     /// (RUSTKIT_TREE_REUSE=verify) compare it with the tree a replaying
     /// build has just walked.
@@ -8906,7 +8927,7 @@ impl Engine {
             let Some((mut tree, images)) = taken else {
                 return;
             };
-            let boxes = self.lctx.refresh_image_sizes(&mut tree, &images);
+            let boxes = self.refresh_image_sizes(&mut tree, &images);
             let mut mismatches = 0usize;
             count_tree_differences(&tree, root_box, &mut mismatches);
             match mismatches {
@@ -8920,6 +8941,9 @@ impl Engine {
             });
         }
     }
+}
+
+impl Engine {
 
 }
 
@@ -9177,6 +9201,9 @@ impl Engine {
             .collect()
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     fn build_layout_from_node_with_styles(
         &self,
         node: &Rc<Node>,
@@ -9191,12 +9218,15 @@ impl Engine {
             ancestors,
             None,
             &[],
-            SiblingContext::SOLE.with_children(Self::node_has_children(node)),
+            SiblingContext::SOLE.with_children(Engine::node_has_children(node)),
             "",
             &Cell::new(0),
             false,
         )
     }
+}
+
+impl Engine {
 
     /// `:empty` input: any element or text child (whitespace included —
     /// Selectors 4 §14.5 counts it); comments do not count.
@@ -9209,6 +9239,9 @@ impl Engine {
         })
     }
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Build a layout box, additionally threading the element-identity context
     /// the geometry oracle needs.
     ///
@@ -9267,7 +9300,7 @@ impl Engine {
                 // Create computed style based on element, attributes, and stylesheets
                 let (mut style, share_id) = style_share_tracked(|| {
                     memoized_style(node.id, || {
-                        self.lctx.compute_style_for_element(
+                        self.compute_style_for_element(
                             tag_name,
                             attributes,
                             stylesheets,
@@ -9317,7 +9350,7 @@ impl Engine {
                     | rustkit_css::Length::Max(_)
                     | rustkit_css::Length::Clamp(_)
                     | rustkit_css::Length::Calc(_)) => {
-                        let viewport = self.lctx.building_viewport();
+                        let viewport = self.building_viewport();
                         match viewport {
                             Some((vw, vh)) => rustkit_css::Length::Px(
                                 other
@@ -9386,7 +9419,7 @@ impl Engine {
                     // exact cache-miss shape #113 fixed for relative URLs.
                     let src = attributes
                         .get("srcset")
-                        .and_then(|ss| Self::pick_from_srcset(ss))
+                        .and_then(|ss| Engine::pick_from_srcset(ss))
                         .or_else(|| attributes.get("src").cloned())
                         .unwrap_or_default();
 
@@ -9424,7 +9457,7 @@ impl Engine {
                         .unwrap_or(src);
 
                     let (natural_width, natural_height) =
-                        self.lctx.img_natural_size(&src, explicit_width, explicit_height);
+                        self.img_natural_size(&src, explicit_width, explicit_height);
 
                     let mut b = LayoutBox::new(
                         BoxType::Image {
@@ -9434,7 +9467,7 @@ impl Engine {
                         },
                         style,
                     );
-                    Self::attach_identity(
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9466,8 +9499,8 @@ impl Engine {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Self::inline_svg_key(&Self::inline_svg_markup(node));
-                    let svg_cache = self.lctx.svg_cache.borrow();
+                    let key = Engine::inline_svg_key(&Engine::inline_svg_markup(node));
+                    let svg_cache = self.svg_cache.borrow();
                     let cached = svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
                     // Such a replaced element is not 300×150: with both
@@ -9518,8 +9551,8 @@ impl Engine {
                             },
                             style.clone(),
                         );
-                        Self::transfer_positioning(&mut svg_box, &style);
-                        Self::attach_identity(
+                        Engine::transfer_positioning(&mut svg_box, &style);
+                        Engine::attach_identity(
                             &mut svg_box,
                             selector_path,
                             attributes,
@@ -9530,8 +9563,8 @@ impl Engine {
                         return svg_box;
                     }
                     let mut svg_box = LayoutBox::new(BoxType::Block, style.clone());
-                    Self::transfer_positioning(&mut svg_box, &style);
-                    Self::attach_identity(
+                    Engine::transfer_positioning(&mut svg_box, &style);
+                    Engine::attach_identity(
                         &mut svg_box,
                         selector_path,
                         attributes,
@@ -9613,8 +9646,8 @@ impl Engine {
                     // positioning, so `position: absolute`/`fixed` and the
                     // offsets were never copied: a positioned <input> stayed
                     // in the flow, painted and hit there (#730 follow-up i).
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9622,7 +9655,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9662,8 +9695,8 @@ impl Engine {
                             }),
                             style,
                         );
-                        Self::transfer_own_positioning(&mut b);
-                        Self::attach_identity(
+                        Engine::transfer_own_positioning(&mut b);
+                        Engine::attach_identity(
                             &mut b,
                             selector_path,
                             attributes,
@@ -9706,8 +9739,8 @@ impl Engine {
                         }),
                         style,
                     );
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9715,7 +9748,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9784,8 +9817,8 @@ impl Engine {
                         }),
                         style,
                     );
-                    Self::transfer_own_positioning(&mut b);
-                    Self::attach_identity(
+                    Engine::transfer_own_positioning(&mut b);
+                    Engine::attach_identity(
                         &mut b,
                         selector_path,
                         attributes,
@@ -9793,7 +9826,7 @@ impl Engine {
                         element_ids,
                     );
                     b.node_id = Some(node.id.raw());
-                    if self.lctx.building_focus() == Some(node.id) {
+                    if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                     }
                     return b;
@@ -9831,7 +9864,7 @@ impl Engine {
                 let display = style.display;
                 let mut layout_box = LayoutBox::new(box_type, style);
 
-                Self::transfer_own_positioning(&mut layout_box);
+                Engine::transfer_own_positioning(&mut layout_box);
                 let unblockified = (layout_box.style.display != display).then(|| {
                     let mut s = (*layout_box.style).clone();
                     s.display = display;
@@ -9849,7 +9882,7 @@ impl Engine {
                     _ => unblockified,
                 };
 
-                Self::attach_identity(
+                Engine::attach_identity(
                     &mut layout_box,
                     selector_path,
                     attributes,
@@ -9868,7 +9901,7 @@ impl Engine {
                 // Carry caret position onto the box when this element is the
                 // focused text control, so the painter can draw the caret and
                 // focus ring without reaching back into engine state.
-                if self.lctx.building_focus() == Some(node.id) {
+                if self.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
                 }
 
@@ -9915,7 +9948,7 @@ impl Engine {
                 // A floated `::first-letter` narrows later boxes like a
                 // floated `::before` (#782 HOLD 5); only the walk asks.
                 if container_query::wants_first_letter()
-                    && self.lctx.first_letter_floats(
+                    && self.first_letter_floats(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -9929,7 +9962,7 @@ impl Engine {
 
                 // Check for ::before pseudo-element
                 if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
-                    self.lctx.pseudo_element_style(
+                    self.pseudo_element_style(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -9941,7 +9974,7 @@ impl Engine {
                     )
                 })
                 .inspect(container_query::note_pseudo)
-                .and_then(Self::pseudo_element_box)
+                .and_then(Engine::pseudo_element_box)
                 {
                     layout_box.children.push(before_box);
                 }
@@ -9979,9 +10012,9 @@ impl Engine {
                 // Selector segments are computed here, not in the child, because
                 // `:nth-of-type` needs the full same-tag sibling count.
                 let children_are_foreign =
-                    in_foreign_content || Self::enters_foreign_content(&tag_lower);
+                    in_foreign_content || Engine::enters_foreign_content(&tag_lower);
                 let child_segments =
-                    Self::child_selector_segments(&child_nodes, children_are_foreign);
+                    Engine::child_selector_segments(&child_nodes, children_are_foreign);
                 // Same-tag totals feed the `-of-type` pseudo-classes.
                 let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
@@ -10016,7 +10049,7 @@ impl Engine {
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = Self::child_selector_path(
+                    let child_path = Engine::child_selector_path(
                         selector_path,
                         child_segments.get(child_index).and_then(|s| s.as_deref()),
                     );
@@ -10029,7 +10062,7 @@ impl Engine {
                                 count: child_element_count,
                                 type_index,
                                 type_count: type_totals.get(&*t).copied().unwrap_or(1),
-                                has_children: Self::node_has_children(child),
+                                has_children: Engine::node_has_children(child),
                             }
                         }
                         _ => SiblingContext::SOLE,
@@ -10089,7 +10122,7 @@ impl Engine {
                     // its place.
                     if child_box.style.display == rustkit_css::Display::Contents {
                         for grandchild in child_box.children {
-                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
+                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
                         }
                         continue;
                     }
@@ -10100,14 +10133,14 @@ impl Engine {
                             // Include blocks if they have children, OR have visible styling,
                             // OR still take part in layout while empty.
                             !child_box.children.is_empty()
-                                || Self::has_visible_styling(&child_box.style)
-                                || Self::empty_block_affects_layout(&child_box, &layout_box.style)
+                                || Engine::has_visible_styling(&child_box.style)
+                                || Engine::empty_block_affects_layout(&child_box, &layout_box.style)
                         }
                         BoxType::Inline => {
                             // Include inline boxes if they have content children (text, images, form controls)
                             // or have visible styling (padding, border, background)
-                            Self::has_content_children(&child_box)
-                                || Self::has_visible_styling(&child_box.style)
+                            Engine::has_content_children(&child_box)
+                                || Engine::has_visible_styling(&child_box.style)
                         }
                         BoxType::Text(_)
                         | BoxType::Image { .. }
@@ -10117,7 +10150,7 @@ impl Engine {
 
                     let shown = !closed_details || details_summary == Some(child_index);
                     if should_include && shown {
-                        Self::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                        Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     } else if shown && matches!(child_box.box_type, BoxType::Inline) {
                         // An inline box with nothing in the flow is dropped,
                         // and so was everything in it. What it positions out
@@ -10130,7 +10163,7 @@ impl Engine {
                                 rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
                             )
                         }) {
-                            Self::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
                         }
                     }
                 }
@@ -10142,7 +10175,7 @@ impl Engine {
 
                 // Check for ::after pseudo-element
                 if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
-                    self.lctx.pseudo_element_style(
+                    self.pseudo_element_style(
                         &tag_lower,
                         attributes,
                         stylesheets,
@@ -10154,7 +10187,7 @@ impl Engine {
                     )
                 })
                 .inspect(container_query::note_pseudo)
-                .and_then(Self::pseudo_element_box)
+                .and_then(Engine::pseudo_element_box)
                 {
                     layout_box.children.push(after_box);
                 }
@@ -10216,9 +10249,9 @@ impl Engine {
                 let n = layout_box.children.len();
                 for i in 0..n {
                     let prev_inline =
-                        i > 0 && Self::is_inline_level_box(&layout_box.children[i - 1]);
+                        i > 0 && Engine::is_inline_level_box(&layout_box.children[i - 1]);
                     let next_inline =
-                        i + 1 < n && Self::is_inline_level_box(&layout_box.children[i + 1]);
+                        i + 1 < n && Engine::is_inline_level_box(&layout_box.children[i + 1]);
                     // Phase 2 only applies to COLLAPSIBLE spaces. Under
                     // pre/pre-wrap/break-spaces every space is preserved
                     // and renders (css-text §4.1.1): " XX" in a pre-wrap
@@ -10360,6 +10393,9 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
 
     /// Create a pseudo-element (::before or ::after) if applicable. The
     /// layout build calls the two halves itself, through the style memo.
@@ -14984,12 +15020,18 @@ impl layout_ctx::LayoutCtx {
 
 impl Engine {
 
+}
+
+impl layout_ctx::LayoutCtx {
     /// Loaded faces in the partition of the view being built (the opaque one
     /// for a view-less build).
     fn web_font_count(&self) -> usize {
-        let base = self.lctx.building_url();
-        self.lctx.font_loader.faces_for(&Self::font_partition(base.as_ref())).len()
+        let base = self.building_url();
+        self.font_loader.faces_for(&Engine::font_partition(base.as_ref())).len()
     }
+}
+
+impl Engine {
 
     fn install_web_fonts(&self, id: EngineViewId) {
         let base = self.views.get(&id).and_then(|v| v.url.as_ref());
@@ -25683,7 +25725,7 @@ mod button_children_tests {
         for c in children {
             button.append_child(c);
         }
-        engine.build_layout_from_parent_style_and_path(
+        engine.lctx.build_layout_from_parent_style_and_path(
             &button,
             &[],
             &HashMap::new(),
@@ -26392,7 +26434,7 @@ mod svg_image_tests {
             },
         );
 
-        let layout = engine.build_layout_from_parent_style_and_path(
+        let layout = engine.lctx.build_layout_from_parent_style_and_path(
             &img,
             &[],
             &HashMap::new(),
