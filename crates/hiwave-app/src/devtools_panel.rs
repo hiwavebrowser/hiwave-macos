@@ -247,6 +247,13 @@ impl Devtools {
         Some(self.again.remove(i).1)
     }
 
+    /// A hover had no answer (a closed view, or a load held the page).
+    /// Nothing more is asked; true when the pointer left the view meanwhile,
+    /// so the outline goes all the same (#809 re-review).
+    fn hover_unavailable(&mut self) -> bool {
+        self.hover_next.take() == Some(None) && self.picking
+    }
+
     /// The panel closed: nothing out is shown, nothing waiting is asked.
     fn forget_questions(&mut self) {
         self.asked.clear();
@@ -459,7 +466,11 @@ impl Devtools {
             (Want::Element, _) => {
                 run(panel, "window.hiwaveInspector && window.hiwaveInspector.setElementStyles(null)");
             }
-            (Want::Hover, DevtoolsAnswer::Unavailable) => self.hover_next = None,
+            (Want::Hover, DevtoolsAnswer::Unavailable) => {
+                if self.hover_unavailable() {
+                    self.hovered_now(view, panel, None);
+                }
+            }
             (Want::Hover, DevtoolsAnswer::Node(node)) => {
                 if self.picking {
                     self.hovered_now(view, panel, node);
@@ -662,6 +673,19 @@ mod tests {
         assert_eq!(arrived, vec![(Want::Hover, DevtoolsAnswer::Node(None))], "the outline is not cleared");
         assert_eq!(tools.hover_next, None);
         assert!(page.sent.is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_hover_after_the_pointer_left_clears_the_outline() {
+        let mut tools = Devtools { picking: true, ..Default::default() };
+        tools.hover_next = Some(None);
+        assert!(tools.hover_unavailable(), "the outline stays");
+        assert_eq!(tools.hover_next, None);
+        tools.hover_next = Some(Some((1.0, 2.0)));
+        assert!(!tools.hover_unavailable(), "a pointer still in the view cleared the outline");
+        // As before: nothing more is asked of a page that could not answer.
+        assert_eq!(tools.hover_next, None);
+        assert!(!tools.hover_unavailable());
     }
 
     #[test]
