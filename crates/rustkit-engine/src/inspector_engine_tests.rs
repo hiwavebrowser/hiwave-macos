@@ -897,6 +897,49 @@ secretCaller();";
     assert!(mirrored.lock().unwrap().join("\n").contains("SECRET"), "the mirror keeps its text");
 }
 
+/// Atlas 10-26 20:50 (3): a page-defined `Error` subclass, by its class
+/// name and by a `name` it sets, thrown uncaught and passed to
+/// `console.error`, with the mirror off and on. The record's error name is
+/// a standard one (`standard_name`), so the page's name reaches no record.
+#[test]
+fn a_page_defined_error_subclass_name_reaches_no_record() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::console_log::force_for_test(None);
+            crate::console_log::install_sink(None);
+        }
+    }
+    let _reset = Reset;
+    let page = "<html><body><script src=\"/app.js\"></script><script src=\"/throw.js\"></script></body></html>";
+    let app = "class SecretLeak extends Error {}
+class NamedLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+console.error(new SecretLeak('x'));
+console.error(new NamedLeak('y'));
+Promise.reject(new NamedLeak('z'));";
+    let throws = "class ThrownLeak extends Error { constructor(m) { super(m); this.name = 'SecretName'; } }
+function thrower() { throw new ThrownLeak('w'); }
+thrower();";
+    let server = serve(vec![
+        Route::html("/", page),
+        Route::ok("/app.js", "text/javascript", app),
+        Route::ok("/throw.js", "text/javascript", throws),
+    ]);
+    for mirror in [false, true] {
+        crate::console_log::force_for_test(Some(mirror));
+        let (mut engine, view) = inspected_engine(EngineConfig::default());
+        runtime().block_on(engine.load_url(view, server.url("/"))).unwrap();
+        let records = engine.inspector(view).expect("inspector").snapshot_since(0).records;
+        let kinds: Vec<&str> = records.iter().map(|r| r.event.kind()).collect();
+        assert!(kinds.contains(&"script_error"), "mirror {mirror}: no script_error in {kinds:?}");
+        assert!(kinds.iter().filter(|k| **k == "console").count() >= 2, "mirror {mirror}: {kinds:?}");
+        let text = serde_json::to_string(&records).unwrap();
+        for name in ["SecretLeak", "SecretName", "NamedLeak", "ThrownLeak"] {
+            assert!(!text.contains(name), "mirror {mirror}: the page's error name {name} reached a record: {text}");
+        }
+    }
+}
+
 /// #791 review: `count` had the only shape-path test. A failed
 /// `console.assert` and a `console.timeLog` label reach the Inspector as
 /// shapes too, with the mirror on; with console text kept, the text is there
