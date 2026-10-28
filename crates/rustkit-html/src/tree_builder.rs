@@ -998,6 +998,16 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.open_elements.push((name, node_id));
                 self.mode = InsertionMode::InBody;
             }
+            // HTML §13.2.6.4.6, start tag "frameset": insert the element and
+            // switch to "in frameset". No body is implied: the frameset is
+            // the html element's child, the document's body element (§3.1.3).
+            Token::StartTag {
+                name, attrs, self_closing: _
+            } if name == "frameset" => {
+                let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.open_elements.push((name, node_id));
+                self.mode = InsertionMode::InFrameset;
+            }
             _ => {
                 // Implied body start tag
                 let node_id = self.sink.start_element("body".to_string(), vec![], false);

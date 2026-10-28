@@ -631,15 +631,16 @@ impl Document {
             .find(|n| n.tag_name() == Some("head"))
     }
 
-    /// Get the <body> element.
+    /// The body element (HTML §3.1.3): the first child of the html element
+    /// that is a `body` OR a `frameset` element, or None. A frameset
+    /// document's body element is its frameset; callers that need a `<body>`
+    /// specifically must check the tag.
     pub fn body(&self) -> Option<Rc<Node>> {
-        // First try to find body as a direct child of the document element (html)
-        // This is the correct DOM structure per spec
         if let Some(html_element) = self.document_element() {
             if let Some(body) = html_element
                 .children()
                 .into_iter()
-                .find(|n| n.tag_name() == Some("body"))
+                .find(|n| matches!(n.tag_name(), Some("body") | Some("frameset")))
             {
                 return Some(body);
             }

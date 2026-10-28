@@ -3435,6 +3435,15 @@ const WRAPPERS_JS: &str = r#"
     // then `el` in scope (§8.1.8.1 "getting the current value of the event
     // handler", the scope chain). `this` is whatever the handler is called
     // on: the element, or the Window for a body handler the Window owns.
+    //
+    // Known deviation (L2): for a handler the Window owns (`<body onload>`,
+    // `<frameset onresize>`), the spec's scope chain is the global only: its
+    // "element" is null, so neither the document nor the body is put in
+    // scope (§8.1.8.1 steps 10 and 12 apply to an element's handler). This
+    // compiles every attribute the same way, with the document and the
+    // element in scope, so `<body onload="getElementById(...)">` resolves
+    // where the spec would throw. Kept deliberately: nothing on the web
+    // depends on the throw, and one compile path is one place to get right.
     function compileHandler(src, el) {
         try {
             return new Function('__rk_doc', '__rk_el',
@@ -3454,18 +3463,32 @@ const WRAPPERS_JS: &str = r#"
         if (!c || c.src !== src) c = all[type] = { src: src, fn: compileHandler(src, t) };
         return c.fn;
     }
-    // The body element of the global document (HTML §3.1.3): the one body
-    // or frameset whose handlers the Window owns. A detached <body>, or one
-    // in a DOMParser document, is not it.
-    function isTheBody(t) { return t.nodeType === 1 && t === doc.body; }
+    // HTML §8.1.8.1 "determine the target of an event handler", for a
+    // Window type (WINDOW_HANDLER_TYPES) on an element:
+    //   1. not a body or frameset element: the element itself;
+    //   3. a body/frameset whose node document is not the active document
+    //      (a DOMParser body: no Window): null, so the getter answers null
+    //      and the setter does nothing;
+    //   4. else the Window: the body's or frameset's node document is the
+    //      global document, attached to it or not (`createElement('body')`
+    //      forwards too; the spec never asks whether it is THE body element).
+    function isBodyOrFrameset(t) {
+        if (t.nodeType !== 1) return false;
+        var n = t.localName;
+        return n === 'body' || n === 'frameset';
+    }
+    function windowHandlerTarget(t) {
+        return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
     function handlerOf(t, type) {
         if (PLAIN.has(t)) return undefined;
+        // A body or frameset has no handler of its own for a Window type,
+        // assigned or inline: the target is the Window (its handler runs
+        // when the event reaches the Window) or nothing.
+        if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
         var a = ASSIGNED.get(t);
         if (a && type in a) return a[type];
         if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
-        // The body element has no handler of its own for a Window type: the
-        // Window's handler runs when the event reaches the Window.
-        if (WINDOW_HANDLER_TYPES[type] && isTheBody(t)) return undefined;
         // A type with no accessor (a custom event) is still a data property.
         if (!HANDLER_TYPES[type]) {
             var h = t['on' + type];
@@ -3485,7 +3508,14 @@ const WRAPPERS_JS: &str = r#"
             if (a) delete a[type];
             // The body's attribute for a Window type is the Window's
             // handler: it replaces what was assigned to `window.on<type>`.
-            if (WINDOW_HANDLER_TYPES[type] && isTheBody(t)) delete WINDOW_ASSIGNED[type];
+            // Only the body element's attribute (L1): the Window's getter
+            // reads `doc.body`'s attribute lazily, so a detached body's
+            // attribute, which the spec would also compile into the
+            // Window's handler, is left alone rather than dropping the
+            // assigned handler for nothing.
+            if (WINDOW_HANDLER_TYPES[type] && t === doc.body && windowHandlerTarget(t) === g) {
+                delete WINDOW_ASSIGNED[type];
+            }
         }
     }
     // HTML §8.1.8.2 GlobalEventHandlers: `on<type>` is an accessor on
@@ -3539,23 +3569,25 @@ const WRAPPERS_JS: &str = r#"
     // the Window-reflecting set (onload, onresize, onscroll, onerror,
     // onfocus, onblur) on the body element are the Window's handlers. The
     // IDL attributes on HTMLBodyElement.prototype (and the frameset's)
-    // forward to `window.on<type>` when the element is the body element,
-    // and `<body onload="...">` is the Window's `load` handler: compiled
-    // from the attribute with the document and the body in scope, the
-    // Window as `this`, and run by the Window's `load` dispatch (which is
-    // where `load` fires; older pages put their start-up there). A body
-    // that is not the body element keeps element handlers, as any element.
+    // forward to `window.on<type>` for any body or frameset of the global
+    // document (windowHandlerTarget), and `<body onload="...">` is the
+    // Window's `load` handler: compiled from the attribute with the
+    // document and the body in scope, the Window as `this`, and run by the
+    // Window's `load` dispatch (which is where `load` fires; older pages
+    // put their start-up there). A frameset document's body element is its
+    // frameset (§3.1.3), so `<frameset onload>` is the same. A body in
+    // another document has no Window to forward to: null, no assignment.
     //
     // `window.on<type>` for these types is an accessor on the Window over
     // one slot: the value assigned (through the Window or the body), else
-    // the body's compiled content attribute, else null. Setting or removing
-    // the body's attribute drops the assigned value, as on elements. The
-    // Window's dispatch reads `window['on' + type]`, so it sees the slot.
-    // The other on<type> on the Window stay data properties.
+    // the body element's compiled content attribute, else null. Setting or
+    // removing the body element's attribute drops the assigned value, as
+    // on elements. The Window's dispatch reads `window['on' + type]`, so it
+    // sees the slot. The other on<type> on the Window stay data properties.
     var WINDOW_HANDLER_TYPES = Object.create(null), WINDOW_ASSIGNED = Object.create(null);
     ('afterprint beforeprint beforeunload blur error focus hashchange languagechange load message ' +
-     'messageerror offline online pagehide pageshow popstate rejectionhandled resize scroll storage ' +
-     'unhandledrejection unload').split(' ').forEach(function (type) {
+     'messageerror offline online pagehide pagereveal pageshow pageswap popstate rejectionhandled ' +
+     'resize scroll storage unhandledrejection unload').split(' ').forEach(function (type) {
         WINDOW_HANDLER_TYPES[type] = true;
         var name = 'on' + type;
         Object.defineProperty(g, name, {
@@ -3567,11 +3599,17 @@ const WRAPPERS_JS: &str = r#"
             },
             set: function (v) { WINDOW_ASSIGNED[type] = handlerValue(v); }
         });
+        // §8.1.8.2 getter step 2 / setter step 2: a null target answers
+        // null and takes no assignment.
         var desc = {
             configurable: true, enumerable: true,
-            get: function () { return isTheBody(this) ? g[name] : elementHandlerGet(this, type); },
+            get: function () {
+                var target = windowHandlerTarget(this);
+                return target === g ? g[name] : target === null ? null : elementHandlerGet(this, type);
+            },
             set: function (v) {
-                if (isTheBody(this)) g[name] = v; else elementHandlerSet(this, type, v);
+                var target = windowHandlerTarget(this);
+                if (target === g) g[name] = v; else if (target !== null) elementHandlerSet(this, type, v);
             }
         };
         Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
