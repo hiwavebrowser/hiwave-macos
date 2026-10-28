@@ -9541,6 +9541,27 @@ impl layout_ctx::LayoutCtx {
                         },
                         style,
                     );
+                    // An `<img>` was the one element kind whose positioning
+                    // never reached its layout box: every other builder
+                    // (block, inline, control, inline `<svg>`, pseudo)
+                    // transfers it, this one returned the box as built, so a
+                    // `position: absolute` image laid out IN FLOW with its
+                    // `top/left` ignored, took the line's place, and painted
+                    // in the normal-flow bucket. railway's hero (`absolute
+                    // inset-0 w-full h-full` in an `absolute inset-0` layer)
+                    // kept its 1:1 ratio, 1248x1248 for Chrome's 1248x1700,
+                    // because the flow pass has no containing-block height
+                    // for it and nothing re-anchored it (HT27 R3).
+                    //
+                    // Only a POSITIONED image takes the transfer: a static
+                    // one keeps the box exactly as before, float and clear
+                    // included (a floated `<img>` still rides the line; that
+                    // is a separate item, not touched here), so nothing
+                    // moves on a page without a positioned image.
+                    let positioning = Engine::positioning_of(&b.style);
+                    if positioning.position != Position::Static {
+                        Engine::apply_positioning(&mut b, positioning);
+                    }
                     Engine::attach_identity(
                         &mut b,
                         selector_path,
