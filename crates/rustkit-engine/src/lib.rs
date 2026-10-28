@@ -21626,7 +21626,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         // string (Chrome 148 reads `none` on an element as `normal` too).
         // netflix's form picks its layout from it.
         ("content", match &s.content {
-            Some(text) => format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")),
+            Some(text) => css_string(text),
             None => "normal".to_string(),
         }),
     ];
@@ -21634,6 +21634,26 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
+/// escaped, and a control character (a `\a` line break resolved by the
+/// parser, say) as `\<hex> ` so the value stays on one row of the
+/// tab-separated lines script reads.
+fn css_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push('\u{FFFD}'),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => out.push_str(&format!("\\{:x} ", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.

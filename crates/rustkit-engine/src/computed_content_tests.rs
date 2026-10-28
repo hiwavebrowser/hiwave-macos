@@ -19,18 +19,19 @@ fn computed_content_is_the_cascaded_string_or_normal() {
         .load_html(
             id,
             r#"<!doctype html><style>#w{content:'1'} @media (min-width: 600px){#w{content:'2'}}
-               #q{content:"a\"b"} #n{content:none}</style>
-               <body><div id=w><form id=f>x</form></div><div id=q>x</div><div id=n>x</div><div id=d>x</div></body>"#,
+               #q{content:"a\"b"} #n{content:none} #l{content:"a\a b"}</style>
+               <body><div id=w><form id=f>x</form></div><div id=q>x</div><div id=n>x</div><div id=d>x</div><div id=l>x</div></body>"#,
         )
         .expect("load_html");
     let value = engine
         .execute_script(
             id,
-            "['w', 'f', 'q', 'n', 'd'].map(function (i) { return i + '=' + \
+            "['w', 'f', 'q', 'n', 'd', 'l'].map(function (i) { return i + '=' + \
              getComputedStyle(document.getElementById(i)).content; }).join(' ')",
         )
         .expect("script");
-    // Chrome 148.0.7778.216, same page.
-    let chrome = r#"w="2" f=normal q="a\"b" n=normal d=normal"#;
+    // Chrome 148.0.7778.216, same page; a resolved `\a` serialises back as
+    // `\a ` (CSSOM), never as a raw line break that would split the row.
+    let chrome = r#"w="2" f=normal q="a\"b" n=normal d=normal l="a\a b""#;
     assert_eq!(value, format!("String({chrome:?})"));
 }
