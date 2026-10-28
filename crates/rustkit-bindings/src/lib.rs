@@ -3647,6 +3647,76 @@ mod tests {
         );
     }
 
+    // DOM §4.2.3 DocumentType half: at most one doctype, and only before the
+    // element. The real `document.doctype` is the only path that reaches
+    // `document_child_check`'s DocumentType arm — `createDocumentType` is a
+    // fake JS object and never exercises it (#804).
+    #[test]
+    fn a_document_refuses_a_doctype_after_its_root_and_takes_it_back_before() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name; }} }})()"
+                ),
+            )
+        };
+        // With a root: append puts the doctype after the element. DocumentType
+        // has no ChildNode.remove (only Element/CharacterData), so use
+        // removeChild. replaceChild onto a trailing comment is the same
+        // refusal; the comment is cleaned up so later asserts stay local.
+        assert_eq!(threw("document.appendChild(document.doctype)"), "HierarchyRequestError");
+        assert_eq!(
+            threw(
+                "var c = document.createComment('x'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        // Remove, then re-insert before the root: success, and the doctype is
+        // once again the first child.
+        assert_eq!(
+            eval_string(
+                &b,
+                "var dt = document.doctype, root = document.documentElement; \
+                 document.removeChild(dt); \
+                 var gone = [document.doctype, document.firstChild === root].join(); \
+                 document.insertBefore(dt, root); \
+                 [gone, document.doctype === dt, document.firstChild === dt, \
+                  document.lastChild === root, document.childNodes.length].join()"
+            ),
+            ",true,true,true,true,2"
+        );
+        // Without a root: append of the lone doctype succeeds once; a second
+        // doctype (via replaceChild onto a comment) is refused.
+        assert_eq!(
+            threw(
+                "var dt = document.doctype; document.removeChild(document.documentElement); \
+                 document.removeChild(dt); document.appendChild(dt)"
+            ),
+            "no throw"
+        );
+        assert_eq!(
+            threw(
+                "var c = document.createComment('d'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "[document.doctype !== null, document.documentElement, \
+                  document.firstChild === document.doctype, document.childNodes.length].join()"
+            ),
+            "true,,true,1"
+        );
+    }
+
     // DOM §4.2.3 validity: the DOMException named, and the tree untouched.
     #[test]
     fn invalid_tree_writes_throw_and_change_nothing() {
