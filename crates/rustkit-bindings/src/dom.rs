@@ -24,7 +24,7 @@
 use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -66,6 +66,40 @@ pub type GeometrySource =
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
 
+/// Control writes script made that the engine has not taken yet. A forced
+/// layout copies them into the engine's edit state before it builds, and
+/// drains what it applied (`ForcedLayout`).
+#[derive(Default)]
+pub struct ControlWrites {
+    pub values: Vec<(usize, String)>,
+    pub checked: Vec<(usize, Option<bool>)>,
+}
+
+/// A layout of the DOM as it is now: what a forced layout publishes.
+pub struct ForcedGeometry {
+    /// Builds the geometry and computed-style maps of this layout, on the
+    /// first read that needs them (as `DomBindings::set_geometry_source`).
+    pub source: GeometrySource,
+    pub hit_tester: Option<HitTester>,
+    /// The furthest the view can scroll over this layout, as
+    /// `DomBindings::set_scroll_state` takes it.
+    pub max_scroll: (f32, f32),
+}
+
+/// Lays the page out again for a read of geometry or computed style that
+/// follows a script write in the same task (forced layout,
+/// `DomBindings::set_forced_layout`). `None` when it cannot now: the read
+/// answers from the last layout published.
+pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
+
+/// How many forced layouts one script task gets before its reads answer
+/// from the last layout (Prometheus, #812 review): a write-read loop that
+/// never settles cannot hold the page thread forever. cnn's header loop
+/// needs 8. A count, not a time: a time limit made the page's answer depend
+/// on the machine's load (at 1 s, cnn's loop ran out on a loaded seat and
+/// laid the header out as before forced layout).
+pub(crate) const FORCED_LAYOUTS_PER_TASK: u64 = 256;
+
 /// The document the host functions read, and its generation.
 #[derive(Default)]
 pub(crate) struct DomHost {
@@ -84,9 +118,25 @@ pub(crate) struct DomHost {
     pub(crate) geometry_source: Option<GeometrySource>,
     /// How many times a pending source was built (`DomBindings::geometry_builds`).
     pub(crate) geometry_builds: u64,
+    /// Lays out the document the engine last published a layout of.
+    pub(crate) forced_layout: Option<ForcedLayout>,
+    /// Forced layouts since the engine last took the count
+    /// (`DomBindings::take_forced_layouts`).
+    pub(crate) forced_layouts: u64,
+    /// The forced layouts against this task's budget, and their time (ms,
+    /// for the decline log), since the engine last published a layout or
+    /// took the count.
+    forced_in_task: u64,
+    forced_ms: f64,
+    /// Whether a read since the count was taken answered from the last
+    /// layout instead (budget spent, or the build state busy): logged once.
+    forced_declined: bool,
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
+    /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
+    /// a forced layout moves its maximum.
+    pub(crate) scroll_state: crate::web_scroll::SharedScroll,
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
@@ -135,6 +185,102 @@ impl DomHost {
         }
     }
 
+    /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
+    /// when script wrote to the DOM since the last layout was published, the
+    /// page is laid out again first (forced layout), as in a browser.
+    pub(crate) fn ensure_fresh_geometry(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        Self::force_layout_if_written(host, dirty);
+        host.borrow_mut().ensure_geometry();
+    }
+
+    /// The forced layout half of `ensure_fresh_geometry`, for reads that
+    /// need the layout current but not the geometry maps (the scroll
+    /// maximum).
+    pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        if !dirty.written_since_layout() {
+            return;
+        }
+        let forced = {
+            let mut h = host.borrow_mut();
+            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
+            match (h.forced_layout.clone(), spent) {
+                (Some(_), true) => {
+                    h.note_forced_decline("budget spent");
+                    None
+                }
+                (forced, _) => forced,
+            }
+        };
+        let Some(forced) = forced else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        // Outside the host borrow: the build does not read the host, and
+        // runs no script.
+        let mut writes = {
+            let mut h = host.borrow_mut();
+            ControlWrites {
+                values: std::mem::take(&mut h.value_writes),
+                checked: std::mem::take(&mut h.checked_writes),
+            }
+        };
+        let laid = forced(&mut writes);
+        let mut h = host.borrow_mut();
+        h.forced_ms += started.elapsed().as_secs_f64() * 1000.0;
+        // What the layout did not apply stays for the engine's flush.
+        writes.values.append(&mut h.value_writes);
+        h.value_writes = writes.values;
+        writes.checked.append(&mut h.checked_writes);
+        h.checked_writes = writes.checked;
+        let Some(laid) = laid else {
+            h.note_forced_decline("build state in use");
+            return;
+        };
+        h.geometry.clear();
+        h.computed.clear();
+        h.geometry_source = Some(laid.source);
+        h.hit_tester = laid.hit_tester;
+        // The document may have grown or shrunk: scrollTo clamps to the new
+        // end, and an offset past it comes back to it.
+        let scroll = h.scroll_state.clone();
+        let mut s = scroll.borrow_mut();
+        (s.max_x, s.max_y) = laid.max_scroll;
+        s.x = s.x.min(s.max_x.max(0.0));
+        s.y = s.y.min(s.max_y.max(0.0));
+        h.scroll = (s.x, s.y);
+        h.forced_layouts += 1;
+        h.forced_in_task += 1;
+        dirty.laid_out();
+    }
+
+    /// A read that wanted a forced layout answers from the last layout:
+    /// one log line per script task (until `take_forced_layouts`).
+    fn note_forced_decline(&mut self, why: &'static str) {
+        if !std::mem::replace(&mut self.forced_declined, true) {
+            tracing::info!(
+                why,
+                forced_layouts = self.forced_in_task,
+                forced_ms = self.forced_ms,
+                "Forced layout declined; reads answer from the last layout"
+            );
+        }
+    }
+
+    /// A new budget for forced layouts: the engine took the task's count,
+    /// or published a layout of its own.
+    pub(crate) fn renew_forced_budget(&mut self) {
+        self.forced_in_task = 0;
+        self.forced_ms = 0.0;
+        self.forced_declined = false;
+    }
+
+    /// The forced layouts since the last call, which starts a new task's
+    /// count and budget.
+    pub(crate) fn take_forced_layouts(&mut self) -> u64 {
+        self.renew_forced_budget();
+        std::mem::take(&mut self.forced_layouts)
+    }
+
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {
         self.scroll = offset;
     }
@@ -150,6 +296,8 @@ impl DomHost {
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
+        // The engine installs one for the new document with its first layout.
+        self.forced_layout = None;
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
@@ -269,15 +417,17 @@ fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
 
 /// DOM §4.2.3 "pre-insert" `node` into `parent` before `child` (`None`
 /// appends). Returns the DOMException name on a failed validity check,
-/// before anything is touched.
+/// before anything is touched. `replacing`: the caller takes `child` out
+/// next (replaceChild, replaceWith), so a Document is checked by the
+/// "replace" rules, which do not count `child` itself.
 fn pre_insert(
     parent: &Rc<Node>,
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
+    replacing: bool,
 ) -> Result<(), &'static str> {
-    // Only elements and fragments take children here; a Document's
-    // one-element rules come with a later rung.
-    if !parent.is_element() && !is_fragment(parent) {
+    let document = matches!(parent.node_type, NodeType::Document);
+    if !document && !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
     if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
@@ -286,11 +436,14 @@ fn pre_insert(
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
         return Err("NotFoundError");
     }
-    if matches!(
-        node.node_type,
-        NodeType::Document | NodeType::DocumentType { .. }
-    ) {
-        return Err("HierarchyRequestError");
+    match node.node_type {
+        NodeType::Document => return Err("HierarchyRequestError"),
+        NodeType::DocumentType { .. } if !document => return Err("HierarchyRequestError"),
+        NodeType::Text(_) if document => return Err("HierarchyRequestError"),
+        _ => {}
+    }
+    if document {
+        document_child_check(parent, node, child.as_ref(), replacing)?;
     }
     // Inserting a node before itself inserts it before its next sibling.
     let child = match child {
@@ -311,6 +464,48 @@ fn pre_insert(
         }
     }
     Ok(())
+}
+
+/// DOM §4.2.3 step 6 of "ensure pre-insert validity" (and step 6 of
+/// "replace"): a Document has at most one element child and one doctype,
+/// the doctype before the element.
+fn document_child_check(
+    document: &Rc<Node>,
+    node: &Rc<Node>,
+    child: Option<&Rc<Node>>,
+    replacing: bool,
+) -> Result<(), &'static str> {
+    let is_doctype = |n: &Rc<Node>| matches!(n.node_type, NodeType::DocumentType { .. });
+    let kids = document.children();
+    // When replacing, `child` is about to leave and does not count.
+    let counted = |n: &&Rc<Node>| !(replacing && child.is_some_and(|c| c.id == n.id));
+    let has_element = kids.iter().filter(counted).any(|n| n.is_element());
+    let has_doctype = kids.iter().filter(counted).any(is_doctype);
+    let at = child.and_then(|c| kids.iter().position(|k| k.id == c.id));
+    let doctype_after = at.is_some_and(|i| kids[i + 1..].iter().any(is_doctype));
+    let element_before = at.is_some_and(|i| kids[..i].iter().any(|n| n.is_element()));
+    let before_doctype = !replacing && child.is_some_and(is_doctype);
+    let one_element = |elements: usize| {
+        elements == 1 && (has_element || before_doctype || doctype_after)
+    };
+    let bad = match node.node_type {
+        NodeType::DocumentFragment => {
+            let inner = node.children();
+            let elements = inner.iter().filter(|n| n.is_element()).count();
+            elements > 1
+                || inner.iter().any(|n| matches!(n.node_type, NodeType::Text(_)))
+                || one_element(elements)
+        }
+        NodeType::Element { .. } => one_element(1),
+        NodeType::DocumentType { .. } => {
+            has_doctype || element_before || (child.is_none() && has_element)
+        }
+        _ => false,
+    };
+    match bad {
+        true => Err("HierarchyRequestError"),
+        false => Ok(()),
+    }
 }
 
 fn is_fragment(node: &Node) -> bool {
@@ -362,7 +557,8 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
                 None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
                 Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
             };
-            pre_insert(&parent, &node, child)
+            let replacing = matches!(args.get(5), Some(JsValue::Boolean(true)));
+            pre_insert(&parent, &node, child, replacing)
         }
         Some("remove") if is_child_of(&node, &parent) => {
             node.remove_from_parent();
@@ -1099,7 +1295,7 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
 pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
-    dirty: &Rc<Cell<DomDirty>>,
+    dirty: &Rc<crate::DirtyMark>,
     mutations: &Rc<RefCell<ScriptMutations>>,
     log: &Rc<RefCell<MutationLog>>,
 ) -> Result<(), JsError> {
@@ -1245,12 +1441,13 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
             if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
-                h.borrow_mut().ensure_geometry();
+                DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
@@ -1284,12 +1481,13 @@ pub(crate) fn install(
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_hit",
         2,
         Box::new(move |args| {
-            let mut host = h.borrow_mut();
-            host.ensure_geometry();
+            DomHost::ensure_fresh_geometry(&h, &d);
+            let host = h.borrow();
             if host.geometry.is_empty() {
                 return JsValue::Null;
             }
@@ -1345,7 +1543,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                d.set(d.get().max(DomDirty::Style));
+                d.mark(DomDirty::Style);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1373,7 +1571,7 @@ pub(crate) fn install(
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                d.set(d.get().max(bucket));
+                d.mark(bucket);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1405,7 +1603,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             result
         }),
     )?;
@@ -1425,7 +1623,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             JsValue::Null
         }),
     )?;
@@ -1476,9 +1674,35 @@ pub(crate) fn install(
                         url: url.clone(),
                         in_order,
                         inserted_by: caller,
+                        inserted_at: std::time::Instant::now(),
                     });
                 }
             }
+            JsValue::Null
+        }),
+    )?;
+
+    // `set_adopted(gen, id, json)`: CSS text of `node`'s adoptedStyleSheets,
+    // a JSON array of strings in array order. An empty string is a disabled
+    // sheet. The next layout applies them. Nothing is injected into the tree.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_adopted",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(json) = string_arg(args, 2) else {
+                return JsValue::Null;
+            };
+            let Ok(texts) = serde_json::from_str::<Vec<String>>(json) else {
+                return JsValue::Null;
+            };
+            node.set_adopted_styles(texts);
+            d.mark(DomDirty::Style);
             JsValue::Null
         }),
     )?;
@@ -1504,10 +1728,10 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit
+        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -1767,7 +1991,10 @@ const WRAPPERS_JS: &str = r#"
         }
         return o[SLOT];
     }
-    function write(op, parent, node, child, method) {
+    // `replacing`: `child` is the node this call takes out (replaceChild,
+    // and replaceWith while `this` is still in place), so the Document
+    // checks do not count it.
+    function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
         function here(s) { return s.gen === gen ? s.id : -1; }
@@ -1775,7 +2002,7 @@ const WRAPPERS_JS: &str = r#"
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c);
+        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
@@ -1816,7 +2043,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var self = this;
         return batch(function () {
-            write('insert', self, node, child, 'replaceChild');
+            write('insert', self, node, child, 'replaceChild', true);
             return write('remove', self, child, null, 'replaceChild');
         });
     };
@@ -1834,8 +2061,8 @@ const WRAPPERS_JS: &str = r#"
         nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
         return nodes;
     }
-    function insertAll(parent, nodes, ref, method) {
-        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    function insertAll(parent, nodes, ref, method, replacing) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method, replacing); });
     }
     // DOM queues one record per call of these; they make several writes,
     // which an observer merges into one while `fn` runs.
@@ -1892,7 +2119,7 @@ const WRAPPERS_JS: &str = r#"
             var self = this, nodes = toNodes(args);
             batch(function () {
                 if (self.parentNode === p) {
-                    insertAll(p, nodes, self, 'replaceWith');
+                    insertAll(p, nodes, self, 'replaceWith', true);
                     p.removeChild(self);
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');
@@ -3433,6 +3660,13 @@ const WRAPPERS_JS: &str = r#"
         // `document.currentScript` while an inserted inline script runs;
         // answers what it was.
         current: function (el) { var was = currentScript; currentScript = el; return was; }
+    };
+    // web_cssom.js publishes constructed-sheet text through this. The
+    // wrapper's slot is private to this closure.
+    g.__rkSetAdoptedStyles = function (node, json) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setAdopted(s.gen, s.id, String(json));
     };
 
     // For node_apis.js, which runs next and deletes it.

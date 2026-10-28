@@ -2664,6 +2664,7 @@ dependencies = [
  "hiwave-core",
  "hiwave-shell",
  "hiwave-shield",
+ "hiwave-shield-intercept",
  "hiwave-vault",
  "http",
  "log",
@@ -2735,6 +2736,17 @@ dependencies = [
  "hiwave-core",
  "log",
  "reqwest",
+ "url",
+]
+
+[[package]]
+name = "hiwave-shield-intercept"
+version = "0.1.0"
+dependencies = [
+ "hiwave-shield",
+ "http",
+ "rustkit-net",
+ "tracing",
  "url",
 ]
 
@@ -4269,9 +4281,11 @@ name = "parity-capture"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "hiwave-shield-intercept",
  "png",
  "rustkit-engine",
  "rustkit-layout",
+ "rustkit-net",
  "rustkit-viewhost",
  "serde",
  "serde_json",

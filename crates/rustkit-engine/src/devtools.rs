@@ -143,6 +143,9 @@ pub struct DevtoolsElement {
 pub struct DevtoolsConsoleEntry {
     /// The record's `seq`.
     pub id: u64,
+    /// The document it was logged in (`InspectorRecord::doc`): the panel
+    /// keeps old documents' lines, marked, until the ring drops them.
+    pub doc: u32,
     /// `log`, `info`, `warn`, `error` or `debug`.
     pub level: &'static str,
     /// The Inspector event it came from (`console`, `script_error`, ...).
@@ -174,6 +177,13 @@ pub struct DevtoolsConsole {
     /// The document laid out for the first time or finished loading since
     /// `since` (or a new one committed): the panel's tree is stale.
     pub tree_stale: bool,
+    /// The page thread panicked holding the view's Inspector lock; the
+    /// lines are what it recorded before (T6 R1 condition 2).
+    pub page_crashed: bool,
+    /// Console calls a running script made and the view has not recorded
+    /// yet (past the live rate cap): "K console lines held by a running
+    /// script" (`Inspector::console_held`, read without the page).
+    pub held: usize,
 }
 
 /// `tag#id.class.class`.
@@ -391,6 +401,7 @@ fn frame(loc: &Option<SourceLocation>) -> Vec<DevtoolsFrame> {
 fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
     let entry = |level, message: String, stack| DevtoolsConsoleEntry {
         id: record.seq,
+        doc: record.doc,
         level,
         kind: record.event.kind(),
         message,
@@ -457,17 +468,29 @@ pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole
                 InspectorEvent::NavigationCommit { .. } | InspectorEvent::FirstLayout | InspectorEvent::LoadFinished { .. }
             )
         }),
+        page_crashed: false,
+        held: 0,
     }
+}
+
+/// The panel's line for `held` console calls, or none.
+pub fn devtools_held_text(held: usize) -> Option<String> {
+    (held > 0).then(|| format!("{held} console lines held by a running script"))
 }
 
 impl Engine {
     /// Start (or stop) recording view `id`'s console, errors and load
     /// events for the panel. On: the ring buffer records and the current
-    /// document's console is hooked now, not at its next commit. Off: the
-    /// buffer is emptied and recording costs one atomic load again.
+    /// document's console is hooked now, not at its next commit. Off:
+    /// recording goes back to the view's default and nothing recorded is
+    /// dropped, so the panel reopens with its history (T6b).
     pub fn devtools_attach(&mut self, id: EngineViewId, on: bool) -> Result<(), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        view.inspector.set_buffer_enabled(on);
+        if on {
+            view.inspector.set_buffer_enabled(true);
+        } else {
+            view.inspector.detach_panel();
+        }
         if on {
             if let Some(bindings) = view.bindings.as_ref() {
                 inspector_glue::attach(bindings, &view.inspector);

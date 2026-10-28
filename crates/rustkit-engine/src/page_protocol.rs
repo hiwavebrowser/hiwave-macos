@@ -19,6 +19,12 @@ use rustkit_viewhost::Bounds;
 use tokio::sync::oneshot;
 use url::Url;
 
+/// A [`PageCmd::DevtoolsEval`] the page reached past its deadline answers
+/// this, without running.
+pub const EVAL_CANCELLED: &str = "cancelled: the page was busy past the deadline";
+
+use crate::devtools_service::DevtoolsCounters;
+
 use crate::{
     ClickOutcome, DevtoolsConsole, DevtoolsElement, DevtoolsNode, Engine, EngineEvent,
     EngineViewId, FrameCommit, InputMark, LivePump,
@@ -70,6 +76,14 @@ pub enum PageCmd {
         script: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// The Inspector console's input line (T6c, R1 condition 5). Reached
+    /// past `deadline` (the page was busy and the panel gave up), it is
+    /// cancelled, never run late.
+    DevtoolsEval {
+        script: String,
+        deadline: std::time::Instant,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     SetVisible {
         visible: bool,
     },
@@ -106,6 +120,15 @@ pub enum PageCmd {
         query: DevtoolsQuery,
         reply: oneshot::Sender<DevtoolsAnswer>,
     },
+    /// Test hook: hold the page thread in a host-side wait for this many
+    /// ms, as a long script would (T6b: devtools reads are answered
+    /// meanwhile).
+    #[cfg(test)]
+    Block(u64),
+    /// Test hook: panic the page thread while it holds the view's
+    /// Inspector lock (T6 R1 condition 2).
+    #[cfg(test)]
+    PanicHoldingInspector,
 }
 
 /// What the Inspector asks the page. Node ids are the document's raw
@@ -113,7 +136,8 @@ pub enum PageCmd {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DevtoolsQuery {
     /// Record the page's console, errors and load events for the panel
-    /// (on), or stop and forget them (off).
+    /// (on), or go back to the view's default (off), keeping what was
+    /// recorded for the panel's next opening (T6b).
     Attach(bool),
     /// Outline this element on the page, or nothing.
     Highlight(Option<usize>),
@@ -308,6 +332,8 @@ pub struct PageEndpoint {
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
+    /// What devtools costs this page (`devtools_service`).
+    devtools_counters: Arc<DevtoolsCounters>,
 }
 
 /// Pair a handle with the endpoint that applies its commands.
@@ -330,6 +356,7 @@ pub(crate) fn adopt(
         wake_window: false,
         last_focused: None,
         failed_nav: 0,
+        devtools_counters: Arc::default(),
     }
 }
 
@@ -361,6 +388,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         wake_window: false,
         last_focused: None,
         failed_nav: 0,
+        devtools_counters: Arc::default(),
     };
     (handle, endpoint)
 }
@@ -458,7 +486,13 @@ impl PageEndpoint {
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
             }
-            PageCmd::Eval { script, reply } => {
+            PageCmd::DevtoolsEval { reply, .. } if reply.is_closed() => {
+                // The panel discarded it (navigated, closed): nothing to run for.
+            }
+            PageCmd::DevtoolsEval { deadline, reply, .. } if std::time::Instant::now() >= deadline => {
+                let _ = reply.send(Err(EVAL_CANCELLED.to_string()));
+            }
+            PageCmd::DevtoolsEval { script, reply, .. } | PageCmd::Eval { script, reply } => {
                 let result = self
                     .engine
                     .execute_script(self.view, &script)
@@ -521,6 +555,13 @@ impl PageEndpoint {
                 let _ = reply.send(result);
             }
             PageCmd::Devtools { query, reply } => {
+                self.devtools_counters.page_command();
+                // The window watches at once when it can reach the page's
+                // Inspector; while the page boots or holds its endpoint it
+                // cannot, so the page watches too (#803 review (2)).
+                if let (DevtoolsQuery::Attach(on), Some(inspector)) = (&query, self.engine.inspector(self.view)) {
+                    crate::devtools_service::watch(&inspector, &self.devtools_counters, *on);
+                }
                 let (answer, frame_changed) = devtools_answer(&mut self.engine, self.view, query);
                 let wake = devtools_wakes_window(&answer, frame_changed);
                 let _ = reply.send(answer);
@@ -535,7 +576,16 @@ impl PageEndpoint {
                 // No event carries the answer: wake the content thread's
                 // window so it reads it now, when there is something to read.
                 if self.wake_window && wake {
+                    self.devtools_counters.window_wake();
                     crate::script_net::poke_live_turn();
+                }
+            }
+            #[cfg(test)]
+            PageCmd::Block(ms) => std::thread::sleep(std::time::Duration::from_millis(ms)),
+            #[cfg(test)]
+            PageCmd::PanicHoldingInspector => {
+                if let Some(inspector) = self.engine.inspector(self.view) {
+                    inspector.panic_holding_lock();
                 }
             }
         }
@@ -888,6 +938,17 @@ impl PageEndpoint {
 
     pub(crate) fn set_wake_window(&mut self, wake: bool) {
         self.wake_window = wake;
+    }
+
+    /// What devtools has cost this page so far.
+    pub fn devtools_counters(&self) -> Arc<DevtoolsCounters> {
+        Arc::clone(&self.devtools_counters)
+    }
+
+    /// The page's Inspector, for reads the page need not answer
+    /// (`devtools_service`).
+    pub fn inspector(&self) -> Option<Arc<crate::inspector::Inspector>> {
+        self.engine.inspector(self.view)
     }
 
     /// Commands waiting on the channel, with adjacent resizes, renders and

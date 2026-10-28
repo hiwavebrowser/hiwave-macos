@@ -353,7 +353,7 @@ pub(crate) struct DiagnosticsSource<'a> {
     pub layout: Option<&'a LayoutBox>,
     pub scroll: (f32, f32),
     pub viewport: (u32, u32),
-    pub checked: &'a HashMap<usize, bool>,
+    pub checked: std::cell::Ref<'a, HashMap<usize, bool>>,
 }
 
 struct Builder<'a> {
@@ -1474,7 +1474,7 @@ impl Engine {
             layout: view.layout.as_deref(),
             scroll: view.scroll_offset,
             viewport: page.viewport,
-            checked: &view.checked_states,
+            checked: view.lay.checked_states.borrow(),
         })
     }
 
@@ -1520,7 +1520,7 @@ impl Engine {
                 let mut stack = vec![src.document.root().clone()];
                 let mut found = None;
                 while let Some(n) = stack.pop() {
-                    match SelectorMatcher.node_matches(&n, sel, src.checked) {
+                    match SelectorMatcher.node_matches(&n, sel, &src.checked) {
                         None => return Err(EngineError::RenderError(format!("invalid selector: {sel}"))),
                         Some(true) => {
                             found = Some(n);
