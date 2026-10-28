@@ -10279,9 +10279,18 @@ impl layout_ctx::LayoutCtx {
                     // slotted node whose box was built in that flat tree.
                     // The element keeps a computed style and no geometry, so
                     // `getComputedStyle` reads `contents` rather than `none`.
+                    // A contents `<a href>` has no box to carry its href, and
+                    // `link_at_point` reads the nearest box's: the hoisted
+                    // children carry it instead, as the pieces of a split
+                    // inline do (`push_child_hoisting_line_breaks`). A child
+                    // that is itself a link keeps its own.
                     if child_box.style.display == rustkit_css::Display::Contents {
                         note_boxless_style(&child_box);
-                        for grandchild in child_box.children {
+                        let link_href = child_box.link_href;
+                        for mut grandchild in child_box.children {
+                            if grandchild.link_href.is_none() {
+                                grandchild.link_href = link_href.clone();
+                            }
                             Engine::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
                         }
                         continue;
