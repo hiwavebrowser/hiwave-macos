@@ -375,3 +375,118 @@ fn a_shown_popover_is_fixed_and_fit_content_and_a_closed_one_is_hidden() {
     assert!(!text.contains("secret"), "{text:?}");
     assert!(!text.contains("closed dialog"), "{text:?}");
 }
+
+/// R1 H1 on #786. A `display: contents` anchor generates no box, and
+/// `link_at_point` reads the nearest box's `link_href`. The hoist has to
+/// hand the anchor's href to the boxes it hoists, or the card lays out
+/// right and a click on it goes nowhere.
+#[test]
+fn a_click_inside_a_display_contents_anchor_follows_its_href() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}#a{display:contents}"#,
+        r#"#card{display:block;width:100px;height:40px}"#,
+        r#"#inner{display:block;width:50px;height:20px}"#,
+        r#"#bcard{display:block;width:100px;height:40px}</style>"#,
+        r#"<body><a id="a" href="https://example.com/card"><div id="card">"#,
+        r#"<div id="inner">card</div></div></a>"#,
+        r#"<a id="b" href="https://example.com/b" style="display:contents">"#,
+        r#"<div id="bcard">b</div></a></body>"#,
+    ));
+    assert_eq!(
+        eval(&mut engine, view, "getComputedStyle(document.getElementById('a')).display"),
+        "contents"
+    );
+    assert_eq!(
+        eval(&mut engine, view, "document.getElementById('a').getBoundingClientRect().width"),
+        "0"
+    );
+    // The text inside the inner block, the card beside it, the second card.
+    assert_eq!(
+        engine.link_at_point(view, 10.0, 10.0).as_deref(),
+        Some("https://example.com/card"),
+        "a click on the hoisted grandchild's text does not follow the contents anchor"
+    );
+    assert_eq!(
+        engine.link_at_point(view, 80.0, 30.0).as_deref(),
+        Some("https://example.com/card"),
+        "a click on the hoisted card does not follow the contents anchor"
+    );
+    assert_eq!(
+        engine.link_at_point(view, 10.0, 50.0).as_deref(),
+        Some("https://example.com/b"),
+        "an inline-styled contents anchor does not navigate"
+    );
+}
+
+/// R1 M1 on #786. The computed styles of boxless elements are kept per
+/// view, keyed by NodeId, which restarts at 1 in every document. Two views
+/// in one engine, built one after the other: each script reads its own
+/// contents element's style, not the other view's for the same id.
+#[test]
+fn each_view_reads_the_boxless_styles_of_its_own_build() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut make_view = || {
+        engine
+            .create_headless_view(Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            })
+            .expect("view")
+    };
+    let a = make_view();
+    let b = make_view();
+    let page = |color: &str| {
+        format!(
+            concat!(
+                r#"<!doctype html><style>body{{margin:0}}#c{{display:contents;color:{color}}}</style>"#,
+                r#"<body><div id="c"><span id="k">k</span></div></body>"#,
+            ),
+            color = color
+        )
+    };
+    engine.load_html(a, &page("rgb(1, 2, 3)")).expect("load a");
+    engine.load_html(b, &page("rgb(4, 5, 6)")).expect("load b");
+    let read = "getComputedStyle(document.getElementById('c')).color";
+    assert_eq!(eval(&mut engine, a, read), "rgb(1, 2, 3)", "view A read view B's map");
+    assert_eq!(eval(&mut engine, b, read), "rgb(4, 5, 6)");
+    assert_eq!(eval(&mut engine, a, "getComputedStyle(document.getElementById('c')).display"), "contents");
+    // A rebuild of A does not disturb B.
+    eval(&mut engine, a, "document.getElementById('k').textContent = 'kk'");
+    assert_eq!(eval(&mut engine, b, read), "rgb(4, 5, 6)", "view B read view A's map");
+    assert_eq!(eval(&mut engine, a, read), "rgb(1, 2, 3)");
+}
+
+/// R1 M2 on #786. A closed `<details>` shows only its summary. The hoist
+/// of a `display: contents` child took its children before that filter,
+/// so the hidden content rendered.
+#[test]
+fn a_contents_child_of_a_closed_details_is_not_rendered() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px Arial}"#,
+        r#".c{display:contents}</style><body>"#,
+        r#"<details id="d"><summary>sum</summary><div id="c" class="c"><span id="t">secret</span></div></details>"#,
+        r#"<details id="o" open><summary>osum</summary><div class="c"><span id="ot">shown</span></div></details>"#,
+        r#"</body>"#,
+    ));
+    let text = painted(&engine, view);
+    assert!(text.contains("sum") && text.contains("shown"), "{text:?}");
+    assert!(!text.contains("secret"), "closed details rendered its contents child: {text:?}");
+    assert_eq!(
+        eval(&mut engine, view, "document.getElementById('t').getBoundingClientRect().width"),
+        "0",
+        "the hidden span has a box"
+    );
+    let shown = eval(&mut engine, view, "document.getElementById('ot').getBoundingClientRect().width");
+    let shown: f64 = shown.parse().expect(&shown);
+    assert!(shown > 0.0, "the open details' contents child has no box");
+
+    // Opened by script, the content is laid out and painted.
+    eval(&mut engine, view, "document.getElementById('d').open = true");
+    let text = painted(&engine, view);
+    assert!(text.contains("secret"), "opened details did not render its contents child: {text:?}");
+    let width = eval(&mut engine, view, "document.getElementById('t').getBoundingClientRect().width");
+    let width: f64 = width.parse().expect(&width);
+    assert!(width > 0.0, "the shown span has no box");
+}
