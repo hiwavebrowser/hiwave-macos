@@ -575,7 +575,9 @@ impl Engine {
         Ok(devtools_console_entries(&view.inspector.snapshot_since(since)))
     }
 
-    /// View `id`'s requests for its current document (T7).
+    /// View `id`'s requests for its current document (T7). URLs are the
+    /// ones the Inspector scrubbed when it recorded them (`scrub_url` on
+    /// `request`, `scrub_text` on `fail`); this path scrubs nothing again.
     pub fn devtools_network(&self, id: EngineViewId) -> Result<DevtoolsNetwork, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let (snapshot, doc) = view.inspector.snapshot_and_doc(0);

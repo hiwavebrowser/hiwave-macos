@@ -3,11 +3,11 @@
 //!
 //! When it is off, every function here returns before taking a lock, reading
 //! an error report, or writing a line. The Inspector is unchanged: it stays
-//! off unless something else turns it on, and this mirror does not use its
-//! URL scrubbing; its own [`brief_url`] drops the query, fragment, `;params`
-//! and userinfo of every URL a line names as a URL: requests, locations,
-//! script places (console and error frames), inserted scripts and dynamic
-//! imports (T7 C1). Page text a line quotes (a console message, an error
+//! off unless something else turns it on; this mirror shares only its pure
+//! URL scrub ([`crate::inspector::scrub_url`]): [`brief_url`] drops the
+//! query, fragment, `;params` and userinfo of every URL a line names as a
+//! URL: requests, locations, script places (console and error frames),
+//! inserted scripts and dynamic imports (T7 C1). Page text a line quotes (a console message, an error
 //! message, a source snippet) is not parsed for URLs. Script names such as `inserted#N` are recorded here, only while
 //! the switch is on, so a line can show the script's URL. Lines for live
 //! script requests are also written on the `rustkit-net` runtime (T7); its
@@ -300,24 +300,41 @@ pub(crate) fn sync_diag_armed() {
 /// Origin and path only, capped at 180 characters. The query, fragment,
 /// `;params` and `user:pass@` are dropped, as everywhere else devtools
 /// writes a URL (Pete 10-23, shapes only; T7 C1): they carry tokens, and
-/// since T7 these lines are written on the network runtime too. A scheme
-/// counts only at the start (`^[A-Za-z][A-Za-z0-9+.-]*:`), so a `://` in a
-/// relative URL's query is not one; a `data:` URL keeps only its MIME type.
+/// since T7 these lines are written on the network runtime too.
+///
+/// An absolute string is parsed by `url` and scrubbed by the Inspector's
+/// [`crate::inspector::scrub_url`], so the parser's reading of the string
+/// (`http:u:pw@host`, `https:\\u:pw@host`, a tab in the scheme, leading
+/// space) is what is cut, not this module's; it also reduces `data:` to a
+/// known MIME type, `blob:` to its origin and `javascript:` to its scheme,
+/// and lowercases scheme and host (T7a R1 HOLD 5682590983). A string with
+/// a scheme that does not parse prints no part of itself. A relative
+/// string is cut by hand: a `://` in its query is not a scheme.
 pub(crate) fn brief_url(url: &str) -> String {
-    let scheme_len = url
-        .find(':')
-        .filter(|&at| {
-            let name = &url[..at];
-            name.starts_with(|c: char| c.is_ascii_alphabetic())
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        })
-        .map_or(0, |at| at + 1);
-    let (scheme, rest) = url.split_at(scheme_len);
-    if scheme.eq_ignore_ascii_case("data:") {
-        let mime = &rest[..rest.find([',', ';']).unwrap_or(rest.len())];
-        return cap_url(format!("data:{mime},…"));
+    match url::Url::parse(url) {
+        Ok(parsed) => cap_url(crate::inspector::scrub_url(&parsed, false)),
+        Err(url::ParseError::RelativeUrlWithoutBase) => brief_relative(url),
+        // Every other error comes after a scheme was read (a bad port, host
+        // or IPv6 literal); whatever follows it may be a credential cut in
+        // the wrong place, so none of it is printed.
+        Err(_) if has_scheme(url) => "…".to_string(),
+        Err(_) => brief_relative(url),
     }
-    let (slashes, rest) = rest.strip_prefix("//").map_or(("", rest), |rest| ("//", rest));
+}
+
+/// Whether `url` starts with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*:`).
+fn has_scheme(url: &str) -> bool {
+    url.find(':').is_some_and(|at| {
+        let name = &url[..at];
+        name.starts_with(|c: char| c.is_ascii_alphabetic())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    })
+}
+
+/// A relative string cut by hand: at `?` or `#`, at `;` only in the path,
+/// and `user:pass@` dropped after a leading `//`.
+fn brief_relative(url: &str) -> String {
+    let (slashes, rest) = url.strip_prefix("//").map_or(("", url), |rest| ("//", rest));
     // Userinfo and the authority only after `//`; `;params` only after it.
     let (host, path) = if slashes.is_empty() {
         ("", rest)
@@ -327,7 +344,7 @@ pub(crate) fn brief_url(url: &str) -> String {
         (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
     let end = path.find(['?', '#', ';']).unwrap_or(path.len());
-    cap_url(format!("{scheme}{slashes}{host}{}", &path[..end]))
+    cap_url(format!("{slashes}{host}{}", &path[..end]))
 }
 
 /// At most 180 characters, the last one `…` when cut.
@@ -605,6 +622,91 @@ mod tests {
         assert_eq!(brief_url("data:text/javascript;base64,U0VDUkVU"), "data:text/javascript,…");
         assert_eq!(brief_url("data:text/plain,SECRET?x#y"), "data:text/plain,…");
         assert_eq!(brief_url("DATA:,SECRET"), "data:,…");
+        // An unknown MIME type is page text; a query in it is still a query.
+        assert_eq!(brief_url("data:SECRETTOKEN,x"), "data:,…");
+    }
+
+    // T7a R1 HOLD 5682590983: absolute strings go through `Url::parse` and
+    // the Inspector's `scrub_url`, so what the parser reads as credentials
+    // is what is cut. One test per leak row.
+
+    #[test]
+    fn brief_url_http_with_no_slashes_drops_the_userinfo() {
+        assert_eq!(brief_url("http:u:SECRET@host/x"), "http://host/x");
+    }
+
+    #[test]
+    fn brief_url_https_with_one_slash_drops_the_userinfo() {
+        assert_eq!(brief_url("https:/u:SECRET@host"), "https://host/");
+    }
+
+    #[test]
+    fn brief_url_https_with_backslashes_drops_the_userinfo_and_query() {
+        assert_eq!(brief_url(r"https:\\u:SECRET@host\x?q=1"), "https://host/x");
+    }
+
+    #[test]
+    fn brief_url_https_with_a_slash_and_backslash_drops_the_userinfo() {
+        assert_eq!(brief_url(r"https:/\u:SECRET@host/x"), "https://host/x");
+    }
+
+    #[test]
+    fn brief_url_with_a_leading_space_is_still_absolute() {
+        assert_eq!(brief_url(" https://u:SECRET@h/x?q"), "https://h/x");
+    }
+
+    #[test]
+    fn brief_url_with_a_tab_in_the_scheme_is_still_absolute() {
+        assert_eq!(brief_url("ht\ttp://u:SECRET@h/x"), "http://h/x");
+    }
+
+    #[test]
+    fn brief_url_data_url_with_a_query_in_its_mime_prints_no_query() {
+        let brief = brief_url("data:text/plain?tok=SECRET#f");
+        assert_eq!(brief, "data:,…");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_javascript_url_keeps_only_its_scheme() {
+        let brief = brief_url("javascript:alert('SECRET')");
+        assert_eq!(brief, "javascript:");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_blob_url_keeps_only_its_origin() {
+        let brief = brief_url("blob:https://u:SECRET@a/b?x");
+        assert_eq!(brief, "blob:https://a");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_prints_nothing_of_a_schemed_string_that_does_not_parse() {
+        // `p?w` reads as a port, so the parser rejects it; a hand cut at
+        // `?` would print the user and part of the password.
+        let brief = brief_url("https://user:SECRET?w@host/x");
+        assert_eq!(brief, "…");
+        assert!(!brief.contains("user") && !brief.contains("SECRET"), "{brief}");
+        assert_eq!(brief_url("http://[::1"), "…");
+    }
+
+    #[test]
+    fn brief_url_lowercases_the_scheme_and_host_only() {
+        assert_eq!(brief_url("HTTPS://USER:SECRET@HOST.TEST/X?TOKEN=S#F"), "https://host.test/X");
+        assert_eq!(brief_url("http://[::1]:8080/x?q=1"), "http://[::1]:8080/x");
+        assert_eq!(brief_url("wss://u:SECRET@h/x;s=1"), "wss://h/x");
+    }
+
+    #[test]
+    fn brief_url_cuts_semicolon_params_in_the_path_and_keeps_an_authority_semicolon() {
+        // The authority's `;` is the parser's to read; only the path's
+        // `;params` are cut (T7a Atlas pin).
+        assert_eq!(brief_url("https://h/p@q;r?s"), "https://h/p@q");
+        let brief = brief_url("https://h;x/p");
+        assert!(!brief.contains('?'), "{brief}");
+        assert!(brief == "…" || brief.starts_with("https://h;x/"), "{brief}");
+        assert_eq!(brief_url("https://h/a;jsessionid=SECRET/b"), "https://h/a/b");
     }
 
     #[test]
