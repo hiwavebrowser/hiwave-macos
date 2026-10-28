@@ -1694,12 +1694,15 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
 
 /// `url` with its credentials always removed, and its query, fragment and
 /// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL
-/// is reduced to `data:<mime>,…` (a common MIME type only); any other URL
-/// that cannot have a host (`about:`, `blob:`) keeps its scheme and, for
-/// `blob:`, its origin.
+/// is reduced to `data:<mime>,…` (a common MIME type only); a `javascript:`
+/// URL is always reduced to its scheme, with or without an authority
+/// (`javascript://h/alert(1)` is a base URL to the parser; R1 M1); any
+/// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
+/// and, for `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     match url.scheme() {
         "data" => format!("data:{},…", data_mime(&url.as_str()[5..])),
+        "javascript" => "javascript:".to_string(),
         "blob" => match Url::parse(url.path()) {
             Ok(inner) => format!("blob:{}", inner.origin().ascii_serialization()),
             Err(_) => "blob:".to_string(),

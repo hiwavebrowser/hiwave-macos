@@ -307,28 +307,27 @@ pub(crate) fn sync_diag_armed() {
 /// (`http:u:pw@host`, `https:\\u:pw@host`, a tab in the scheme, leading
 /// space) is what is cut, not this module's; it also reduces `data:` to a
 /// known MIME type, `blob:` to its origin and `javascript:` to its scheme,
-/// and lowercases scheme and host (T7a R1 HOLD 5682590983). A string with
-/// a scheme that does not parse prints no part of itself. A relative
-/// string is cut by hand: a `://` in its query is not a scheme.
+/// and lowercases scheme and host (T7a R1 HOLD 5682590983). A string the
+/// parser rejects after reading a scheme prints no part of itself. Only a
+/// string the parser found no scheme in is cut by hand, as a relative
+/// string: a `://` in its query is not a scheme.
 pub(crate) fn brief_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(parsed) => cap_url(crate::inspector::scrub_url(&parsed, false)),
+        // The parser's verdict on whether there is a scheme is the only one
+        // used here. `Url::parse` trims leading and trailing C0 controls
+        // and spaces and strips tabs, CRs and LFs before it reads the
+        // scheme, so a raw-string check (`^[A-Za-z][A-Za-z0-9+.-]*:`)
+        // disagrees with it on ` https://u:pw@h` or `ht\ttps://u:pw@h`, and
+        // would hand those to the relative cut, which prints the user and
+        // part of the password. In url 2.5.7 `RelativeUrlWithoutBase` is
+        // the only error returned before a scheme is read (R1 B1).
         Err(url::ParseError::RelativeUrlWithoutBase) => brief_relative(url),
         // Every other error comes after a scheme was read (a bad port, host
         // or IPv6 literal); whatever follows it may be a credential cut in
         // the wrong place, so none of it is printed.
-        Err(_) if has_scheme(url) => "…".to_string(),
-        Err(_) => brief_relative(url),
+        Err(_) => "…".to_string(),
     }
-}
-
-/// Whether `url` starts with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*:`).
-fn has_scheme(url: &str) -> bool {
-    url.find(':').is_some_and(|at| {
-        let name = &url[..at];
-        name.starts_with(|c: char| c.is_ascii_alphabetic())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-    })
 }
 
 /// A relative string cut by hand: at `?` or `#`, at `;` only in the path,
@@ -689,6 +688,30 @@ mod tests {
         assert_eq!(brief, "…");
         assert!(!brief.contains("user") && !brief.contains("SECRET"), "{brief}");
         assert_eq!(brief_url("http://[::1"), "…");
+    }
+
+    /// R1 B1 @ 9ceed2a5: the parser trims leading space and strips a tab
+    /// before reading the scheme, so these are schemed strings that do not
+    /// parse, not relative ones; a raw-string scheme check would have sent
+    /// them to the hand cut, which prints the user and part of the password.
+    #[test]
+    fn brief_url_prints_nothing_of_a_schemed_string_the_parser_had_to_trim_first() {
+        for u in [" https://user:SECRET?w@host/x", "ht\ttps://user:SECRET?w@host/x", " http://u:SECRET@host:bad/x"] {
+            let brief = brief_url(u);
+            assert_eq!(brief, "…", "{u:?}");
+            assert!(!brief.contains("SECRET"), "{u:?} -> {brief}");
+        }
+    }
+
+    /// R1 M1 @ 9ceed2a5: a `javascript:` URL with an authority is a base
+    /// URL to the parser, so the `cannot_be_a_base` reduction missed it.
+    #[test]
+    fn brief_url_javascript_url_with_an_authority_keeps_only_its_scheme() {
+        for u in ["javascript://h/alert(SECRET)", "javascript://alert(1)"] {
+            let brief = brief_url(u);
+            assert_eq!(brief, "javascript:", "{u:?}");
+            assert!(!brief.contains('(') && !brief.contains("SECRET"), "{u:?} -> {brief}");
+        }
     }
 
     #[test]
