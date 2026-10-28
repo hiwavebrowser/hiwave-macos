@@ -1834,16 +1834,68 @@ mod tests {
     #[test]
     fn a_closed_view_frees_its_inspector_with_a_request_out() {
         // T7 test 3 (S5): the task holds the view's Inspector only until its
-        // abort is processed.
+        // abort is processed. C4: within about a second of the close.
         let (page, _port, release) = hanging_page();
-        let weak = Arc::downgrade(&page.devtools_inspector().unwrap());
-        drop(page);
-        let closed = Instant::now();
-        while weak.upgrade().is_some() && closed.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let held = close_to_dead_inspector(page);
         release.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(weak.upgrade().is_none(), "the closed view's Inspector is still held after 3 s");
+        assert!(held < Duration::from_secs(1), "the closed view's Inspector was still held {held:?} after the close");
+    }
+
+    /// Drop `page` and time until its Inspector's last strong ref is gone
+    /// (gives up at 5 s).
+    fn close_to_dead_inspector(page: ContentThread) -> Duration {
+        let weak = Arc::downgrade(&page.devtools_inspector().unwrap());
+        let closed = Instant::now();
+        drop(page);
+        while weak.upgrade().is_some() && closed.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        closed.elapsed()
+    }
+
+    #[test]
+    #[ignore = "receipt: C4 close latency over 10 runs, idle and beside a busy rustkit-net"]
+    fn close_latency_receipt() {
+        let mut idle = Vec::new();
+        for _ in 0..10 {
+            let (page, _port, release) = hanging_page();
+            idle.push(close_to_dead_inspector(page));
+            release.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // A second view keeps the network thread busy: 4 MB bodies, read and
+        // base64-encoded on rustkit-net, 24 at a time.
+        let body = vec![b'x'; 4 << 20];
+        let (big_port, _r, _s) = serve(move |path, _release| {
+            if path.starts_with("/big") {
+                return (200, "application/octet-stream", body.clone());
+            }
+            (200, "text/html", b"<p>busy</p>".to_vec())
+        });
+        let busy = page();
+        let _nav = busy.navigate(Url::parse(&format!("http://127.0.0.1:{big_port}/")).unwrap());
+        let _ = poll_until(&busy, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        let mut loaded = Vec::new();
+        for _ in 0..10 {
+            let mut go = busy.eval("for (let i = 0; i < 24; i++) fetch('/big?' + i).then(r => r.arrayBuffer()); 'go'");
+            assert!(wait_recv(&mut go, Duration::from_secs(5)).is_some());
+            let (page, _port, release) = hanging_page();
+            std::thread::sleep(Duration::from_millis(50));
+            loaded.push(close_to_dead_inspector(page));
+            release.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let report = |name: &str, mut v: Vec<Duration>| {
+            v.sort();
+            eprintln!(
+                "C4 close->dead Weak {name}: p50 {:.1} ms, max {:.1} ms, n {}",
+                v[v.len() / 2].as_secs_f64() * 1e3,
+                v[v.len() - 1].as_secs_f64() * 1e3,
+                v.len()
+            );
+        };
+        report("idle", idle);
+        report("beside 24 x 4 MB fetches", loaded);
     }
 
     /// A plain `fetch` queued while a response is delivered, in the same

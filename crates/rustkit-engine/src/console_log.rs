@@ -4,8 +4,11 @@
 //! When it is off, every function here returns before taking a lock, reading
 //! an error report, or writing a line. The Inspector is unchanged: it stays
 //! off unless something else turns it on, and this mirror does not use its
-//! URL scrubbing; its own [`brief_url`] drops every URL's query and fragment
-//! (T7 C1). Script names such as `inserted#N` are recorded here, only while
+//! URL scrubbing; its own [`brief_url`] drops the query, fragment, `;params`
+//! and userinfo of every URL a line names as a URL: requests, locations,
+//! script places (console and error frames), inserted scripts and dynamic
+//! imports (T7 C1). Page text a line quotes (a console message, an error
+//! message, a source snippet) is not parsed for URLs. Script names such as `inserted#N` are recorded here, only while
 //! the switch is on, so a line can show the script's URL. Lines for live
 //! script requests are also written on the `rustkit-net` runtime (T7); its
 //! tasks carry the page's nav id, and in tests the switch and sink, from the
@@ -95,16 +98,14 @@ pub(crate) fn alias(name: &str, url: &str) {
     map.entries.push_back((name.to_string(), url.to_string()));
 }
 
+/// The URL an engine script label stands for, or `path` itself; either
+/// way through [`brief_place`].
 fn resolve(path: &str) -> String {
     let Ok(map) = aliases().lock() else {
-        return path.to_string();
+        return brief_place(path);
     };
-    map.entries
-        .iter()
-        .rev()
-        .find(|(name, _)| name == path)
-        .map(|(_, url)| url.clone())
-        .unwrap_or_else(|| path.to_string())
+    let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
+    brief_place(place)
 }
 
 fn emit(line: String) {
@@ -268,7 +269,7 @@ pub(crate) fn inserted_script(url: &str, event: &str) {
     if !enabled() {
         return;
     }
-    emit(format!("inserted script {event} {url}"));
+    emit(format!("inserted script {event} {}", brief_place(url)));
 }
 
 /// A dynamic `import()` whose promise rejected. `url` is empty when the
@@ -296,18 +297,38 @@ pub(crate) fn sync_diag_armed() {
     }
 }
 
-/// Origin and path only, capped at 180 characters. The query and fragment
-/// are dropped, as everywhere else devtools writes a URL (Pete 10-23, shapes
-/// only; T7 C1): they carry tokens, and since T7 these lines are written on
-/// the network runtime too.
+/// Origin and path only, capped at 180 characters. The query, fragment,
+/// `;params` and `user:pass@` are dropped, as everywhere else devtools
+/// writes a URL (Pete 10-23, shapes only; T7 C1): they carry tokens, and
+/// since T7 these lines are written on the network runtime too.
 pub(crate) fn brief_url(url: &str) -> String {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
-    let mut brief = url[..end].to_string();
+    let (scheme, rest) = match url.find("://") {
+        Some(at) => url.split_at(at + 3),
+        None => ("", url),
+    };
+    let rest = if scheme.is_empty() {
+        rest
+    } else {
+        let authority = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        rest[..authority].rfind('@').map_or(rest, |at| &rest[at + 1..])
+    };
+    let end = rest.find(['?', '#', ';']).unwrap_or(rest.len());
+    let mut brief = format!("{scheme}{}", &rest[..end]);
     if brief.chars().count() > 180 {
         brief = brief.chars().take(179).collect();
         brief.push('…');
     }
     brief
+}
+
+/// A script's place as a line shows it: an engine label (`inline#1`,
+/// `inserted#4`) as it is, anything else (a URL, a relative specifier)
+/// through [`brief_url`].
+fn brief_place(place: &str) -> String {
+    let label = place.split_once('#').is_some_and(|(kind, n)| {
+        !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && !n.is_empty()
+    });
+    if label { place.to_string() } else { brief_url(place) }
 }
 
 fn dash(text: &str) -> &str {
@@ -387,10 +408,10 @@ pub(crate) fn dynamic_import_failed(specifier: &str, url: &str, reason: &str) {
     if !enabled() {
         return;
     }
-    let url = if url.is_empty() { "-" } else { url };
+    let url = if url.is_empty() { "-".to_string() } else { brief_place(url) };
     let (reason, _) = cap(reason, MAX_MESSAGE_CHARS);
     let reason = reason.replace(['\n', '\r'], " ");
-    emit(format!("dynamic import {specifier} -> {url}: {reason}"));
+    emit(format!("dynamic import {} -> {url}: {reason}", brief_place(specifier)));
 }
 
 #[cfg(test)]
@@ -533,6 +554,33 @@ mod tests {
         assert_eq!(brief_url("https://a.test/p?token=SECRET#frag"), "https://a.test/p");
         assert_eq!(brief_url("https://a.test/p#SECRET?x"), "https://a.test/p");
         assert!(brief_url(&format!("https://example.test/{}", "p".repeat(300))).chars().count() <= 180);
+        // `;params` and userinfo carry tokens too (T7a review).
+        assert_eq!(brief_url("https://a.test/p;jsessionid=SECRET?x"), "https://a.test/p");
+        assert_eq!(brief_url("https://user:SECRET@a.test/p"), "https://a.test/p");
+        assert_eq!(brief_url("https://a.test/p@q"), "https://a.test/p@q");
+    }
+
+    #[test]
+    fn script_places_inserted_scripts_and_imports_drop_the_query_too() {
+        // T7a review: the header says every URL a line names; these were
+        // printed raw.
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        alias("chunk#q-unit", "https://cdn.example/c.js?token=SECRET");
+        let at = ScriptPosition { path: "chunk#q-unit".into(), line: 2, column: 3 };
+        console_message(LogLevel::Log, "hi", Some(&at));
+        let inline = ScriptPosition { path: "inline#1".into(), line: 1, column: 1 };
+        console_message(LogLevel::Log, "hi", Some(&inline));
+        inserted_script("https://cdn.example/i.js?token=SECRET#f", "load");
+        dynamic_import_failed("./m.js?token=SECRET", "https://u:SECRET@cdn.example/m.js;s=SECRET", "not found");
+        let text = sink.lock().unwrap().join("\n");
+        assert!(text.contains("console log https://cdn.example/c.js:2:3 hi"), "{text}");
+        assert!(text.contains("console log inline#1:1:1 hi"), "{text}");
+        assert!(text.contains("inserted script load https://cdn.example/i.js"), "{text}");
+        assert!(text.contains("dynamic import ./m.js -> https://cdn.example/m.js: not found"), "{text}");
+        assert!(!text.contains("SECRET"), "{text}");
     }
 
     #[test]

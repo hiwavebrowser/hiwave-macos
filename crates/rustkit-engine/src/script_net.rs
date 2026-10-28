@@ -260,8 +260,12 @@ fn net_runtime_wanted() -> bool {
 /// first poll, and one thread first-polls new tasks in the order they were
 /// spawned, so slots still go in request order. With two workers the tasks
 /// raced and a later request could take an earlier one's slot (T2's
-/// combined fixture: `/hang/4` capped instead of `/hang/6`). The work on it
-/// is socket waits; nothing runs a page script.
+/// combined fixture: `/hang/4` capped instead of `/hang/6`). That order is
+/// the scheduler's, not a contract; the follow-up takes the slot ticket in
+/// [`begin`] on the page thread so the worker count stops mattering. What
+/// runs here is serial across every view: socket waits, but also TLS
+/// handshakes, body decode, the base64 of [`delivery`], Shield matching and
+/// the Inspector records. Nothing runs a page script.
 fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
     static NET: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
     #[cfg(test)]
@@ -301,9 +305,11 @@ impl<T> Drop for AbortOnDrop<T> {
 
 /// Runs `inner` with the page's diagnostic nav id (and, in tests, the
 /// `HIWAVE_CONSOLE_LOG` switch and sink) set around every poll, restoring
-/// the worker's own after: a task on the multi-thread runtime can move
-/// between workers between polls, so setting them once at the start is not
-/// enough (T7 B2). Taken on the page thread when the task is spawned.
+/// the thread's own after, also when the poll panics: the one `rustkit-net`
+/// thread runs every view's tasks, so between two polls of this task it
+/// polls other pages' (T7 B2). Taken on the page thread when the task is
+/// spawned. A task the runtime spawns on its own (the h2 connection driver)
+/// runs outside it and writes no mirror line.
 struct DiagContext<F> {
     nav: u64,
     #[cfg(test)]
@@ -326,15 +332,31 @@ impl<F: Future> Future for DiagContext<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<F::Output> {
-        let before = rustkit_js::diag_nav();
+        let _restore = Restore {
+            nav: rustkit_js::diag_nav(),
+            #[cfg(test)]
+            hooks: Some(crate::console_log::swap_test_hooks(self.hooks.clone())),
+        };
         rustkit_js::set_diag_nav(self.nav);
+        self.inner.as_mut().poll(cx)
+    }
+}
+
+/// Puts the thread's own diagnostic context back when a [`DiagContext`]
+/// poll ends, by return or by unwind.
+struct Restore {
+    nav: u64,
+    #[cfg(test)]
+    hooks: Option<crate::console_log::TestHooks>,
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
         #[cfg(test)]
-        let hooks_before = crate::console_log::swap_test_hooks(self.hooks.clone());
-        let polled = self.inner.as_mut().poll(cx);
-        #[cfg(test)]
-        crate::console_log::swap_test_hooks(hooks_before);
-        rustkit_js::set_diag_nav(before);
-        polled
+        if let Some(hooks) = self.hooks.take() {
+            crate::console_log::swap_test_hooks(hooks);
+        }
+        rustkit_js::set_diag_nav(self.nav);
     }
 }
 
@@ -356,6 +378,11 @@ pub(crate) fn force_page_polled_for_test(on: bool) {
 /// A request to this path panics where the policy runs (T7 test 10, C3).
 #[cfg(test)]
 pub(crate) const TASK_PANIC_PATH: &str = "/__t7_task_panic";
+
+/// A request to this path fails, on the network runtime, with a reason that
+/// holds its full URL, query and all (T7 test 7: the scrub at record time).
+#[cfg(test)]
+pub(crate) const FAIL_NAMING_URL_PATH: &str = "/__t7_fail_naming_url";
 
 /// Most live script requests one view has out on the network runtime
 /// (T7 S2). In flight is capped by the policy (24 per page, 6 per origin),
@@ -404,23 +431,26 @@ pub(crate) fn start_live(
         }
         return Box::pin(std::future::ready((id, NetDelivery::Error(NETWORK_ERROR.into()))));
     }
+    let (deliver, outcome) = tokio::sync::oneshot::channel();
     let task = net.spawn(DiagContext::new(async move {
         let outcome = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
-        // The outcome is ready: the page's next live turn takes it now,
-        // not at its next scheduled turn (T7 S1).
-        poke_live_turn();
-        outcome
+        // The page side reads the channel, so the outcome is there before
+        // the poke: the page's next live turn takes it now, not at its next
+        // scheduled turn (T7 S1), and never finds it still pending.
+        if deliver.send(outcome).is_ok() {
+            poke_live_turn();
+        }
     }));
     let task = AbortOnDrop(task);
     Box::pin(async move {
-        let mut task = task;
-        match (&mut task.0).await {
+        let _task = task;
+        match outcome.await {
             Ok(outcome) => (id, outcome),
-            // A panic is answered in the task; this is the belt. An
-            // unexpected cancel (the runtime is never shut down) is the
-            // same network error (T7 C2).
-            Err(e) => {
-                tracing::warn!(id, panic = e.is_panic(), "live request task ended without an outcome");
+            // The task ended without sending: a panic is answered in the
+            // task, so this is the belt. An unexpected cancel (the runtime
+            // is never shut down) is the same network error (T7 C2).
+            Err(_) => {
+                tracing::warn!(id, "live request task ended without an outcome");
                 (id, NetDelivery::Error(NETWORK_ERROR.into()))
             }
         }
@@ -531,6 +561,13 @@ async fn finish(
     use futures::FutureExt as _;
     let Started { id, script_request, guard, method, url } = started;
     let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+    #[cfg(test)]
+    if script_request.url.path() == FAIL_NAMING_URL_PATH {
+        if let Some(guard) = guard {
+            guard.fail(FailureStage::Policy, &format!("refused {}", script_request.url));
+        }
+        return NetDelivery::Error(NETWORK_ERROR.into());
+    }
     let sent = AssertUnwindSafe(async {
         #[cfg(test)]
         if script_request.url.path() == TASK_PANIC_PATH {

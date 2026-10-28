@@ -2,7 +2,7 @@
 //! against a real loopback server and the real policy: no engine, no GPU.
 
 use crate::inspector::{Inspector, InspectorConfig, InspectorEvent, InspectorRecord};
-use crate::script_net::{start_live, LiveRequest, MAX_LIVE_NET_TASKS, TASK_PANIC_PATH};
+use crate::script_net::{start_live, LiveRequest, FAIL_NAMING_URL_PATH, MAX_LIVE_NET_TASKS, TASK_PANIC_PATH};
 use crate::script_net_tests::serve_routes;
 use rustkit_bindings::{NetDelivery, NetRequest};
 use rustkit_net::policy::FetchPolicy;
@@ -255,7 +255,16 @@ fn records_written_on_the_network_runtime_carry_no_query() {
     assert!(matches!(ok, NetDelivery::Response { status: 200, .. }), "{ok:?}");
     let (_, failed) = rig.rt.block_on(rig.start(2, "/__t7_task_panic?token=SECRET", 0));
     assert!(matches!(failed, NetDelivery::Error(_)));
-    assert!(rig.wait_for(Duration::from_secs(5), |rig| rig.terminals().len() == 2 && rig.terminals().iter().all(|t| t.1 == 1)));
+    // A failure reason that names the request's full URL, written on the
+    // network runtime: the scrub at record time takes the query out of it.
+    let (_, named) = rig.rt.block_on(rig.start(3, &format!("{FAIL_NAMING_URL_PATH}?token=SECRET#frag"), 0));
+    assert!(matches!(named, NetDelivery::Error(_)));
+    assert!(rig.wait_for(Duration::from_secs(5), |rig| rig.terminals().len() == 3 && rig.terminals().iter().all(|t| t.1 == 1)));
+    let reasons = failures(&rig.records());
+    assert!(
+        reasons.iter().any(|r| r.contains(&format!("127.0.0.1:{}{FAIL_NAMING_URL_PATH}", rig.port))),
+        "the URL-naming reason is not there: {reasons:?}"
+    );
     let json = serde_json::to_string(&rig.records()).unwrap();
     assert!(!json.contains("SECRET") && !json.contains("frag"), "{json}");
 }
