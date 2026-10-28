@@ -386,6 +386,8 @@ mod content_string_tests;
 #[cfg(test)]
 mod html_element_ancestor_tests;
 #[cfg(test)]
+mod computed_content_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
@@ -21620,11 +21622,38 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
         ("white-space", css_keyword(&format!("{:?}", s.white_space))),
         ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+        // A string in double quotes, `"` and `\` escaped; `normal` with no
+        // string (Chrome 148 reads `none` on an element as `normal` too).
+        // netflix's form picks its layout from it.
+        ("content", match &s.content {
+            Some(text) => css_string(text),
+            None => "normal".to_string(),
+        }),
     ];
     rows.into_iter()
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
+/// escaped, and a control character (a `\a` line break resolved by the
+/// parser, say) as `\<hex> ` so the value stays on one row of the
+/// tab-separated lines script reads.
+fn css_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push('\u{FFFD}'),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => out.push_str(&format!("\\{:x} ", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.
