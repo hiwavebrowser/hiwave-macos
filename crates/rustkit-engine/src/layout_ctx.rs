@@ -235,4 +235,18 @@ mod tests {
         assert!(ctx.building.borrow().is_none());
         assert_eq!(Rc::strong_count(&lay), 1);
     }
+
+    /// #812: a forced layout must decline while a build holds the ctx, so a
+    /// geometry read nested inside layout answers from the last published
+    /// frame instead of re-entering.
+    #[test]
+    fn busy_for_forced_layout_names_a_held_build() {
+        let ctx = LayoutCtx::default();
+        let lay = Rc::new(ViewLayout::default());
+        assert_eq!(ctx.busy_for_forced_layout(&lay), None);
+        ctx.with_building(build_view(&lay), || {
+            assert_eq!(ctx.busy_for_forced_layout(&lay), Some("building"));
+        });
+        assert_eq!(ctx.busy_for_forced_layout(&lay), None);
+    }
 }
