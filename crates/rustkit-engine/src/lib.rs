@@ -30963,6 +30963,60 @@ mod rule_prefilter_tests {
         assert!(ancestor_filter_admits(&chain, &[ancestor_key_hash(b'<', "SECTION")]));
     }
 
+    // The filter answers for a suffix of the chain it was built from (its
+    // key set is a subset), which is the chain a complex `:is()` member is
+    // matched against. Not for a prefix, nor for a disjoint slice.
+    #[test]
+    fn the_ancestor_filter_answers_for_a_suffix_of_its_chain() {
+        let chain = vec![
+            ancestor("div", &["card", "wide"], None),
+            ancestor("section", &["sec"], Some("s1")),
+            ancestor("main", &["page"], Some("app")),
+        ];
+        let missing = [ancestor_key_hash(b'.', "missing")];
+        let card = [ancestor_key_hash(b'.', "card")];
+        let _scope = AncestorFilterScope::install(&chain);
+        assert!(!ancestor_filter_admits(&chain[1..], &missing));
+        assert!(!ancestor_filter_admits(&chain[2..], &missing));
+        assert!(!ancestor_filter_admits(&chain[3..], &missing));
+        // Still a filter: a key the chain has is admitted for its suffixes
+        // too, and the walk decides.
+        assert!(ancestor_filter_admits(&chain[1..], &card));
+        // A prefix is not a suffix; a disjoint slice is not this chain.
+        assert!(ancestor_filter_admits(&chain[..2], &missing));
+        let other = vec![ancestor("x", &[], None); 3];
+        assert!(ancestor_filter_admits(&other, &missing));
+        assert!(ancestor_filter_admits(&other[1..], &missing));
+    }
+
+    // `:is(.nope *) .t` with no `.nope` ancestor: the member `.nope *` is
+    // matched with each ancestor as subject against the rest of the chain,
+    // and the filter rejects it there instead of the walk running it.
+    #[test]
+    fn a_complex_is_member_that_cannot_match_is_rejected_by_the_filter() {
+        let chain = vec![
+            ancestor("div", &["card", "wide"], None),
+            ancestor("section", &["sec"], Some("s1")),
+            ancestor("main", &["page"], Some("app")),
+        ];
+        let t = attrs(&[("class", "t")]);
+        let selectors = [":is(.nope *) .t", ":is(.page *) .t", ":is(.sec > *) .t", ":is(.card *) .t"];
+        let run = |s: &str| SelectorMatcher.selector_matches(s, "p", &t, &chain, &[], SiblingContext::SOLE);
+        let expected: Vec<bool> = selectors.iter().map(|s| run(s)).collect();
+        assert_eq!(expected, vec![false, true, true, false]);
+        ANCESTOR_FILTER_REJECTS.with(|n| n.set(0));
+        let filtered: Vec<bool> = {
+            let _scope = AncestorFilterScope::install(&chain);
+            selectors.iter().map(|s| run(s)).collect()
+        };
+        assert_eq!(filtered, expected);
+        // The rules themselves have no ancestor keys (an `:is()` leaves
+        // none); only a member is rejected, and only `.nope *`, at each of
+        // the three ancestors. `.card *` is admitted everywhere: the filter
+        // is the whole chain's, and the walk finds no card above the card.
+        assert_eq!(ANCESTOR_FILTER_REJECTS.with(|n| n.get()), 3);
+    }
+
     // What a complex `:is()` member reads of the ancestor it takes as its
     // subject (`AncestorCompound::complex_alternatives_hold`): the key tuple
     // decides tag, classes, id and the member's own combinators; what the
@@ -33533,8 +33587,8 @@ thread_local! {
 
 /// Installs the [`AncestorFilter`] of one ancestor slice while one element
 /// is styled. Dropping it (also on unwind) restores the previous one. The
-/// filter only answers for that exact slice, which is borrowed for the
-/// scope's whole life, so it can't describe a different chain.
+/// filter only answers for that slice and its suffixes, which are borrowed
+/// for the scope's whole life, so it can't describe a different chain.
 struct AncestorFilterScope(Option<(usize, usize, AncestorFilter)>);
 
 impl AncestorFilterScope {
@@ -33551,14 +33605,26 @@ impl Drop for AncestorFilterScope {
     }
 }
 
-/// False only when a filter is installed for exactly `ancestors` and it
-/// lacks one of `keys`. With no filter for this slice, it always says true.
+/// False only when a filter is installed for the installed chain or a
+/// suffix of it (`ancestors` ends where the installed slice ends) and it
+/// lacks one of `keys`. A suffix's key set is a subset of the chain's, so a
+/// key the filter lacks is absent from the suffix too: a complex `:is()`
+/// member, matched with `ancestors[idx]` as subject against
+/// `ancestors[idx + 1..]`, is rejected as early as the rule it sits in. For
+/// any other slice it always says true.
 fn ancestor_filter_admits(ancestors: &[Ancestor], keys: &[u32]) -> bool {
     ANCESTOR_FILTER.with(|c| match &*c.borrow() {
-        Some((ptr, len, f)) if *ptr == ancestors.as_ptr() as usize && *len == ancestors.len() => {
-            keys.iter().all(|&k| f.may_contain(k))
+        Some((base, len, f)) => {
+            let stride = std::mem::size_of::<Ancestor>();
+            let end = base + len * stride;
+            let ptr = ancestors.as_ptr() as usize;
+            if ptr >= *base && ptr + ancestors.len() * stride == end {
+                keys.iter().all(|&k| f.may_contain(k))
+            } else {
+                true
+            }
         }
-        _ => true,
+        None => true,
     })
 }
 
