@@ -422,25 +422,34 @@
     // splice moves elements one index write at a time, so the list can
     // briefly hold holes: only sheets are linked.
     function relink(node, entry) {
-        var before = entry.linked, now = new Set();
-        for (var i = 0; i < entry.raw.length; i++) if (entry.raw[i] instanceof CSSStyleSheet) now.add(entry.raw[i]);
-        before.forEach(function (s) {
-            if (!now.has(s)) { var nodes = adopters.get(s); if (nodes) nodes.delete(node); }
-        });
-        now.forEach(function (s) {
-            var nodes = adopters.get(s);
-            if (!nodes) { nodes = new Set(); adopters.set(s, nodes); }
+        var before = entry.linked, now = [];
+        for (var i = 0; i < entry.raw.length; i++) {
+            var s = entry.raw[i];
+            if (s instanceof CSSStyleSheet && now.indexOf(s) < 0) now.push(s);
+        }
+        for (var b = 0; b < before.length; b++) {
+            if (now.indexOf(before[b]) < 0) { var gone = adopters.get(before[b]); if (gone) gone.delete(node); }
+        }
+        for (var n = 0; n < now.length; n++) {
+            var nodes = adopters.get(now[n]);
+            if (!nodes) { nodes = new Set(); adopters.set(now[n], nodes); }
             nodes.add(node);
-        });
+        }
         entry.linked = now;
         publishAdopted(node);
     }
     function entryFor(node) {
         var entry = adopted.get(node);
-        if (entry) return entry;
-        entry = { raw: [], linked: new Set(), list: null };
-        // An ObservableArray (CSSOM §6.3): index writes are validated, and
-        // any change (push, splice, length = 0) re-links and republishes.
+        if (!entry) { entry = { raw: [], linked: [], list: null }; adopted.set(node, entry); }
+        return entry;
+    }
+    // An ObservableArray (CSSOM §6.3): index writes are validated, and any
+    // change (push, splice, length = 0) re-links and republishes. Made on
+    // the first read, so a root whose list is only ever assigned (Lit) pays
+    // for no proxy.
+    function observedList(node) {
+        var entry = entryFor(node);
+        if (entry.list) return entry.list;
         entry.list = new Proxy(entry.raw, {
             set: function (t, k, v) {
                 if (typeof k === 'string' && k !== 'length' && String(k >>> 0) === k) checkAdoptable(v);
@@ -454,8 +463,7 @@
                 return true;
             }
         });
-        adopted.set(node, entry);
-        return entry;
+        return entry.list;
     }
     function setAdopted(node, v) {
         if (v == null || typeof v[Symbol.iterator] !== 'function') throw new TypeError('adoptedStyleSheets must be an array');
@@ -473,7 +481,7 @@
         nodes.forEach(publishAdopted);
     }
     function adoptedGetter() {
-        return entryFor(this).list;
+        return observedList(this);
     }
     getter(g.Document.prototype, 'adoptedStyleSheets', adoptedGetter, function (v) { setAdopted(this, v); });
     if (g.ShadowRoot) getter(g.ShadowRoot.prototype, 'adoptedStyleSheets', adoptedGetter, function (v) { setAdopted(this, v); });
