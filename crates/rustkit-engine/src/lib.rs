@@ -12524,6 +12524,8 @@ impl layout_ctx::LayoutCtx {
             }
             "display" => {
                 if value.trim().eq_ignore_ascii_case("contents") {
+                    style.display = rustkit_css::Display::Contents;
+                    style.webkit_box = None;
                     style.display_contents_declared = true;
                 } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);

@@ -2742,9 +2742,9 @@ pub struct ComputedStyle {
     /// does not split into columns for them yet, but `@container` treats a
     /// child's width as unknown. Not inherited.
     pub columns_declared: bool,
-    /// An author `display: contents`, which layout does not honour yet
-    /// (only `<slot>` gets `Display::Contents`): the box is still laid out,
-    /// but `@container` treats it as having no size. Not inherited.
+    /// An author `display: contents` (with `display` set to
+    /// `Display::Contents`): the element generates no box, and `@container`
+    /// treats it as having no size. Not inherited.
     pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
