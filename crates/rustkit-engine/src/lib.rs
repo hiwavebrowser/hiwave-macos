@@ -16481,12 +16481,24 @@ impl SelectorMatcher {
             )
     }
 
+    /// How deep functional pseudo-classes may nest (`:is(:is(:is(...`)
+    /// before the list is invalid. This gate is iterative, but
+    /// `SubjectCompound::parse`, `AncestorCompound::parse` and
+    /// `selector_specificity` recurse once per level, so a selector no
+    /// author writes must not take the stack down.
+    const SELECTOR_NESTING_CAP: usize = 32;
+
     /// Selectors 4 §3.9 validity, restricted to what the matcher decides
     /// here: every pseudo-class in the list (outside `:is()`/`:where()`,
-    /// which are forgiving) must be one the engine knows. Pseudo-elements
+    /// which are forgiving) must be one the engine knows, and parentheses
+    /// nest at most [`Self::SELECTOR_NESTING_CAP`] deep. Pseudo-elements
     /// (`::x`) and attribute/quoted content are skipped. Chrome drops a rule
     /// whose selector list carries an unknown pseudo-class, including a
-    /// vendor-prefixed one from another engine (`:-moz-focusring`).
+    /// vendor-prefixed one from another engine (`:-moz-focusring`). Every
+    /// selector the engine matches passes here first: a rule's through
+    /// `prepared_selector` (invalid means `PreparedSelector::Never`, the
+    /// rule is dropped) and a script's through `query_selector_prepared`
+    /// (`querySelector`/`matches`/`closest` throw `SyntaxError`).
     fn selector_list_is_valid(selector: &str) -> bool {
         let chars: Vec<char> = selector.chars().collect();
         let mut i = 0;
@@ -16514,6 +16526,9 @@ impl SelectorMatcher {
                 '(' => {
                     paren_depth.push(false);
                     has_parens.push(false);
+                    if paren_depth.len() > Self::SELECTOR_NESTING_CAP {
+                        return false;
+                    }
                 }
                 ')' => {
                     has_parens.pop();
@@ -16566,6 +16581,9 @@ impl SelectorMatcher {
                         }
                         paren_depth.push(forgiving);
                         has_parens.push(has);
+                        if paren_depth.len() > Self::SELECTOR_NESTING_CAP {
+                            return false;
+                        }
                         i = end + 1;
                         continue;
                     }
@@ -16923,6 +16941,18 @@ impl SelectorMatcher {
     /// - b = number of class selectors, attribute selectors, and pseudo-classes
     /// - c = number of type selectors and pseudo-elements
     fn selector_specificity(&self, selector: &str) -> (usize, usize, usize) {
+        self.selector_specificity_nested(selector, 0)
+    }
+
+    /// [`Self::selector_specificity`] `depth` functional pseudo-classes
+    /// in. Past [`Self::SELECTOR_NESTING_CAP`] an argument scores nothing:
+    /// such a list is invalid and its rule never matches, but the index
+    /// scores every rule's selector, dropped or not, and this walk recurses
+    /// once per level, so it must stop where the validity gate does.
+    fn selector_specificity_nested(&self, selector: &str, depth: usize) -> (usize, usize, usize) {
+        if depth > Self::SELECTOR_NESTING_CAP {
+            return (0, 0, 0);
+        }
         let mut ids = 0; // (a)
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
@@ -16940,7 +16970,7 @@ impl SelectorMatcher {
         if members.len() > 1 {
             let mut max_spec = (0, 0, 0);
             for part in members {
-                let spec = SelectorMatcher.selector_specificity(part);
+                let spec = SelectorMatcher.selector_specificity_nested(part, depth);
                 if spec > max_spec {
                     max_spec = spec;
                 }
@@ -17039,7 +17069,7 @@ impl SelectorMatcher {
                                     // run backwards.
                                     let arg_end = i.saturating_sub(1).max(arg_start);
                                     let arg: String = chars[arg_start..arg_end].iter().collect();
-                                    let (a, b, c) = SelectorMatcher.selector_specificity(&arg);
+                                    let (a, b, c) = SelectorMatcher.selector_specificity_nested(&arg, depth + 1);
                                     ids += a;
                                     classes += b;
                                     tags += c;
@@ -23339,6 +23369,36 @@ mod tests {
             SelectorMatcher::split_top_level_commas(":is(a, b) c, d[x=\"1,2\"], e"),
             vec![":is(a, b) c", "d[x=\"1,2\"]", "e"]
         );
+    }
+
+    // `SubjectCompound::parse`, `AncestorCompound::parse` and
+    // `selector_specificity` recurse once per `:is(`/`:not(` level. The
+    // validity gate, which is iterative and runs first, caps the nesting:
+    // past it the list is invalid (the rule is dropped, a query throws),
+    // and nothing recurses on it.
+    #[test]
+    fn selector_nesting_past_the_cap_is_invalid_not_a_stack_overflow() {
+        let nested = |n: usize| format!("{}.a{}", ":is(".repeat(n), ")".repeat(n));
+        let a = HashMap::from([("class".to_string(), "a".to_string())]);
+        let none = HashMap::new();
+        let ten = nested(10);
+        assert!(SelectorMatcher::selector_list_is_valid(&ten));
+        assert_eq!(SelectorMatcher.selector_specificity(&ten), (0, 1, 0));
+        assert!(SelectorMatcher.selector_matches(&ten, "div", &a, &[], &[], SiblingContext::SOLE));
+        assert!(!SelectorMatcher.selector_matches(&ten, "div", &none, &[], &[], SiblingContext::SOLE));
+        assert!(SelectorMatcher::selector_list_is_valid(&nested(SelectorMatcher::SELECTOR_NESTING_CAP)));
+        for n in [SelectorMatcher::SELECTOR_NESTING_CAP + 1, 40, 4096] {
+            let deep = nested(n);
+            assert!(!SelectorMatcher::selector_list_is_valid(&deep), "{n} nested");
+            assert!(matches!(*SelectorMatcher.prepared_selector(&deep), PreparedSelector::Never), "{n} nested");
+            assert!(!SelectorMatcher.selector_matches(&deep, "div", &a, &[], &[], SiblingContext::SOLE));
+            // The index scores every rule's selector, dropped or not.
+            assert_eq!(SelectorMatcher.selector_specificity(&deep), (0, 0, 0), "{n} nested");
+        }
+        // `:not(` and a bare `(` count toward the same cap.
+        let mixed = format!("{}.a{}", ":not(:is(".repeat(17), "))".repeat(17));
+        assert!(!SelectorMatcher::selector_list_is_valid(&mixed));
+        assert!(SelectorMatcher::selector_list_is_valid(&format!("{}.a{}", ":not(:is(".repeat(16), "))".repeat(16))));
     }
 
     #[test]
@@ -40622,6 +40682,19 @@ mod script_selector_tests {
             js("try { document.querySelector('p:frobnicate'); 'no throw' } catch (e) { e.name }"),
             "SyntaxError"
         );
+        // Nesting past the matcher's cap is invalid like any other list:
+        // a SyntaxError from every query entry point. Within it, it matches.
+        let nested = |n: usize| format!("{}.card{}", ":is(".repeat(n), ")".repeat(n));
+        assert_eq!(js(&format!("document.querySelectorAll('{}').length", nested(10))), "2");
+        assert_eq!(js(&format!("document.getElementById('deep').closest('{}').className", nested(10))), "card");
+        for call in [
+            format!("document.querySelectorAll('{}')", nested(40)),
+            format!("document.querySelector('{}')", nested(40)),
+            format!("document.getElementById('deep').matches('{}')", nested(40)),
+            format!("document.getElementById('deep').closest('{}')", nested(40)),
+        ] {
+            assert_eq!(js(&format!("try {{ {call}; 'no throw' }} catch (e) {{ e.name }}")), "SyntaxError", "{call}");
+        }
     }
 
     // The matcher reads the tree as it is now: script moves and class writes
