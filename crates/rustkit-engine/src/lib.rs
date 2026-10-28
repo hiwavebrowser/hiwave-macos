@@ -2938,6 +2938,9 @@ impl Engine {
                         "resize",
                     )
                 });
+                // Then the media query lists whose answer flipped hear
+                // `change` (after `resize`, as in the rendering update).
+                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
                 let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
