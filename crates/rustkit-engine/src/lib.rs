@@ -10284,8 +10284,17 @@ impl layout_ctx::LayoutCtx {
                     // children carry it instead, as the pieces of a split
                     // inline do (`push_child_hoisting_line_breaks`). A child
                     // that is itself a link keeps its own.
+                    //
+                    // A closed `<details>` shows only its summary: the hoist
+                    // is gated on `shown` like any other child, or the hidden
+                    // content rendered through a contents wrapper. The style
+                    // is still noted: the element is styled, only unboxed.
+                    let shown = !closed_details || details_summary == Some(child_index);
                     if child_box.style.display == rustkit_css::Display::Contents {
                         note_boxless_style(&child_box);
+                        if !shown {
+                            continue;
+                        }
                         let link_href = child_box.link_href;
                         for mut grandchild in child_box.children {
                             if grandchild.link_href.is_none() {
@@ -10322,7 +10331,6 @@ impl layout_ctx::LayoutCtx {
                         | BoxType::LineBreak => true,
                     };
 
-                    let shown = !closed_details || details_summary == Some(child_index);
                     if should_include && shown {
                         Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     } else if shown && matches!(child_box.box_type, BoxType::Inline) {
