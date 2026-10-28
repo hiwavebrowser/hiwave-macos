@@ -386,6 +386,8 @@ mod content_string_tests;
 #[cfg(test)]
 mod html_element_ancestor_tests;
 #[cfg(test)]
+mod computed_content_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
