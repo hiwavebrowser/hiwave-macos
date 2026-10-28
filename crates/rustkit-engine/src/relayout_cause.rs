@@ -233,6 +233,9 @@ pub struct RelayoutStats {
     /// Relayouts that kept the laid-out tree: the build changed only what
     /// is painted, so the layout pass was skipped.
     pub layouts_skipped: u32,
+    /// Forced layouts: script read geometry after a DOM write in the same
+    /// task, so the page was laid out (not painted) for the read.
+    pub forced_layouts: u64,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.
