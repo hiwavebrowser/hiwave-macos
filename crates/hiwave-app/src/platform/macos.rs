@@ -272,16 +272,20 @@ impl MacOSPlatform {
             .append(&PredefinedMenuItem::separator())
             .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add separator: {}", e)))?;
 
-        // Developer Tools / Inspector (Cmd+Opt+I)
+        // View > Developer > Inspector (Cmd+Opt+I toggles it)
+        let developer_menu = Submenu::new("Developer", true);
         let inspector_item = MenuItem::with_id(
             menu_ids::TOGGLE_INSPECTOR,
-            "Developer Tools",
+            "Inspector",
             true,
             Some(Accelerator::new(Some(Modifiers::META | Modifiers::ALT), Code::KeyI)),
         );
-        view_menu
+        developer_menu
             .append(&inspector_item)
-            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add Developer Tools: {}", e)))?;
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add Inspector: {}", e)))?;
+        view_menu
+            .append(&developer_menu)
+            .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to add Developer menu: {}", e)))?;
 
         menu.append(&view_menu)
             .map_err(|e| PlatformError::MenuInitFailed(format!("Failed to append view menu: {}", e)))?;

@@ -7,7 +7,6 @@ use super::{id_list, node_id, string_arg, SharedDomHost};
 use crate::DomDirty;
 use rustkit_dom::{ShadowRootInit, ShadowRootMode};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::Cell;
 use std::rc::Rc;
 
 /// `shadow(gen, op, id, a, b)`, for node `id`:
@@ -26,7 +25,7 @@ use std::rc::Rc;
 pub(super) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
-    dirty: &Rc<Cell<DomDirty>>,
+    dirty: &Rc<crate::DirtyMark>,
 ) -> Result<(), JsError> {
     let h = host.clone();
     let d = dirty.clone();
@@ -57,7 +56,7 @@ pub(super) fn install(
                         Ok(root) => {
                             // The host's children stop rendering, until
                             // slotted.
-                            d.set(d.get().max(DomDirty::Style));
+                            d.mark(DomDirty::Style);
                             node_id(Some(root))
                         }
                         Err(_) => JsValue::String("NotSupportedError".into()),
@@ -88,7 +87,7 @@ pub(super) fn install(
                     if let Some(name) = string_arg(args, 3) {
                         document.define_custom_element(name);
                         // `:defined` rules now match elements of the name.
-                        d.set(d.get().max(DomDirty::Style));
+                        d.mark(DomDirty::Style);
                     }
                     JsValue::Null
                 }

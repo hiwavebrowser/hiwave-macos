@@ -84,6 +84,8 @@
     var NamedNodeMap = iface('NamedNodeMap'), Attr = iface('Attr', g.Node);
     var OWNER = Symbol('rustkit.owner'), NAME = Symbol('rustkit.name');
     var maps = new WeakMap(), attrs = new WeakMap();
+    // An Attr taken off its element keeps its value and has no owner.
+    var gone = new WeakMap();
     function hidden(o, k, v) { Object.defineProperty(o, k, { value: v }); return o; }
     function attrNode(el, name) {
         var byName = attrs.get(el);
@@ -106,7 +108,7 @@
         return this[NAME] === 'xmlns' ? PREFIX_NS.xmlns : nsOf(this[NAME]);
     });
     getter(Attr.prototype, 'ownerElement', function () {
-        return this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
+        return !gone.has(this) && this[OWNER].hasAttribute(this[NAME]) ? this[OWNER] : null;
     });
     getter(Attr.prototype, 'nodeType', function () { return 2; });
     getter(Attr.prototype, 'specified', function () { return true; });
@@ -114,8 +116,13 @@
     getter(Attr.prototype, 'ownerDocument', function () { return this[OWNER].ownerDocument; });
     ['value', 'nodeValue', 'textContent'].forEach(function (k) {
         Object.defineProperty(Attr.prototype, k, {
-            get: function () { var v = this[OWNER].getAttribute(this[NAME]); return v === null ? '' : v; },
-            set: function (v) { this[OWNER].setAttribute(this[NAME], v); },
+            get: function () {
+                if (gone.has(this)) return gone.get(this);
+                var v = this[OWNER].getAttribute(this[NAME]); return v === null ? '' : v;
+            },
+            set: function (v) {
+                if (gone.has(this)) gone.set(this, String(v)); else this[OWNER].setAttribute(this[NAME], v);
+            },
             configurable: true, enumerable: true
         });
     });
@@ -131,11 +138,24 @@
     NamedNodeMap.prototype.getNamedItemNS = function (ns, local) {
         var n = nsName(this[OWNER], ns, local); return n === null ? null : attrNode(this[OWNER], n);
     };
+    // Take `a` off its element: it keeps its value, and the name gets a new
+    // Attr if it is set again (DOM §4.9.2 "remove an attribute").
+    function detach(a) {
+        var el = a[OWNER], v = a.value;
+        el.removeAttribute(a[NAME]);
+        delete attrs.get(el)[a[NAME]];
+        gone.set(a, v);
+        return a;
+    }
     NamedNodeMap.prototype.removeNamedItem = function (name) {
         var a = this.getNamedItem(name);
         if (!a) fail('removeNamedItem', 'NamedNodeMap', 'NotFoundError');
-        this[OWNER].removeAttribute(a.name);
-        return a;
+        return detach(a);
+    };
+    NamedNodeMap.prototype.removeNamedItemNS = function (ns, local) {
+        var a = this.getNamedItemNS(ns, local);
+        if (!a) fail('removeNamedItemNS', 'NamedNodeMap', 'NotFoundError');
+        return detach(a);
     };
     NamedNodeMap.prototype[Symbol.iterator] = function () {
         var out = [];
@@ -166,6 +186,14 @@
     Element.prototype.getAttributeNode = function (name) { return this.attributes.getNamedItem(name); };
     Element.prototype.getAttributeNodeNS = function (ns, local) {
         return this.attributes.getNamedItemNS(ns, local);
+    };
+    // React 19 strips a host singleton's attributes with this on a client
+    // render after a hydration error (yahoo).
+    Element.prototype.removeAttributeNode = function (attr) {
+        if (!(attr instanceof Attr) || gone.has(attr) || attr[OWNER] !== this || !this.hasAttribute(attr[NAME])) {
+            fail('removeAttributeNode', 'Element', 'NotFoundError');
+        }
+        return detach(attr);
     };
 
     // ---- document.activeElement with focus()/blur() (HTML §6.6). One

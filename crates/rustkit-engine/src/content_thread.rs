@@ -24,7 +24,11 @@ use url::Url;
 
 use crate::nav_cancel::NavCanceller;
 use crate::page_protocol::{adopt, coalesce};
-use crate::{EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
+use crate::devtools_service::{
+    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+};
+use crate::inspector::Inspector;
+use crate::{DevtoolsAnswer, DevtoolsQuery, EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
 
 /// `HIWAVE_CONTENT_THREAD=1` (or true/on/yes). Anything else, including an
 /// unset variable, leaves the page on the window thread.
@@ -67,6 +71,9 @@ struct Boot {
     control: Arc<ViewControl>,
     canceller: NavCanceller,
     images: Arc<ImageManager>,
+    /// The view's Inspector, for reads the page need not answer.
+    inspector: Arc<Inspector>,
+    devtools_counters: Arc<DevtoolsCounters>,
     #[allow(dead_code)]
     view: EngineViewId,
     thread: std::thread::ThreadId,
@@ -128,6 +135,9 @@ impl ContentThread {
                     let canceller = engine
                         .nav_canceller(view)
                         .ok_or_else(|| "view has no canceller".to_string())?;
+                    let inspector = engine
+                        .inspector(view)
+                        .ok_or_else(|| "view has no inspector".to_string())?;
                     let mut endpoint = adopt(engine, view, cmd_rx, ev_tx);
                     endpoint.set_settle_keys(true);
                     endpoint.set_wake_window(true);
@@ -135,6 +145,8 @@ impl ContentThread {
                         control,
                         canceller,
                         images,
+                        inspector,
+                        devtools_counters: endpoint.devtools_counters(),
                         view,
                         thread: std::thread::current().id(),
                     }));
@@ -251,6 +263,18 @@ impl ContentThread {
         rx
     }
 
+    /// The Inspector console's input line: cancelled, not run, if the page
+    /// reaches it at or past `deadline` (T6c).
+    pub fn devtools_eval(&self, script: &str, deadline: Instant) -> oneshot::Receiver<Result<String, String>> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::DevtoolsEval {
+            script: script.to_string(),
+            deadline,
+            reply,
+        });
+        rx
+    }
+
     /// The newest navigation id this handle allocated (by `navigate`,
     /// `load_html` or a reload). Only the window allocates ids, so right
     /// after one of those calls this is the id it used.
@@ -311,6 +335,37 @@ impl ContentThread {
     /// Queue a command. Does not signal cancel and does not wait.
     pub fn enqueue(&self, cmd: PageCmd) {
         let _ = self.cmd.send(cmd);
+    }
+
+    /// Ask a developer-tools question. Console reads are answered by the
+    /// devtools thread from the view's Inspector, without the page (T6a);
+    /// the rest are page commands. Before the page has booted every
+    /// question is a page command, answered once it runs.
+    pub fn devtools_ask(&self, query: DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> {
+        if let (DevtoolsQuery::Console { since }, Some(Ok(boot))) = (&query, self.boot()) {
+            return devtools_ask_console(boot.inspector, *since, Some(boot.devtools_counters));
+        }
+        // An open panel is woken when the view records, not on a clock (T6b).
+        if let (DevtoolsQuery::Attach(on), Some(Ok(boot))) = (&query, self.boot()) {
+            devtools_watch(&boot.inspector, &boot.devtools_counters, *on);
+        }
+        let (reply, rx) = oneshot::channel();
+        let _ = self.cmd.send(PageCmd::Devtools { query, reply });
+        rx
+    }
+
+    /// The view's Inspector, once the page has booted. Read its
+    /// [`Inspector::watermark`] to know whether there is anything new.
+    pub fn devtools_inspector(&self) -> Option<Arc<Inspector>> {
+        self.boot().and_then(|boot| boot.ok()).map(|boot| boot.inspector)
+    }
+
+    /// What devtools has cost the page so far; zero before it has booted.
+    pub fn devtools_counters(&self) -> DevtoolsCount {
+        self.boot()
+            .and_then(|boot| boot.ok())
+            .map(|boot| boot.devtools_counters.read())
+            .unwrap_or_default()
     }
 }
 
@@ -415,6 +470,88 @@ mod tests {
     }
 
     #[test]
+    fn load_html_runs_the_documents_inline_scripts() {
+        // Red on develop ff6ad36a (dev-tools lane, 2026-10-25): the app
+        // loads New Tab, About and the report page (Chart.js inline) with
+        // `load_html`, which reaches `Engine::load_html_as`. That set up the
+        // bindings and laid out but ran no `<script>`.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\">before</p><script>document.getElementById('t').textContent = 'ran';</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut text = page.eval("document.getElementById('t').textContent");
+        let text = wait_recv(&mut text, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(text.contains("ran"), "the inline script did not run: {text}");
+    }
+
+    #[test]
+    fn load_html_fires_domcontentloaded_and_load_after_its_scripts() {
+        // The report page draws its charts from a `DOMContentLoaded`
+        // listener, so the lifecycle events matter as much as the scripts.
+        let page = page();
+        let mut loaded = page.load_html(
+            "<p id=\"t\"></p><script>\
+             var seen = [document.readyState];\
+             document.addEventListener('DOMContentLoaded', function () { seen.push('dcl:' + document.readyState); });\
+             window.addEventListener('load', function () { seen.push('load:' + document.readyState); });\
+             </script><script>seen.push('second');</script>",
+        );
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut seen = page.eval("seen.join(',')");
+        let seen = wait_recv(&mut seen, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            seen.contains("loading,second,dcl:interactive,load:complete"),
+            "scripts in order, then DOMContentLoaded, then load: {seen}"
+        );
+    }
+
+    #[test]
+    fn about_page_script_runs_and_sets_the_version_line() {
+        // about.html (New Tab / About in RustKit content mode) exposes
+        // `hiwaveAbout.setVersion`, which the shell calls with the version.
+        let page = page();
+        let mut loaded = page.load_html(include_str!("../../hiwave-app/src/ui/about.html"));
+        let load = wait_recv(&mut loaded, Duration::from_secs(10)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut version = page.eval(
+            "window.hiwaveAbout.setVersion('v9.8.7'); document.getElementById('versionBadge').textContent",
+        );
+        let version = wait_recv(&mut version, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("the about page's script defined hiwaveAbout");
+        assert!(version.contains("v9.8.7"), "version line: {version}");
+    }
+
+    #[test]
+    fn report_page_runs_inline_chart_js_and_its_dom_content_loaded_listener() {
+        // Prometheus's #799 nit 1: the report page as the shell loads it
+        // (`load_report_page`): Chart.js (200 KB) inlined in a `<script>`,
+        // then the page's script, which does its work from DOMContentLoaded.
+        let html = include_str!("../../hiwave-app/src/ui/report.html").replace(
+            "<!-- Chart.js is injected by Rust before page load -->",
+            &format!("<script>{}</script>", include_str!("../../hiwave-app/src/ui/chart.umd.min.js")),
+        );
+        let page = page();
+        let mut loaded = page.load_html(&html);
+        let load = wait_recv(&mut loaded, Duration::from_secs(20)).expect("load reply");
+        assert!(load.is_ok(), "{load:?}");
+        let mut seen = page.eval(
+            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display",
+        );
+        let seen = wait_recv(&mut seen, Duration::from_secs(10))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(seen.contains("function,function,block"), "Chart.js, the page script, DOMContentLoaded: {seen}");
+    }
+
+    #[test]
     fn stop_during_a_script_returns_and_a_later_eval_runs() {
         let page = page();
         let mut loaded = page.load_html("<p id=\"t\">x</p>");
@@ -461,6 +598,339 @@ mod tests {
             .expect("eval reply")
             .expect("the old document's script is still stopped after the failed navigation");
         assert!(value.contains("x2"), "{value}");
+    }
+
+    fn ask_devtools(page: &ContentThread, query: crate::DevtoolsQuery) -> crate::DevtoolsAnswer {
+        let (reply, mut rx) = oneshot::channel();
+        page.enqueue(PageCmd::Devtools { query, reply });
+        wait_recv(&mut rx, Duration::from_secs(5)).expect("the page answered the Inspector")
+    }
+
+    fn find_by_id(node: &crate::DevtoolsNode, id: &str) -> Option<usize> {
+        if node.id.as_deref() == Some(id) {
+            return Some(node.node_id);
+        }
+        node.children.iter().find_map(|child| find_by_id(child, id))
+    }
+
+    #[test]
+    fn the_inspector_is_answered_on_the_content_thread() {
+        // #764 re-cut: the Inspector queried the engine on the window
+        // thread, which has no engine once the page runs on its own thread
+        // (the shipped default). Every question goes through the protocol.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html(
+            "<body style='margin:0'><div id=box class='a b' style='width:100px;height:50px;padding:5px'>hi</div></body>",
+        );
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Attach(true)), DevtoolsAnswer::Done);
+        let DevtoolsAnswer::Tree(Some(tree)) = ask_devtools(&page, DevtoolsQuery::DomTree { root: None, reveal: None })
+        else {
+            panic!("no DOM tree");
+        };
+        let node = find_by_id(&tree, "box").expect("the tree has #box");
+        let DevtoolsAnswer::Element(Some(element)) = ask_devtools(&page, DevtoolsQuery::Element(node)) else {
+            panic!("no element details");
+        };
+        assert_eq!(element.tag, "div");
+        assert_eq!(element.classes, vec!["a".to_string(), "b".to_string()]);
+        let rect = element.rect.expect("the element has a box");
+        assert_eq!((rect.width, rect.height), (110.0, 60.0));
+        assert_eq!(
+            ask_devtools(&page, DevtoolsQuery::NodeAt { x: 20.0, y: 20.0 }),
+            DevtoolsAnswer::Node(Some(node))
+        );
+        let _ = page.poll();
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Highlight(Some(node))), DevtoolsAnswer::Done);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut outlined = false;
+        while Instant::now() < deadline && !outlined {
+            outlined = page.poll().into_iter().any(|e| matches!(e, PageEvent::Commit(_)));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(outlined, "the outline was never drawn into a new frame");
+        let mut logged = page.eval("console.log('from the page'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let DevtoolsAnswer::Console(console) = ask_devtools(&page, DevtoolsQuery::Console { since: 0 }) else {
+            panic!("no console");
+        };
+        // The Inspector records a value's shape, not the page's text
+        // (inspector.rs): the line is there, as `<string len=13>`.
+        assert!(
+            console.entries.iter().any(|e| e.level == "log" && e.message == "<string len=13>"),
+            "{:?}",
+            console.entries
+        );
+    }
+
+    #[test]
+    fn an_open_panel_on_an_idle_page_costs_the_page_no_devtools_commands() {
+        // T6a (T6-design.md): every console read the open panel made was a
+        // page command, four a second on an idle page (#785's 250 ms
+        // CONSOLE_POLL). The reads now come from the view's Inspector on
+        // the devtools thread, and the console still updates.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p id=t>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        assert_eq!(ask_devtools(&page, DevtoolsQuery::Attach(true)), DevtoolsAnswer::Done);
+        let before = page.devtools_counters();
+        let (mut since, mut lines) = (0, Vec::new());
+        let start = Instant::now();
+        let mut logged_late = false;
+        while start.elapsed() < Duration::from_secs(2) {
+            if !logged_late && start.elapsed() >= Duration::from_secs(1) {
+                logged_late = true;
+                let mut done = page.eval("console.log('late'); 1");
+                assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+            }
+            // The panel's clock (devtools_panel.rs, CONSOLE_POLL).
+            let mut rx = page.devtools_ask(DevtoolsQuery::Console { since });
+            let Some(DevtoolsAnswer::Console(console)) = wait_recv(&mut rx, Duration::from_secs(5)) else {
+                panic!("the console read was not answered");
+            };
+            since = console.next_seq;
+            lines.extend(console.entries.into_iter().map(|e| e.message));
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let cost = page.devtools_counters();
+        assert_eq!(
+            cost.page_commands - before.page_commands,
+            0,
+            "devtools page commands in 2 s on an idle page with the panel open"
+        );
+        assert!(lines.iter().any(|m| m == "<string len=4>"), "the late line never reached the panel: {lines:?}");
+    }
+
+    /// The panel's console read, through the routing the window uses.
+    fn read_console(page: &ContentThread, since: u64, budget: Duration) -> Option<crate::DevtoolsConsole> {
+        let mut rx = page.devtools_ask(crate::DevtoolsQuery::Console { since });
+        match wait_recv(&mut rx, budget) {
+            Some(crate::DevtoolsAnswer::Console(console)) => Some(console),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_console_read_is_answered_while_the_page_thread_is_blocked() {
+        // T6b (T6-design.md): the panel stays usable when the page is hung.
+        // The page thread sits in a 3 s host-side wait; the console read
+        // is answered from the view's Inspector meanwhile.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('before'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        page.enqueue(PageCmd::Block(3_000));
+        // Queued behind the block: no answer until it ends.
+        let mut behind = page.eval("1");
+        std::thread::sleep(Duration::from_millis(100));
+        let asked = Instant::now();
+        let console = read_console(&page, 0, Duration::from_secs(1)).expect("no console answer while the page was blocked");
+        assert!(asked.elapsed() < Duration::from_secs(1), "the read waited for the page");
+        assert!(
+            matches!(behind.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the page was not in its block when the read was served"
+        );
+        assert!(
+            console.entries.iter().any(|e| e.message == "<string len=6>"),
+            "the line logged before the block is missing: {:?}",
+            console.entries
+        );
+    }
+
+    #[test]
+    fn a_devtools_eval_reached_past_its_deadline_is_cancelled_not_run_late() {
+        // T6c, R1 condition 5: the page is busy (a 1.5 s host-side block)
+        // when the panel's console line arrives with a 300 ms deadline. The
+        // page reaches it late and must not run it; one in time still runs.
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        page.enqueue(PageCmd::Block(1_500));
+        let mut late = page.devtools_eval("window.ranLate = 1; 'ran'", Instant::now() + Duration::from_millis(300));
+        let answer = wait_recv(&mut late, Duration::from_secs(5)).expect("no answer to the late eval");
+        assert_eq!(answer, Err(crate::EVAL_CANCELLED.to_string()));
+        let mut check = page.devtools_eval("String(window.ranLate)", Instant::now() + Duration::from_secs(5));
+        let ran = wait_recv(&mut check, Duration::from_secs(5)).expect("no answer").expect("eval");
+        assert!(ran.contains("undefined"), "the cancelled eval ran anyway: {ran}");
+    }
+
+    #[test]
+    fn a_page_thread_panic_holding_the_inspector_lock_does_not_blank_the_panel() {
+        // T6 R1 condition 2: the page thread panics while it holds the
+        // view's Inspector lock, with the panel open. The panel still reads
+        // what was recorded, and is told the page crashed.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>x</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('before'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let inspector = page.devtools_inspector().expect("booted");
+        assert!(!inspector.page_crashed());
+        page.enqueue(PageCmd::PanicHoldingInspector);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !inspector.page_crashed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(inspector.page_crashed(), "the page thread never panicked");
+        let console = read_console(&page, 0, Duration::from_secs(2)).expect("no console answer after the crash");
+        assert!(console.page_crashed, "the answer does not say the page crashed");
+        assert!(
+            console.entries.iter().any(|e| e.message == "<string len=6>"),
+            "the panel lost what was recorded before the crash: {:?}",
+            console.entries
+        );
+    }
+
+    #[test]
+    fn an_open_panel_is_woken_when_the_view_records_and_not_otherwise() {
+        // T6b: no CONSOLE_POLL. With the panel watching, an idle page posts
+        // no window wakes; a console line posts one, and the next is not
+        // posted until the panel has read.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        // What the page recorded before the panel opened: read it once.
+        std::thread::sleep(Duration::from_millis(200));
+        let inspector = page.devtools_inspector().expect("booted");
+        let since = read_console(&page, 0, Duration::from_secs(5)).expect("first read").next_seq;
+        std::thread::sleep(Duration::from_millis(200));
+        let idle_from = page.devtools_counters();
+        std::thread::sleep(Duration::from_secs(1));
+        let idle = page.devtools_counters();
+        assert_eq!(idle.window_wakes - idle_from.window_wakes, 0, "window wakes in 1 s on an idle page");
+        assert_eq!(idle.page_commands - idle_from.page_commands, 0);
+        // Three lines, no read: one wake.
+        let mut done = page.eval("console.log('a'); console.log('b'); console.log('c'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while page.devtools_counters().window_wakes == idle.window_wakes && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let woken = page.devtools_counters();
+        assert_eq!(woken.window_wakes - idle.window_wakes, 1, "one wake for unread lines");
+        assert!(inspector.watermark() > since);
+        // The panel reads (its answer wakes the window once more), then a
+        // new line wakes it again.
+        let console = read_console(&page, since, Duration::from_secs(5)).expect("read");
+        assert_eq!(console.entries.len(), 3, "{:?}", console.entries);
+        std::thread::sleep(Duration::from_millis(200));
+        let read = page.devtools_counters();
+        let mut done = page.eval("console.log('d'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(page.devtools_counters().window_wakes - read.window_wakes, 1, "a new line after a read wakes");
+        assert_eq!(page.devtools_counters().page_commands, idle.page_commands, "no console read reached the page");
+    }
+
+    #[test]
+    fn a_panel_attached_while_the_page_boots_is_still_watched() {
+        // #803 review (2): before `boot()` returns the window cannot reach
+        // the Inspector, so it made no watch, and an idle page never woke
+        // the panel. The page now watches when it handles the attach.
+        use crate::DevtoolsQuery;
+        let page = page();
+        let before_boot = page.boot().is_none();
+        let _attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert!(before_boot, "the page booted before the attach: this test checks nothing");
+        let mut loaded = page.load_html("<p>idle</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        std::thread::sleep(Duration::from_millis(300));
+        let since = read_console(&page, 0, Duration::from_secs(5)).expect("first read").next_seq;
+        std::thread::sleep(Duration::from_millis(200));
+        let from = page.devtools_counters().window_wakes;
+        let mut done = page.eval("console.log('late'); 1");
+        assert!(wait_recv(&mut done, Duration::from_secs(5)).is_some());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while page.devtools_counters().window_wakes == from && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(page.devtools_counters().window_wakes > from, "a line after boot never woke the panel");
+        let console = read_console(&page, since, Duration::from_secs(5)).expect("read");
+        assert!(console.entries.iter().any(|e| e.message == "<string len=4>"), "{:?}", console.entries);
+    }
+
+    #[test]
+    fn with_the_ring_off_a_closed_panel_drops_its_session() {
+        // #803 review nit: with the tab ring off nothing reads a closed
+        // panel's records, so they are not kept for the life of the view.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page();
+        let mut loaded = page.load_html("<p>one</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut logged = page.eval("console.log('one'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let inspector = page.devtools_inspector().expect("booted");
+        assert!(!inspector.snapshot_since(0).records.is_empty());
+        let mut detached = page.devtools_ask(DevtoolsQuery::Attach(false));
+        assert_eq!(wait_recv(&mut detached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        assert!(inspector.snapshot_since(0).records.is_empty(), "the closed panel's records were kept");
+    }
+
+    /// A page with the tab ring on (`HIWAVE_DEVTOOLS_RING=1`).
+    fn page_with_ring() -> ContentThread {
+        let mut config = EngineBuilder::new()
+            .script_budget_ms(5_000)
+            .interrupt_scripts_at_budget(true)
+            .config()
+            .clone();
+        config.inspector.buffer = true;
+        ContentThread::spawn(
+            EngineBuilder::new().with_config(config),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+        )
+        .expect("content thread spawns")
+    }
+
+    #[test]
+    fn the_panel_reopens_with_history_marked_by_document() {
+        // T6b: with the tab ring on, closing the panel does not forget, and
+        // records carry their document, so a panel opened after a navigation
+        // shows both pages' lines and can tell them apart.
+        use crate::{DevtoolsAnswer, DevtoolsQuery};
+        let page = page_with_ring();
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        let _ = wait_recv(&mut attached, Duration::from_secs(5));
+        let mut loaded = page.load_html("<p>one</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut logged = page.eval("console.log('one'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let mut detached = page.devtools_ask(DevtoolsQuery::Attach(false));
+        assert_eq!(wait_recv(&mut detached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let mut loaded = page.load_html("<p>two</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let mut logged = page.eval("console.log('second'); 1");
+        assert!(wait_recv(&mut logged, Duration::from_secs(5)).is_some());
+        let mut attached = page.devtools_ask(DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(DevtoolsAnswer::Done));
+        let console = read_console(&page, 0, Duration::from_secs(5)).expect("read");
+        let doc_of = |len: usize| {
+            let shape = format!("<string len={len}>");
+            console.entries.iter().find(|e| e.message == shape).map(|e| e.doc)
+        };
+        let (first, second) = (doc_of(3), doc_of(6));
+        assert!(first.is_some(), "the first page's line was forgotten: {:?}", console.entries);
+        assert!(second.is_some(), "the second page's line is missing: {:?}", console.entries);
+        assert!(second > first, "documents not told apart: {first:?} vs {second:?}");
     }
 
     /// Events until `nav_id` fails or `budget` runs out.
@@ -576,6 +1046,28 @@ mod tests {
         let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
         let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
         assert!(text.contains("shown"), "the 204 replaced the document on screen: {text}");
+    }
+
+    #[test]
+    fn a_205_navigation_leaves_the_page_as_it_is_and_reports_no_failure() {
+        // #730 follow-up (e) / #780: HTML aborts 204 *and* 205 the same way.
+        // Only 204 was pinned; a wrong status match would wipe the shown
+        // document or report Failed on Reset Content.
+        let port = serve_empty("HTTP/1.1 205 Reset Content");
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/ping")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 0, "a 205 was reported as a failure: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the window was never told the 205 navigation ended: {events:?}"
+        );
+        let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
+        let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
+        assert!(text.contains("shown"), "the 205 replaced the document on screen: {text}");
     }
 
     #[test]

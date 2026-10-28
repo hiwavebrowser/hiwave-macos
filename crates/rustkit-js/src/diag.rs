@@ -26,10 +26,12 @@ use std::time::Instant;
 use boa_engine::builtins::error::Error;
 use boa_engine::{Context, JsObject, JsValue};
 
-use crate::{ErrorReport, LogLevel, ScriptPosition};
+use crate::{ConsoleStacks, ErrorReport, LogLevel, ScriptFrame, ScriptPosition};
 
-/// One console call: level, line, the caller's position.
-pub(crate) type ConsoleCall = (LogLevel, String, Option<ScriptPosition>);
+/// One console call: level, line, its shape line (when one was asked
+/// for, see `console_shapes`), the caller's position, and the stacks of an
+/// error-level call while reports are on.
+pub(crate) type ConsoleCall = (LogLevel, String, Option<String>, Option<ScriptPosition>, ConsoleStacks);
 
 /// An unimplemented member the embedder's scripts saw page script reach.
 struct Unsupported {
@@ -57,6 +59,47 @@ pub(crate) const EMBEDDER_PATH: &str = "rustkit#embedder";
 
 /// Console calls held between flushes; past it the oldest is dropped.
 const MAX_CONSOLE_PENDING: usize = 1024;
+
+/// Live hand-overs in one second (T6d). A hand-over carries the calls
+/// held before it too, so this caps hand-overs, not calls: up to
+/// `MAX_CONSOLE_LIVE + MAX_CONSOLE_PENDING` calls can reach the handler in
+/// a second. A page logging in a hot loop past it has its calls held, as
+/// with no live reader.
+pub const MAX_CONSOLE_LIVE: u32 = 200;
+
+/// Where console calls go as they are made ([`crate::JsRuntime::set_console_live`]).
+pub(crate) struct LiveConsole {
+    pub(crate) on: std::sync::Arc<crate::ConsoleLive>,
+    pub(crate) handler: std::sync::Arc<crate::ConsoleHandler>,
+    pub(crate) shapes: Option<std::sync::Arc<crate::ConsoleHandler>>,
+}
+
+/// Hand `calls` to the handlers, after a line for the `dropped` ones
+/// before them, if any: engine text, so the shape handler gets it too.
+/// `capped`: the live rate cap held calls, so it is why they were dropped.
+pub(crate) fn deliver_console(
+    handler: &crate::ConsoleHandler,
+    shapes: Option<&std::sync::Arc<crate::ConsoleHandler>>,
+    dropped: u64,
+    calls: Vec<ConsoleCall>,
+    capped: bool,
+) {
+    if dropped > 0 {
+        let cause = if capped { "; console rate cap" } else { "" };
+        let line = format!("{dropped} console calls dropped (more than {MAX_CONSOLE_PENDING} held{cause})");
+        let none = ConsoleStacks::default();
+        handler(LogLevel::Warn, &line, None, &none);
+        if let Some(shapes) = shapes {
+            shapes(LogLevel::Warn, &line, None, &none);
+        }
+    }
+    for (level, msg, shape, at, stack) in calls {
+        handler(level, &msg, at.as_ref(), &stack);
+        if let (Some(shapes), Some(shape)) = (shapes, shape) {
+            shapes(level, &shape, at.as_ref(), &stack);
+        }
+    }
+}
 /// `console.count` and `console.time` labels held at once; a new label past
 /// it is not counted or timed.
 const MAX_CONSOLE_LABELS: usize = 1024;
@@ -121,7 +164,19 @@ pub(crate) struct Diagnostics {
     pub(crate) console_capturing: Cell<bool>,
     /// Console arguments are recorded as type and length only.
     pub(crate) console_redacted: Cell<bool>,
+    /// Each call also records a type-and-length line beside its line (an
+    /// embedder set a shape handler).
+    pub(crate) console_shapes: Cell<bool>,
     console: RefCell<VecDeque<ConsoleCall>>,
+    /// Calls dropped from `console` since it was last taken.
+    console_dropped: Cell<u64>,
+    pub(crate) console_live: RefCell<Option<std::rc::Rc<LiveConsole>>>,
+    /// The current second of live hand-overs: its start and how many.
+    console_live_window: Cell<(Option<Instant>, u32)>,
+    /// A call was held because the live rate cap was spent.
+    console_capped: Cell<bool>,
+    /// Where the embedder reads how many calls are held (`console.len()`).
+    pub(crate) console_held: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>>,
     console_counts: RefCell<HashMap<String, u64>>,
     console_timers: RefCell<HashMap<String, Instant>>,
     unsupported: RefCell<Vec<Unsupported>>,
@@ -139,12 +194,61 @@ impl Diagnostics {
             true => crate::describe::join_line(args, |arg| crate::describe::redacted_text(arg, context)),
             false => crate::describe::join_line(args, |arg| crate::describe::text(arg, context)),
         };
+        let shape = self
+            .console_shapes
+            .get()
+            .then(|| crate::describe::join_line(args, |arg| crate::describe::redacted_text(arg, context)));
         let at = caller_position(context, false);
+        // Stacks only for `console.error` (and a failed `assert`), and only
+        // for an embedder that records page errors: one more walk of the
+        // frames the position walk already started, and the first error
+        // argument's own frames through the realm's getter.
+        let stack = match (level, self.on.get()) {
+            (LogLevel::Error, true) => ConsoleStacks {
+                caller: page_stack(context, self.keep_text.get()),
+                error: self.first_error_frames(args, context),
+            },
+            _ => ConsoleStacks::default(),
+        };
+        let call = (level, line, shape, at, stack);
+        // Decided per call: the reader may have come or gone since the last.
+        let live = self.console_live.borrow().clone().filter(|live| (*live.on)());
+        let wanted_live = live.is_some();
+        if let Some(live) = live.filter(|_| self.live_slot()) {
+            // What was held goes first: each call once, in order.
+            let (dropped, mut calls, capped) = self.take_console_counted();
+            calls.push(call);
+            deliver_console(&live.handler, live.shapes.as_ref(), dropped, calls, capped);
+            return;
+        }
+        // Held for the cap, or because nobody reads live: the dropped line
+        // names the cap only when that is why (the latest hold decides).
+        self.console_capped.set(wanted_live);
         let mut pending = self.console.borrow_mut();
         if pending.len() >= MAX_CONSOLE_PENDING {
             pending.pop_front();
+            self.console_dropped.set(self.console_dropped.get() + 1);
         }
-        pending.push_back((level, line, at));
+        pending.push_back(call);
+        self.note_held(pending.len());
+    }
+
+    fn note_held(&self, n: usize) {
+        if let Some(held) = self.console_held.borrow().as_ref() {
+            held.store(n, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Whether one more call may be handed over live this second.
+    fn live_slot(&self) -> bool {
+        let now = Instant::now();
+        let (start, n) = match self.console_live_window.get() {
+            (Some(start), n) if now.saturating_duration_since(start) < std::time::Duration::from_secs(1) => (start, n),
+            _ => (now, 0),
+        };
+        let ok = n < MAX_CONSOLE_LIVE;
+        self.console_live_window.set((Some(start), n + u32::from(ok)));
+        ok
     }
 
     /// A Console namespace member other than the five logging ones, as
@@ -228,8 +332,34 @@ impl Diagnostics {
         }
     }
 
-    pub(crate) fn take_console(&self) -> Vec<ConsoleCall> {
-        self.console.borrow_mut().drain(..).collect()
+    /// The first error object among `args`: its frames as a report's are
+    /// read (the realm's own `stack` getter, scripts the engine evaluated
+    /// only), names only with error text kept. Runs none of the page's code.
+    fn first_error_frames(&self, args: &[JsValue], context: &mut Context) -> Vec<ScriptFrame> {
+        let Some(error) = args.iter().find(|a| a.as_object().is_some_and(|o| o.is::<Error>())) else {
+            return Vec::new();
+        };
+        let Some(stack) = self.stack_of(error, context) else { return Vec::new() };
+        let (frames, functions, _) = self.frames(&stack);
+        let keep = self.keep_text.get();
+        frames
+            .into_iter()
+            .zip(functions)
+            .map(|(at, function)| ScriptFrame { function: function.filter(|_| keep), at })
+            .collect()
+    }
+
+    /// The held calls, how many were dropped before them, and whether the
+    /// live rate cap held any of them.
+    pub(crate) fn take_console_counted(&self) -> (u64, Vec<ConsoleCall>, bool) {
+        let calls = self.console.borrow_mut().drain(..).collect();
+        self.note_held(0);
+        (self.console_dropped.replace(0), calls, self.console_capped.replace(false))
+    }
+
+    /// The calls held now, for a counter just set.
+    pub(crate) fn console_held_now(&self) -> usize {
+        self.console.borrow().len()
     }
 
     /// The embedder's scripts saw page script reach `interface.member`,
@@ -327,6 +457,7 @@ impl Diagnostics {
             message: None,
             message_len: None,
             frames: Vec::new(),
+            functions: Vec::new(),
             located: false,
             rejection,
             module: None,
@@ -375,8 +506,17 @@ impl Diagnostics {
             _ => None,
         };
         let stack = own_stack.as_deref().or(frames).unwrap_or("");
-        (report.frames, report.located) = self.frames(stack);
+        self.set_frames(&mut report, stack);
         report
+    }
+
+    /// `report`'s frames from Boa's stack text, with their function names
+    /// when error text is kept.
+    fn set_frames(&self, report: &mut ErrorReport, stack: &str) {
+        let (frames, functions, located) = self.frames(stack);
+        report.frames = frames;
+        report.functions = if self.keep_text.get() { functions } else { Vec::new() };
+        report.located = located;
     }
 
     /// An error object's stack as the realm's own getter gives it (frame
@@ -399,12 +539,15 @@ impl Diagnostics {
     /// evaluated (`eval` code, `eval at :l:c`; a function `eval` code
     /// declared or `new Function` built, an `on*` attribute's handler among
     /// them, `unknown at :l:c`) has no place of its own and is never given
-    /// its caller's. A function name is never read or kept, and a line that
-    /// is not a whole frame is dropped, never copied: a name the page made
-    /// can hold a newline.
-    pub(crate) fn frames(&self, stack: &str) -> (Vec<ScriptPosition>, bool) {
+    /// its caller's. A function name never decides which frame is what, and
+    /// a line that is not a whole frame is dropped, never copied: a name the
+    /// page made can hold a newline. Each kept frame comes with its function
+    /// name as Boa wrote it (`None` for top-level code and unnamed
+    /// functions).
+    fn frames(&self, stack: &str) -> (Vec<ScriptPosition>, Vec<Option<String>>, bool) {
         let known = self.known_paths.borrow();
         let mut frames = Vec::new();
+        let mut functions = Vec::new();
         // `None` until the innermost frame that is the page's is seen.
         let mut located = None;
         for line in stack.lines() {
@@ -412,6 +555,7 @@ impl Diagnostics {
             let Some(inner) = frame.strip_suffix(')') else { continue };
             let Some(open) = inner.rfind(" (") else { continue };
             let position = &inner[open + 2..];
+            let function = function_name(&inner[..open]);
             if position == "native" || position.starts_with("native at ") {
                 continue;
             }
@@ -426,6 +570,7 @@ impl Diagnostics {
                     located.get_or_insert(true);
                     if frames.len() < MAX_FRAMES {
                         frames.push(ScriptPosition { path: path.to_string(), line, column });
+                        functions.push(function);
                     }
                 }
                 _ => {
@@ -433,7 +578,7 @@ impl Diagnostics {
                 }
             }
         }
-        (frames, located.unwrap_or(false))
+        (frames, functions, located.unwrap_or(false))
     }
 
     /// A `JsError` an evaluation ended in, as a report.
@@ -467,10 +612,10 @@ impl Diagnostics {
                         })
                         .unwrap_or("");
                     let (at, rest) = after.split_once('\n').unwrap_or((after, ""));
-                    (report.frames, report.located) = self.frames(rest);
+                    self.set_frames(&mut report, rest);
                     if report.frames.is_empty() {
                         if let Some(at) = at.strip_prefix(" (").and_then(|at| at.strip_suffix(')')) {
-                            (report.frames, report.located) = self.frames(&format!("    at <main> ({at})"));
+                            self.set_frames(&mut report, &format!("    at <main> ({at})"));
                         }
                     }
                 }
@@ -485,6 +630,7 @@ impl Diagnostics {
                     message: self.keep_text.get().then(|| message.to_string()),
                     message_len: Some(message.chars().count()),
                     frames: Vec::new(),
+                    functions: Vec::new(),
                     located: false,
                     rejection: false,
                     module: None,
@@ -492,6 +638,54 @@ impl Diagnostics {
             }
         }
     }
+}
+
+/// Longest function name kept for a frame, in characters.
+const MAX_FUNCTION_CHARS: usize = 128;
+
+/// A frame's function name as Boa writes it: `None` for its placeholders
+/// (`<main>` for top-level code, `<anonymous>`, empty), which no page
+/// identifier can spell, and for a computed name holding a control
+/// character or a parenthesis, which could forge a frame line
+/// (`    at f (url:line:col)`) in the stack text.
+fn function_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() || (name.starts_with('<') && name.ends_with('>')) {
+        return None;
+    }
+    if name.chars().any(|c| c.is_control() || c == '(' || c == ')') {
+        return None;
+    }
+    Some(name.chars().take(MAX_FUNCTION_CHARS).collect())
+}
+
+/// The page's frames on the VM's stack, innermost first, as
+/// [`caller_position`] reads them: frames in no named script (`eval` code,
+/// an `on*` handler) and the embedder's own are passed over. Function names
+/// only with `names`. Runs no script.
+pub(crate) fn page_stack(context: &mut Context, names: bool) -> Vec<ScriptFrame> {
+    use boa_engine::vm::SourcePath;
+    let mut frames = Vec::new();
+    for frame in context.stack_trace() {
+        let location = frame.position();
+        let path = match &location.path {
+            SourcePath::Path(path) if path.as_os_str() != EMBEDDER_PATH => path.to_string_lossy().into_owned(),
+            _ => continue,
+        };
+        let Some(position) = location.position else { continue };
+        let function = match names {
+            true => function_name(&location.function_name.to_std_string_escaped()),
+            false => None,
+        };
+        frames.push(ScriptFrame {
+            function,
+            at: ScriptPosition { path, line: position.line_number(), column: position.column_number() },
+        });
+        if frames.len() >= MAX_FRAMES {
+            break;
+        }
+    }
+    frames
 }
 
 /// The position of the innermost script frame on the VM's stack: the
