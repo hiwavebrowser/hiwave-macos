@@ -1165,9 +1165,6 @@ impl DomBindings {
                 requestAnimationFrame: function(callback) { return 0; },
                 cancelAnimationFrame: function(id) {},
                 getComputedStyle: function(element) { return {}; },
-                matchMedia: function(query) {
-                    return { matches: false, media: query, addEventListener: function() {} };
-                },
                 alert: function(msg) { console.log('[alert]', msg); },
                 confirm: function(msg) { console.log('[confirm]', msg); return false; },
                 prompt: function(msg, def) { console.log('[prompt]', msg); return def || null; }
@@ -1178,6 +1175,27 @@ impl DomBindings {
         "#;
 
         runtime.evaluate_script(window_js)?;
+
+        // `__rustkit_media_matches(query, width, height)`: whether a media
+        // query list matches a window of that size, by the evaluator `@media`
+        // rules use. Backs `matchMedia` (web_media.js).
+        runtime.register_host_function(
+            "__rustkit_media_matches",
+            3,
+            Box::new(|args| {
+                let number = |i: usize| match args.get(i) {
+                    Some(JsValue::Number(n)) => *n as f32,
+                    _ => 0.0,
+                };
+                match args.first() {
+                    Some(JsValue::String(query)) => JsValue::Boolean(
+                        rustkit_css::media::media_query_list_matches(query, number(1), number(2)),
+                    ),
+                    _ => JsValue::Boolean(false),
+                }
+            }),
+        )?;
+        runtime.evaluate_script(include_str!("web_media.js"))?;
 
         // The screen, performance and navigator facts, and the window
         // geometry, that pages read without feature-testing (web_platform.js).
@@ -1744,6 +1762,16 @@ impl DomBindings {
             width, height, width, height
         ))?;
 
+        Ok(())
+    }
+
+    /// Fire `change` on every watched `matchMedia` list whose answer flipped
+    /// with the window size (HTML's "evaluate media queries and report
+    /// changes", after the resize steps).
+    pub fn fire_media_changes(&self) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(
+            "if (typeof window.__rkMediaChanged === 'function') window.__rkMediaChanged();",
+        )?;
         Ok(())
     }
 

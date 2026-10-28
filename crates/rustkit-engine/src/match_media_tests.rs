@@ -40,3 +40,39 @@ fn match_media_answers_for_the_views_viewport() {
         .unwrap_or(&value);
     assert_eq!(got, CHROME.split_whitespace().collect::<Vec<_>>().join(" "));
 }
+
+/// A resize that flips the answer fires `change` once, after `resize`, on
+/// the listener and then on `onchange` (in the order they were added); a
+/// resize that does not flip it fires nothing. Chrome 148, 1280x800 then
+/// 900 then 950 wide (tools/parity_oracle/mm_resize_log.mjs).
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn match_media_fires_change_after_resize_when_the_answer_flips() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let id = engine
+        .create_headless_view(Bounds::new(0, 0, 1280, 800))
+        .expect("headless view");
+    engine
+        .load_html(id, "<!doctype html><html><body><p>x</p></body></html>")
+        .expect("load_html");
+    engine
+        .execute_script(
+            id,
+            "window.__log = []; var q = matchMedia('(min-width: 1000px)'); window.__q = q; \
+             q.addEventListener('change', function (e) { __log.push('listener:' + e.matches + ':' + e.media + ':' + \
+                 (e instanceof MediaQueryListEvent)); }); \
+             q.onchange = function (e) { __log.push('onchange:' + e.matches); }; \
+             addEventListener('resize', function () { __log.push('resize:' + innerWidth); }); \
+             __log.push('start:' + q.matches);",
+        )
+        .expect("script");
+    engine.resize_view(id, Bounds::new(0, 0, 900, 800)).expect("resize");
+    engine.resize_view(id, Bounds::new(0, 0, 950, 800)).expect("resize");
+    let value = engine
+        .execute_script(id, "__log.join(' ') + ' now:' + __q.matches")
+        .expect("script");
+    assert_eq!(
+        value,
+        "String(\"start:true resize:900 listener:false:(min-width: 1000px):true onchange:false resize:950 now:false\")"
+    );
+}

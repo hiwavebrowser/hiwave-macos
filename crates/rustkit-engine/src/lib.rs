@@ -2936,7 +2936,8 @@ impl Engine {
                     bindings.fire_lifecycle_event(
                         rustkit_bindings::LifecycleTarget::Window,
                         "resize",
-                    )
+                    )?;
+                    bindings.fire_media_changes()
                 });
                 let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
                 // A stopped listener's error is the stop itself, which has
