@@ -1898,6 +1898,48 @@ mod tests {
         report("beside 24 x 4 MB fetches", loaded);
     }
 
+    #[test]
+    #[ignore = "receipt: two heavy live pages loading at once in one process; run with HIWAVE_NET_RUNTIME on and =0"]
+    fn two_heavy_tabs_receipt() {
+        // T7a D1: both views' script requests share the one rustkit-net
+        // thread. Wall clock from navigate to load complete, each view, and
+        // the script request records each made.
+        let sites = ["https://www.cnn.com/", "https://www.yahoo.com/"];
+        let started = Instant::now();
+        let pages: Vec<_> = sites
+            .iter()
+            .map(|url| {
+                let page = page();
+                let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+                let _ = wait_recv(&mut attached, Duration::from_secs(5));
+                let _nav = page.navigate(Url::parse(url).unwrap());
+                page
+            })
+            .collect();
+        let mut done: Vec<Option<Duration>> = vec![None; pages.len()];
+        while done.iter().any(Option::is_none) && started.elapsed() < Duration::from_secs(90) {
+            for (i, page) in pages.iter().enumerate() {
+                if done[i].is_none()
+                    && page
+                        .poll()
+                        .iter()
+                        .any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+                {
+                    done[i] = Some(started.elapsed());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let arm = std::env::var("HIWAVE_NET_RUNTIME").unwrap_or_else(|_| "on".into());
+        for ((url, page), at) in sites.iter().zip(&pages).zip(&done) {
+            let requests = read_network(page, Duration::from_secs(2)).map_or(0, |n| n.requests.len());
+            eprintln!(
+                "two tabs HIWAVE_NET_RUNTIME={arm}: {url} load complete {} ({requests} network records listed)",
+                at.map_or("not in 90 s".to_string(), |d| format!("{:.1} s", d.as_secs_f64()))
+            );
+        }
+    }
+
     /// A plain `fetch` queued while a response is delivered, in the same
     /// turn as `location.href`, is handed to the network before the
     /// document can be replaced. That is h16's start beacon: not
