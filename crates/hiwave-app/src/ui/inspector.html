@@ -474,6 +474,16 @@
             margin-top: 4px;
         }
 
+        /* RustKit content: breadcrumb, geometry, Copy details */
+        .element-breadcrumb { margin-top: 4px; font-family: 'SF Mono', monospace; color: var(--text-secondary); word-break: break-all; }
+        .element-breadcrumb .crumb { cursor: pointer; }
+        .element-breadcrumb .crumb:hover { color: var(--accent); text-decoration: underline; }
+        .element-geometry { margin-top: 4px; font-family: 'SF Mono', monospace; color: var(--text-secondary); white-space: pre; }
+        .copy-details-btn { margin-top: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; }
+        .style-property.unavailable .style-property-value { color: var(--text-muted); font-style: italic; }
+        .styles-note { color: var(--text-muted); padding: 4px 8px; font-size: 11px; }
+        .dom-more { color: var(--text-muted); cursor: pointer; font-style: italic; }
+
         /* Empty State */
         .empty-state {
             display: flex;
@@ -603,6 +613,18 @@
 
         .console-entry:hover {
             background: var(--bg-hover);
+        }
+
+        .console-entry.stale-doc {
+            opacity: 0.55;
+        }
+
+        .console-doc-divider {
+            padding: 2px 12px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 11px;
         }
 
         .console-entry.log {
@@ -790,6 +812,7 @@
             <!-- Elements Panel (default view) -->
             <div class="panel elements-panel" id="elements-panel">
                 <div class="panel-content" id="dom-tree-container">
+                    <div class="page-busy" id="page-busy" style="display: none; padding: 4px 8px; color: #b45309;"></div>
                     <div class="empty-state" id="elements-empty">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                             <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
@@ -807,6 +830,9 @@
                 <div class="element-info" id="element-info" style="display: none;">
                     <div class="element-info-selector" id="selected-selector"></div>
                     <div class="element-info-dimensions" id="selected-dimensions"></div>
+                    <div class="element-breadcrumb" id="selected-breadcrumb"></div>
+                    <div class="element-geometry" id="selected-geometry"></div>
+                    <button class="copy-details-btn" id="copy-details-btn" style="display: none;">Copy details</button>
                 </div>
                 <div class="panel-content" id="styles-container">
                     <div class="empty-state" id="styles-empty">
@@ -859,6 +885,7 @@
                         <div class="styles-section">
                             <div class="styles-section-header">Computed Styles</div>
                             <div class="computed-styles" id="computed-styles"></div>
+                            <div class="styles-note" id="rule-sources-note" style="display: none;"></div>
                         </div>
                     </div>
                 </div>
@@ -880,6 +907,7 @@
                         </svg>
                     </button>
                 </div>
+                <div class="console-held" id="console-held" style="display: none; padding: 4px 8px; color: #b45309;"></div>
                 <div class="console-output" id="console-output">
                     <div class="console-empty" id="console-empty">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1010,12 +1038,41 @@
                 return '';
             }
 
-            function renderConsoleEntry(entry) {
+            // Console lines grouped by document (T6b): the panel keeps old
+            // documents' lines, so a divider goes wherever the document
+            // changes and lines from before the newest one are marked stale.
+            // One document in view: no dividers. A line without a doc (the
+            // console's input and results) belongs to the line before it.
+            // Pure; scripts/tests/test_inspector_console_groups.py runs it.
+            function consoleRows(entries) {
+                const docs = entries.map(e => e.doc).filter(d => d != null);
+                const newest = docs.length ? Math.max(...docs) : null;
+                const several = docs.some(d => d !== newest);
+                const rows = [];
+                let last = null;
+                for (const entry of entries) {
+                    const doc = entry.doc != null ? entry.doc : last;
+                    if (several && doc != null && doc !== last) {
+                        rows.push({ divider: doc, stale: doc !== newest });
+                    }
+                    rows.push({ entry, stale: doc != null && doc !== newest });
+                    last = doc;
+                }
+                return rows;
+            }
+
+            function renderConsoleRow(row) {
+                if (row.entry) return renderConsoleEntry(row.entry, row.stale);
+                const label = row.stale ? `Document ${row.divider} (earlier page)` : `Document ${row.divider}`;
+                return `<div class="console-doc-divider" data-doc="${row.divider}">${label}</div>`;
+            }
+
+            function renderConsoleEntry(entry, stale) {
                 const icon = getConsoleIcon(entry.level);
                 const time = formatTime(entry.timestamp);
                 const source = formatSource(entry.stack);
 
-                return `<div class="console-entry ${entry.level}" data-id="${entry.id}" data-level="${entry.level}">
+                return `<div class="console-entry ${entry.level}${stale ? ' stale-doc' : ''}" data-id="${entry.id}" data-level="${entry.level}">
                     <span class="console-entry-time">${time}</span>
                     ${icon ? `<span class="console-entry-icon">${icon}</span>` : ''}
                     <span class="console-entry-content">${escapeHtml(entry.message)}</span>
@@ -1031,11 +1088,11 @@
                 if (filteredEntries.length === 0) {
                     consoleEmpty.style.display = 'flex';
                     // Remove all entries except empty state
-                    const entries = consoleOutput.querySelectorAll('.console-entry');
+                    const entries = consoleOutput.querySelectorAll('.console-entry, .console-doc-divider');
                     entries.forEach(e => e.remove());
                 } else {
                     consoleEmpty.style.display = 'none';
-                    consoleOutput.innerHTML = filteredEntries.map(renderConsoleEntry).join('');
+                    consoleOutput.innerHTML = consoleRows(filteredEntries).map(renderConsoleRow).join('');
                     // Scroll to bottom
                     consoleOutput.scrollTop = consoleOutput.scrollHeight;
                 }
@@ -1048,6 +1105,10 @@
             }
 
             function addConsoleEntry(entry) {
+                // Input and results belong to the document showing now.
+                if (entry.doc == null && consoleEntries.length) {
+                    entry.doc = consoleEntries[consoleEntries.length - 1].doc;
+                }
                 consoleEntries.push(entry);
                 updateConsoleDisplay();
             }
@@ -1119,10 +1180,13 @@
             // Render DOM tree node
             function renderDomNode(node, depth = 0) {
                 const indent = depth * 16;
-                const hasChildren = node.children && node.children.length > 0;
-                const isExpanded = depth < 3; // Auto-expand first 3 levels
+                const omitted = node.childrenOmitted || 0;
+                const hasChildren = (node.children && node.children.length > 0) || omitted > 0;
+                // Auto-expand the first 3 levels, and every level the engine sent
+                // down to a picked element (RustKit content).
+                const isExpanded = depth < 3 || revealPaths.has(node.path);
 
-                let html = `<div class="dom-node ${isExpanded ? 'expanded' : ''}" data-path="${escapeHtml(node.path || '')}">`;
+                let html = `<div class="dom-node ${isExpanded ? 'expanded' : ''}" data-path="${escapeHtml(node.path || '')}" data-depth="${depth}" data-omitted="${omitted}">`;
                 html += `<div class="dom-node-line" style="padding-left: ${indent}px">`;
 
                 // Toggle arrow
@@ -1186,8 +1250,12 @@
                 // Children
                 if (hasChildren) {
                     html += `<div class="dom-children">`;
-                    for (const child of node.children) {
+                    for (const child of (node.children || [])) {
                         html += renderDomNode(child, depth + 1);
+                    }
+                    if (omitted > 0) {
+                        html += `<div class="dom-node-line dom-more" data-expand="${escapeHtml(node.path || '')}" style="padding-left: ${indent + 16}px">`;
+                        html += `<span class="dom-toggle hidden"></span><span class="dom-content">… ${omitted} more</span></div>`;
                     }
                     // Closing tag
                     html += `<div class="dom-node-line dom-closing-tag" style="padding-left: ${indent}px">`;
@@ -1278,7 +1346,10 @@
             }
 
             function renderStyleProperty(name, value) {
-                let formattedValue = escapeHtml(String(value));
+                // Number highlighting (before the colour preview, whose style
+                // attribute has numbers of its own)
+                let formattedValue = escapeHtml(String(value)).replace(/(\d+\.?\d*)(px|em|rem|%|vh|vw|deg|s|ms)?/g,
+                    '<span class="number">$1</span><span class="unit">$2</span>');
 
                 // Color preview
                 if (name.includes('color') || name === 'background') {
@@ -1287,10 +1358,6 @@
                         formattedValue = `<span class="color-preview" style="background: ${escapeHtml(value)}"></span>${formattedValue}`;
                     }
                 }
-
-                // Number highlighting
-                formattedValue = formattedValue.replace(/(\d+\.?\d*)(px|em|rem|%|vh|vw|deg|s|ms)?/g,
-                    '<span class="number">$1</span><span class="unit">$2</span>');
 
                 return `<div class="style-property">
                     <span class="style-property-name">${escapeHtml(name)}</span>
@@ -1302,6 +1369,11 @@
             domTreeContainer.addEventListener('click', (e) => {
                 const nodeLine = e.target.closest('.dom-node-line');
                 if (!nodeLine) return;
+                // "… N more": the engine sends this node's children.
+                if (nodeLine.dataset.expand) {
+                    window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_expand_node', path: nodeLine.dataset.expand }));
+                    return;
+                }
 
                 const toggle = e.target.closest('.dom-toggle');
                 const node = nodeLine.closest('.dom-node');
@@ -1318,6 +1390,90 @@
                     }
                 }
             });
+
+            let hoveredPath = null;
+            domTreeContainer.addEventListener('mouseover', (e) => {
+                const node = e.target.closest('.dom-node');
+                const path = node && node.dataset.path;
+                if (!path || path === hoveredPath || pickerActive) return;
+                hoveredPath = path;
+                window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_highlight_element', path: path }));
+            });
+            domTreeContainer.addEventListener('mouseleave', () => {
+                if (hoveredPath === null || pickerActive) return;
+                hoveredPath = null;
+                window.ipc.postMessage(JSON.stringify({ cmd: 'inspector_clear_highlight' }));
+            });
+
+            // Paths of the selection's ancestors, from its breadcrumb: the tree
+            // keeps them open when it is drawn again.
+            let revealPaths = new Set();
+            let detailsText = '';
+
+            function markSelected(path) {
+                domTreeContainer.querySelectorAll('.dom-node-line.selected').forEach(line => line.classList.remove('selected'));
+                const node = domTreeContainer.querySelector(`[data-path="${CSS.escape(path)}"]`);
+                const line = node && node.querySelector('.dom-node-line');
+                if (line) {
+                    line.classList.add('selected');
+                    line.scrollIntoView({ block: 'nearest' });
+                }
+                selectedElement = path;
+            }
+
+            function copyText(text) {
+                const fallback = () => {
+                    const area = document.createElement('textarea');
+                    area.value = text;
+                    document.body.appendChild(area);
+                    area.select();
+                    try { document.execCommand('copy'); } catch (e) {}
+                    area.remove();
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).catch(fallback);
+                } else {
+                    fallback();
+                }
+            }
+
+            const copyDetailsBtn = document.getElementById('copy-details-btn');
+            copyDetailsBtn.addEventListener('click', () => {
+                if (!detailsText) return;
+                copyText(detailsText);
+                copyDetailsBtn.textContent = 'Copied';
+                setTimeout(() => { copyDetailsBtn.textContent = 'Copy details'; }, 1200);
+            });
+
+            function renderRustKitDetails(data) {
+                const crumbs = document.getElementById('selected-breadcrumb');
+                const geometry = document.getElementById('selected-geometry');
+                const note = document.getElementById('rule-sources-note');
+                crumbs.innerHTML = '';
+                geometry.textContent = '';
+                note.style.display = 'none';
+                detailsText = data.detailsText || '';
+                copyDetailsBtn.style.display = detailsText ? '' : 'none';
+                if (!data.breadcrumb) return;
+                revealPaths = new Set(data.breadcrumb.map(c => c.path));
+                data.breadcrumb.forEach((c, i) => {
+                    if (i > 0) crumbs.appendChild(document.createTextNode(' > '));
+                    const span = document.createElement('span');
+                    span.className = 'crumb';
+                    span.textContent = c.label;
+                    span.addEventListener('click', () => selectElement(c.path));
+                    crumbs.appendChild(span);
+                });
+                const r = (b) => `x=${Math.round(b.x * 100) / 100} y=${Math.round(b.y * 100) / 100} w=${Math.round(b.width * 100) / 100} h=${Math.round(b.height * 100) / 100}`;
+                const m = data.boxModel;
+                geometry.textContent = m
+                    ? `margin  ${r(m.marginBox)}\nborder  ${r(m.borderBox)}\npadding ${r(m.paddingBox)}\ncontent ${r(m.contentBox)}`
+                    : `no box: ${data.noBoxReason || 'not laid out'}`;
+                if (data.ruleSourcesUnavailable) {
+                    note.textContent = `Rule sources: unavailable (${data.ruleSourcesUnavailable}).`;
+                    note.style.display = '';
+                }
+            }
 
             function selectElement(path) {
                 // Update UI selection
@@ -1424,6 +1580,52 @@
                     if (data.computedStyles) {
                         renderComputedStyles(data.computedStyles);
                     }
+
+                    renderRustKitDetails(data);
+                    if (data.styleUnavailable) {
+                        const container = document.getElementById('computed-styles');
+                        for (const name of Object.keys(data.styleUnavailable).sort()) {
+                            const row = document.createElement('div');
+                            row.className = 'style-property unavailable';
+                            const n = document.createElement('span');
+                            n.className = 'style-property-name';
+                            n.textContent = name;
+                            const v = document.createElement('span');
+                            v.className = 'style-property-value';
+                            v.textContent = `unavailable: ${data.styleUnavailable[name]}`;
+                            row.append(n, v);
+                            container.appendChild(row);
+                        }
+                    }
+                },
+
+                // RustKit content: the subtree of a node the tree left out.
+                setSubtree: function(node) {
+                    const old = domTreeContainer.querySelector(`.dom-node[data-path="${CSS.escape(node.path)}"]`);
+                    if (!old) return;
+                    revealPaths.add(node.path);
+                    const holder = document.createElement('div');
+                    holder.innerHTML = renderDomNode(node, parseInt(old.dataset.depth || '0', 10));
+                    const fresh = holder.firstElementChild;
+                    fresh.classList.add('expanded');
+                    const toggle = fresh.querySelector('.dom-toggle');
+                    if (toggle) toggle.classList.add('expanded');
+                    old.replaceWith(fresh);
+                    if (selectedElement) markSelected(selectedElement);
+                },
+
+                // Mark a row selected without asking for its details again.
+                markSelected: function(path) {
+                    markSelected(path);
+                },
+
+                addConsoleEntries: function(entries) {
+                    const now = Date.now();
+                    for (const entry of entries) {
+                        entry.timestamp = entry.timestamp || now;
+                        consoleEntries.push(entry);
+                    }
+                    updateConsoleDisplay();
                 },
 
                 highlightElement: function(path) {
@@ -1444,6 +1646,17 @@
                 setPickerActive: function(active) {
                     pickerActive = active;
                     pickerBtn.classList.toggle('active', active);
+                },
+
+                // The page has not answered a live query in time (T6c): say
+                // so and grey the last tree, which is kept. `null` clears it.
+                // `domTreeContainer` is `#dom-tree`, a sibling of the busy
+                // line, so the line itself is not greyed.
+                setPageBusy: function(text) {
+                    const busy = document.getElementById('page-busy');
+                    busy.textContent = text || '';
+                    busy.style.display = text ? 'block' : 'none';
+                    domTreeContainer.style.opacity = text ? '0.5' : '';
                 },
 
                 selectElementByPath: function(path) {
@@ -1468,6 +1681,15 @@
 
                 clearConsole: function() {
                     clearConsole();
+                    this.setConsoleHeld(null);
+                },
+
+                // Console calls a running script made past the live cap,
+                // not recorded until it ends (T6d). `null` hides the line.
+                setConsoleHeld: function(text) {
+                    const held = document.getElementById('console-held');
+                    held.textContent = text || '';
+                    held.style.display = text ? 'block' : 'none';
                 },
 
                 addConsoleResult: function(result, isError) {

@@ -288,9 +288,34 @@ pub struct ScriptPosition {
     pub column: u32,
 }
 
+/// One of the page's frames on a stack: its position, and the function's
+/// name only when error text is kept ([`JsRuntime::set_error_reports`]; a
+/// name is the page's text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFrame {
+    pub function: Option<String>,
+    pub at: ScriptPosition,
+}
+
+/// The stacks of a `console.error` call (with error reports on; empty
+/// otherwise), innermost first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleStacks {
+    /// The page's frames that made the call.
+    pub caller: Vec<ScriptFrame>,
+    /// The first error argument's own frames: where it was made (a page
+    /// that catches an error and logs it, as frameworks do, logs this).
+    pub error: Vec<ScriptFrame>,
+}
+
 /// Console output handler: the level, the arguments formatted and joined,
-/// and the calling script's position when the caller was in a named script.
-pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>) + Send + Sync>;
+/// the calling script's position when the caller was in a named script,
+/// and a `console.error`'s stacks.
+pub type ConsoleHandler = Box<dyn Fn(LogLevel, &str, Option<&ScriptPosition>, &ConsoleStacks) + Send + Sync>;
+
+/// Whether console calls reach the handler as they are made
+/// ([`JsRuntime::set_console_live`]).
+pub type ConsoleLive = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// A page error for diagnostics: an exception no script caught (in a
 /// script, a module, a listener or a timer) or a promise rejected with no
@@ -315,6 +340,10 @@ pub struct ErrorReport {
     /// The page's frames, innermost first: only positions in scripts the
     /// engine evaluated, never a function name.
     pub frames: Vec<ScriptPosition>,
+    /// Each of `frames`' function names, in step with it, only with error
+    /// text kept (else empty); `None` for top-level code or a function
+    /// with no name.
+    pub functions: Vec<Option<String>>,
     /// The first of `frames` is where it was thrown. Not so when the
     /// innermost page code is in no script of its own (`eval` code, an
     /// `on*` attribute's handler): it then has no position, and is never
@@ -336,6 +365,10 @@ pub type TimerCallback = Box<dyn FnOnce() + Send + 'static>;
 /// `undefined`. That keeps every Boa-managed value on the Boa side: a host
 /// function can capture Rust state freely but can never hold a JS object.
 pub type HostFunction = Box<dyn Fn(&[JsValue]) -> JsValue>;
+
+/// A [`HostFunction`] that is also told where in the page's script it was
+/// called from ([`JsRuntime::register_host_function_with_caller`]).
+pub type HostFunctionWithCaller = Box<dyn Fn(&[JsValue], Option<ScriptPosition>) -> JsValue>;
 
 fn stack_addr() -> usize {
     let slot = 0u8;
@@ -442,6 +475,10 @@ pub struct JsRuntime {
     executor: std::rc::Rc<executor::HostJobExecutor>,
     config: JsRuntimeConfig,
     console_handler: Option<Arc<ConsoleHandler>>,
+    console_shape_handler: Option<Arc<ConsoleHandler>>,
+    /// [`set_console_live`](Self::set_console_live)'s predicate, kept so the
+    /// live delivery is rebuilt whenever a handler is set.
+    console_live: Option<Arc<ConsoleLive>>,
     timers: Arc<Mutex<HashMap<TimerId, PendingTimer>>>,
     globals: HashMap<String, JsValue>,
     deadline: std::rc::Rc<ExecutionDeadline>,
@@ -508,6 +545,8 @@ impl JsRuntime {
             executor,
             config,
             console_handler: None,
+            console_shape_handler: None,
+            console_live: None,
             timers: Arc::new(Mutex::new(HashMap::new())),
             globals: HashMap::new(),
             deadline: std::rc::Rc::default(),
@@ -571,6 +610,63 @@ impl JsRuntime {
         self.console_handler = Some(Arc::new(handler));
         #[cfg(feature = "boa")]
         self.diag.console_capturing.set(true);
+        self.rebuild_console_live();
+    }
+
+    /// Also hand each console call to `handler` as its shape line: each
+    /// argument's type, and a string's length (see `describe::redacted_text`),
+    /// whatever [`set_console_redaction`](Self::set_console_redaction) says.
+    /// For an embedder whose console handler keeps the page's text for one
+    /// reader and must give another reader none of it. Called after the
+    /// console handler, for the same call, and only while one is set.
+    pub fn set_console_shape_handler(&mut self, handler: ConsoleHandler) {
+        self.console_shape_handler = Some(Arc::new(handler));
+        #[cfg(feature = "boa")]
+        self.diag.console_shapes.set(true);
+        self.rebuild_console_live();
+    }
+
+    /// Hand each console call to the handlers as it is made, while `live`
+    /// says so (asked once per call), instead of at the next flush: an
+    /// embedder whose reader must see the console of a script that is
+    /// still running (T6d). Calls held from before go first, so each call
+    /// is handed over once and in order. Past 200 hand-overs in one second
+    /// the calls are held as before (a hand-over also carries what was
+    /// held, so this caps hand-overs, not calls), and a line saying how
+    /// many were dropped comes ahead of the next ones handed over. Calls
+    /// go to the handlers set at the time of the call, whichever order
+    /// they were set in. `None`: flushes only.
+    pub fn set_console_live(&mut self, live: Option<ConsoleLive>) {
+        self.console_live = live.map(Arc::new);
+        self.rebuild_console_live();
+    }
+
+    fn rebuild_console_live(&mut self) {
+        #[cfg(feature = "boa")]
+        {
+            let delivery = self.console_live.clone().zip(self.console_handler.clone()).map(|(on, handler)| {
+                diag::LiveConsole { on, handler, shapes: self.console_shape_handler.clone() }
+            });
+            *self.diag.console_live.borrow_mut() = delivery.map(std::rc::Rc::new);
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = &self.console_live;
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter`, which any thread may read: past the live rate cap a
+    /// running script's calls wait for its end, and a script that hangs
+    /// after a hot loop never gets there (T6d review). `None`: not kept.
+    pub fn set_console_held_counter(&mut self, counter: Option<Arc<std::sync::atomic::AtomicUsize>>) {
+        #[cfg(feature = "boa")]
+        {
+            if let Some(counter) = &counter {
+                counter.store(self.diag.console_held_now(), std::sync::atomic::Ordering::Relaxed);
+            }
+            *self.diag.console_held.borrow_mut() = counter;
+        }
+        #[cfg(not(feature = "boa"))]
+        let _ = counter;
     }
 
     /// Hand the handler each console argument's type, and a string's length,
@@ -1034,10 +1130,8 @@ impl JsRuntime {
 
         #[cfg(feature = "boa")]
         {
-            let logs = self.diag.take_console();
-            for (level, msg, at) in logs {
-                handler(level, &msg, at.as_ref());
-            }
+            let (dropped, logs, capped) = self.diag.take_console_counted();
+            diag::deliver_console(&handler, self.console_shape_handler.as_ref(), dropped, logs, capped);
         }
 
         #[cfg(not(feature = "boa"))]
@@ -1106,6 +1200,29 @@ impl JsRuntime {
         length: usize,
         function: HostFunction,
     ) -> Result<(), JsError> {
+        self.register_native(name, length, Box::new(move |args, _| function(args)), false)
+    }
+
+    /// [`register_host_function`](Self::register_host_function), also
+    /// handing `function` the position of the page's innermost frame that
+    /// led to the call (the embedder's own frames and those in no named
+    /// script passed over; one walk of the VM's frames per call).
+    pub fn register_host_function_with_caller(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+    ) -> Result<(), JsError> {
+        self.register_native(name, length, function, true)
+    }
+
+    fn register_native(
+        &mut self,
+        name: &str,
+        length: usize,
+        function: HostFunctionWithCaller,
+        with_caller: bool,
+    ) -> Result<(), JsError> {
         #[cfg(feature = "boa")]
         {
             use boa_engine::{JsString, NativeFunction};
@@ -1142,7 +1259,11 @@ impl JsRuntime {
                         return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
                     }
                     let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
-                    Ok(to_boa_value(function(&args)))
+                    let caller = match with_caller {
+                        true => diag::caller_position(context, true),
+                        false => None,
+                    };
+                    Ok(to_boa_value(function(&args, caller)))
                 })
             };
             self.context
@@ -1152,7 +1273,7 @@ impl JsRuntime {
 
         #[cfg(not(feature = "boa"))]
         {
-            let _ = (name, length, function);
+            let _ = (name, length, function, with_caller);
             Err(JsError::NotInitialized)
         }
     }
@@ -1630,7 +1751,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
 
@@ -1646,6 +1767,141 @@ mod tests {
         let logs2 = received.lock().unwrap().clone();
         assert_eq!(logs2.len(), 3);
         assert_eq!(logs2[2], ("Error".to_string(), "oops".to_string()));
+    }
+
+    /// When each console call reached the handler, and its line.
+    fn timed_handler(runtime: &mut JsRuntime) -> Arc<Mutex<Vec<(std::time::Instant, String)>>> {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            sink.lock().unwrap().push((std::time::Instant::now(), msg.to_string()));
+        }));
+        got
+    }
+
+    const SPIN_300_MS: &str = "console.log('first'); \
+        const t = Date.now(); while (Date.now() - t < 300) {} \
+        console.log('second');";
+
+    #[test]
+    fn a_live_console_call_reaches_the_handler_while_the_script_runs() {
+        // T6d: the calls were held until the script ended, so a panel saw
+        // nothing of a long script's console until it was over.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn with_live_off_the_calls_still_wait_for_the_flush() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| false)));
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        let got = got.lock().unwrap().clone();
+        let lines: Vec<_> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, ["first", "second"]);
+        // Handed over live, 'first' would come a whole spin (300 ms) early.
+        assert!(got[1].0 - got[0].0 < std::time::Duration::from_millis(250), "not handed over together");
+    }
+
+    #[test]
+    fn live_calls_go_to_the_handler_set_last_whatever_the_order() {
+        // #810 R1 nit 1: the live delivery took the handlers set when
+        // `set_console_live` ran, so a handler set after it got only the
+        // flushed calls.
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let first = timed_handler(&mut runtime);
+        let got = timed_handler(&mut runtime);
+        runtime.evaluate_script(SPIN_300_MS).unwrap();
+        assert!(first.lock().unwrap().is_empty(), "a replaced handler got calls");
+        let got = got.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        let gap = got[1].0 - got[0].0;
+        assert!(gap >= std::time::Duration::from_millis(250), "'first' came with the flush: {gap:?} apart");
+    }
+
+    #[test]
+    fn calls_held_past_the_live_cap_are_counted_while_the_script_hangs() {
+        // #810 review: a hot loop past the cap, then a hang. The held calls
+        // wait for the script's end, and nothing outside the page could see
+        // that any were waiting.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.set_console_held_counter(Some(held.clone()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (held, got, done) = (held.clone(), got.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut last = None;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Count, delivered, count again: a flush landing between
+                    // the reads changes the count, and the pair is skipped.
+                    let n = held.load(std::sync::atomic::Ordering::SeqCst);
+                    let delivered = got.lock().unwrap().len();
+                    if n > 0 && held.load(std::sync::atomic::Ordering::SeqCst) == n {
+                        last = Some((n, delivered));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                last
+            })
+        };
+        runtime
+            .evaluate_script(
+                "for (let i = 0; i < 300; i++) console.log(i); \
+                 const t = Date.now(); while (Date.now() - t < 500) {}",
+            )
+            .unwrap();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (n, delivered) = reader.join().unwrap().expect("no held call was ever counted");
+        assert_eq!(n + delivered, 300, "held {n} + delivered {delivered}");
+        assert_eq!(held.load(std::sync::atomic::Ordering::Relaxed), 0, "the flush left a count");
+        assert_eq!(got.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn a_reader_arriving_mid_script_gets_each_call_once_in_order() {
+        // T6 R1 condition 4: decided per call. Calls held before the reader
+        // came go first, and the flush at the end repeats none of them.
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = asked.clone();
+        // Off for the first two calls, on from the third.
+        runtime.set_console_live(Some(Box::new(move || n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2)));
+        runtime
+            .evaluate_script("console.log('a'); console.log('b'); console.log('c'); console.log('d');")
+            .unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(lines, ["a", "b", "c", "d"]);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 4, "not asked once per call");
+    }
+
+    #[test]
+    fn a_hot_loop_is_capped_and_says_how_many_were_dropped() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let got = timed_handler(&mut runtime);
+        runtime.set_console_live(Some(Box::new(|| true)));
+        runtime.evaluate_script("for (let i = 0; i < 3000; i++) console.log(i);").unwrap();
+        let lines: Vec<_> = got.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        let notes: Vec<_> = lines.iter().filter(|l| l.contains("console calls dropped")).collect();
+        assert!(!notes.is_empty(), "no dropped line");
+        let dropped: usize = notes.iter().map(|l| l.split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
+        assert_eq!(lines.len() - notes.len() + dropped, 3000, "calls lost without a count");
+        assert!(dropped > 0, "not capped");
+        assert!(notes.iter().all(|l| l.ends_with("; console rate cap)")), "the dropped line names no cause: {notes:?}");
+        // The newest calls are the ones kept.
+        assert_eq!(lines.last().map(String::as_str), Some("2999"));
     }
 
     /// Every member of the WHATWG Console namespace is a function. A page
@@ -1681,7 +1937,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push((format!("{level:?}"), msg.to_string()));
         }));
         runtime
@@ -1727,7 +1983,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime
@@ -1820,7 +2076,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
 
@@ -1842,7 +2098,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime
@@ -1871,7 +2127,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         runtime.set_console_redaction(true);
@@ -1895,13 +2151,34 @@ mod tests {
         assert_eq!(received.lock().unwrap().clone(), vec!["<string len=6> <number>"]);
     }
 
+    /// A shape handler gets each call's types and lengths while the console
+    /// handler keeps the text, for the same calls in the same order.
+    #[test]
+    fn a_shape_handler_gets_shapes_beside_the_text_line() {
+        let mut runtime = JsRuntime::new().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let texts = received.clone();
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
+            texts.lock().unwrap().push(format!("text {msg}"));
+        }));
+        let shapes = received.clone();
+        runtime.set_console_shape_handler(Box::new(move |_level, msg, _at, _stack| {
+            shapes.lock().unwrap().push(format!("shape {msg}"));
+        }));
+        runtime.evaluate_script("console.log('SECRET', 1); console.warn({a: 'SECRET'});").unwrap();
+        assert_eq!(
+            received.lock().unwrap().clone(),
+            vec!["text SECRET 1", "shape <string len=6> <number>", "text [object Object]", "shape [object Object]"]
+        );
+    }
+
     /// A page that logs without end holds at most 1024 lines between flushes.
     #[test]
     fn console_lines_waiting_for_a_flush_are_bounded() {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, _at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, _at, _stack| {
             recv_clone.lock().unwrap().push(msg.to_string());
         }));
         let module = runtime.begin_module("https://a.test/m.js", "for (let i = 0; i < 5000; i++) console.log(i);");
@@ -1909,7 +2186,9 @@ mod tests {
         let _ = runtime.poll_module(&module.unwrap());
         runtime.flush_console();
         let lines = received.lock().unwrap().clone();
-        assert_eq!(lines.len(), 1024);
+        // The 1024 newest, after a line counting the rest (T6d).
+        assert_eq!(lines.len(), 1 + 1024);
+        assert_eq!(lines[0], "3976 console calls dropped (more than 1024 held)");
         assert_eq!(lines.last().map(String::as_str), Some("4999"));
     }
 
@@ -1920,7 +2199,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         let recv_clone = received.clone();
-        runtime.set_console_handler(Box::new(move |_level, msg, at| {
+        runtime.set_console_handler(Box::new(move |_level, msg, at, _stack| {
             recv_clone.lock().unwrap().push((msg.to_string(), at.cloned()));
         }));
         runtime.evaluate_script_named("1;\neval(\"console.log('in eval')\");", "inline#1").unwrap();
@@ -1959,7 +2238,7 @@ mod tests {
         let mut runtime = JsRuntime::new().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+        runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
         runtime.set_error_reports(true, false);
         let body = "{ console.log(\"c\"); throw new Error(\"x\"); }";
         let script = format!("1;\neval('{}');\n{call};", declare.replace("BODY", body));
@@ -2009,7 +2288,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             let body = "{\nconsole.log('c');\n  throw new Error('x'); }";
             let script = format!("{};\n{call};", declare.replace("BODY", body));
@@ -2030,7 +2309,7 @@ mod tests {
             let mut runtime = JsRuntime::new().unwrap();
             let seen = Arc::new(Mutex::new(Vec::new()));
             let sink = seen.clone();
-            runtime.set_console_handler(Box::new(move |_level, _msg, at| sink.lock().unwrap().push(at.cloned())));
+            runtime.set_console_handler(Box::new(move |_level, _msg, at, _stack| sink.lock().unwrap().push(at.cloned())));
             runtime.set_error_reports(true, false);
             assert!(runtime.evaluate_script_named(script, "inline#1").is_err());
             let reports = runtime.take_error_reports();

@@ -26,6 +26,8 @@ pub mod scroll;
 pub mod table;
 pub mod text;
 
+mod filter;
+pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
 #[cfg(test)]
 mod box_opacity_tests;
 
@@ -6841,12 +6843,18 @@ impl LayoutBox {
             if at.position != Position::Fixed {
                 return self.hit_test_scrolled(viewport_x, viewport_y, scroll);
             }
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, false) {
+            // A fixed box in a fixed box is drawn in its ancestor's
+            // stacking context: the outermost one's `z-index` places both.
+            let z_index = ancestors
+                .iter()
+                .find(|a| a.position == Position::Fixed)
+                .map_or(at.z_index, |outer| outer.z_index);
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, true) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
                 }
-                held.push((at.z_index, hit));
+                held.push((z_index, hit));
             }
         }
         self.top_held_or_page(held, viewport_x, viewport_y, scroll)
@@ -6882,6 +6890,30 @@ impl LayoutBox {
         Some(hit)
     }
 
+    /// This box's transform in layout coordinates, about its
+    /// `transform-origin`, as the painter draws it (`PushTransform`, the
+    /// renderer's `affine_about_origin`): `None` when it has none.
+    fn own_transform(&self) -> Option<[f32; 6]> {
+        let transform = self.style.effective_transform();
+        if transform.is_identity() {
+            return None;
+        }
+        let border_box = self.dimensions.border_box();
+        let m = transform.to_matrix(border_box.width, border_box.height);
+        let origin = &self.style.transform_origin;
+        let ox = border_box.x + origin.x.to_px(16.0, 16.0, border_box.width);
+        let oy = border_box.y + origin.y.to_px(16.0, 16.0, border_box.height);
+        // T(origin) · m · T(-origin)
+        Some([
+            m[0],
+            m[1],
+            m[2],
+            m[3],
+            m[4] + ox - (m[0] * ox + m[2] * oy),
+            m[5] + oy - (m[1] * ox + m[3] * oy),
+        ])
+    }
+
     /// Whether the boxes inside this one are in a transformed box, where a
     /// fixed box moves with the page (the painter's `transformed_ancestors`).
     fn transforms_descendants(&self) -> bool {
@@ -6915,27 +6947,46 @@ impl LayoutBox {
             at.push(index);
             if child.position == Position::Fixed {
                 paths.push(at.clone());
-            } else {
-                child.collect_held_fixed(at, paths);
             }
+            // A fixed box inside this one is held too: the window, not
+            // its fixed ancestor, is its containing block, so it can lie
+            // outside that ancestor's box (a 0x0 fixed container holding
+            // a full-window overlay).
+            child.collect_held_fixed(at, paths);
             at.pop();
         }
     }
 
     /// Collect a hit at the point, with its `z-index`, for each fixed box
-    /// the scroll does not move, in tree order.
+    /// the scroll does not move, in tree order. A fixed box inside another
+    /// is one of them (`collect_held_fixed`), placed by the outermost
+    /// one's `z-index` (`outer_z`).
     fn hit_test_held_fixed(&self, x: f32, y: f32, depth: u32, hits: &mut Vec<(i32, HitTestResult)>) {
+        self.hit_test_held_fixed_in(x, y, depth, None, hits)
+    }
+
+    fn hit_test_held_fixed_in(
+        &self,
+        x: f32,
+        y: f32,
+        depth: u32,
+        outer_z: Option<i32>,
+        hits: &mut Vec<(i32, HitTestResult)>,
+    ) {
         if self.transforms_descendants() {
             return;
         }
         let first = hits.len();
         for child in &self.children {
-            if child.position != Position::Fixed {
-                child.hit_test_held_fixed(x, y, depth + 1, hits);
-            } else if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, false) {
-                hit.viewport_fixed = true;
-                hits.push((child.z_index, hit));
+            let fixed = child.position == Position::Fixed;
+            if fixed {
+                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, true) {
+                    hit.viewport_fixed = true;
+                    hits.push((outer_z.unwrap_or(child.z_index), hit));
+                }
             }
+            let outer_z = outer_z.or(fixed.then_some(child.z_index));
+            child.hit_test_held_fixed_in(x, y, depth + 1, outer_z, hits);
         }
         for (_, hit) in &mut hits[first..] {
             self.add_as_ancestor(hit);
@@ -6969,6 +7020,14 @@ impl LayoutBox {
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
     /// those with the viewport point).
     fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
+        // A transformed box and its descendants are drawn moved
+        // (`PushTransform`): the point is taken back to where they are
+        // laid out. A box squashed flat (`scale(0)`) is drawn nowhere.
+        let (x, y) = match self.own_transform() {
+            Some(m) => invert_affine(m).map(|inv| apply_affine(inv, x, y))?,
+            None => (x, y),
+        };
+
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -7067,6 +7126,14 @@ impl LayoutBox {
 
     /// Internal hit test that collects all results.
     fn hit_test_all_internal(&self, x: f32, y: f32, depth: u32, results: &mut Vec<HitTestResult>) {
+        // Where `hit_test_internal` looks: a transformed box where it is drawn.
+        let (x, y) = match self.own_transform() {
+            Some(m) => match invert_affine(m) {
+                Some(inv) => apply_affine(inv, x, y),
+                None => return,
+            },
+            None => (x, y),
+        };
         let border_box = self.dimensions.border_box();
 
         if !border_box.contains(x, y) {
@@ -7096,6 +7163,22 @@ impl LayoutBox {
             child.hit_test_all_internal(x, y, depth + 1, results);
         }
     }
+}
+
+/// A point under a 2D affine `[a, b, c, d, e, f]` (the painter's layout).
+fn apply_affine(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// The inverse of a 2D affine, or `None` when it has none (it squashes
+/// the plane onto a line or a point).
+fn invert_affine(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
 /// Result of a hit test operation.
@@ -7666,6 +7749,13 @@ pub enum DisplayCommand {
     PushOpacity(f32),
     /// End the innermost opacity scope.
     PopOpacity,
+    /// Paint everything up to the matching `PopFilter` as one group and lay
+    /// it down through this 4x5 row-major colour matrix, applied to
+    /// unpremultiplied colour and clamped: the colour-matrix functions of
+    /// CSS `filter` (Filter Effects 1 §13), composed in order. Scopes nest.
+    PushFilter([f32; 20]),
+    /// End the innermost filter scope.
+    PopFilter,
 
     /// Start of a `position: fixed` box whose containing block is the
     /// viewport. What follows, up to the matching `PopViewportFixed`, does
@@ -8627,8 +8717,13 @@ impl DisplayList {
         // its absolute children — image-gallery's `.gallery-item { position:
         // relative; overflow: hidden }` must keep its `.image-overlay` inside
         // the clip. `LayoutBox::position` alone would let the overlay escape.
+        // A `clip-path` clips every descendant, positioned or not, so the
+        // clips above it are scoped out of its subtree like a positioned
+        // box's: an absolute descendant popping them would pop this one.
+        let shape_clip = self.clip_path_clip(layout_box);
         let positioned = layout_box.position != Position::Static
-            || layout_box.style.position != rustkit_css::Position::Static;
+            || layout_box.style.position != rustkit_css::Position::Static
+            || shape_clip.is_some();
         let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
@@ -8673,6 +8768,28 @@ impl DisplayList {
             self.commands.push(DisplayCommand::PushOpacity(opacity));
         }
 
+        // `filter` applies before opacity (Filter Effects 1 §5), so its
+        // group sits inside the opacity scope.
+        //
+        // TODO(filter blur/drop-shadow): the filter group is opened outside
+        // the transform and the `clip-path` clip below, so today the clip
+        // runs on the content first and the filter after. For the colour
+        // matrices supported now that paints the same as Chrome, which
+        // filters first and then clips (filter -> clip -> mask -> opacity,
+        // in the element's transformed space), because a matrix is per
+        // pixel. Once `blur()` or `drop-shadow()` paint, the clip must wrap
+        // the filter: they bleed past the box, and Chrome clips that bleed
+        // away. Pinned by
+        // `rustkit_engine::filter_pins::filter_with_clip_path_clips_inside_the_filter_group`.
+        let filter_matrix = if layout_box.style.filter.is_empty() {
+            None
+        } else {
+            filter_color_matrix(&layout_box.style.filter)
+        };
+        if let Some(matrix) = filter_matrix {
+            self.commands.push(DisplayCommand::PushFilter(matrix));
+        }
+
         // Check if this box has a transform
         let transform = layout_box.style.effective_transform();
         let has_transform = !transform.is_identity();
@@ -8698,6 +8815,18 @@ impl DisplayList {
                 origin: (origin_x, origin_y),
             });
             self.transformed_ancestors += 1;
+        }
+
+        // `clip-path` clips the box's own painting too, so it opens before
+        // the box's content, inside its transform, and closes after its
+        // subtree.
+        if let Some((rect, radius)) = shape_clip {
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::PushClip(rect));
+            } else {
+                self.commands
+                    .push(DisplayCommand::PushClipRounded { rect, radius });
+            }
         }
 
         // Render this box
@@ -8796,11 +8925,18 @@ impl DisplayList {
         if let Some(outer) = outer_ellipsis {
             self.ellipsis = outer;
         }
+        if shape_clip.is_some() {
+            self.commands.push(DisplayCommand::PopClip);
+        }
 
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
             self.transformed_ancestors -= 1;
+        }
+
+        if filter_matrix.is_some() {
+            self.commands.push(DisplayCommand::PopFilter);
         }
 
         if fades {
@@ -9019,6 +9155,208 @@ impl DisplayList {
             bottom_left: corner(&s.border_bottom_left_radius),
         }
         .fitted(border_rect.width, border_rect.height)
+    }
+
+    /// The clip a `clip-path` basic shape puts on the box and everything it
+    /// paints, as the rounded rect the painter already clips to (CSS Masking
+    /// 1 §5.1). `inset()` (with `round`), `circle()` and `ellipse()` are all
+    /// exactly a rounded rect; the reference box is the border box unless a
+    /// `padding-box`, `content-box` or `margin-box` keyword names another.
+    ///
+    /// `None` (paint unclipped, as before) for `none`, for shapes that are not
+    /// a rounded rect (`polygon()`, `path()`, `url()`), for a bare box keyword,
+    /// and for any value this does not read. A text run, an inline box or an
+    /// anonymous block is never clipped on its own: a text run carries its
+    /// parent's style, and the parent's clip already covers all three.
+    fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        if !matches!(layout_box.box_type, BoxType::Block | BoxType::Image { .. }) {
+            return None;
+        }
+        let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();
+        if raw.is_empty() || raw == "none" {
+            return None;
+        }
+        let open = raw.find('(')?;
+        let close = raw.rfind(')')?;
+        if close < open {
+            return None;
+        }
+        // `<basic-shape> <geometry-box>?` in either order.
+        let mut head: Vec<&str> = raw[..open].split_whitespace().collect();
+        let name = head.pop()?;
+        let args = raw[open + 1..close].trim();
+        let keywords: Vec<&str> = head
+            .into_iter()
+            .chain(raw[close + 1..].split_whitespace())
+            .collect();
+        let keyword = match keywords.as_slice() {
+            [] => "",
+            [k] => *k,
+            _ => return None,
+        };
+        let d = &layout_box.dimensions;
+        let reference = match keyword {
+            "" | "border-box" => d.border_box(),
+            "padding-box" => d.padding_box(),
+            "content-box" => d.content,
+            "margin-box" => d.margin_box(),
+            _ => return None,
+        };
+        let font_size = match layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root = self.root_font_size;
+        let px = |token: &str, basis: f32| -> Option<f32> {
+            if token == "0" {
+                return Some(0.0);
+            }
+            rustkit_css::parse_length(token).map(|l| l.to_px(font_size, root, basis))
+        };
+        let (w, h) = (reference.width, reference.height);
+
+        // `at <position>`: one or two keywords or lengths, centre by default.
+        let (shape, at) = match args.find(" at ").or_else(|| args.strip_prefix("at ").map(|_| 0)) {
+            Some(i) => (args[..i].trim(), Some(args[i..].trim().trim_start_matches("at").trim())),
+            None => (args, None),
+        };
+        let centre = |at: Option<&str>| -> Option<(f32, f32)> {
+            let Some(at) = at else {
+                return Some((w / 2.0, h / 2.0));
+            };
+            let t: Vec<&str> = at.split_whitespace().collect();
+            let horizontal = |s: &str| matches!(s, "left" | "right");
+            let vertical = |s: &str| matches!(s, "top" | "bottom");
+            let (xs, ys) = match t.as_slice() {
+                [a] if vertical(a) => ("center", *a),
+                [a] => (*a, "center"),
+                [a, b] if vertical(a) || horizontal(b) => (*b, *a),
+                [a, b] => (*a, *b),
+                _ => return None,
+            };
+            let x = match xs {
+                "left" => 0.0,
+                "center" => w / 2.0,
+                "right" => w,
+                v => px(v, w)?,
+            };
+            let y = match ys {
+                "top" => 0.0,
+                "center" => h / 2.0,
+                "bottom" => h,
+                v => px(v, h)?,
+            };
+            Some((x, y))
+        };
+        // A shape radius: a length, a percentage of `basis`, or the distance
+        // to the closest or farthest side along the axes given.
+        let radius = |token: &str, basis: f32, near: f32, far: f32| -> Option<f32> {
+            match token {
+                "closest-side" => Some(near),
+                "farthest-side" => Some(far),
+                v => px(v, basis).map(|r| r.max(0.0)),
+            }
+        };
+
+        let (rect, radii) = match name {
+            "inset" => {
+                let (offsets, round) = match shape.find("round") {
+                    Some(i) => (shape[..i].trim(), Some(shape[i + 5..].trim())),
+                    None => (shape, None),
+                };
+                let o: Vec<&str> = offsets.split_whitespace().collect();
+                let (t, r, b, l) = match o.as_slice() {
+                    [a] => (*a, *a, *a, *a),
+                    [a, b] => (*a, *b, *a, *b),
+                    [a, b, c] => (*a, *b, *c, *b),
+                    [a, b, c, d] => (*a, *b, *c, *d),
+                    _ => return None,
+                };
+                let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
+                let rect = Rect::new(
+                    reference.x + l,
+                    reference.y + t,
+                    (w - l - r).max(0.0),
+                    (h - t - b).max(0.0),
+                );
+                let radii = match round {
+                    None => BorderRadius::default(),
+                    Some(round) => {
+                        // The `border-radius` shorthand: 1–4 horizontal radii,
+                        // optionally `/` and 1–4 vertical ones.
+                        let (hs, vs) = match round.split_once('/') {
+                            Some((a, b)) => (a.trim(), b.trim()),
+                            None => (round, round),
+                        };
+                        let four = |list: &str, basis: f32| -> Option<[f32; 4]> {
+                            let v = list
+                                .split_whitespace()
+                                .map(|s| px(s, basis).map(|r| r.max(0.0)))
+                                .collect::<Option<Vec<f32>>>()?;
+                            Some(match v.as_slice() {
+                                [a] => [*a, *a, *a, *a],
+                                [a, b] => [*a, *b, *a, *b],
+                                [a, b, c] => [*a, *b, *c, *b],
+                                [a, b, c, d] => [*a, *b, *c, *d],
+                                _ => return None,
+                            })
+                        };
+                        let hr = four(hs, rect.width)?;
+                        let vr = four(vs, rect.height)?;
+                        let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
+                        BorderRadius {
+                            top_left: c(0),
+                            top_right: c(1),
+                            bottom_right: c(2),
+                            bottom_left: c(3),
+                        }
+                        .fitted(rect.width, rect.height)
+                    }
+                };
+                (rect, radii)
+            }
+            "circle" | "ellipse" => {
+                let (cx, cy) = centre(at)?;
+                let (near_x, far_x) = (cx.abs().min((w - cx).abs()), cx.abs().max((w - cx).abs()));
+                let (near_y, far_y) = (cy.abs().min((h - cy).abs()), cy.abs().max((h - cy).abs()));
+                let t: Vec<&str> = shape.split_whitespace().collect();
+                let (rx, ry) = if name == "circle" {
+                    // A percentage is of the reference box's normalised
+                    // diagonal, sqrt(w² + h²) / sqrt(2).
+                    let diagonal = (w * w + h * h).sqrt() / std::f32::consts::SQRT_2;
+                    let r = match t.as_slice() {
+                        [] => near_x.min(near_y),
+                        [a] => radius(a, diagonal, near_x.min(near_y), far_x.max(far_y))?,
+                        _ => return None,
+                    };
+                    (r, r)
+                } else {
+                    match t.as_slice() {
+                        [] => (near_x, near_y),
+                        [a, b] => (radius(a, w, near_x, far_x)?, radius(b, h, near_y, far_y)?),
+                        _ => return None,
+                    }
+                };
+                let rect = Rect::new(
+                    reference.x + cx - rx,
+                    reference.y + cy - ry,
+                    2.0 * rx,
+                    2.0 * ry,
+                );
+                let corner = CornerRadius { h: rx, v: ry };
+                (
+                    rect,
+                    BorderRadius {
+                        top_left: corner,
+                        top_right: corner,
+                        bottom_right: corner,
+                        bottom_left: corner,
+                    },
+                )
+            }
+            _ => return None,
+        };
+        Some((rect, radii))
     }
 
     /// The rounded clip a box imposes on its descendants, if any.
@@ -18885,5 +19223,102 @@ mod mask_paint_tests {
             ]
         );
         assert!(matches!(cmds[0], DisplayCommand::PushClip(_)));
+    }
+}
+
+#[cfg(test)]
+mod overlay_hit_tests {
+    //! A click lands on what is drawn under it: a transformed box where it
+    //! is painted, and a fixed box wherever the window puts it, even
+    //! outside its fixed ancestor's box (consent dialogs, 2026-10-21).
+    use super::*;
+    use rustkit_css::{TransformList, TransformOp};
+
+    fn boxed(node: usize, x: f32, y: f32, w: f32, h: f32) -> LayoutBox {
+        let mut b = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+        b.dimensions.content = Rect::new(x, y, w, h);
+        b.node_id = Some(node);
+        b
+    }
+
+    fn page() -> LayoutBox {
+        boxed(1, 0.0, 0.0, 800.0, 600.0)
+    }
+
+    #[test]
+    fn a_translated_box_is_hit_where_it_is_painted() {
+        // `top: 50%; left: 50%; transform: translate(-50%, -50%)`.
+        let mut root = page();
+        let mut dialog = boxed(2, 400.0, 300.0, 400.0, 200.0);
+        dialog.position = Position::Fixed;
+        dialog.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Percent(-50.0), Length::Percent(-50.0))],
+        };
+        dialog.children.push(boxed(3, 420.0, 440.0, 120.0, 40.0));
+        root.children.push(dialog);
+
+        let at = |x, y| root.hit_test_scrolled(x, y, (0.0, 0.0)).and_then(|h| h.node_id);
+        // The button is painted at (220, 340)..(340, 380).
+        assert_eq!(at(280.0, 360.0), Some(3));
+        // Where it is laid out, nothing of the dialog is drawn.
+        assert_eq!(at(480.0, 460.0), Some(1));
+        // The same with the paths the engine keeps.
+        let held = root.held_fixed_paths();
+        assert_eq!(
+            root.hit_test_scrolled_with(280.0, 360.0, (0.0, 0.0), &held).and_then(|h| h.node_id),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn hit_test_all_finds_a_translated_box_where_it_is_painted() {
+        let mut root = page();
+        let mut moved = boxed(2, 400.0, 300.0, 100.0, 100.0);
+        moved.style.transform = TransformList {
+            ops: vec![TransformOp::Translate(Length::Px(-300.0), Length::Px(-200.0))],
+        };
+        root.children.push(moved);
+        let nodes = |x, y| root.hit_test_all(x, y).iter().map(|h| h.node_id).collect::<Vec<_>>();
+        assert_eq!(nodes(150.0, 150.0), vec![Some(1), Some(2)]);
+        assert_eq!(nodes(450.0, 350.0), vec![Some(1)]);
+    }
+
+    #[test]
+    fn a_box_scaled_to_nothing_is_not_hit() {
+        let mut root = page();
+        let mut gone = boxed(2, 0.0, 0.0, 200.0, 200.0);
+        gone.style.transform = TransformList { ops: vec![TransformOp::Scale(0.0, 0.0)] };
+        root.children.push(gone);
+        assert_eq!(root.hit_test(50.0, 50.0).and_then(|h| h.node_id), Some(1));
+    }
+
+    #[test]
+    fn a_fixed_box_in_a_zero_size_fixed_box_is_hit() {
+        let mut root = page();
+        let mut container = boxed(2, 0.0, 100.0, 0.0, 0.0);
+        container.position = Position::Fixed;
+        container.z_index = 10;
+        let mut overlay = boxed(3, 0.0, 0.0, 800.0, 600.0);
+        overlay.position = Position::Fixed;
+        overlay.children.push(boxed(4, 300.0, 280.0, 120.0, 40.0));
+        container.children.push(overlay);
+        // Page content under the overlay, painted before it.
+        root.children.push(boxed(5, 0.0, 0.0, 800.0, 600.0));
+        root.children.push(container);
+
+        let held = root.held_fixed_paths();
+        assert_eq!(held, vec![vec![1], vec![1, 0]]);
+        for hit in [
+            root.hit_test_scrolled(350.0, 300.0, (0.0, 200.0)),
+            root.hit_test_scrolled_with(350.0, 300.0, (0.0, 200.0), &held),
+        ] {
+            let hit = hit.expect("a hit");
+            assert_eq!(hit.node_id, Some(4));
+            assert!(hit.viewport_fixed);
+            // Its path runs through the overlay and the container.
+            assert_eq!(hit.ancestors.len(), 3);
+        }
+        // Elsewhere on the overlay: the overlay, not the page under it.
+        assert_eq!(root.hit_test_scrolled(10.0, 10.0, (0.0, 0.0)).and_then(|h| h.node_id), Some(3));
     }
 }

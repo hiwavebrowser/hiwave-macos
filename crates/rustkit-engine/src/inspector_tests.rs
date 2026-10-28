@@ -9,6 +9,8 @@ fn console(message: &str) -> InspectorEvent {
         message: message.into(),
         truncated: false,
         location: None,
+        stack: None,
+        error_stack: None,
     }
 }
 
@@ -73,6 +75,7 @@ fn the_inspector_can_be_shared_across_threads() {
 fn records_serialize_with_a_stable_field_order() {
     let record = InspectorRecord {
         seq: 7,
+        doc: 2,
         t_ms: 1.5,
         event: InspectorEvent::ScriptError {
             name: "TypeError".into(),
@@ -83,11 +86,12 @@ fn records_serialize_with_a_stable_field_order() {
             script: "https://a.test/s.js".into(),
             value: "error".into(),
             message_len: Some(12),
+            inserted_by: None,
         },
     };
     assert_eq!(
         serde_json::to_string(&record).unwrap(),
-        r#"{"seq":7,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12}"#
+        r#"{"seq":7,"doc":2,"t_ms":1.5,"type":"script_error","name":"TypeError","message":null,"location":{"url":"https://a.test/s.js","line":3,"column":9},"stack":null,"unhandled_rejection":false,"script":"https://a.test/s.js","value":"error","message_len":12,"inserted_by":null}"#
     );
     let back: InspectorRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
@@ -136,7 +140,7 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
     let path = dir.join("events.jsonl");
     let mut sink = RollingFileSink::new(&path, 300, 2).unwrap();
     for i in 0..40 {
-        sink.record(&InspectorRecord { seq: i, t_ms: 0.0, event: console("0123456789") });
+        sink.record(&InspectorRecord { seq: i, doc: 0, t_ms: 0.0, event: console("0123456789") });
     }
     sink.flush();
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -162,7 +166,7 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
 fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let records: Vec<InspectorRecord> = [
         console("a"),
-        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None },
+        InspectorEvent::Console { level: ConsoleLevel::Error, message: "e".into(), truncated: false, location: None, stack: None, error_stack: None },
         InspectorEvent::ScriptError {
             name: "Error".into(),
             message: None,
@@ -172,12 +176,13 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
             script: "inline#1".into(),
             value: "error".into(),
             message_len: Some(1),
+            inserted_by: None,
         },
         InspectorEvent::UnsupportedApi { interface: "XMLHttpRequest".into(), member: "open(async=false)".into(), location: None },
     ]
     .into_iter()
     .enumerate()
-    .map(|(i, event)| InspectorRecord { seq: i as u64, t_ms: 0.0, event })
+    .map(|(i, event)| InspectorRecord { seq: i as u64, doc: 0, t_ms: 0.0, event })
     .collect();
     let unsupported = vec![UnsupportedApiCount {
         interface: "XMLHttpRequest".into(),
@@ -190,6 +195,30 @@ fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
         serde_json::to_string(&summary).unwrap(),
         r#"{"schema":2,"events":4,"console":{"log":1,"info":0,"warn":0,"error":1,"debug":0},"script_errors":1,"unhandled_rejections":1,"unsupported_apis":{"XMLHttpRequest.open(async=false)":4},"requests":{},"failures_by_stage":{}}"#
     );
+}
+
+/// T6 R1 condition 6: a request's answer belongs to the document that made
+/// the request, even when it arrives after the next navigation started.
+#[test]
+fn a_network_answer_is_stamped_with_the_document_its_request_started_in() {
+    let inspector = buffered(16);
+    let url = url::Url::parse("https://a.test/feed.json").unwrap();
+    inspector.navigation_started(Some(&url::Url::parse("https://a.test/one").unwrap()));
+    let answered = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    let failed = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    let dropped = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("script")).unwrap();
+    inspector.navigation_started(Some(&url::Url::parse("https://a.test/two").unwrap()));
+    answered.response(200, None, None, None, false);
+    failed.fail(FailureStage::Connect, "reset");
+    drop(dropped);
+    inspector.emit(console("on two"));
+    let records = inspector.snapshot_since(0).records;
+    let doc_of = |kind: &str| -> Vec<u32> { records.iter().filter(|r| r.event.kind() == kind).map(|r| r.doc).collect() };
+    let request_doc = doc_of("request")[0];
+    assert_eq!(doc_of("request"), vec![request_doc; 3]);
+    assert_eq!(doc_of("response"), vec![request_doc], "{records:?}");
+    assert_eq!(doc_of("failure"), vec![request_doc; 2], "{records:?}");
+    assert_eq!(doc_of("console"), vec![request_doc + 1]);
 }
 
 #[test]
