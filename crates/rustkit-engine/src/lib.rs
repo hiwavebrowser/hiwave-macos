@@ -15612,11 +15612,16 @@ impl layout_ctx::LayoutCtx {
                     match (name.as_str(), arg) {
                         ("root" | "scope", _) => key.tag = Some("html".to_string()),
                         ("is" | "where" | "matches" | "-webkit-any", Some(arg)) => {
-                            // Some member compound must match the element
-                            // (any_compound_in_list_matches); members with
-                            // a combinator never do.
+                            // Some member must match the element
+                            // (`SubjectPart::List`): a compound member on
+                            // the element, a complex member with the
+                            // element as its subject, so its keys are its
+                            // subject compound's (`.dark *` files under
+                            // the universal bucket).
                             for member in SelectorMatcher::split_top_level_commas(&arg) {
-                                if !SelectorMatcher::selector_has_combinator(member) {
+                                if SelectorMatcher::selector_has_combinator(member) {
+                                    keys_for(engine, &SelectorMatcher.prepared_selector(member.trim()), out);
+                                } else {
                                     keys_for_compound(engine, member, out);
                                 }
                             }
@@ -15877,7 +15882,7 @@ impl SelectorMatcher {
                     ANCESTOR_FILTER_REJECTS.with(|n| n.set(n.get() + 1));
                     return false;
                 }
-                if !subject.matches(self, tag_name, attributes, sib) {
+                if !subject.matches(self, tag_name, attributes, ancestors, siblings_before, sib) {
                     return false;
                 }
                 (tokens, compounds)
@@ -15900,13 +15905,13 @@ impl SelectorMatcher {
             let _relational = compound.relational.then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_ancestor_node(&n, idx, anc)))
             });
-            compound.matches_ancestor(anc)
+            compound.matches_ancestor_in_chain(ancestors, idx)
         };
         let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
             let _relational = compound.relational.then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
             });
-            compound.matches_sibling(prev)
+            compound.matches_sibling_in_chain(prev, ancestors)
         };
 
         for i in (0..tokens.len() - 1).rev() {
@@ -16612,10 +16617,11 @@ impl SelectorMatcher {
         out
     }
 
-    /// `:is()`/`:where()`/`:not()` argument: a selector list of compound
-    /// selectors, evaluated against the subject. A member with a combinator
-    /// needs the ancestor chain this matcher does not carry and counts as
-    /// not matching (under-match, ledgered) rather than matching everything.
+    /// `:is()`/`:where()`/`:not()` argument: a selector list evaluated
+    /// against the subject, on the string path, which carries no ancestor
+    /// chain or siblings. A member with a combinator is matched as a
+    /// complex selector against an empty chain (the compiled path,
+    /// `SubjectCompound`, has the real one: `ListMember::Complex`).
     fn any_compound_in_list_matches(
         &self,
         list: &str,
@@ -16625,7 +16631,8 @@ impl SelectorMatcher {
     ) -> bool {
         SelectorMatcher::split_top_level_commas(list).into_iter().any(|member| {
             if SelectorMatcher::selector_has_combinator(member) {
-                return false;
+                let prepared = SelectorMatcher.prepared_selector(member.trim());
+                return SelectorMatcher.selector_matches_prepared(&prepared, tag_name, attributes, &[], &[], sib);
             }
             SelectorMatcher.simple_selector_matches_with_pseudo(member, tag_name, attributes, sib)
         })
@@ -31179,7 +31186,7 @@ mod rule_prefilter_tests {
             for (tag, attributes) in &elements {
                 for sib in sibs {
                     assert_eq!(
-                        subject.matches(&SelectorMatcher, tag, attributes, sib),
+                        subject.matches(&SelectorMatcher, tag, attributes, &[], &[], sib),
                         SelectorMatcher.simple_selector_matches_with_pseudo(selector, tag, attributes, sib),
                         "{selector:?} on {tag} {attributes:?}"
                     );
@@ -33545,9 +33552,20 @@ enum SubjectPart {
     Pseudo(String, Option<String>),
     /// `:not(list)` (`negate`) or `:is`/`:where`/`:matches`/`-webkit-any`
     /// with its members compiled once, which `any_compound_in_list_matches`
-    /// re-split and re-parsed for every candidate element. A member with a
-    /// combinator is `None`: it never matches, as there.
-    List { negate: bool, members: Vec<Option<SubjectCompound>> },
+    /// re-split and re-parsed for every candidate element.
+    List { negate: bool, members: Vec<ListMember> },
+}
+
+/// One member of a `:is()`/`:where()`/`:not()` argument.
+enum ListMember {
+    /// A compound: tested against the element itself.
+    Compound(SubjectCompound),
+    /// A complex selector (one with a combinator), prepared like a rule's
+    /// own selector and matched with the element as its subject, against
+    /// the same ancestor chain and earlier siblings. Tailwind v4 spells its
+    /// `dark:` variant `.dark\:x:is(.dark *)`; before this every such rule
+    /// was lost (railway.com's whole first screen under `html.dark`).
+    Complex(Rc<PreparedSelector>),
 }
 
 /// Whether the text after a leading `#` is the whole compound (`#id`), not
@@ -33568,9 +33586,10 @@ impl SubjectCompound {
             Self::General { parts, .. } => parts.iter().all(|part| match part {
                 SubjectPart::Class(_) | SubjectPart::Id(_) | SubjectPart::Attr(_) => true,
                 SubjectPart::Pseudo(..) => false,
-                SubjectPart::List { members, .. } => {
-                    members.iter().all(|m| m.as_ref().is_none_or(|m| m.is_context_free()))
-                }
+                SubjectPart::List { members, .. } => members.iter().all(|m| match m {
+                    ListMember::Compound(m) => m.is_context_free(),
+                    ListMember::Complex(p) => p.is_context_free(),
+                }),
             }),
         }
     }
@@ -33626,9 +33645,13 @@ impl SubjectCompound {
                     {
                         let members = SelectorMatcher::split_top_level_commas(&list)
                             .into_iter()
-                            .map(|m| {
-                                (!SelectorMatcher::selector_has_combinator(m))
-                                    .then(|| SubjectCompound::parse(engine, m))
+                            .map(|m| match SelectorMatcher::selector_has_combinator(m) {
+                                // Prepared through the same cache as a rule's
+                                // selector; `prepared_selector` holds no cache
+                                // borrow while it prepares, so the recursion
+                                // is safe (as for a selector list's members).
+                                true => ListMember::Complex(engine.prepared_selector(m.trim())),
+                                false => ListMember::Compound(SubjectCompound::parse(engine, m)),
                             })
                             .collect();
                         SubjectPart::List { negate, members }
@@ -33643,11 +33666,17 @@ impl SubjectCompound {
         Self::General { tag, parts }
     }
 
+    /// Does the element match this compound? `ancestors` and
+    /// `siblings_before` are the element's own (as `selector_matches`
+    /// takes them); only a complex `:is()`/`:where()`/`:not()` member reads
+    /// them, with the element as its subject.
     fn matches(
         &self,
         engine: &SelectorMatcher,
         tag_name: &str,
         attributes: &HashMap<String, String>,
+        ancestors: &[Ancestor],
+        siblings_before: &[SiblingKey],
         sib: SiblingContext,
     ) -> bool {
         match self {
@@ -33671,8 +33700,19 @@ impl SubjectCompound {
                         SelectorMatcher.match_pseudo_class(name, arg.as_deref(), tag_name, sib, attributes)
                     }
                     SubjectPart::List { negate, members } => {
-                        members.iter().flatten().any(|m| m.matches(engine, tag_name, attributes, sib))
-                            != *negate
+                        members.iter().any(|m| match m {
+                            ListMember::Compound(m) => {
+                                m.matches(engine, tag_name, attributes, ancestors, siblings_before, sib)
+                            }
+                            ListMember::Complex(p) => engine.selector_matches_prepared(
+                                p,
+                                tag_name,
+                                attributes,
+                                ancestors,
+                                siblings_before,
+                                sib,
+                            ),
+                        }) != *negate
                     }
                 })
             }
@@ -34011,10 +34051,8 @@ struct AncestorCompound {
     /// state; an ancestor carries none, so it stays permissive there.
     state: Vec<StatePseudo>,
     /// One entry per `:is()`/`:where()` in the compound: some alternative
-    /// must match. A member with its own combinator needs an ancestor chain
-    /// this tuple does not carry and is left out (under-match, the same as
-    /// the subject path's `any_compound_in_list_matches`).
-    any_of: Vec<Vec<AncestorCompound>>,
+    /// must match.
+    any_of: Vec<AnyOf>,
     /// The `[...]` parts, brackets off. Tested only against an ancestor
     /// that carries its attributes (`AncestorKey`).
     attrs: Vec<String>,
@@ -34135,15 +34173,22 @@ impl AncestorCompound {
                                 out.undecided = true;
                             }
                             ("is" | "where" | "matches" | "-webkit-any", Some(a)) => {
-                                let members = SelectorMatcher::split_top_level_commas(a);
-                                let alternatives: Vec<AncestorCompound> = members
-                                    .iter()
-                                    .filter(|m| !SelectorMatcher::selector_has_combinator(m))
-                                    .map(|m| AncestorCompound::parse(m))
-                                    .collect();
-                                out.undecided |= alternatives.len() != members.len()
-                                    || alternatives.iter().any(|m| m.undecided);
-                                out.relational |= alternatives.iter().any(|m| m.relational);
+                                let mut alternatives = AnyOf::default();
+                                for m in SelectorMatcher::split_top_level_commas(a) {
+                                    if SelectorMatcher::selector_has_combinator(m) {
+                                        alternatives.complex.push(SelectorMatcher.prepared_selector(m.trim()));
+                                        out.relational |= m.contains(":has(");
+                                    } else {
+                                        let parsed = AncestorCompound::parse(m);
+                                        out.undecided |= parsed.undecided;
+                                        out.relational |= parsed.relational;
+                                        alternatives.compounds.push(parsed);
+                                    }
+                                }
+                                // A complex member is decided only where
+                                // the walk names the chain; inside `:not()`
+                                // the compound stays permissive.
+                                out.undecided |= !alternatives.complex.is_empty();
                                 out.any_of.push(alternatives);
                             }
                             ("not", Some(a)) => {
@@ -34230,7 +34275,61 @@ impl AncestorCompound {
             && self
                 .any_of
                 .iter()
-                .all(|alts| alts.iter().any(|a| a.matches_ancestor(ancestor)))
+                .all(|alts| alts.undecidable() || alts.compounds.iter().any(|a| a.matches_ancestor(ancestor)))
+    }
+
+    /// [`Self::matches_ancestor`] for `ancestors[idx]`, with the complex
+    /// `:is()` members decided against that ancestor's own chain.
+    fn matches_ancestor_in_chain(&self, ancestors: &[Ancestor], idx: usize) -> bool {
+        let ancestor = &ancestors[idx];
+        self.matches_ancestor(ancestor) && {
+            let (tag, classes, id, attributes) = &**ancestor;
+            self.complex_alternatives_hold(tag, classes, id.as_ref(), attributes.as_deref(), &ancestors[idx + 1..])
+        }
+    }
+
+    /// [`Self::matches_sibling`], with the complex `:is()` members decided
+    /// against the sibling's chain, which is the subject's.
+    fn matches_sibling_in_chain(&self, prev: &SiblingKey, ancestors: &[Ancestor]) -> bool {
+        self.matches_sibling(prev) && {
+            let (tag, classes, id, _) = prev;
+            self.complex_alternatives_hold(tag, classes, id.as_ref(), None, ancestors)
+        }
+    }
+
+    /// Every `:is()` with a complex member holds for the element known by
+    /// `tag`, `classes` and `id` (and `attributes` where carried), whose
+    /// ancestors are `chain`: some compound member matches it, or some
+    /// complex member does with it as subject. The element's attributes,
+    /// where not carried, are its classes and id; its place among its
+    /// siblings is not carried and reads as an only child (permissive, as
+    /// the rest of the ancestor path). Only a compound with such a member
+    /// pays for this: the others return at the first check.
+    fn complex_alternatives_hold(
+        &self,
+        tag: &str,
+        classes: &[String],
+        id: Option<&String>,
+        attributes: Option<&HashMap<String, String>>,
+        chain: &[Ancestor],
+    ) -> bool {
+        if self.any_of.iter().all(|alts| !alts.undecidable()) {
+            return true;
+        }
+        let synthesized;
+        let attributes = match attributes {
+            Some(attributes) => attributes,
+            None => {
+                synthesized = key_attributes(classes, id);
+                &synthesized
+            }
+        };
+        self.any_of.iter().filter(|alts| alts.undecidable()).all(|alts| {
+            alts.compounds.iter().any(|a| a.matches(tag, classes, id))
+                || alts.complex.iter().any(|p| {
+                    SelectorMatcher.selector_matches_prepared(p, tag, attributes, chain, &[], SiblingContext::SOLE)
+                })
+        })
     }
 
     fn matches(&self, tag_name: &str, classes: &[String], id: Option<&String>) -> bool {
@@ -34241,7 +34340,7 @@ impl AncestorCompound {
             && self
                 .any_of
                 .iter()
-                .all(|alts| alts.iter().any(|a| a.matches(tag_name, classes, id)))
+                .all(|alts| alts.undecidable() || alts.compounds.iter().any(|a| a.matches(tag_name, classes, id)))
             && self.has.iter().all(|a| relational_has(a))
     }
 
@@ -34264,6 +34363,53 @@ impl AncestorCompound {
                 StatePseudo::Enabled => state.control && !state.disabled,
             })
     }
+}
+
+/// One `:is()`/`:where()` of a compound left of a combinator: some
+/// alternative must match the ancestor or earlier sibling.
+#[derive(Default)]
+struct AnyOf {
+    /// The compound members, decided from the key tuple.
+    compounds: Vec<AncestorCompound>,
+    /// The members with a combinator, prepared like a rule's selector and
+    /// matched with the ancestor or sibling as subject against its chain
+    /// (`AncestorCompound::complex_alternatives_hold`). Tailwind v4's
+    /// `.dark\:divide-x:is(.dark *) > :not(:last-child)` puts one left of
+    /// a child combinator.
+    complex: Vec<Rc<PreparedSelector>>,
+}
+
+impl AnyOf {
+    /// Not decidable from the key tuple alone: some member needs the chain.
+    /// Where only the tuple is known the `:is()` is taken as matching.
+    fn undecidable(&self) -> bool {
+        !self.complex.is_empty()
+    }
+}
+
+/// The attribute map an ancestor or earlier sibling known by its key tuple
+/// stands for: its classes and id, with the hover and active marks back as
+/// the attributes the subject matcher reads.
+fn key_attributes(classes: &[String], id: Option<&String>) -> HashMap<String, String> {
+    let mut attributes = HashMap::new();
+    let mut class = String::new();
+    for c in classes {
+        if c == HOVER_MARK || c == ACTIVE_MARK {
+            attributes.insert(c.clone(), String::new());
+            continue;
+        }
+        if !class.is_empty() {
+            class.push(' ');
+        }
+        class.push_str(c);
+    }
+    if !class.is_empty() {
+        attributes.insert("class".to_string(), class);
+    }
+    if let Some(id) = id {
+        attributes.insert("id".to_string(), id.clone());
+    }
+    attributes
 }
 
 /// One selector-list member's subject requirements; `None` fields are
@@ -35299,8 +35445,13 @@ impl SelectorReads {
             }
             self.ancestor_attributes.insert(name);
         }
-        for inner in compound.any_of.iter().flatten().chain(&compound.none_of) {
+        for inner in compound.any_of.iter().flat_map(|alts| &alts.compounds).chain(&compound.none_of) {
             self.note_ancestor(inner);
+        }
+        // A complex `:is()` member is matched against the ancestor's chain
+        // like a rule; what it reads, a rule would.
+        for prepared in compound.any_of.iter().flat_map(|alts| &alts.complex) {
+            self.note(prepared);
         }
     }
 
@@ -35367,8 +35518,13 @@ impl SelectorReads {
                     positional |= !Self::pseudo_reads_only_the_element(name);
                 }
                 SubjectPart::List { members, .. } => {
-                    for member in members.iter().flatten() {
-                        positional |= self.note_subject(member);
+                    for member in members {
+                        positional |= match member {
+                            ListMember::Compound(m) => self.note_subject(m),
+                            // With the element as subject, against its
+                            // own chain and siblings: what a rule reads.
+                            ListMember::Complex(p) => self.note(p),
+                        };
                     }
                 }
             }
