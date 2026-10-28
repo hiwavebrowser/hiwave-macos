@@ -30963,6 +30963,43 @@ mod rule_prefilter_tests {
         assert!(ancestor_filter_admits(&chain, &[ancestor_key_hash(b'<', "SECTION")]));
     }
 
+    // What a complex `:is()` member reads of the ancestor it takes as its
+    // subject (`AncestorCompound::complex_alternatives_hold`): the key tuple
+    // decides tag, classes, id and the member's own combinators; what the
+    // tuple does not carry reads as absent, not as permissive.
+    #[test]
+    fn a_complex_is_member_reads_its_subject_from_the_key_tuple() {
+        let chain = vec![
+            ancestor("div", &["card", "wide"], None),
+            ancestor("section", &["sec"], Some("s1")),
+            ancestor("main", &["page"], Some("app")),
+        ];
+        let t = attrs(&[("class", "t")]);
+        let run = |s: &str| SelectorMatcher.selector_matches(s, "p", &t, &chain, &[], SiblingContext::SOLE);
+        // Decided from the tuple and the chain.
+        assert!(run(":is(.sec div.card) .t"));
+        assert!(run(":is(#app > .sec > .card) .t"));
+        assert!(run(":is(main#app .card.wide) .t"));
+        assert!(!run(":is(.sec .nope) .t"));
+        assert!(!run(":is(.sec > .page) .t"));
+        assert!(!run(":is(.sec .card:hover) .t"));
+        // False where the tuple carries nothing: attributes beyond class
+        // and id, earlier siblings, a position past the first.
+        assert!(!run(":is(.sec [data-x]) .t"));
+        assert!(!run(":is(.sec .x + .card) .t"));
+        assert!(!run(":is(.sec .x ~ .card) .t"));
+        assert!(!run(":is(.sec .card:nth-child(2)) .t"));
+        assert!(!run(":is(.sec .card:nth-last-child(2)) .t"));
+        // True: the stand-in is a sole child whose attributes are its
+        // class and id.
+        assert!(run(":is(.sec [class~=card]) .t"));
+        assert!(run(":is(.sec :not([data-x])) .t"));
+        assert!(run(":is(.sec .card:first-child) .t"));
+        assert!(run(":is(.sec .card:last-child) .t"));
+        assert!(run(":is(.sec .card:only-child) .t"));
+        assert!(run(":is(.sec .card:nth-child(1)) .t"));
+    }
+
     #[test]
     fn a_selector_list_holds_its_members_prepared() {
         // github's comma lists: each member used to be matched by string,
@@ -34300,11 +34337,29 @@ impl AncestorCompound {
     /// Every `:is()` with a complex member holds for the element known by
     /// `tag`, `classes` and `id` (and `attributes` where carried), whose
     /// ancestors are `chain`: some compound member matches it, or some
-    /// complex member does with it as subject. The element's attributes,
-    /// where not carried, are its classes and id; its place among its
-    /// siblings is not carried and reads as an only child (permissive, as
-    /// the rest of the ancestor path). Only a compound with such a member
-    /// pays for this: the others return at the first check.
+    /// complex member does with it as subject. A complex member is NOT
+    /// permissive the way the rest of the ancestor path is: it runs the
+    /// full subject matcher over a stand-in for the element, so what the
+    /// stand-in lacks reads as absent, not as "could be". With the element
+    /// as the member's subject:
+    /// - decided: its tag, classes and id; `:hover`/`:active` (the marks
+    ///   ride in `classes` and come back as the attributes `key_attributes`
+    ///   builds); `:has()` (against the DOM element the walk named in
+    ///   `RELATIONAL_NODE`); the member's own combinators, against `chain`;
+    ///   and, where the element carries its attributes, every attribute
+    ///   selector;
+    /// - read as false (under-match): where attributes are not carried, any
+    ///   attribute selector other than `[class]`/`[id]` (the synthesized map
+    ///   holds only those and the marks), and form state (`:checked`);
+    ///   `+`/`~` to the subject (no earlier siblings are carried, so the
+    ///   sibling walk finds none); `:nth-child(n)`/`:nth-last-child(n)` and
+    ///   the `-of-type` forms for any n other than 1;
+    /// - read as true: `:first-child`, `:last-child`, `:only-child`,
+    ///   `:nth-child(1)`, their `-of-type` forms and `:empty` (the stand-in
+    ///   is `SiblingContext::SOLE`: an only child with no children), and
+    ///   `:not([attr])` where attributes are not carried.
+    /// Only a compound with such a member pays for this: the others return
+    /// at the first check.
     fn complex_alternatives_hold(
         &self,
         tag: &str,
