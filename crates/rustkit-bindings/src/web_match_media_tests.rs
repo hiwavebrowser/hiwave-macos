@@ -187,16 +187,72 @@ fn onchange_handler_and_legacy_add_listener_hear_change() {
     .unwrap();
     assert_eq!(ev(&b, "[String(a.onchange), o.onchange === null, typeof o.onchange].join()"), "null,false,function");
     // `addListener` registers the same listener as `addEventListener('change')`:
-    // once. Four lists are in the document's list of media query lists (`gone`
-    // stays there with nobody listening, as in the spec); `untouched` never was.
-    assert_eq!(resize(&b, 500.0, 800.0), 4);
+    // once. Three lists hear the report; `gone`, with nobody listening, is
+    // dropped from the document's list at this report (Chrome collects such
+    // lists too); `untouched` never was in it.
+    assert_eq!(resize(&b, 500.0, 800.0), 3);
     assert_eq!(ev(&b, "seen.join('|')"), "legacy:true:(max-width: 599px)|onchange:false|both:false");
     assert_eq!(ev(&b, "[a.matches, o.matches, both.matches, gone.matches, untouched.matches].join()"), "true,false,false,false,false");
 
-    // Removing the legacy listener silences it; `onchange = null` too.
+    // Removing the legacy listener silences it; `onchange = null` too. Both
+    // lists are dropped at this report: only `both` hears it.
     b.evaluate("a.removeListener(la); o.onchange = null;").unwrap();
-    assert_eq!(resize(&b, 1280.0, 800.0), 4);
+    assert_eq!(resize(&b, 1280.0, 800.0), 1);
     assert_eq!(ev(&b, "seen.slice(3).join('|')"), "both:true");
+}
+
+/// A list whose only listener was removed leaves the document's list of
+/// media query lists at the next report (#818 R1 M2: React's useMediaQuery
+/// churns listeners on a long-lived page, and a list nothing can hear has
+/// no reason to stay; Chrome collects such lists too). One that listens
+/// again joins afresh and compares from then.
+#[test]
+fn a_list_whose_only_listener_was_removed_is_dropped_at_the_next_report() {
+    let b = bound(1280.0, 800.0);
+    b.evaluate(
+        "var n = 0; var q = matchMedia('(min-width: 600px)'); \
+         function f() { n++; } q.addEventListener('change', f); \
+         var o = matchMedia('(min-width: 600px)'); o.onchange = function () { n++; }; \
+         var once = matchMedia('(min-width: 600px)'); \
+         once.addEventListener('change', function () { n++; }, { once: true });",
+    )
+    .unwrap();
+    // All three are live and hear the flip.
+    assert_eq!(resize(&b, 500.0, 800.0), 3);
+    assert_eq!(ev(&b, "n"), "3");
+
+    // `q` lost its only listener, `o` its handler, `once` fired its listener
+    // once: the next report drops all three, and none counts as hearing it.
+    b.evaluate("q.removeEventListener('change', f); o.onchange = null;").unwrap();
+    assert_eq!(resize(&b, 1280.0, 800.0), 0);
+    assert_eq!(ev(&b, "n"), "3");
+    // Dropped: a flip while nothing listens is not reported later either.
+    assert_eq!(resize(&b, 500.0, 800.0), 0);
+
+    // Listening again joins the list afresh: no flip since then, nothing to
+    // report; the next flip is heard.
+    b.evaluate("q.addEventListener('change', f);").unwrap();
+    assert_eq!(resize(&b, 400.0, 800.0), 0);
+    assert_eq!(ev(&b, "n"), "3");
+    assert_eq!(resize(&b, 1024.0, 800.0), 1);
+    assert_eq!(ev(&b, "[n, q.matches].join()"), "4,true");
+    assert!(b.take_reported_errors().is_empty());
+}
+
+/// A non-ASCII char in a range query reached a byte-stepping walk in the
+/// serializer (#818 R1 H1): `matchMedia('(ü>1)')` panicked the host closure.
+/// The query is invalid, `not all` and false, and never throws.
+#[test]
+fn a_non_ascii_range_query_is_not_all_and_never_throws() {
+    let b = bound(1280.0, 800.0);
+    assert_eq!(ev(&b, "var q = matchMedia('(ü>1)'); [q.media, q.matches].join()"), "not all,false");
+    assert_eq!(ev(&b, "var q = matchMedia('(width > 600pxé)'); [q.media, q.matches].join()"), "not all,false");
+    assert_eq!(ev(&b, "matchMedia('screen, (ü > 1)').media"), "screen, not all");
+    assert_eq!(ev(&b, "var q = matchMedia('(width > 600px)'); [q.media, q.matches].join()"), "(width > 600px),true");
+    // A listener on it is accepted and never fires.
+    assert_eq!(ev(&b, "var n = 0; var q = matchMedia('(ü>1)'); q.onchange = function () { n++; }; n"), "0");
+    assert_eq!(resize(&b, 300.0, 300.0), 0);
+    assert_eq!(ev(&b, "[n, q.matches, q.media].join()"), "0,false,not all");
 }
 
 #[test]

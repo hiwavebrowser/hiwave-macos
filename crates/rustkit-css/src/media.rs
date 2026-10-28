@@ -206,23 +206,30 @@ fn serialize_in_parens(inner: &str) -> Option<String> {
         return Some(format!("({})", serialize_condition(&toks, false)?));
     }
     if inner.contains(['<', '>']) || (inner.contains('=') && !inner.contains(':')) {
-        // Range syntax: one space around each comparison operator.
+        // Range syntax. Its operands are feature names, numbers, dimensions,
+        // ratios and math functions, all ASCII: a non-ASCII char anywhere
+        // makes the feature invalid (Chrome 148: `(ü > 1)` and
+        // `(width > 600pxé)` are both `not all`). Page text, so the walk
+        // below steps by char, never by byte.
+        if !inner.is_ascii() {
+            return None;
+        }
+        // One space around each comparison operator.
         let mut spaced = String::new();
-        let bytes = inner.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let op = ["<=", ">=", "<", ">", "="].iter().find(|op| inner[i..].starts_with(*op));
-            match op {
+        let mut skip = 0;
+        for (i, c) in inner.char_indices() {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            match ["<=", ">=", "<", ">", "="].iter().find(|op| inner[i..].starts_with(*op)) {
                 Some(op) => {
                     spaced.push(' ');
                     spaced.push_str(op);
                     spaced.push(' ');
-                    i += op.len();
+                    skip = op.len() - 1;
                 }
-                None => {
-                    spaced.push(bytes[i] as char);
-                    i += 1;
-                }
+                None => spaced.push(c),
             }
         }
         let spaced = collapse_whitespace(&spaced);
@@ -1402,5 +1409,27 @@ mod tests {
         assert!(m(&ser("(MIN-WIDTH:600PX)"), w, h));
         assert!(!m(&ser("(min-width: 1281px)"), w, h));
         assert!(m(&ser(""), w, h));
+    }
+
+    /// A non-ASCII char in a range feature is page text the serializer must
+    /// walk by char: #818 R1 H1 stepped it by byte and panicked on `(ü > 1)`
+    /// ("byte index 1 is not a char boundary"), a page-controlled panic
+    /// through `window.matchMedia`. Such a feature is invalid (`not all`, as
+    /// Chrome 148 answers), and a valid range still serializes as before.
+    #[test]
+    fn range_serialization_is_utf8_safe() {
+        use super::media_query_list_serialize as ser;
+        assert_eq!(ser("(ü > 1)"), "not all");
+        assert_eq!(ser("(ü>1)"), "not all");
+        assert_eq!(ser("(width > 600pxé)"), "not all");
+        assert_eq!(ser("(é <= width <= ü)"), "not all");
+        assert_eq!(ser("(width = ü)"), "not all");
+        assert_eq!(ser("screen, (ü > 1)"), "screen, not all");
+        assert_eq!(ser("(width > 600px)"), "(width > 600px)");
+        assert_eq!(ser("(width>600px)"), "(width > 600px)");
+        assert_eq!(ser("(400px <= width < 700px)"), "(400px <= width < 700px)");
+        assert_eq!(ser("(aspect-ratio >= 16/9)"), "(aspect-ratio >= 16/9)");
+        assert!(!m(&ser("(ü > 1)"), 1280.0, 800.0));
+        assert!(m(&ser("(width > 600px)"), 1280.0, 800.0));
     }
 }

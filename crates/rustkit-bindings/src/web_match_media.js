@@ -10,10 +10,16 @@
 // hears about it. `change` fires from `__rustkit_media_changes()`, which
 // the engine runs after the `resize` event (the "evaluate media queries and
 // report changes" step of update the rendering, HTML §8.1.7.3), for every
-// list whose answer flipped since it was last reported. A list is kept in
-// the document's list of media query lists once it has a `change` listener
+// list whose answer flipped since it was last reported. A list joins the
+// document's list of media query lists when it gets a `change` listener
 // or an `onchange` handler; the comparison starts at the answer it had
-// then.
+// then. The report drops a list that no longer has either (its listeners
+// removed or `once`, `onchange` set back to null): nothing could hear it,
+// and Chrome collects such lists too (CSSOM View §4.2 keeps them only
+// while reachable), so a page that churns listeners (React's
+// useMediaQuery on a long-lived SPA) does not grow the list for the life
+// of the document. A list that listens again joins afresh, comparing
+// from then.
 //
 // `media` is the serialized query: lowercased, whitespace normalized, an
 // invalid query `not all` (and never a throw).
@@ -25,9 +31,11 @@
     try { delete g.__rustkit_media_serialize; delete g.__rustkit_media_matches; } catch (_) {}
 
     var proto = MediaQueryList.prototype;
+    // The DOM install's listener registry (`hasListener(target, type)`).
+    var HOOKS = g.__rkDomHooks || {};
     // MediaQueryList -> { media, w, h, matches, reported, onchange }
     var STATE = new WeakMap();
-    // The lists that can hear `change`, in creation order.
+    // The lists that can hear `change`, in the order they started to.
     var live = [];
 
     function method(name, fn) {
@@ -106,14 +114,25 @@
         e.matches = matches;
         return e;
     }
+    // Can anything hear `change` from this list right now?
+    function heard(mql, s) {
+        if (s.onchange !== null) return true;
+        return typeof HOOKS.hasListener === 'function' ? HOOKS.hasListener(mql, 'change') : true;
+    }
     // Report the lists whose answer flipped since it was last reported;
-    // answers how many heard `change`. Listener exceptions go to the
+    // answers how many heard `change`. A list nothing can hear any more is
+    // dropped instead (see the header). Listener exceptions go to the
     // engine's error log through dispatchEvent, as any listener's do.
     g.__rustkit_media_changes = function () {
         var lists = live.slice(), fired = 0;
         for (var i = 0; i < lists.length; i++) {
             var mql = lists[i], s = STATE.get(mql);
             if (!s) continue;
+            if (!heard(mql, s)) {
+                var at = live.indexOf(mql);
+                if (at >= 0) live.splice(at, 1);
+                continue;
+            }
             var now = current(s);
             if (now === s.reported) continue;
             s.reported = now;
