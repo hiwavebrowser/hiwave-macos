@@ -7829,7 +7829,7 @@ impl Engine {
         // answer from this layout, measured on the first read.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout, root_element_id(view));
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -8128,7 +8128,7 @@ impl Engine {
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout, root_element_id(view));
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -8677,10 +8677,11 @@ impl layout_ctx::LayoutCtx {
         external_stylesheets: &[Stylesheet],
         javascript_enabled: bool,
     ) -> LayoutBox {
-        // A full build replaces the styles of boxless elements (`display:
-        // contents`, the root). A restyle keeps the ones it does not walk.
+        // A full build replaces the view's styles of boxless elements
+        // (`display: contents`, the root). A restyle keeps the ones it does
+        // not walk.
         if RESTYLE_BUILD.with(|build| build.borrow().is_none()) {
-            clear_boxless_styles();
+            self.with_building_lay(|lay| lay.boxless_styles.borrow_mut().clear());
         }
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
@@ -8888,7 +8889,7 @@ impl layout_ctx::LayoutCtx {
         if let (Some(html), Some(style)) = (document.document_element(), html_style.as_ref()) {
             let mut root = LayoutBox::new(BoxType::Block, style.clone());
             root.node_id = Some(html.id.raw());
-            note_boxless_style(&root);
+            self.note_boxless_style(&root);
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
@@ -10291,7 +10292,7 @@ impl layout_ctx::LayoutCtx {
                     // is still noted: the element is styled, only unboxed.
                     let shown = !closed_details || details_summary == Some(child_index);
                     if child_box.style.display == rustkit_css::Display::Contents {
-                        note_boxless_style(&child_box);
+                        self.note_boxless_style(&child_box);
                         if !shown {
                             continue;
                         }
@@ -18427,10 +18428,11 @@ impl Engine {
             // on the first read that needs them, as `publish_geometry` does:
             // a scrollTo after the write needs only `max_scroll`.
             let snapshot_of = built.clone();
+            let styled = lay.clone();
             Some(rustkit_bindings::ForcedGeometry {
                 source: Box::new(move || {
                     let _snapshot_time = time_stage(Stage::Snapshot);
-                    geometry_with_root(&snapshot_of, root_element)
+                    geometry_with_root(&snapshot_of, root_element, &styled.boxless_styles.borrow())
                 }),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
                 max_scroll,
@@ -18466,7 +18468,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             if let Some(layout) = view.layout.as_ref() {
-                publish_geometry(bindings, layout, root_element_id(view));
+                publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
@@ -21464,7 +21466,14 @@ fn first_named_box_id(layout: &LayoutBox) -> Option<usize> {
 ///
 /// `root_element` is the document element's raw NodeId. It has no box of its
 /// own: the layout's anonymous root stands in for it, and reports as it.
-fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element: Option<usize>) {
+/// `lay` is the view's: its `boxless_styles` are read when the snapshot is
+/// built, so the read sees this view's map however many views built since.
+fn publish_geometry(
+    bindings: &DomBindings,
+    layout: &Rc<LayoutBox>,
+    root_element: Option<usize>,
+    lay: Rc<layout_ctx::ViewLayout>,
+) {
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade())));
@@ -21474,7 +21483,7 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element
         };
         let _snapshot_time = time_stage(Stage::Snapshot);
         let started = std::time::Instant::now();
-        let snapshot = geometry_with_root(&layout, root_element);
+        let snapshot = geometry_with_root(&layout, root_element, &lay.boxless_styles.borrow());
         debug!(
             elements = snapshot.0.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -21500,40 +21509,40 @@ fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> ru
     })
 }
 
-/// `geometry_snapshot`, with the document element reported as the root box.
+/// `geometry_snapshot`, with the document element reported as the root box
+/// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
+/// display: contents, the root) added. A node that also produced a box
+/// keeps that box's style.
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
+    boxless: &HashMap<usize, String>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
     }
+    for (node, lines) in boxless {
+        snapshot.1.entry(*node).or_insert_with(|| lines.clone());
+    }
     snapshot
 }
 
-/// Computed style lines (`computed_style_lines`) of elements that have no
-/// layout box: `display: contents` (hoisted out of the tree) and the root,
-/// which is styled but not walked. Keyed by DOM node.
-thread_local! {
-    static BOXLESS_STYLES: std::cell::RefCell<HashMap<usize, String>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-fn clear_boxless_styles() {
-    BOXLESS_STYLES.with(|slot| slot.borrow_mut().clear());
-}
-
-/// Remember `box_`'s computed style for an element the box tree will not
-/// keep. A later real box for the same node wins in `geometry_snapshot`.
-fn note_boxless_style(box_: &LayoutBox) {
-    let Some(node) = box_.node_id else {
-        return;
-    };
-    let lines = computed_style_lines(box_);
-    BOXLESS_STYLES.with(|slot| {
-        slot.borrow_mut().insert(node, lines);
-    });
+impl layout_ctx::LayoutCtx {
+    /// Remember `box_`'s computed style for an element the box tree will
+    /// not keep (`display: contents`, the root), in the map of the view
+    /// being built (`ViewLayout::boxless_styles`). A later real box for the
+    /// same node wins in `geometry_with_root`. An ad-hoc build with no view
+    /// has no script to read it, and notes nothing.
+    fn note_boxless_style(&self, box_: &LayoutBox) {
+        let Some(node) = box_.node_id else {
+            return;
+        };
+        self.with_building_lay(|lay| {
+            let lines = computed_style_lines(box_);
+            lay.boxless_styles.borrow_mut().insert(node, lines);
+        });
+    }
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -21620,13 +21629,6 @@ fn geometry_snapshot(
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
     walk(root, &mut out, &mut styles);
-    // Boxless elements (display: contents, the root) have a computed style
-    // and no geometry. A node that also produced a box keeps that box's style.
-    BOXLESS_STYLES.with(|slot| {
-        for (node, lines) in slot.borrow().iter() {
-            styles.entry(*node).or_insert_with(|| lines.clone());
-        }
-    });
     (out, styles)
 }
 
