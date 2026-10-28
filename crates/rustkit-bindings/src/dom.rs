@@ -3456,6 +3456,12 @@ const WRAPPERS_JS: &str = r#"
         return inlineHandler(t, type);
     }
     function attributeChanged(t, name) {
+        // The native setAttr/removeAttr lowercases the name for HTML elements
+        // (`OnClick` is the `onclick` attribute), so compare the lowercased
+        // name here too. Lowercasing unconditionally is fine: SVG's on<type>
+        // attributes are lowercase already, so a case-sensitive SVG name
+        // either is lowercase or names no handler attribute at all.
+        name = String(name).toLowerCase();
         if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
             var a = ASSIGNED.get(t);
             if (a) delete a[name.slice(2)];

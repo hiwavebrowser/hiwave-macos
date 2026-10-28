@@ -4178,6 +4178,29 @@ mod tests {
         );
     }
 
+    // R1 L1: the native setAttr lowercases the name for HTML elements, so a
+    // mixed-case `OnClick` is the `onclick` content attribute and must drop
+    // the assigned handler just as the lowercase spelling does.
+    #[test]
+    fn a_mixed_case_on_attribute_drops_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 window.__hit = 0; window.__f = 0; \
+                 function f() { window.__f++; } \
+                 i.onclick = f; \
+                 i.setAttribute('OnClick', 'window.__hit=(window.__hit||0)+1'); \
+                 i.click(); \
+                 log.push(window.__f, window.__hit, i.onclick === f, typeof i.onclick, \
+                          i.getAttribute('onclick') === 'window.__hit=(window.__hit||0)+1'); \
+                 log.join(',')"
+            ),
+            "0,1,false,function,true"
+        );
+    }
+
     // A page's script-retry shim wraps the native accessor: it takes
     // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
     // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own. The
