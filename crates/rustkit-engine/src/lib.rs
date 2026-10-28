@@ -10269,7 +10269,7 @@ impl layout_ctx::LayoutCtx {
                     // A culled inline (only in-flow block children, no line
                     // box of its own) becomes a block box before the include
                     // test, so those children are not discarded with it.
-                    Self::rebox_culled_inline(&mut child_box);
+                    Engine::rebox_culled_inline(&mut child_box);
 
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
