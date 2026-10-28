@@ -882,6 +882,21 @@ mod tests {
         assert_eq!(main.text_content(), "Hello, world!");
     }
 
+    /// HTML §3.1.3 "the body element": the first child of the html element
+    /// that is a body OR a frameset element. A frameset document's body
+    /// element is its frameset.
+    #[test]
+    fn body_of_a_frameset_document_is_the_frameset() {
+        let doc = Document::parse_html(
+            "<!DOCTYPE html><html><head><title>f</title></head><frameset cols='*'><frame src='a'></frameset></html>",
+        )
+        .unwrap();
+        let body = doc.body().expect("a frameset document's body element is its frameset");
+        assert_eq!(body.tag_name(), Some("frameset"));
+        assert_eq!(body.parent().and_then(|p| p.tag_name().map(str::to_string)), Some("html".to_string()));
+        assert_eq!(doc.head().map(|h| h.tag_name() == Some("head")), Some(true));
+    }
+
     #[test]
     fn test_get_elements_by_tag_name_document_order() {
         // Regression: HashMap-backed lookup returned styles in random order

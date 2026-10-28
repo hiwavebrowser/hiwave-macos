@@ -4379,30 +4379,68 @@ mod tests {
         );
     }
 
-    // A body element that is not the document's body element (detached, or
-    // in another document) does not reach the Window: its handlers are the
-    // element's own, as for any element.
+    // HTML §8.1.8.1 "determine the target of an event handler": a body or
+    // frameset element's handler for a Window type is the Window's whenever
+    // the element's node document is the active document, attached or not
+    // (a `createElement('body')` forwards). One whose node document is
+    // another document (a DOMParser body: no Window) has no target: the
+    // getter answers null and assignment does nothing. A `load` dispatched
+    // at a body runs nothing at the body itself: the handler is the Window's.
     #[test]
-    fn a_body_that_is_not_the_body_element_does_not_forward() {
+    fn any_body_of_the_active_document_forwards_and_another_documents_body_has_no_target() {
         let b = bound(INLINE);
         assert_eq!(
             eval_string(
                 &b,
                 "var log = [], d = document.createElement('body'); \
-                 function f() {} \
+                 function f() { window.__ran = (window.__ran || 0) + 1; } \
                  d.onload = f; \
-                 log.push(d.onload === f, String(window.onload), String(document.body.onload)); \
-                 d.setAttribute('onresize', 'window.__r = 1'); \
-                 log.push(typeof d.onresize, String(window.onresize)); \
-                 d.onhashchange = f; log.push(d.onhashchange === f, String(window.onhashchange)); \
+                 log.push(d.onload === f, window.onload === f, document.body.onload === f); \
+                 d.onhashchange = f; log.push(window.onhashchange === f); \
+                 d.onload = null; log.push(String(window.onload), String(d.onload)); \
+                 window.onload = f; log.push(d.onload === f); \
+                 d.dispatchEvent(new Event('load')); log.push(String(window.__ran)); \
                  var p = new DOMParser().parseFromString('<body onload=\"window.__p = 1\"></body>', 'text/html'); \
-                 log.push(typeof p.body.onload, String(window.onload)); \
+                 log.push(p.body.ownerDocument === p, String(p.body.onload)); \
+                 p.body.onload = function () { window.__q = 1; }; \
+                 log.push(String(p.body.onload), window.onload === f); \
+                 p.body.dispatchEvent(new Event('load')); \
                  log.join(',')"
             ),
-            "true,null,null,function,null,true,null,function,null"
+            "true,true,true,true,null,null,true,undefined,true,null,null,true"
         );
         b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
-        assert_eq!(eval_string(&b, "[String(window.__r), String(window.__p)].join(',')"), "undefined,undefined");
+        assert_eq!(
+            eval_string(&b, "[String(window.__ran), String(window.__p), String(window.__q)].join(',')"),
+            "1,undefined,undefined"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // HTML §3.1.3: a frameset document's body element is its frameset, so
+    // `<frameset onload>` is the Window's `load` handler as `<body onload>`
+    // is, and `frameset.onload` reads the Window's slot. `onpagereveal` and
+    // `onpageswap` are WindowEventHandlers members too (§8.1.8.2.1).
+    #[test]
+    fn a_frameset_onload_attribute_is_the_windows_load_handler() {
+        let b = bound(
+            "<html><head></head><frameset cols='*' onload=\"window.__f = 1\"><frame src='a'></frameset></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var fs = document.body, log = [fs && fs.localName]; \
+                 log.push(typeof window.onload, fs.onload === window.onload, String(window.__f)); \
+                 log.push(Object.prototype.hasOwnProperty.call(HTMLFrameSetElement.prototype, 'onpagereveal'), \
+                          Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onpageswap'), \
+                          Object.prototype.hasOwnProperty.call(window, 'onpagereveal')); \
+                 log.join(',')"
+            ),
+            "frameset,function,true,undefined,true,true,true"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "String(window.__f)"), "1");
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
     }
 
     const ROW: &str =
