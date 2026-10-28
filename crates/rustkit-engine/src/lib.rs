@@ -392,6 +392,8 @@ mod flex_abspos_static_position_tests;
 #[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
+mod positioned_paint_order_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
