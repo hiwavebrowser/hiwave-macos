@@ -43,18 +43,54 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
     return e.id + ':' + Math.round(r.left) + ':' + Math.round(r.top) + ':' + Math.round(r.width) + ':' + Math.round(r.height);\
     }).join(' ')";
 
-#[test]
-#[cfg(all(target_os = "macos", feature = "headless"))]
-fn an_abspos_flex_child_is_placed_as_the_sole_flex_item() {
+/// Overflow on either axis: the alignment is unsafe, so a box larger than
+/// the content box overflows on the start side (centre: both sides), with
+/// `row-reverse` and `wrap-reverse` flipping the start edge.
+const OVERFLOW_PAGE: &str = r#"<!doctype html>
+<html><head><style>
+body { margin: 0 }
+.r { position: relative; display: flex; width: 200px; height: 100px; padding: 10px; margin-bottom: 20px }
+.w { position: absolute; width: 400px; height: 40px }
+.t { position: absolute; width: 40px; height: 300px }
+</style></head><body>
+<div class="r" style="justify-content: center"><div class="w" id="m1"></div></div>
+<div class="r" style="justify-content: flex-end"><div class="w" id="m2"></div></div>
+<div class="r" style="align-items: center"><div class="t" id="c1"></div></div>
+<div class="r" style="align-items: flex-end"><div class="t" id="c2"></div></div>
+<div class="r" style="flex-direction: column; justify-content: flex-end"><div class="t" id="c3"></div></div>
+<div class="r" style="flex-direction: row-reverse"><div class="w" id="m3"></div></div>
+<div class="r" style="flex-wrap: wrap-reverse"><div class="t" id="c4"></div></div>
+</body></html>"#;
+
+const OVERFLOW_CHROME: &str = "m1:-90:10:400:40 m2:-190:150:400:40 c1:10:190:40:300 c2:10:230:40:300 \
+    c3:10:370:40:300 m3:-190:710:400:40 c4:10:650:40:300";
+
+fn boxes(html: &str) -> String {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let id = engine
         .create_headless_view(Bounds::new(0, 0, 1280, 800))
         .expect("headless view");
-    engine.load_html(id, PAGE).expect("load_html");
+    engine.load_html(id, html).expect("load_html");
     let value = engine.execute_script(id, BOXES).expect("script");
-    let got = value
+    value
         .strip_prefix("String(\"")
         .and_then(|v| v.strip_suffix("\")"))
-        .unwrap_or(&value);
-    assert_eq!(got, CHROME.split_whitespace().collect::<Vec<_>>().join(" "));
+        .unwrap_or(&value)
+        .to_string()
+}
+
+fn chrome(row: &str) -> String {
+    row.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn an_abspos_flex_child_is_placed_as_the_sole_flex_item() {
+    assert_eq!(boxes(PAGE), chrome(CHROME));
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn an_abspos_flex_child_larger_than_the_content_box_overflows_like_chrome() {
+    assert_eq!(boxes(OVERFLOW_PAGE), chrome(OVERFLOW_CHROME));
 }
