@@ -388,6 +388,8 @@ mod html_element_ancestor_tests;
 #[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
+mod computed_content_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
@@ -427,6 +429,8 @@ mod script_nav_image_wait_tests;
 mod post_onload_requests_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_action_url_tests;
+#[cfg(test)]
+mod form_empty_submit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -21623,11 +21627,38 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
         ("white-space", css_keyword(&format!("{:?}", s.white_space))),
         ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+        // A string in double quotes, `"` and `\` escaped; `normal` with no
+        // string (Chrome 148 reads `none` on an element as `normal` too).
+        // netflix's form picks its layout from it.
+        ("content", match &s.content {
+            Some(text) => css_string(text),
+            None => "normal".to_string(),
+        }),
     ];
     rows.into_iter()
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
+/// escaped, and a control character (a `\a` line break resolved by the
+/// parser, say) as `\<hex> ` so the value stays on one row of the
+/// tab-separated lines script reads.
+fn css_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push('\u{FFFD}'),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => out.push_str(&format!("\\{:x} ", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.
@@ -42439,13 +42470,22 @@ mod clip_path_pins {
                 r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
             ))
         };
-        let cases: [(&str, &str, &str, Option<&str>); 5] = [
+        let cases: [(&str, &str, &str, Option<&str>); 9] = [
             ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
             ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
             ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
             ("-webkit-clip-path:inset(20px round 10px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 10.0, v: 10.0 }")),
             // closest-side from (90, 90) in the content box is 30px.
             ("clip-path:circle(closest-side at 70px 70px) content-box", "PushClipRounded", "x: 60.0, y: 60.0, width: 60.0, height: 60.0", Some("CornerRadius { h: 30.0, v: 30.0 }")),
+            // padding-box reference: 20px border shrinks the box to 100×100 at (20,20);
+            // inset(10px 20px) → top/bottom 10, left/right 20 → 60×80 at (40,30).
+            ("clip-path:inset(10px 20px) padding-box", "PushClip(", "x: 40.0, y: 30.0, width: 60.0, height: 80.0", None),
+            // margin-box with zero margin equals the border box; 4-value inset.
+            ("clip-path:inset(10px 20px 30px 40px) margin-box", "PushClip(", "x: 40.0, y: 10.0, width: 80.0, height: 100.0", None),
+            // farthest-side from (70, 70) in the 100×100 content box is max(70,30)=70 → 140×140 at (20,20).
+            ("clip-path:circle(farthest-side at 70px 70px) content-box", "PushClipRounded", "x: 20.0, y: 20.0, width: 140.0, height: 140.0", Some("CornerRadius { h: 70.0, v: 70.0 }")),
+            // `round` with `/` vertical radii: 8px horizontal, 4px vertical.
+            ("clip-path:inset(20px round 8px / 4px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 8.0, v: 4.0 }")),
         ];
         for (style, kind, rect, corner) in cases {
             let lines = page(style, "");
