@@ -11882,6 +11882,14 @@ impl Engine {
             "border-right-color" => style.border_right_color = parent.border_right_color,
             "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
             "border-left-color" => style.border_left_color = parent.border_left_color,
+            // apple's nav: `display: inherit` wrappers under a `contents`
+            // item. The legacy `-webkit-box` and the declared-contents flag
+            // that `@container` reads come along with the keyword.
+            "display" => {
+                style.display = parent.display;
+                style.webkit_box = parent.webkit_box;
+                style.display_contents_declared = parent.display_contents_declared;
+            }
             _ => return false,
         }
         true
