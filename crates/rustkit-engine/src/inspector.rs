@@ -1758,7 +1758,7 @@ fn data_mime(rest: &str) -> &'static str {
 /// a servlet puts the session cookie there when cookies are off. Each one
 /// runs from `;` (or `%3B`, to record less) to the end of its segment. The
 /// same rule as the diagnostics half's `report_url`.
-fn drop_path_params(path: &str) -> String {
+pub(crate) fn drop_path_params(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
     while !rest.is_empty() {

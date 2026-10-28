@@ -330,9 +330,32 @@ pub(crate) fn brief_url(url: &str) -> String {
     }
 }
 
-/// A relative string cut by hand: at `?` or `#`, at `;` only in the path,
-/// and `user:pass@` dropped after a leading `//`.
+/// The base a relative string is joined onto to learn whether the parser
+/// reads it as scheme-relative. Reserved under RFC 2606; no page has it.
+const RELATIVE_BASE: &str = "https://relative.invalid/";
+const RELATIVE_HOST: &str = "relative.invalid";
+
+/// A relative string, cut as the parser reads it joined onto a fixed base
+/// (R1 B2). When the join lands on another host, or carries userinfo, the
+/// string was scheme-relative in disguise (`\\u:pw@h/x`, `/\u:pw@h/x`,
+/// `\/u:pw@h/x`, a leading space or tab, a tab inside the slashes: with a
+/// special base the parser reads each as `user=u, password=pw, host=h`),
+/// and only `//`, the host[:port] and the path without its `;params` are
+/// printed. A string the join rejects prints no part of itself. Any other
+/// string is cut by hand, so `./`, `../` and bare specifiers stay as the
+/// page wrote them: at `?` or `#`, and without the path's `;params`
+/// (`../a;jsessionid=S/b` is `../a/b`, as on the absolute side).
 fn brief_relative(url: &str) -> String {
+    let base = url::Url::parse(RELATIVE_BASE).expect("fixed base parses");
+    let Ok(joined) = base.join(url) else {
+        return "…".to_string();
+    };
+    let host = joined.host_str().unwrap_or("");
+    if host != RELATIVE_HOST || !joined.username().is_empty() || joined.password().is_some() {
+        let port = joined.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let path = crate::inspector::drop_path_params(joined.path());
+        return cap_url(format!("//{host}{port}{path}"));
+    }
     let (slashes, rest) = url.strip_prefix("//").map_or(("", url), |rest| ("//", rest));
     // Userinfo and the authority only after `//`; `;params` only after it.
     let (host, path) = if slashes.is_empty() {
@@ -342,8 +365,8 @@ fn brief_relative(url: &str) -> String {
         let (authority, path) = rest.split_at(authority);
         (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
-    let end = path.find(['?', '#', ';']).unwrap_or(path.len());
-    cap_url(format!("{slashes}{host}{}", &path[..end]))
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    cap_url(format!("{slashes}{host}{}", crate::inspector::drop_path_params(&path[..end])))
 }
 
 /// At most 180 characters, the last one `…` when cut.
@@ -730,6 +753,63 @@ mod tests {
         assert!(!brief.contains('?'), "{brief}");
         assert!(brief == "…" || brief.starts_with("https://h;x/"), "{brief}");
         assert_eq!(brief_url("https://h/a;jsessionid=SECRET/b"), "https://h/a/b");
+    }
+
+    // T7a R1 HOLD 5685085123 (B2): a relative string is joined onto a fixed
+    // base, so a scheme-relative string in disguise is cut as the parser
+    // reads it. One test per leak row; none may print the user or password.
+
+    /// `brief_url(input)`, checked to print neither the user nor the password.
+    fn brief_without_userinfo(input: &str) -> String {
+        let brief = brief_url(input);
+        assert!(!brief.contains("SECRET"), "{input:?} printed {brief:?}");
+        assert!(!brief.contains("u:"), "{input:?} printed {brief:?}");
+        assert!(!brief.contains('@'), "{input:?} printed {brief:?}");
+        brief
+    }
+
+    #[test]
+    fn brief_relative_two_backslashes_drop_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"\\u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_slash_backslash_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"/\u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_backslash_slash_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"\/u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_leading_space_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(" //u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_leading_tab_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo("\t//u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_tab_between_the_slashes_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo("/\t/u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_scheme_relative_keeps_the_port_and_cuts_the_rest() {
+        assert_eq!(brief_without_userinfo(r"\\u:SECRET@h:8443/a;jsessionid=SECRET/b?t=SECRET#SECRET"), "//h:8443/a/b");
+    }
+
+    #[test]
+    fn brief_relative_plain_paths_stay_as_the_page_wrote_them() {
+        assert_eq!(brief_url("../a/b?x"), "../a/b");
+        assert_eq!(brief_url("/api?token=SECRET"), "/api");
+        assert_eq!(brief_url("./m.js?a=1&u=http://e.test/"), "./m.js");
+        assert_eq!(brief_url("/a;jsessionid=SECRET/b"), "/a/b");
+        assert_eq!(brief_url("m.js"), "m.js");
     }
 
     #[test]
