@@ -20,7 +20,7 @@ fn computed_content_is_the_cascaded_string_or_normal() {
             id,
             r#"<!doctype html><style>#w{content:'1'} @media (min-width: 600px){#w{content:'2'}}
                #q{content:"a\"b"} #n{content:none}</style>
-               <body><div id=w><form id=f></form></div><div id=q></div><div id=n></div><div id=d></div></body>"#,
+               <body><div id=w><form id=f>x</form></div><div id=q>x</div><div id=n>x</div><div id=d>x</div></body>"#,
         )
         .expect("load_html");
     let value = engine
