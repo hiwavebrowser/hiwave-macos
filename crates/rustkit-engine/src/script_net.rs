@@ -244,7 +244,13 @@ pub(crate) type LiveRequest = LiveFuture<(u64, NetDelivery)>;
 /// before, for bisects and the A/B.
 fn net_runtime_wanted() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| !matches!(std::env::var("HIWAVE_NET_RUNTIME").ok().as_deref(), Some("0" | "off" | "false")))
+    *ON.get_or_init(|| net_runtime_switch(std::env::var("HIWAVE_NET_RUNTIME").ok().as_deref()))
+}
+
+/// `HIWAVE_NET_RUNTIME`'s value read as the switch: off only for `0`,
+/// `off` or `false`; unset, empty and anything else are on.
+pub(crate) fn net_runtime_switch(value: Option<&str>) -> bool {
+    !matches!(value, Some("0" | "off" | "false"))
 }
 
 /// The process's network runtime (T7): one `rustkit-net` thread that runs

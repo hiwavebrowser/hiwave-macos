@@ -247,6 +247,18 @@ fn the_kill_switch_and_an_unlistened_view_keep_requests_working() {
 }
 
 #[test]
+fn the_kill_switch_is_off_only_for_its_three_words() {
+    // T7 test 9, the env half: what `HIWAVE_NET_RUNTIME` turns off.
+    use crate::script_net::net_runtime_switch;
+    for off in ["0", "off", "false"] {
+        assert!(!net_runtime_switch(Some(off)), "{off}");
+    }
+    for on in [None, Some(""), Some("1"), Some("on"), Some("OFF"), Some(" 0")] {
+        assert!(net_runtime_switch(on), "{on:?}");
+    }
+}
+
+#[test]
 fn records_written_on_the_network_runtime_carry_no_query() {
     // T7 test 7, the records half (the mirror half is with the
     // HIWAVE_CONSOLE_LOG tests).
