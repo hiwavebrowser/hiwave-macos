@@ -215,6 +215,39 @@ fn absolute_float_and_the_root_are_blockified_and_contents_is_not() {
     );
 }
 
+/// #782's `@container` work gave the declaration apply an early
+/// `display: contents` arm that only set `display_contents_declared`. Merged
+/// with this branch it shadowed the parse, and git did not flag it: every
+/// author `contents` element got a block box. Any spelling of `contents`
+/// must reach layout as `Display::Contents` and keep the flag, and a later
+/// `display` must clear both.
+#[test]
+fn the_early_contents_arm_sets_display_contents_and_the_container_flag() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0}"#,
+        r#"#a{display:contents}#b{display: CONTENTS }#c{display:contents}#c{display:block}"#,
+        r#".k{width:30px;height:10px}</style>"#,
+        r#"<body><div id="a"><div class="k" id="ka"></div></div>"#,
+        r#"<div id="b"><div class="k"></div></div><div id="c"><div class="k"></div></div></body>"#,
+    ));
+    let mut js = |s: &str| eval(&mut engine, view, s);
+    let d = |id: &str| format!("getComputedStyle(document.getElementById('{id}')).display");
+    assert_eq!(js(&d("a")), "contents");
+    assert_eq!(js(&d("b")), "contents");
+    assert_eq!(js(&d("c")), "block");
+    // No box of its own: its child is laid out in its place.
+    assert_eq!(js("document.getElementById('a').getBoundingClientRect().width"), "0");
+    assert_eq!(js("document.getElementById('ka').getBoundingClientRect().width"), "30");
+
+    let mut style = ComputedStyle::default();
+    engine.lctx.apply_style_property(&mut style, "display", "contents");
+    assert_eq!(style.display, rustkit_css::Display::Contents);
+    assert!(style.display_contents_declared);
+    engine.lctx.apply_style_property(&mut style, "display", "flex");
+    assert_eq!(style.display, rustkit_css::Display::Flex);
+    assert!(!style.display_contents_declared);
+}
+
 #[test]
 fn an_unknown_element_computes_to_inline_and_a_div_stays_block() {
     let (mut engine, view) = loaded(concat!(
