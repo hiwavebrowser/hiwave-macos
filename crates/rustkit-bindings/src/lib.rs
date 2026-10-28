@@ -4201,6 +4201,33 @@ mod tests {
         );
     }
 
+    // R1 B1: removing an absent attribute runs no attribute-change steps
+    // (DOM "remove an attribute by name" on a missing attribute is a no-op),
+    // so `removeAttribute('onclick')` with no such attribute keeps the
+    // IDL-assigned handler, as Chrome does. Removing one that IS present
+    // still deactivates it.
+    #[test]
+    fn removing_an_absent_on_attribute_keeps_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), log = []; \
+                 var b = document.createElement('button'); o.appendChild(b); \
+                 window.__f = 0; function f() { window.__f++; } \
+                 b.onclick = f; \
+                 b.removeAttribute('onclick'); log.push(b.onclick === f); \
+                 b.removeAttribute('OnClick'); log.push(b.onclick === f); \
+                 b.removeAttributeNS(null, 'onclick'); log.push(b.onclick === f); \
+                 b.click(); log.push(window.__f); \
+                 b.setAttribute('onclick', ''); b.removeAttribute('onclick'); \
+                 log.push(String(b.onclick)); b.click(); log.push(window.__f); \
+                 log.join(',')"
+            ),
+            "true,true,true,1,null,1"
+        );
+    }
+
     // A page's script-retry shim wraps the native accessor: it takes
     // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
     // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own. The

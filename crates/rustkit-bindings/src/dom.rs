@@ -1922,12 +1922,17 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Removing an absent attribute runs no attribute-change steps (DOM
+        // "remove an attribute by name"), so it must not drop an assigned
+        // on<type> handler. N.attr matches the name as the write does.
+        var changed = op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
-        if (op === 'setAttr' || op === 'removeAttr') attributeChanged(o, a);
+        if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
