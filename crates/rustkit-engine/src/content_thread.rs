@@ -1854,48 +1854,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "receipt: C4 close latency over 10 runs, idle and beside a busy rustkit-net"]
+    #[ignore = "receipt: C4 close latency over 10 runs, idle"]
     fn close_latency_receipt() {
+        // T7a R1 delta (Atlas 6): the "beside a busy rustkit-net" figure is
+        // dropped; nothing showed a body still in flight at the close.
         let mut idle = Vec::new();
         for _ in 0..10 {
             let (page, _port, release) = hanging_page();
             idle.push(close_to_dead_inspector(page));
             release.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        // A second view keeps the network thread busy: 4 MB bodies, read and
-        // base64-encoded on rustkit-net, 24 at a time.
-        let body = vec![b'x'; 4 << 20];
-        let (big_port, _r, _s) = serve(move |path, _release| {
-            if path.starts_with("/big") {
-                return (200, "application/octet-stream", body.clone());
-            }
-            (200, "text/html", b"<p>busy</p>".to_vec())
-        });
-        let busy = page();
-        let _nav = busy.navigate(Url::parse(&format!("http://127.0.0.1:{big_port}/")).unwrap());
-        let _ = poll_until(&busy, Duration::from_secs(8), |events| {
-            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
-        });
-        let mut loaded = Vec::new();
-        for _ in 0..10 {
-            let mut go = busy.eval("for (let i = 0; i < 24; i++) fetch('/big?' + i).then(r => r.arrayBuffer()); 'go'");
-            assert!(wait_recv(&mut go, Duration::from_secs(5)).is_some());
-            let (page, _port, release) = hanging_page();
-            std::thread::sleep(Duration::from_millis(50));
-            loaded.push(close_to_dead_inspector(page));
-            release.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let report = |name: &str, mut v: Vec<Duration>| {
-            v.sort();
-            eprintln!(
-                "C4 close->dead Weak {name}: p50 {:.1} ms, max {:.1} ms, n {}",
-                v[v.len() / 2].as_secs_f64() * 1e3,
-                v[v.len() - 1].as_secs_f64() * 1e3,
-                v.len()
-            );
-        };
-        report("idle", idle);
-        report("beside 24 x 4 MB fetches", loaded);
+        idle.sort();
+        eprintln!(
+            "C4 close->dead Weak idle: p50 {:.1} ms, max {:.1} ms, n {}",
+            idle[idle.len() / 2].as_secs_f64() * 1e3,
+            idle[idle.len() - 1].as_secs_f64() * 1e3,
+            idle.len()
+        );
     }
 
     #[test]

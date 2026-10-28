@@ -300,20 +300,38 @@ pub(crate) fn sync_diag_armed() {
 /// Origin and path only, capped at 180 characters. The query, fragment,
 /// `;params` and `user:pass@` are dropped, as everywhere else devtools
 /// writes a URL (Pete 10-23, shapes only; T7 C1): they carry tokens, and
-/// since T7 these lines are written on the network runtime too.
+/// since T7 these lines are written on the network runtime too. A scheme
+/// counts only at the start (`^[A-Za-z][A-Za-z0-9+.-]*:`), so a `://` in a
+/// relative URL's query is not one; a `data:` URL keeps only its MIME type.
 pub(crate) fn brief_url(url: &str) -> String {
-    let (scheme, rest) = match url.find("://") {
-        Some(at) => url.split_at(at + 3),
-        None => ("", url),
-    };
-    let rest = if scheme.is_empty() {
-        rest
+    let scheme_len = url
+        .find(':')
+        .filter(|&at| {
+            let name = &url[..at];
+            name.starts_with(|c: char| c.is_ascii_alphabetic())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        })
+        .map_or(0, |at| at + 1);
+    let (scheme, rest) = url.split_at(scheme_len);
+    if scheme.eq_ignore_ascii_case("data:") {
+        let mime = &rest[..rest.find([',', ';']).unwrap_or(rest.len())];
+        return cap_url(format!("data:{mime},…"));
+    }
+    let (slashes, rest) = rest.strip_prefix("//").map_or(("", rest), |rest| ("//", rest));
+    // Userinfo and the authority only after `//`; `;params` only after it.
+    let (host, path) = if slashes.is_empty() {
+        ("", rest)
     } else {
         let authority = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        rest[..authority].rfind('@').map_or(rest, |at| &rest[at + 1..])
+        let (authority, path) = rest.split_at(authority);
+        (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
-    let end = rest.find(['?', '#', ';']).unwrap_or(rest.len());
-    let mut brief = format!("{scheme}{}", &rest[..end]);
+    let end = path.find(['?', '#', ';']).unwrap_or(path.len());
+    cap_url(format!("{scheme}{slashes}{host}{}", &path[..end]))
+}
+
+/// At most 180 characters, the last one `…` when cut.
+fn cap_url(mut brief: String) -> String {
     if brief.chars().count() > 180 {
         brief = brief.chars().take(179).collect();
         brief.push('…');
@@ -322,11 +340,14 @@ pub(crate) fn brief_url(url: &str) -> String {
 }
 
 /// A script's place as a line shows it: an engine label (`inline#1`,
-/// `inserted#4`) as it is, anything else (a URL, a relative specifier)
-/// through [`brief_url`].
+/// `inserted#4`: a word, `#`, digits only) as it is, anything else (a URL,
+/// a relative specifier, `app#token`) through [`brief_url`].
 fn brief_place(place: &str) -> String {
     let label = place.split_once('#').is_some_and(|(kind, n)| {
-        !kind.is_empty() && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && !n.is_empty()
+        !kind.is_empty()
+            && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
     });
     if label { place.to_string() } else { brief_url(place) }
 }
@@ -558,6 +579,41 @@ mod tests {
         assert_eq!(brief_url("https://a.test/p;jsessionid=SECRET?x"), "https://a.test/p");
         assert_eq!(brief_url("https://user:SECRET@a.test/p"), "https://a.test/p");
         assert_eq!(brief_url("https://a.test/p@q"), "https://a.test/p@q");
+    }
+
+    #[test]
+    fn brief_url_takes_a_scheme_only_at_the_start() {
+        // T7a R1 delta (Atlas 1, Prometheus 7): a `://` later in the URL
+        // is not the scheme, so a relative URL keeps its query cut too.
+        assert_eq!(brief_url("/api?token=SECRET&next=https://x.test/p"), "/api");
+        assert_eq!(brief_url("./m.js?a=1&u=http://e.test/"), "./m.js");
+        assert_eq!(brief_url("m.js#SECRET://x"), "m.js");
+        // `;` is cut after the authority only.
+        assert_eq!(brief_url("https://a.test/p;s=SECRET"), "https://a.test/p");
+    }
+
+    #[test]
+    fn brief_url_strips_userinfo_after_a_leading_double_slash() {
+        // T7a R1 delta (Atlas 2).
+        assert_eq!(brief_url("//u:SECRET@host.test/x"), "//host.test/x");
+        assert_eq!(brief_url("//host.test/x?SECRET"), "//host.test/x");
+    }
+
+    #[test]
+    fn brief_url_reduces_a_data_url_to_its_mime_type() {
+        // T7a R1 delta (Atlas 3): the payload is page content.
+        assert_eq!(brief_url("data:text/javascript;base64,U0VDUkVU"), "data:text/javascript,…");
+        assert_eq!(brief_url("data:text/plain,SECRET?x#y"), "data:text/plain,…");
+        assert_eq!(brief_url("DATA:,SECRET"), "data:,…");
+    }
+
+    #[test]
+    fn brief_place_keeps_only_numbered_engine_labels() {
+        // T7a R1 delta (Atlas 5): `word#` is a label only when digits follow.
+        assert_eq!(brief_place("inline#1"), "inline#1");
+        assert_eq!(brief_place("unparseable#12"), "unparseable#12");
+        assert_eq!(brief_place("app#SECRET"), "app");
+        assert_eq!(brief_place("app#"), "app");
     }
 
     #[test]
