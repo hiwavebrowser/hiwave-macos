@@ -779,6 +779,18 @@ impl Inspector {
         }
     }
 
+    /// The buffered records from `since` on, and the document the next
+    /// record belongs to (the current one), read under one lock (T7 C5).
+    pub fn snapshot_and_doc(&self, since: u64) -> (InspectorSnapshot, u32) {
+        let state = self.state();
+        let snapshot = InspectorSnapshot {
+            records: state.records.iter().filter(|r| r.seq >= since).cloned().collect(),
+            next_seq: state.next_seq,
+            dropped: state.dropped,
+        };
+        (snapshot, state.doc)
+    }
+
     /// The current page's unsupported members, in the order first seen.
     pub fn unsupported_apis(&self) -> Vec<UnsupportedApiCount> {
         self.state().unsupported.clone()
@@ -1682,12 +1694,15 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
 
 /// `url` with its credentials always removed, and its query, fragment and
 /// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL
-/// is reduced to `data:<mime>,…` (a common MIME type only); any other URL
-/// that cannot have a host (`about:`, `blob:`) keeps its scheme and, for
-/// `blob:`, its origin.
+/// is reduced to `data:<mime>,…` (a common MIME type only); a `javascript:`
+/// URL is always reduced to its scheme, with or without an authority
+/// (`javascript://h/alert(1)` is a base URL to the parser; R1 M1); any
+/// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
+/// and, for `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     match url.scheme() {
         "data" => format!("data:{},…", data_mime(&url.as_str()[5..])),
+        "javascript" => "javascript:".to_string(),
         "blob" => match Url::parse(url.path()) {
             Ok(inner) => format!("blob:{}", inner.origin().ascii_serialization()),
             Err(_) => "blob:".to_string(),
@@ -1743,7 +1758,7 @@ fn data_mime(rest: &str) -> &'static str {
 /// a servlet puts the session cookie there when cookies are off. Each one
 /// runs from `;` (or `%3B`, to record less) to the end of its segment. The
 /// same rule as the diagnostics half's `report_url`.
-fn drop_path_params(path: &str) -> String {
+pub(crate) fn drop_path_params(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
     while !rest.is_empty() {

@@ -150,6 +150,9 @@ pub enum DevtoolsQuery {
     Element(usize),
     /// Console lines recorded since `since`.
     Console { since: u64 },
+    /// The current document's requests (T7). Answered by the devtools
+    /// thread, like console reads.
+    Network,
 }
 
 /// The page's answer to a [`DevtoolsQuery`]. `None` and `Unavailable` mean
@@ -161,6 +164,7 @@ pub enum DevtoolsAnswer {
     Tree(Option<DevtoolsNode>),
     Element(Option<DevtoolsElement>),
     Console(DevtoolsConsole),
+    Network(crate::DevtoolsNetwork),
     Unavailable,
 }
 
@@ -182,6 +186,7 @@ fn devtools_answer(engine: &mut Engine, view: EngineViewId, query: DevtoolsQuery
         }
         DevtoolsQuery::Element(node) => engine.devtools_element(view, node).map(DevtoolsAnswer::Element),
         DevtoolsQuery::Console { since } => engine.devtools_console(view, since).map(DevtoolsAnswer::Console),
+        DevtoolsQuery::Network => engine.devtools_network(view).map(DevtoolsAnswer::Network),
     };
     (answer.unwrap_or(DevtoolsAnswer::Unavailable), false)
 }

@@ -324,15 +324,16 @@ pub use inspector_page::{
 mod inspector_page_tests;
 mod devtools;
 pub use devtools::{
-    devtools_console_entries, devtools_held_text, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
-    DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
+    devtools_console_entries, devtools_held_text, devtools_network, devtools_node_of, devtools_path, DevtoolsBoxModel,
+    DevtoolsConsole, DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsNetwork, DevtoolsRequest, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
     DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
 mod devtools_service;
 pub use devtools_service::{
-    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+    ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount,
+    DevtoolsCounters,
 };
 #[cfg(test)]
 mod consent_click_tests;
@@ -350,6 +351,8 @@ mod script_net;
 mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
+#[cfg(test)]
+mod script_net_t7_tests;
 #[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -387,6 +390,8 @@ mod content_string_tests;
 mod html_element_ancestor_tests;
 #[cfg(test)]
 mod is_complex_argument_tests;
+#[cfg(test)]
+mod computed_content_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -4526,13 +4531,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(
-                        requests
-                            .into_iter()
-                            .map(|request| {
-                                script_net::start_live(policy.clone(), loader.clone(), request, deadline, inspector.clone())
-                            }),
-                    );
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
+                            policy.clone(),
+                            loader.clone(),
+                            request,
+                            deadline,
+                            inspector.clone(),
+                            out,
+                        ));
+                    }
                 }
                 Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
@@ -4591,15 +4600,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) if !requests.is_empty() => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(requests.into_iter().map(|request| {
-                        script_net::start_live(
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
                             policy.clone(),
                             loader.clone(),
                             request,
                             deadline,
                             inspector.clone(),
-                        )
-                    }));
+                            out,
+                        ));
+                    }
                     let handed =
                         script_net::settle_live(live_requests, LIVE_HANDOFF_SLICE).await;
                     for (at, answer) in handed.into_iter().enumerate() {
@@ -21659,11 +21670,38 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
         ("white-space", css_keyword(&format!("{:?}", s.white_space))),
         ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+        // A string in double quotes, `"` and `\` escaped; `normal` with no
+        // string (Chrome 148 reads `none` on an element as `normal` too).
+        // netflix's form picks its layout from it.
+        ("content", match &s.content {
+            Some(text) => css_string(text),
+            None => "normal".to_string(),
+        }),
     ];
     rows.into_iter()
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
+/// escaped, and a control character (a `\a` line break resolved by the
+/// parser, say) as `\<hex> ` so the value stays on one row of the
+/// tab-separated lines script reads.
+fn css_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push('\u{FFFD}'),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => out.push_str(&format!("\\{:x} ", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.
