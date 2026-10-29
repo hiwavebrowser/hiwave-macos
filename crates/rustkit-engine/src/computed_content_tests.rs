@@ -8,6 +8,52 @@
 
 use super::*;
 
+/// The `content` CSSOM value for a style, via the same `computed_style_lines`
+/// row script reads. Portable: no headless view, no GPU.
+fn content_cssom(style: ComputedStyle) -> String {
+    let box_ = LayoutBox::new(rustkit_layout::BoxType::Block, style);
+    for line in computed_style_lines(&box_).lines() {
+        if let Some(v) = line.strip_prefix("content\t") {
+            return v.to_string();
+        }
+    }
+    panic!("computed_style_lines dropped the content row");
+}
+
+/// #821: the CSSOM serialize for a cascaded string — quotes, escapes, and
+/// `none`/`normal` both reading as `normal`. The macOS+headless pin below
+/// covers the `@media` cascade end-to-end; Linux CI never saw that module's
+/// only test, so the serialize contract lived untested on every default
+/// `cargo test -p rustkit-engine --lib`.
+#[test]
+fn computed_content_serializes_like_cssom() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let apply = |value: &str| {
+        let mut style = ComputedStyle::default();
+        engine
+            .lctx
+            .apply_style_property(&mut style, "content", value);
+        content_cssom(style)
+    };
+
+    assert_eq!(
+        content_cssom(ComputedStyle::default()),
+        "normal",
+        "unset content reads normal, never empty"
+    );
+    assert_eq!(apply("none"), "normal");
+    assert_eq!(apply("normal"), "normal");
+    assert_eq!(apply("'1'"), "\"1\"");
+    assert_eq!(apply("'2'"), "\"2\"");
+    assert_eq!(apply(r#""a\"b""#), "\"a\\\"b\"");
+    // A resolved `\a` serialises back as `\a ` (CSSOM), never as a raw
+    // line break that would split the tab-separated computed-style row.
+    assert_eq!(apply(r#""a\a b""#), "\"a\\a b\"");
+    assert_eq!(css_string("a\nb"), "\"a\\a b\"");
+    assert_eq!(css_string("a\\b"), "\"a\\\\b\"");
+    assert_eq!(css_string("a\"b"), "\"a\\\"b\"");
+}
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
 fn computed_content_is_the_cascaded_string_or_normal() {
