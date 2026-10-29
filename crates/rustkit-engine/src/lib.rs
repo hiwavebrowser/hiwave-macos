@@ -324,15 +324,16 @@ pub use inspector_page::{
 mod inspector_page_tests;
 mod devtools;
 pub use devtools::{
-    devtools_console_entries, devtools_held_text, devtools_node_of, devtools_path, DevtoolsBoxModel, DevtoolsConsole,
-    DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
+    devtools_console_entries, devtools_held_text, devtools_network, devtools_node_of, devtools_path, DevtoolsBoxModel,
+    DevtoolsConsole, DevtoolsConsoleEntry, DevtoolsCrumb, DevtoolsNetwork, DevtoolsRequest, DevtoolsElement, DevtoolsFrame, DevtoolsNode, DevtoolsRect,
     DEVTOOLS_TREE_DEPTH, DEVTOOLS_TREE_MAX_NODES, RULE_SOURCES_UNAVAILABLE,
 };
 #[cfg(all(test, feature = "headless"))]
 mod devtools_tests;
 mod devtools_service;
 pub use devtools_service::{
-    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+    ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount,
+    DevtoolsCounters,
 };
 #[cfg(test)]
 mod consent_click_tests;
@@ -350,6 +351,8 @@ mod script_net;
 mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
+#[cfg(test)]
+mod script_net_t7_tests;
 #[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -387,6 +390,12 @@ mod range_hit_tests;
 mod content_string_tests;
 #[cfg(test)]
 mod html_element_ancestor_tests;
+#[cfg(test)]
+mod match_media_tests;
+#[cfg(test)]
+mod computed_content_tests;
+#[cfg(test)]
+mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2257,6 +2266,51 @@ pub struct Engine {
     lctx: Rc<layout_ctx::LayoutCtx>,
 }
 
+/// One element's author SVG paint declarations, as `style` text: `normal`
+/// goes before the element's own `style` attribute (which beats it),
+/// `important` after it, less any property the own `style` declares
+/// `!important` (which beats an author `!important`). `inherit` names the
+/// properties whose winning author value is `inherit` (or `unset`, for an
+/// inherited one): the declaration is left out and the same-named
+/// presentation attribute dropped, so rustkit-svg's parse-time inheritance
+/// gives the parent's value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SvgPaintStyle {
+    normal: String,
+    important: String,
+    inherit: Vec<String>,
+}
+
+/// Of `SVG_PAINT_PROPERTIES`, the ones that are not inherited (`unset` is
+/// `initial` for them).
+const SVG_PAINT_NOT_INHERITED: &[&str] = &["stop-color", "stop-opacity"];
+
+/// Lowercased names of the declarations `style` text marks `!important`.
+fn style_important_properties(style: &str) -> std::collections::HashSet<String> {
+    style
+        .split(';')
+        .filter_map(|decl| {
+            let (property, value) = decl.split_once(':')?;
+            split_important(value).1.then(|| property.trim().to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// The properties rustkit-svg paints with that an author sheet may set
+/// (SVG 2 §13 / §14: presentation attributes that are also CSS properties).
+const SVG_PAINT_PROPERTIES: &[&str] = &[
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-width",
+    "stroke-opacity",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stop-color",
+    "stop-opacity",
+];
+
 /// Split a trailing `!important` (ASCII case-insensitive, whitespace allowed
 /// between `!` and `important`) off a declaration value. Stylesheet rules get
 /// this from the parser; inline `style=` values arrive raw.
@@ -2940,6 +2994,9 @@ impl Engine {
                         "resize",
                     )
                 });
+                // Then the media query lists whose answer flipped hear
+                // `change` (after `resize`, as in the rendering update).
+                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
                 let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
@@ -4526,13 +4583,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(
-                        requests
-                            .into_iter()
-                            .map(|request| {
-                                script_net::start_live(policy.clone(), loader.clone(), request, deadline, inspector.clone())
-                            }),
-                    );
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
+                            policy.clone(),
+                            loader.clone(),
+                            request,
+                            deadline,
+                            inspector.clone(),
+                            out,
+                        ));
+                    }
                 }
                 Err(_) => threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
@@ -4591,15 +4652,17 @@ impl Engine {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bindings.take_net_requests())) {
                 Ok(requests) if !requests.is_empty() => {
                     let deadline = tokio::time::Instant::now() + LIVE_REQUEST_TIMEOUT;
-                    live_requests.extend(requests.into_iter().map(|request| {
-                        script_net::start_live(
+                    for request in requests {
+                        let out = live_requests.len();
+                        live_requests.push(script_net::start_live(
                             policy.clone(),
                             loader.clone(),
                             request,
                             deadline,
                             inspector.clone(),
-                        )
-                    }));
+                            out,
+                        ));
+                    }
                     let handed =
                         script_net::settle_live(live_requests, LIVE_HANDOFF_SLICE).await;
                     for (at, answer) in handed.into_iter().enumerate() {
@@ -7736,7 +7799,9 @@ impl Engine {
         );
 
         // Inline <svg> subtrees parse into svg_cache before the tree build,
-        // which only looks the documents up.
+        // which only looks the documents up; the author paint declarations
+        // go first, since they are part of the markup that is parsed.
+        self.cache_svg_paint_styles(&document, id, Some((bounds.width as f32, bounds.height as f32)));
         self.lctx.cache_inline_svgs(&document);
 
         // Get external stylesheets from view state
@@ -9623,6 +9688,27 @@ impl layout_ctx::LayoutCtx {
                         },
                         style,
                     );
+                    // An `<img>` was the one element kind whose positioning
+                    // never reached its layout box: every other builder
+                    // (block, inline, control, inline `<svg>`, pseudo)
+                    // transfers it, this one returned the box as built, so a
+                    // `position: absolute` image laid out IN FLOW with its
+                    // `top/left` ignored, took the line's place, and painted
+                    // in the normal-flow bucket. railway's hero (`absolute
+                    // inset-0 w-full h-full` in an `absolute inset-0` layer)
+                    // kept its 1:1 ratio, 1248x1248 for Chrome's 1248x1700,
+                    // because the flow pass has no containing-block height
+                    // for it and nothing re-anchored it (HT27 R3).
+                    //
+                    // Only a POSITIONED image takes the transfer: a static
+                    // one keeps the box exactly as before, float and clear
+                    // included (a floated `<img>` still rides the line; that
+                    // is a separate item, not touched here), so nothing
+                    // moves on a page without a positioned image.
+                    let positioning = Engine::positioning_of(&b.style);
+                    if positioning.position != Position::Static {
+                        Engine::apply_positioning(&mut b, positioning);
+                    }
                     Engine::attach_identity(
                         &mut b,
                         selector_path,
@@ -9655,7 +9741,7 @@ impl layout_ctx::LayoutCtx {
                             .get(name)
                             .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
                     };
-                    let key = Engine::inline_svg_key(&Engine::inline_svg_markup(node));
+                    let key = Engine::inline_svg_key(&self.inline_svg_markup_styled(node));
                     let svg_cache = self.svg_cache.borrow();
                     let cached = svg_cache.get(&key);
                     // A viewBox gives the SVG a ratio but no natural size.
@@ -14237,7 +14323,17 @@ impl Engine {
     /// emitted verbatim except for `"` — rustkit-svg reads them literally
     /// and does not decode entities.
     fn serialize_svg_subtree(node: &Node) -> String {
-        fn walk(node: &Node, out: &mut String) {
+        Self::serialize_svg_subtree_with(node, &HashMap::new())
+    }
+
+    /// `serialize_svg_subtree`, with each element's author paint
+    /// declarations (`paint`, by raw NodeId) written into its `style`:
+    /// author CSS beats a presentation attribute and loses to the
+    /// element's own `style` unless `!important` (CSS Cascade 4 §6.1,
+    /// SVG 2 §6.8). An element with no entry serializes as before, so a
+    /// page without such rules keeps its cache keys.
+    fn serialize_svg_subtree_with(node: &Node, paint: &HashMap<usize, SvgPaintStyle>) -> String {
+        fn walk(node: &Node, paint: &HashMap<usize, SvgPaintStyle>, out: &mut String) {
             match &node.node_type {
                 NodeType::Element {
                     tag_name,
@@ -14246,6 +14342,34 @@ impl Engine {
                 } => {
                     out.push('<');
                     out.push_str(tag_name);
+                    let styled;
+                    let attributes = match paint.get(&node.id.raw()) {
+                        Some(p) => {
+                            let mut a = attributes.clone();
+                            for property in &p.inherit {
+                                a.remove(property);
+                            }
+                            let own = a.get("style").map(String::as_str).unwrap_or("");
+                            // The own `!important` beats the author one
+                            // (Cascade 4 §6.1); rustkit-svg's parser is
+                            // last-wins and ignores `!important`, so leave
+                            // the author one out.
+                            let own_important = style_important_properties(own);
+                            let important: String = p
+                                .important
+                                .split_inclusive(';')
+                                .filter(|d| {
+                                    d.split_once(':')
+                                        .is_none_or(|(prop, _)| !own_important.contains(&prop.trim().to_ascii_lowercase()))
+                                })
+                                .collect();
+                            let style = format!("{}{};{}", p.normal, own, important);
+                            a.insert("style".to_string(), style);
+                            styled = a;
+                            &styled
+                        }
+                        None => attributes,
+                    };
                     let mut keys: Vec<&String> = attributes.keys().collect();
                     keys.sort();
                     for k in keys {
@@ -14257,7 +14381,7 @@ impl Engine {
                     }
                     out.push('>');
                     for child in node.children() {
-                        walk(&child, out);
+                        walk(&child, paint, out);
                     }
                     out.push_str("</");
                     out.push_str(tag_name);
@@ -14268,10 +14392,177 @@ impl Engine {
             }
         }
         let mut out = String::new();
-        walk(node, &mut out);
+        walk(node, paint, &mut out);
         out
     }
 
+    /// `cache_svg_paint_styles` on the context, with view `view`'s sheets
+    /// and the engine's scripting setting.
+    fn cache_svg_paint_styles(&self, document: &Document, view: EngineViewId, viewport: Option<(f32, f32)>) {
+        let view = self.views.get(&view);
+        let lay = view.map(|v| &*v.lay);
+        let external = view.map(|v| v.external_stylesheets.clone()).unwrap_or_default();
+        self.lctx
+            .cache_svg_paint_styles(document, lay, &external, self.config.javascript_enabled, viewport);
+    }
+}
+
+impl layout_ctx::LayoutCtx {
+    /// `inline_svg_markup` with the author paint declarations of
+    /// `svg_paint_styles` written in: what the cache, the box build and the
+    /// shape index all key and parse, so the three agree.
+    fn inline_svg_markup_styled(&self, svg: &Rc<Node>) -> String {
+        Engine::inline_svg_markup_with(svg, &self.svg_paint_styles.borrow())
+    }
+
+    /// Collect, for every element inside an inline `<svg>`, the SVG paint
+    /// declarations (`SVG_PAINT_PROPERTIES`) of the document's author rules
+    /// that match it, ranked as the cascade ranks them: specificity of the
+    /// matching selector, then order; `!important` apart. `var()` resolves
+    /// against the custom properties declared on the root. Before this, an
+    /// inline svg was painted from its markup alone, so `.icon { fill: red }`
+    /// (Census #8: 86 of 100 sites) painted the initial black.
+    ///
+    /// `inherit` (and `unset` on an inherited property) as the winning
+    /// value drops the declaration and the presentation attribute, so the
+    /// parse-time inheritance gives the parent's value. Values are written
+    /// with `'` for `"`, since rustkit-svg reads the markup without decoding
+    /// `&quot;` (`url("#g")` is a common way to name a gradient). Only svgs
+    /// in the document tree take document rules: those do not reach into a
+    /// shadow tree.
+    ///
+    /// Not modelled: cascade layers (ranked as unlayered), element-scoped
+    /// custom properties, shadow-tree sheets, `initial` and `revert*` (left
+    /// out, so the presentation attribute or the inherited value stands
+    /// where Chrome would use the initial or user-agent value).
+    ///
+    /// Cost: rerun on every relayout. A rule reaches `node_matches` for an
+    /// element only when its subject keys (`subject_keys`, the main
+    /// cascade's rule-index keys: the subject compound's id, class, tag or
+    /// attribute) admit the element, so `.icon-x path { fill }` is tested
+    /// against the `path`s alone. Review 5634328533 measured the unfiltered
+    /// version at 1.5 s for 500 icons x 50 rules in the debug test profile;
+    /// `author_svg_paint_matching_bench` measures this one. A further step,
+    /// if a page needs it: memoize per svg subtree and class/attribute
+    /// signature across relayouts.
+    fn cache_svg_paint_styles(
+        &self,
+        document: &Document,
+        lay: Option<&layout_ctx::ViewLayout>,
+        external: &[Stylesheet],
+        javascript_enabled: bool,
+        viewport: Option<(f32, f32)>,
+    ) {
+        self.svg_paint_styles.borrow_mut().clear();
+        let inline = self.inline_sheets(document, lay, javascript_enabled);
+        let rules: Vec<&rustkit_css::Rule> = inline
+            .iter()
+            .map(|s| &**s)
+            .chain(external.iter())
+            .flat_map(|sheet| sheet.rules.iter())
+            .filter(|rule| rule.media.is_empty() || viewport.is_some_and(|(w, h)| rule.applies_at(w, h)))
+            .collect();
+        let mut root_vars: HashMap<String, String> = HashMap::new();
+        // (order, rule, the subject keys of its selector list)
+        let mut paint_rules: Vec<(usize, &rustkit_css::Rule, Rc<Vec<SubjectKey>>)> = Vec::new();
+        for (order, rule) in rules.iter().enumerate() {
+            if rule.declarations.iter().any(|d| SVG_PAINT_PROPERTIES.contains(&d.property.as_str())) {
+                paint_rules.push((order, rule, self.subject_keys(&rule.selector)));
+            }
+            if selects_the_root(&rule.selector) {
+                for decl in &rule.declarations {
+                    if let (true, rustkit_css::PropertyValue::Specified(v)) =
+                        (decl.property.starts_with("--"), &decl.value)
+                    {
+                        root_vars.insert(decl.property.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        if paint_rules.is_empty() {
+            return;
+        }
+
+        fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
+            f(node);
+            for child in node.children() {
+                walk(&child, f);
+            }
+        }
+        let no_checked = HashMap::new();
+        let mut styles = HashMap::new();
+        for svg_el in document.get_elements_by_tag_name("svg") {
+            walk(&svg_el, &mut |n| {
+                let NodeType::Element { tag_name, attributes, .. } = &n.node_type else { return };
+                if styles.contains_key(&n.id.raw()) {
+                    return;
+                }
+                let keyed = KeyedElement::of(tag_name, attributes);
+                // (important, specificity, order, property, value)
+                let mut won: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
+                for (order, rule, keys) in &paint_rules {
+                    let (order, rule) = (*order, *rule);
+                    if !Engine::keys_may_match_keyed(keys, &keyed) {
+                        continue;
+                    }
+                    let specificity = SelectorMatcher::split_top_level_commas(&rule.selector)
+                        .into_iter()
+                        .filter(|member| SelectorMatcher.node_matches(n, member, &no_checked) == Some(true))
+                        .map(|member| SelectorMatcher.selector_specificity(member))
+                        .max();
+                    let Some(specificity) = specificity else { continue };
+                    for decl in &rule.declarations {
+                        let rustkit_css::PropertyValue::Specified(value) = &decl.value else { continue };
+                        if !SVG_PAINT_PROPERTIES.contains(&decl.property.as_str()) {
+                            continue;
+                        }
+                        let value = self.resolve_css_variables(value, &root_vars);
+                        if value.trim().is_empty() || value.contains(';') || (value.contains('"') && value.contains('\'')) {
+                            continue;
+                        }
+                        let value = value.replace('"', "'");
+                        won.push((decl.important, specificity, order, decl.property.as_str(), value));
+                    }
+                }
+                if won.is_empty() {
+                    return;
+                }
+                won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                let mut style = SvgPaintStyle::default();
+                // The winner per property is its last entry; a CSS-wide
+                // keyword there is applied here rather than written out.
+                let mut keyword: HashMap<&str, String> = HashMap::new();
+                for (_, _, _, property, value) in &won {
+                    keyword.insert(property, value.trim().to_ascii_lowercase());
+                }
+                let wide = |v: &str| matches!(v, "inherit" | "unset" | "initial" | "revert" | "revert-layer");
+                for (property, value) in &keyword {
+                    let inherits = value == "inherit"
+                        || (value == "unset" && !SVG_PAINT_NOT_INHERITED.contains(property));
+                    if inherits {
+                        style.inherit.push(property.to_string());
+                    }
+                }
+                style.inherit.sort();
+                won.retain(|(_, _, _, property, _)| !keyword.get(property).is_some_and(|v| wide(v)));
+                if won.is_empty() && style.inherit.is_empty() {
+                    return;
+                }
+                for (important, _, _, property, value) in won {
+                    let out = if important { &mut style.important } else { &mut style.normal };
+                    out.push_str(property);
+                    out.push(':');
+                    out.push_str(value.trim());
+                    out.push(';');
+                }
+                styles.insert(n.id.raw(), style);
+            });
+        }
+        *self.svg_paint_styles.borrow_mut() = styles;
+    }
+}
+
+impl Engine {
     /// The markup rustkit-svg parses for one inline `<svg>`: its own subtree,
     /// then, inside a trailing `<defs>` (never painted on its own), every
     /// element its `<use>`s name by `#id` that lives elsewhere in the page.
@@ -14280,6 +14571,12 @@ impl Engine {
     /// referenced content is part of the cache key: a sprite sheet inserted
     /// or changed later re-parses the icon.
     fn inline_svg_markup(svg: &Rc<Node>) -> String {
+        Self::inline_svg_markup_with(svg, &HashMap::new())
+    }
+
+    /// `inline_svg_markup`, with author paint declarations written into the
+    /// elements `paint` names (`serialize_svg_subtree_with`).
+    fn inline_svg_markup_with(svg: &Rc<Node>, paint: &HashMap<usize, SvgPaintStyle>) -> String {
         fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
             f(node);
             for child in node.children() {
@@ -14300,7 +14597,7 @@ impl Engine {
             });
         }
 
-        let mut out = Self::serialize_svg_subtree(svg);
+        let mut out = Self::serialize_svg_subtree_with(svg, paint);
         let mut defined = std::collections::HashSet::new();
         let mut wanted = Vec::new();
         references(svg, &mut defined, &mut wanted);
@@ -14336,7 +14633,7 @@ impl Engine {
                 continue;
             }
             if let Some(target) = by_id.get(&id) {
-                out.push_str(&Self::serialize_svg_subtree(target));
+                out.push_str(&Self::serialize_svg_subtree_with(target, paint));
                 let mut nested = Vec::new();
                 references(target, &mut defined, &mut nested);
                 wanted.extend(nested.into_iter().filter(|n| !defined.contains(n)));
@@ -14371,7 +14668,7 @@ impl layout_ctx::LayoutCtx {
     /// keys are skipped, so steady-state cost is one serialize per svg.
     fn cache_inline_svgs(&self, document: &Document) {
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let xml = Engine::inline_svg_markup(&svg_el);
+            let xml = self.inline_svg_markup_styled(&svg_el);
             let key = Engine::inline_svg_key(&xml);
             if self.svg_cache.borrow().contains_key(&key) {
                 continue;
@@ -14401,7 +14698,7 @@ impl Engine {
         let mut index = HashMap::new();
         let svg_cache = self.lctx.svg_cache.borrow();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
-            let key = Self::inline_svg_key(&Self::inline_svg_markup(&svg_el));
+            let key = Self::inline_svg_key(&self.lctx.inline_svg_markup_styled(&svg_el));
             if index.contains_key(&key) {
                 continue;
             }
@@ -17431,8 +17728,14 @@ impl Engine {
         // shapes generate no CSS box, so the tree has nothing to walk. Empty
         // when the view has no document, which keeps the export identical to
         // what it was rather than failing.
+        // The index keys by the styled markup, and the author paint map is
+        // one per engine: another view's relayout since this view's would
+        // leave the wrong map in it, so it is recomputed for this view.
         let svg_shapes = match view.document.as_ref() {
-            Some(document) => self.inline_svg_shape_index(document),
+            Some(document) => {
+                self.cache_svg_paint_styles(document, id, self.view_viewport(id));
+                self.inline_svg_shape_index(document)
+            }
             None => HashMap::new(),
         };
         let layout_json = layout_box_to_json_under(layout, None, &svg_shapes);
@@ -18405,6 +18708,7 @@ impl Engine {
                 writes,
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
+            lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, javascript_enabled, building.viewport);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
@@ -21862,11 +22166,38 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("text-transform", css_keyword(&format!("{:?}", s.text_transform))),
         ("white-space", css_keyword(&format!("{:?}", s.white_space))),
         ("flex-direction", css_keyword(&format!("{:?}", s.flex_direction))),
+        // A string in double quotes, `"` and `\` escaped; `normal` with no
+        // string (Chrome 148 reads `none` on an element as `normal` too).
+        // netflix's form picks its layout from it.
+        ("content", match &s.content {
+            Some(text) => css_string(text),
+            None => "normal".to_string(),
+        }),
     ];
     rows.into_iter()
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
+/// escaped, and a control character (a `\a` line break resolved by the
+/// parser, say) as `\<hex> ` so the value stays on one row of the
+/// tab-separated lines script reads.
+fn css_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push('\u{FFFD}'),
+            '\u{1}'..='\u{1f}' | '\u{7f}' => out.push_str(&format!("\\{:x} ", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Wrap a serialised layout tree with the provenance an oracle needs.
@@ -24539,6 +24870,243 @@ mod tests {
         }
         let svg = svg_like(&layout).expect("svg box");
         assert!(svg.children.is_empty() && !any_text(svg), "svg children must not generate boxes");
+    }
+
+    #[test]
+    fn test_author_css_paints_inline_svg_children() {
+        // Census 6e25ea3a #1 (86 sites): `.i{fill:#e00}` on an inline svg
+        // painted black because author CSS never reached SVG children (they
+        // get no boxes). Matched paint declarations now ride into the
+        // serialized markup's style attribute: inherited from the svg,
+        // specificity-ordered, below the element's own style="" and above it
+        // when !important.
+        let html = r##"<!DOCTYPE html><html><head><style>
+            .i { fill: green }
+            .i rect { fill: #e00 }
+            .i .r { fill: green }
+            .imp { fill: green !important }
+            </style></head><body>
+              <svg class="i" width="40" height="10"><path d="M0 0h10v10H0z"/><rect class="r" x="10" width="10" height="10" fill="red"/><rect x="20" width="10" height="10" style="fill:blue"/><rect class="imp" x="30" width="10" height="10" style="fill:red"/></svg>
+            </body></html>"##;
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+        let compositor = match crate::test_compositor() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return;
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+        };
+        engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
+        engine.lctx.cache_inline_svgs(&document);
+        let svg_cache = engine.lctx.svg_cache.borrow();
+        assert_eq!(svg_cache.len(), 1);
+        let doc = svg_cache.values().next().unwrap();
+        let fills: Vec<(u8, u8, u8)> = doc
+            .render(0.0, 0.0, 40.0, 10.0)
+            .iter()
+            .filter_map(|c| match c {
+                rustkit_layout::DisplayCommand::FillRect { color, .. }
+                | rustkit_layout::DisplayCommand::FillPolygon { color, .. } => {
+                    Some((color.r, color.g, color.b))
+                }
+                _ => None,
+            })
+            .collect();
+        let green = (0, 128, 0);
+        assert_eq!(
+            fills,
+            vec![green, green, (0, 0, 255), green],
+            "inherited .i fill, (0,2,0) beats (0,1,1), own style beats author normal, !important beats own style"
+        );
+    }
+
+    /// Paints `html`'s inline svgs through the author paint styles and
+    /// returns each one's fill and gradient commands, in paint order with
+    /// runs of one colour collapsed (a gradient paints as strips), as
+    /// `rgb(r,g,b)` or `gradient`.
+    fn author_svg_paints(html: &str) -> Vec<String> {
+        let document = Rc::new(Document::parse_html(html).expect("Failed to parse HTML"));
+        let compositor = match crate::test_compositor() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test: GPU not available ({:?})", e);
+                return vec!["skip".to_string()];
+            }
+        };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            config: EngineConfig::default(),
+            views: HashMap::new(),
+            presenter: Some(Presenter::layout_only(compositor)),
+            page_commits: HashMap::new(),
+            nav_seq: Arc::new(AtomicU64::new(0)),
+            host_reentry_override: None,
+            loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
+            event_tx,
+            event_rx: Some(event_rx),
+            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+        };
+        engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
+        engine.lctx.cache_inline_svgs(&document);
+        let mut out = Vec::new();
+        for svg in document.get_elements_by_tag_name_shadow_including("svg") {
+            let key = Engine::inline_svg_key(&engine.lctx.inline_svg_markup_styled(&svg));
+            let svg_cache = engine.lctx.svg_cache.borrow();
+            let Some(doc) = svg_cache.get(&key) else {
+                out.push("uncached".to_string());
+                continue;
+            };
+            for c in doc.render(0.0, 0.0, 10.0, 10.0) {
+                match c {
+                    rustkit_layout::DisplayCommand::FillRect { color, .. }
+                    | rustkit_layout::DisplayCommand::FillPolygon { color, .. } => {
+                        out.push(format!("rgb({},{},{})", color.r, color.g, color.b))
+                    }
+                    other if format!("{other:?}").contains("Gradient") => out.push("gradient".to_string()),
+                    _ => {}
+                }
+            }
+            out.dedup();
+        }
+        out
+    }
+
+    #[test]
+    fn test_author_svg_paint_follows_the_cascade_where_develop_did() {
+        // #787 review 5634328533 (Atlas #847): five inputs develop painted
+        // as Chrome does and the author paint styles changed.
+        let blue = "rgb(0,0,255)";
+        let skip = |v: &Vec<String>| v.first().is_some_and(|s| s == "skip");
+        // A: the own style's !important beats an author !important.
+        let a = author_svg_paints(r#"<!DOCTYPE html><style>.imp{fill:green !important}</style><svg width=10 height=10><rect class=imp width=10 height=10 style="fill:blue !important"/></svg>"#);
+        // B, B2: `inherit` / `unset` take the svg's fill="#0000ff".
+        let b = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:inherit}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
+        let b2 = author_svg_paints(r##"<!DOCTYPE html><style>svg path{fill:unset}</style><svg fill="#0000ff" width=10 height=10><path d="M0 0h10v10H0z"/></svg>"##);
+        // C: a quoted url() names the (blue to blue) gradient.
+        let c = author_svg_paints(r##"<!DOCTYPE html><style>.g rect{fill:url("#gr")}</style><svg class=g width=10 height=10><defs><linearGradient id=gr><stop offset=0 stop-color="#0000ff"/><stop offset=1 stop-color="#0000ff"/></linearGradient></defs><rect width=10 height=10 fill="url(#gr)"/></svg>"##);
+        // F: document rules do not reach into a shadow tree.
+        let f = author_svg_paints(r##"<!DOCTYPE html><style>rect{fill:red}</style><div><template shadowrootmode="open"><svg width=10 height=10><rect width=10 height=10 fill="#0000ff"/></svg></template></div>"##);
+        if [&a, &b, &b2, &c, &f].iter().any(|v| skip(v)) {
+            return;
+        }
+        let got = [a, b, b2, c, f];
+        let want = [vec![blue], vec![blue], vec![blue], vec![blue], vec![blue]];
+        assert_eq!(got.iter().map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()).collect::<Vec<_>>(), want);
+    }
+
+    #[test]
+    fn author_svg_paint_prefilter_keeps_the_cascades_answer() {
+        // The subject-key pre-filter (the main cascade's `subject_keys`)
+        // only skips rules the matcher could never admit: a class the
+        // element lacks is skipped, a `:is()` list, an attribute subject and
+        // the universal selector still reach `node_matches`.
+        let blue = "rgb(0,0,255)";
+        let got = author_svg_paints(r##"<!DOCTYPE html><style>
+            .x rect{fill:red}
+            *{fill:red}
+            [data-k]{fill:red}
+            rect:is(.a,.b){fill:#0000ff}
+            </style><svg width=10 height=10><rect class=b data-k width=10 height=10/></svg>"##);
+        if got.first().is_some_and(|s| s == "skip") {
+            return;
+        }
+        assert_eq!(got, vec![blue]);
+    }
+
+    /// The cost of `cache_svg_paint_styles` on a page of `SVG_BENCH=icons,rules`
+    /// (default 500,50) icons of three shapes, each under one of `rules`
+    /// class rules. `--ignored --nocapture` prints the time per pass.
+    #[test]
+    #[ignore]
+    fn author_svg_paint_matching_bench() {
+        let spec = std::env::var("SVG_BENCH").unwrap_or_else(|_| "500,50".to_string());
+        let (icons, rules) = spec
+            .split_once(',')
+            .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+            .unwrap_or((500, 50));
+        let mut html = String::from("<!DOCTYPE html><style>");
+        for r in 0..rules {
+            html.push_str(&format!(".k{r} path{{fill:#0000ff}} .k{r} .s{{stroke:#ff0000;stroke-width:2}}\n"));
+        }
+        html.push_str("</style>");
+        for i in 0..icons {
+            html.push_str(&format!(
+                r##"<svg class="k{}" width="10" height="10"><path d="M0 0h10v10H0z"/><rect class="s" width="5" height="5"/><circle cx="5" cy="5" r="2"/></svg>"##,
+                i % rules
+            ));
+        }
+        let document = Rc::new(Document::parse_html(&html).expect("parse"));
+        let Some(engine) = layout_only_engine() else { return };
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
+        }
+        let per_pass = started.elapsed().as_secs_f64() * 1000.0 / 3.0;
+        let styled = engine.lctx.svg_paint_styles.borrow().len();
+        eprintln!("cache_svg_paint_styles: {icons} icons x {rules} rules: {per_pass:.0} ms per pass, {styled} elements styled");
+        assert_eq!(styled, icons * 2, "path and .s rect of every icon take a rule");
+    }
+
+    /// Review 5634328533 (#787): `svg_paint_styles` is one map per engine,
+    /// not per view, so after another view relaid out, a view's export
+    /// keyed its svg shapes with that view's map and lost them. The export
+    /// now recomputes the map for the view it exports.
+    #[cfg(feature = "headless")]
+    #[test]
+    fn a_views_layout_export_keeps_its_svg_shapes_after_another_view_relaid_out() {
+        let mut engine = match EngineBuilder::new().javascript_enabled(false).build() {
+            Ok(e) => e,
+            Err(_) => return, // no GPU adapter; nothing to assert
+        };
+        let bounds = rustkit_viewhost::Bounds { x: 0, y: 0, width: 400, height: 300 };
+        let (Ok(a), Ok(b)) = (engine.create_headless_view(bounds), engine.create_headless_view(bounds)) else {
+            return;
+        };
+        // The same tree in both views (so NodeIds coincide), under different
+        // author paint: view b's map, keyed by the same raw ids, would give
+        // view a's svg a markup it never cached.
+        let page = |class: &str, fill: &str| {
+            format!(
+                r##"<!DOCTYPE html><html><head><style>.{class} rect{{fill:{fill}}}</style></head><body><svg class="{class}" width="10" height="10" viewBox="0 0 10 10"><rect width="10" height="10"/></svg></body></html>"##
+            )
+        };
+        engine.load_html(a, &page("a", "#0000ff")).expect("load a");
+        engine.load_html(b, &page("b", "#ff0000")).expect("load b");
+        assert!(engine.views[&a].layout.is_some() && engine.views[&b].layout.is_some(), "both views laid out");
+
+        let dir = std::env::temp_dir().join(format!("rustkit-svg-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("a.json");
+        engine.export_layout_json(a, path.to_str().unwrap()).expect("export a");
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        fn shapes(v: &serde_json::Value, out: &mut usize) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("svg_shape") {
+                *out += 1;
+            }
+            if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
+                for c in children {
+                    shapes(c, out);
+                }
+            }
+        }
+        let mut found = 0;
+        shapes(&json["root"], &mut found);
+        assert_eq!(found, 1, "view a's rect must be exported after view b relaid out");
     }
 
     #[test]

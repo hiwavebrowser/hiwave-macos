@@ -163,6 +163,46 @@ fn the_rolling_file_sink_rotates_and_keeps_at_most_n_files() {
 }
 
 #[test]
+#[ignore = "receipt: Inspector lock hold with the rolling file sink on (T7a review)"]
+fn lock_hold_receipt_with_the_file_sink_on() {
+    // Each request and response record call, timed whole on one thread: the
+    // lock is taken once per call and nothing else waits for it here, so a
+    // call's time bounds how long it held the lock. 20 000 requests, with a
+    // 1 MB file rotated 3 deep (so rotations land in the sample), against
+    // the ring alone.
+    let url = url::Url::parse("https://cdn.example.test/assets/chunk-7730.js?token=SECRET#f").unwrap();
+    let run = |sink: Option<RollingFileSink>| {
+        let inspector = buffered(2048);
+        if let Some(sink) = sink {
+            inspector.add_sink(Box::new(sink));
+        }
+        let mut held = Vec::with_capacity(40_000);
+        for _ in 0..20_000 {
+            let t = std::time::Instant::now();
+            let guard = inspector.begin_request(&url, "GET", ResourceType::Fetch, Some("fetch")).unwrap();
+            held.push(t.elapsed());
+            let t = std::time::Instant::now();
+            guard.response(200, Some("text/javascript"), None, Some(123_456), false);
+            held.push(t.elapsed());
+        }
+        held.sort();
+        let us = |d: std::time::Duration| d.as_secs_f64() * 1e6;
+        (us(held[held.len() / 2]), us(held[held.len() * 99 / 100]), us(held[held.len() - 1]))
+    };
+    let dir = std::env::temp_dir().join(format!("rustkit-lockhold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let off = run(None);
+    let on = run(Some(RollingFileSink::new(dir.join("events.jsonl"), 1 << 20, 3).unwrap()));
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("lock hold per record call, ring only: p50 {:.1} us, p99 {:.1} us, max {:.1} us", off.0, off.1, off.2);
+    eprintln!(
+        "lock hold per record call, ring + RollingFileSink 1 MB x3: p50 {:.1} us, p99 {:.1} us, max {:.1} us",
+        on.0, on.1, on.2
+    );
+}
+
+#[test]
 fn the_summary_counts_by_kind_and_takes_final_unsupported_counts() {
     let records: Vec<InspectorRecord> = [
         console("a"),

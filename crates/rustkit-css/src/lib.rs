@@ -3195,7 +3195,7 @@ pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_serialize};
 
 pub mod content;
 pub mod selector_escape;
