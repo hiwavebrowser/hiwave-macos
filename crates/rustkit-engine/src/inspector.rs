@@ -1718,6 +1718,12 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
                 // The parser's path: `\` already reads as `/` for a special
                 // scheme, and tabs and newlines are gone.
                 let path = drop_path_params(clean.path());
+                // A host-less path that now starts with `//` (`foo:/;x/a@b`)
+                // would serialise as an authority (`foo://a@b`); url 2.5.7's
+                // `set_path` adds no `/.`, so it is written here (T8).
+                if clean.host().is_none() && path.starts_with("//") {
+                    return format!("{}:/.{path}", clean.scheme());
+                }
                 clean.set_path(&path);
             }
             clean.to_string()
