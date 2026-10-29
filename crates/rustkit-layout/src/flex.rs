@@ -1470,10 +1470,6 @@ fn layout_flex_container_at(
     // still centres y.
     {
         let main_is_horizontal = main_axis == Axis::Horizontal;
-        let reverse_main = direction.is_reverse();
-        let reverse_cross = wrap == FlexWrap::WrapReverse;
-        let container_align_items = container.style.align_items;
-        let container_justify = container.style.justify_content;
         // The container's content box, read from the same place steps 6–10
         // read it (`container_origin`, `container_main_size`): the caller
         // passes the container's own dimensions, so this is its content box.
@@ -1521,100 +1517,133 @@ fn layout_flex_container_at(
             content.width
         });
 
-        for child in &mut container.children {
-            if !matches!(
-                child.style.position,
-                rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
-            ) {
-                continue;
-            }
+        place_static_position_children(container, container_box, content, used_inner_main, used_inner_cross);
+    }
+}
 
-            let offsets = child.resolved_offsets(container_box);
-            let main_auto = if main_is_horizontal {
-                offsets.left.is_none() && offsets.right.is_none()
-            } else {
-                offsets.top.is_none() && offsets.bottom.is_none()
-            };
-            let cross_auto = if main_is_horizontal {
-                offsets.top.is_none() && offsets.bottom.is_none()
-            } else {
-                offsets.left.is_none() && offsets.right.is_none()
-            };
-            if !main_auto && !cross_auto {
-                continue;
-            }
+/// Step 13's placement of the out-of-flow children whose insets are auto on
+/// an axis: each is aligned as if it were the sole flex item in `content`
+/// (the container's content box), `used_inner_main` x `used_inner_cross`.
+/// `offsets_cb` is what the children's insets resolve against (only
+/// whether each is auto matters here).
+///
+/// Called from step 13 and again by `reanchor_absolute_children` once the
+/// container is final: a container with only out-of-flow children leaves
+/// the flex algorithm before step 13 (no lines), and a `height: 100%` child
+/// only gets its height in `reanchor_absolute`, after step 13 aligned its
+/// pre-pass size (netflix's hero layer, hand test 10-27 N1).
+pub(crate) fn place_static_position_children(
+    container: &mut LayoutBox,
+    offsets_cb: &Dimensions,
+    content: Rect,
+    used_inner_main: f32,
+    used_inner_cross: f32,
+) {
+    let main_is_horizontal = container.style.flex_direction.is_row();
+    let reverse_main = container.style.flex_direction.is_reverse();
+    let reverse_cross = container.style.flex_wrap == FlexWrap::WrapReverse;
+    let container_align_items = container.style.align_items;
+    let container_justify = container.style.justify_content;
+    for child in &mut container.children {
+        if !matches!(
+            child.style.position,
+            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+        ) {
+            continue;
+        }
 
-            let margin_box = child.dimensions.margin_box();
-            let (outer_main, outer_cross) = if main_is_horizontal {
-                (margin_box.width, margin_box.height)
-            } else {
-                (margin_box.height, margin_box.width)
-            };
+        let offsets = child.resolved_offsets(offsets_cb);
+        let main_auto = if main_is_horizontal {
+            offsets.left.is_none() && offsets.right.is_none()
+        } else {
+            offsets.top.is_none() && offsets.bottom.is_none()
+        };
+        let cross_auto = if main_is_horizontal {
+            offsets.top.is_none() && offsets.bottom.is_none()
+        } else {
+            offsets.left.is_none() && offsets.right.is_none()
+        };
+        if !main_auto && !cross_auto {
+            continue;
+        }
 
-            // A sole item leaves all the free space to the alignment keyword;
-            // the distribution keywords degenerate: space-between packs to
-            // main-start, space-around and space-evenly to the centre.
-            let free_main = (used_inner_main - outer_main).max(0.0);
-            let main_start = match container_justify {
-                JustifyContent::FlexStart | JustifyContent::SpaceBetween => 0.0,
-                JustifyContent::FlexEnd => free_main,
-                JustifyContent::Center
-                | JustifyContent::SpaceAround
-                | JustifyContent::SpaceEvenly => free_main / 2.0,
-            };
-            // `row-reverse`/`column-reverse` put main-start at the far edge.
-            let main_start = if reverse_main {
-                free_main - main_start
-            } else {
-                main_start
-            };
+        let margin_box = child.dimensions.margin_box();
+        let (outer_main, outer_cross) = if main_is_horizontal {
+            (margin_box.width, margin_box.height)
+        } else {
+            (margin_box.height, margin_box.width)
+        };
 
-            let free_cross = (used_inner_cross - outer_cross).max(0.0);
-            let align = resolved_align(child.style.align_self, container_align_items);
-            let cross_start = match align {
-                // A static-position box is not stretched by `stretch`, and
-                // `baseline` has no line to sit on: both align to cross-start.
-                AlignItems::FlexStart | AlignItems::Stretch | AlignItems::Baseline => 0.0,
-                AlignItems::FlexEnd => free_cross,
-                AlignItems::Center => free_cross / 2.0,
-            };
-            let cross_start = if reverse_cross {
-                free_cross - cross_start
-            } else {
-                cross_start
-            };
+        // A sole item leaves all the free space to the alignment keyword;
+        // the distribution keywords degenerate: space-between packs to
+        // main-start, space-around and space-evenly to the centre.
+        //
+        // The free space may be negative: the alignment is unsafe, so a
+        // box larger than the content box overflows on the start side
+        // (both sides when centred). Chrome 148 places a 400px-wide box
+        // in a 200px `justify-content: center` row at -90, and netflix's
+        // `height: 100%` hero layer under `align-items: flex-end` at the
+        // top of the padding box, not the content box.
+        let free_main = used_inner_main - outer_main;
+        let main_start = match container_justify {
+            JustifyContent::FlexStart | JustifyContent::SpaceBetween => 0.0,
+            JustifyContent::FlexEnd => free_main,
+            JustifyContent::Center
+            | JustifyContent::SpaceAround
+            | JustifyContent::SpaceEvenly => free_main / 2.0,
+        };
+        // `row-reverse`/`column-reverse` put main-start at the far edge.
+        let main_start = if reverse_main {
+            free_main - main_start
+        } else {
+            main_start
+        };
 
-            let (target_x, target_y) = if main_is_horizontal {
-                (content.x + main_start, content.y + cross_start)
-            } else {
-                (content.x + cross_start, content.y + main_start)
-            };
+        let free_cross = used_inner_cross - outer_cross;
+        let align = resolved_align(child.style.align_self, container_align_items);
+        let cross_start = match align {
+            // A static-position box is not stretched by `stretch`, and
+            // `baseline` has no line to sit on: both align to cross-start.
+            AlignItems::FlexStart | AlignItems::Stretch | AlignItems::Baseline => 0.0,
+            AlignItems::FlexEnd => free_cross,
+            AlignItems::Center => free_cross / 2.0,
+        };
+        let cross_start = if reverse_cross {
+            free_cross - cross_start
+        } else {
+            cross_start
+        };
 
-            // Positions are absolute, so move by the delta on the MARGIN box
-            // and carry the already-laid-out subtree (translate_subtree) —
-            // shifting the box origin alone strands its text and children.
-            let current = child.dimensions.margin_box();
-            let (horizontal_auto, vertical_auto) = if main_is_horizontal {
-                (main_auto, cross_auto)
-            } else {
-                (cross_auto, main_auto)
-            };
-            let dx = if horizontal_auto {
-                target_x - current.x
-            } else {
-                0.0
-            };
-            let dy = if vertical_auto {
-                target_y - current.y
-            } else {
-                0.0
-            };
-            if dx != 0.0 || dy != 0.0 {
-                child.dimensions.content.x += dx;
-                child.dimensions.content.y += dy;
-                for grandchild in &mut child.children {
-                    translate_subtree(grandchild, dx, dy);
-                }
+        let (target_x, target_y) = if main_is_horizontal {
+            (content.x + main_start, content.y + cross_start)
+        } else {
+            (content.x + cross_start, content.y + main_start)
+        };
+
+        // Positions are absolute, so move by the delta on the MARGIN box
+        // and carry the already-laid-out subtree (translate_subtree) —
+        // shifting the box origin alone strands its text and children.
+        let current = child.dimensions.margin_box();
+        let (horizontal_auto, vertical_auto) = if main_is_horizontal {
+            (main_auto, cross_auto)
+        } else {
+            (cross_auto, main_auto)
+        };
+        let dx = if horizontal_auto {
+            target_x - current.x
+        } else {
+            0.0
+        };
+        let dy = if vertical_auto {
+            target_y - current.y
+        } else {
+            0.0
+        };
+        if dx != 0.0 || dy != 0.0 {
+            child.dimensions.content.x += dx;
+            child.dimensions.content.y += dy;
+            for grandchild in &mut child.children {
+                translate_subtree(grandchild, dx, dy);
             }
         }
     }
