@@ -91,6 +91,8 @@ mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
 #[cfg(test)]
+mod raw_text_inner_html_tests;
+#[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
 mod event_target_ctor_tests;
@@ -4169,6 +4171,302 @@ mod tests {
         let errors = b.take_reported_errors();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("SyntaxError"), "{errors:?}");
+    }
+
+    // HTML §8.1.8.2 (GlobalEventHandlers): `on<type>` is an accessor on
+    // HTMLElement.prototype, not a data property of each element. The getter
+    // answers the assigned value, else the compiled content attribute, else
+    // null; a non-object assigned is null; setting the content attribute
+    // again makes the attribute the handler.
+    #[test]
+    fn on_handlers_are_accessors_on_the_element_prototype() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 var has = function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); }; \
+                 var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'); \
+                 log.push(typeof o, o && typeof o.get, o && typeof o.set, o && o.enumerable, o && o.configurable); \
+                 log.push(has(HTMLElement.prototype, 'onload'), has(HTMLElement.prototype, 'onclick'), \
+                          has(SVGElement.prototype, 'onclick'), has(Element.prototype, 'onclick')); \
+                 var s = document.createElement('script'); \
+                 log.push(String(s.onerror), String(s.onload)); \
+                 function h() {} \
+                 s.onerror = h; log.push(s.onerror === h, has(s, 'onerror')); \
+                 s.onerror = 'nope'; log.push(String(s.onerror)); \
+                 log.push(typeof i.onclick, i.onclick === i.onclick); \
+                 i.onclick = null; log.push(String(i.onclick)); \
+                 i.setAttribute('onclick', 'window.seen = 3'); i.click(); log.push(window.seen); \
+                 log.join(',')"
+            ),
+            "object,function,function,true,true,true,true,true,false,null,null,true,false,null,function,true,null,3"
+        );
+    }
+
+    // R1 L1: the native setAttr lowercases the name for HTML elements, so a
+    // mixed-case `OnClick` is the `onclick` content attribute and must drop
+    // the assigned handler just as the lowercase spelling does.
+    #[test]
+    fn a_mixed_case_on_attribute_drops_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 window.__hit = 0; window.__f = 0; \
+                 function f() { window.__f++; } \
+                 i.onclick = f; \
+                 i.setAttribute('OnClick', 'window.__hit=(window.__hit||0)+1'); \
+                 i.click(); \
+                 log.push(window.__f, window.__hit, i.onclick === f, typeof i.onclick, \
+                          i.getAttribute('onclick') === 'window.__hit=(window.__hit||0)+1'); \
+                 log.join(',')"
+            ),
+            "0,1,false,function,true"
+        );
+    }
+
+    // R1 B1: removing an absent attribute runs no attribute-change steps
+    // (DOM "remove an attribute by name" on a missing attribute is a no-op),
+    // so `removeAttribute('onclick')` with no such attribute keeps the
+    // IDL-assigned handler, as Chrome does. Removing one that IS present
+    // still deactivates it.
+    #[test]
+    fn removing_an_absent_on_attribute_keeps_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), log = []; \
+                 var b = document.createElement('button'); o.appendChild(b); \
+                 window.__f = 0; function f() { window.__f++; } \
+                 b.onclick = f; \
+                 b.removeAttribute('onclick'); log.push(b.onclick === f); \
+                 b.removeAttribute('OnClick'); log.push(b.onclick === f); \
+                 b.removeAttributeNS(null, 'onclick'); log.push(b.onclick === f); \
+                 b.click(); log.push(window.__f); \
+                 b.setAttribute('onclick', ''); b.removeAttribute('onclick'); \
+                 log.push(String(b.onclick)); b.click(); log.push(window.__f); \
+                 log.join(',')"
+            ),
+            "true,true,true,1,null,1"
+        );
+    }
+
+    // A page's script-retry shim wraps the native accessor: it takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own. The
+    // handler it stores through the original setter is the one dispatched.
+    #[test]
+    fn a_wrapped_on_handler_accessor_still_dispatches() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'), log = []; \
+                 Object.defineProperty(HTMLElement.prototype, 'onerror', { configurable: true, enumerable: true, \
+                     get: function () { var e = o.get.call(this); return (e && e.__origin) || e; }, \
+                     set: function (t) { \
+                         var i = this; \
+                         if (typeof t !== 'function') return o.set.call(this, t); \
+                         var s = function () { log.push('wrapped'); return t.apply(i, arguments); }; \
+                         s.__origin = t; o.set.call(this, s); \
+                     } }); \
+                 var s = document.createElement('script'); \
+                 s.src = 'https://example.invalid/x.js'; \
+                 s.onload = function () {}; \
+                 var n = function (e) { log.push('error:' + (this === s) + ':' + e.type); }; \
+                 s.onerror = n; \
+                 log.push(s.onerror === n); \
+                 document.body.appendChild(s); \
+                 s.dispatchEvent(new Event('error')); \
+                 s.onerror = null; log.push(String(s.onerror)); \
+                 s.dispatchEvent(new Event('error')); \
+                 log.join(',')"
+            ),
+            "true,wrapped,error:true:error,null"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // HTML §8.1.8.2.1 (event handlers on body and frameset elements): the
+    // WindowEventHandlers set and the Window-reflecting set (onload,
+    // onresize, onscroll, onerror, onfocus, onblur) on the body element are
+    // the Window's handlers. `<body onload>` compiles into the Window's
+    // `load` handler, with the document and the body in scope and the Window
+    // as `this`; the Window's `load` dispatch runs it.
+    const BODY_ONLOAD: &str = "<html><body id='b' onload=\"window.__l = [this === window, id, typeof getElementById].join(':')\">\
+         <a id='i'>x</a></body></html>";
+
+    #[test]
+    fn a_body_onload_attribute_is_the_windows_load_handler() {
+        let b = bound(BODY_ONLOAD);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = []; \
+                 log.push(typeof window.onload, document.body.onload === window.onload, String(window.__l)); \
+                 log.join(',')"
+            ),
+            "function,true,undefined"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "String(window.__l)"), "true:b:function");
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // `document.body.onload = f` is `window.onload = f`: both read the same
+    // slot, and `load` at the Window runs it with the Window as `this`.
+    #[test]
+    fn a_body_onload_assignment_is_the_windows_load_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = []; \
+                 function f() { window.__ran = (window.__ran || 0) + 1; window.__this = this === window; } \
+                 document.body.onload = f; \
+                 log.push(window.onload === f, document.body.onload === f); \
+                 var o = Object.getOwnPropertyDescriptor(HTMLBodyElement.prototype, 'onload'); \
+                 log.push(typeof o, o && typeof o.get, o && typeof o.set); \
+                 log.push(Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onhashchange'), \
+                          Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onclick')); \
+                 log.join(',')"
+            ),
+            "true,true,object,function,function,true,false"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "[window.__ran, window.__this].join(',')"), "1,true");
+        // The other direction too: a Window assignment shows on the body,
+        // and null turns the handler off on both.
+        assert_eq!(
+            eval_string(
+                &b,
+                "function h() {} window.onresize = h; var log = [document.body.onresize === h]; \
+                 document.body.onresize = null; log.push(String(window.onresize), String(document.body.onresize)); \
+                 window.onhashchange = h; log.push(document.body.onhashchange === h); \
+                 log.join(',')"
+            ),
+            "true,null,null,true"
+        );
+    }
+
+    // The body's on<type> content attribute for a Window type, set later,
+    // is the Window's handler (and replaces an assigned one, as on elements);
+    // removing it leaves no handler. A bubbling event dispatched at the body
+    // runs the handler once, at the Window, not again at the body.
+    #[test]
+    fn a_body_window_attribute_set_later_and_dispatch_once_at_window() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], body = document.body; \
+                 window.__n = 0; \
+                 function f() { log.push('assigned'); } \
+                 window.onscroll = f; \
+                 body.setAttribute('onscroll', 'window.__n++; window.__at = (this === window) + \":\" + (event.currentTarget === window)'); \
+                 log.push(window.onscroll === f, typeof window.onscroll, body.onscroll === window.onscroll); \
+                 body.dispatchEvent(new Event('scroll', { bubbles: true })); \
+                 log.push(window.__n, window.__at); \
+                 body.dispatchEvent(new Event('scroll')); \
+                 log.push(window.__n); \
+                 body.removeAttribute('onscroll'); \
+                 log.push(String(window.onscroll), String(body.onscroll)); \
+                 body.dispatchEvent(new Event('scroll', { bubbles: true })); \
+                 log.push(window.__n); \
+                 log.join(',')"
+            ),
+            "false,function,true,1,true:true,1,null,null,1"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // GlobalEventHandlers that are not in the Window-reflecting set stay the
+    // body element's own: `body.onclick` is not `window.onclick`.
+    #[test]
+    fn a_body_onclick_stays_the_elements_own_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], body = document.body; \
+                 function f() { log.push('click:' + (this === body)); } \
+                 body.onclick = f; \
+                 log.push(body.onclick === f, String(window.onclick)); \
+                 body.dispatchEvent(new Event('click', { bubbles: true })); \
+                 body.setAttribute('onclick', 'window.__c = this === document.body'); \
+                 body.dispatchEvent(new Event('click', { bubbles: true })); \
+                 log.push(window.__c, String(window.onclick)); \
+                 log.join(',')"
+            ),
+            "true,undefined,click:true,true,undefined"
+        );
+    }
+
+    // HTML §8.1.8.1 "determine the target of an event handler": a body or
+    // frameset element's handler for a Window type is the Window's whenever
+    // the element's node document is the active document, attached or not
+    // (a `createElement('body')` forwards). One whose node document is
+    // another document (a DOMParser body: no Window) has no target: the
+    // getter answers null and assignment does nothing. A `load` dispatched
+    // at a body runs nothing at the body itself: the handler is the Window's.
+    #[test]
+    fn any_body_of_the_active_document_forwards_and_another_documents_body_has_no_target() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], d = document.createElement('body'); \
+                 function f() { window.__ran = (window.__ran || 0) + 1; } \
+                 d.onload = f; \
+                 log.push(d.onload === f, window.onload === f, document.body.onload === f); \
+                 d.onhashchange = f; log.push(window.onhashchange === f); \
+                 d.onload = null; log.push(String(window.onload), String(d.onload)); \
+                 window.onload = f; log.push(d.onload === f); \
+                 d.dispatchEvent(new Event('load')); log.push(String(window.__ran)); \
+                 var p = new DOMParser().parseFromString('<body onload=\"window.__p = 1\"></body>', 'text/html'); \
+                 log.push(p.body.ownerDocument === p, String(p.body.onload)); \
+                 p.body.onload = function () { window.__q = 1; }; \
+                 log.push(String(p.body.onload), window.onload === f); \
+                 p.body.dispatchEvent(new Event('load')); \
+                 log.join(',')"
+            ),
+            "true,true,true,true,null,null,true,undefined,true,null,null,true"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(
+            eval_string(&b, "[String(window.__ran), String(window.__p), String(window.__q)].join(',')"),
+            "1,undefined,undefined"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // HTML §3.1.3: a frameset document's body element is its frameset, so
+    // `<frameset onload>` is the Window's `load` handler as `<body onload>`
+    // is, and `frameset.onload` reads the Window's slot. `onpagereveal` and
+    // `onpageswap` are WindowEventHandlers members too (§8.1.8.2.1).
+    #[test]
+    fn a_frameset_onload_attribute_is_the_windows_load_handler() {
+        let b = bound(
+            "<html><head></head><frameset cols='*' onload=\"window.__f = 1\"><frame src='a'></frameset></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var fs = document.body, log = [fs && fs.localName]; \
+                 log.push(typeof window.onload, fs.onload === window.onload, String(window.__f)); \
+                 log.push(Object.prototype.hasOwnProperty.call(HTMLFrameSetElement.prototype, 'onpagereveal'), \
+                          Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onpageswap'), \
+                          Object.prototype.hasOwnProperty.call(window, 'onpagereveal')); \
+                 log.join(',')"
+            ),
+            "frameset,function,true,undefined,true,true,true"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "String(window.__f)"), "1");
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
     }
 
     const ROW: &str =

@@ -741,7 +741,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
-                .parse_fragment(html, tag_name)
+                .parse_fragment_in(html, tag_name, is_in_html_content(&node))
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -1089,6 +1089,25 @@ fn string_arg(args: &[JsValue], index: usize) -> Option<&str> {
 fn is_html_element(node: &Node) -> bool {
     matches!(&node.node_type, NodeType::Element { namespace, .. }
         if namespace.is_empty() || namespace == "http://www.w3.org/1999/xhtml")
+}
+
+/// Is `node` an HTML element for the fragment parser? The tree builder gives
+/// every parsed element the HTML namespace, so an element inside `<svg>` or
+/// `<math>` (and not under a `foreignObject`) is foreign by its ancestors.
+fn is_in_html_content(node: &Node) -> bool {
+    if !is_html_element(node) {
+        return false;
+    }
+    let mut up = node.parent();
+    while let Some(ancestor) = up {
+        match ancestor.tag_name().map(str::to_ascii_lowercase).as_deref() {
+            Some("foreignobject") => return true,
+            Some("svg") | Some("math") => return false,
+            _ => {}
+        }
+        up = ancestor.parent();
+    }
+    true
 }
 
 /// Is `node` a descendant of `scope` (not `scope` itself)?
@@ -1789,7 +1808,7 @@ const WRAPPERS_JS: &str = r#"
             a: 'HTMLAnchorElement', area: 'HTMLAreaElement', audio: 'HTMLAudioElement', base: 'HTMLBaseElement',
             body: 'HTMLBodyElement', br: 'HTMLBRElement', button: 'HTMLButtonElement', canvas: 'HTMLCanvasElement',
             data: 'HTMLDataElement', details: 'HTMLDetailsElement', dialog: 'HTMLDialogElement', div: 'HTMLDivElement',
-            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', head: 'HTMLHeadElement',
+            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', frameset: 'HTMLFrameSetElement', head: 'HTMLHeadElement',
             h1: 'HTMLHeadingElement', h2: 'HTMLHeadingElement', h3: 'HTMLHeadingElement', h4: 'HTMLHeadingElement',
             h5: 'HTMLHeadingElement', h6: 'HTMLHeadingElement', hr: 'HTMLHRElement', html: 'HTMLHtmlElement',
             iframe: 'HTMLIFrameElement', img: 'HTMLImageElement', label: 'HTMLLabelElement', legend: 'HTMLLegendElement',
@@ -1922,11 +1941,17 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Removing an absent attribute runs no attribute-change steps (DOM
+        // "remove an attribute by name"), so it must not drop an assigned
+        // on<type> handler. N.attr matches the name as the write does.
+        var changed = op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
+        if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
@@ -3423,33 +3448,199 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
-    // An element's on<type> handler: the property when one was assigned
-    // (`null` included, which turns the handler off), else its `on<type>`
-    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
-    // `function (event)`, with the element and its document in scope,
-    // compiled on first use and again when the text changes. A body that
-    // does not compile is logged once and is no handler.
-    var INLINE = new WeakMap();
-    function handlerOf(t, type) {
-        if (PLAIN.has(t)) return undefined;
-        var h = t['on' + type];
-        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+    // An element's on<type> handler (HTML §8.1.8): the value assigned through
+    // its `on<type>` IDL attribute (`null` included, which turns the handler
+    // off), else its `on<type>` content attribute. The attribute's text is
+    // the body of `function (event)`, with the element and its document in
+    // scope, compiled on first use and again when the text changes. A body
+    // that does not compile is logged once and is no handler. Setting or
+    // removing the attribute drops the assigned value: the attribute is the
+    // handler again (§8.1.8.1 "event handler content attributes").
+    var INLINE = new WeakMap(), ASSIGNED = new WeakMap();
+    // `src` as the body of `function (event)`, with `el`'s document and
+    // then `el` in scope (§8.1.8.1 "getting the current value of the event
+    // handler", the scope chain). `this` is whatever the handler is called
+    // on: the element, or the Window for a body handler the Window owns.
+    //
+    // Known deviation (L2): for a handler the Window owns (`<body onload>`,
+    // `<frameset onresize>`), the spec's scope chain is the global only: its
+    // "element" is null, so neither the document nor the body is put in
+    // scope (§8.1.8.1 steps 10 and 12 apply to an element's handler). This
+    // compiles every attribute the same way, with the document and the
+    // element in scope, so `<body onload="getElementById(...)">` resolves
+    // where the spec would throw. Kept deliberately: nothing on the web
+    // depends on the throw, and one compile path is one place to get right.
+    function compileHandler(src, el) {
+        try {
+            return new Function('__rk_doc', '__rk_el',
+                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
+            )(el.ownerDocument || {}, el);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+            return null;
+        }
+    }
+    function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return h;
+        if (src === null) return null;
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
-        if (!c || c.src !== src) {
-            c = all[type] = { src: src, fn: null };
-            try {
-                c.fn = new Function('event',
-                    'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
-            } catch (e) {
-                try { __rk.reportError(e); } catch (_) {}
-            }
-        }
+        if (!c || c.src !== src) c = all[type] = { src: src, fn: compileHandler(src, t) };
         return c.fn;
     }
+    // HTML §8.1.8.1 "determine the target of an event handler", for a
+    // Window type (WINDOW_HANDLER_TYPES) on an element:
+    //   1. not a body or frameset element: the element itself;
+    //   3. a body/frameset whose node document is not the active document
+    //      (a DOMParser body: no Window): null, so the getter answers null
+    //      and the setter does nothing;
+    //   4. else the Window: the body's or frameset's node document is the
+    //      global document, attached to it or not (`createElement('body')`
+    //      forwards too; the spec never asks whether it is THE body element).
+    function isBodyOrFrameset(t) {
+        if (t.nodeType !== 1) return false;
+        var n = t.localName;
+        return n === 'body' || n === 'frameset';
+    }
+    function windowHandlerTarget(t) {
+        return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
+    function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
+        // A body or frameset has no handler of its own for a Window type,
+        // assigned or inline: the target is the Window (its handler runs
+        // when the event reaches the Window) or nothing.
+        if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
+        // A type with no accessor (a custom event) is still a data property.
+        if (!HANDLER_TYPES[type]) {
+            var h = t['on' + type];
+            if (h !== undefined) return h;
+        }
+        return inlineHandler(t, type);
+    }
+    function attributeChanged(t, name) {
+        // The native setAttr/removeAttr lowercases the name for HTML elements
+        // (`OnClick` is the `onclick` attribute), so compare the lowercased
+        // name here too. Lowercasing unconditionally is fine: SVG's on<type>
+        // attributes are lowercase already, so a case-sensitive SVG name
+        // either is lowercase or names no handler attribute at all.
+        name = String(name).toLowerCase();
+        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+            var type = name.slice(2), a = ASSIGNED.get(t);
+            if (a) delete a[type];
+            // The body's attribute for a Window type is the Window's
+            // handler: it replaces what was assigned to `window.on<type>`.
+            // Only the body element's attribute (L1): the Window's getter
+            // reads `doc.body`'s attribute lazily, so a detached body's
+            // attribute, which the spec would also compile into the
+            // Window's handler, is left alone rather than dropping the
+            // assigned handler for nothing.
+            if (WINDOW_HANDLER_TYPES[type] && t === doc.body && windowHandlerTarget(t) === g) {
+                delete WINDOW_ASSIGNED[type];
+            }
+        }
+    }
+    // HTML §8.1.8.2 GlobalEventHandlers: `on<type>` is an accessor on
+    // HTMLElement.prototype (and SVGElement.prototype), not a data property
+    // of each element. The getter answers the assigned value, else the
+    // compiled content attribute, else null; the setter keeps a function or
+    // object and makes anything else null. Script that wraps the native
+    // accessor needs the descriptor to exist: a script-retry shim takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own, and
+    // without it every later `onerror` read and write on any element threw,
+    // which stopped Next's bootstrap and webpack's chunk loader at the first
+    // `<script src>` they inserted.
+    var HANDLER_TYPES = Object.create(null);
+    ('abort animationcancel animationend animationiteration animationstart auxclick beforeinput ' +
+     'beforematch beforetoggle blur cancel canplay canplaythrough change click close contextlost ' +
+     'contextmenu contextrestored copy cuechange cut dblclick drag dragend dragenter dragleave ' +
+     'dragover dragstart drop durationchange emptied ended error focus formdata gotpointercapture ' +
+     'input invalid keydown keypress keyup load loadeddata loadedmetadata loadstart ' +
+     'lostpointercapture mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup ' +
+     'paste pause play playing pointercancel pointerdown pointerenter pointerleave pointermove ' +
+     'pointerout pointerover pointerrawupdate pointerup progress ratechange reset resize scroll ' +
+     'scrollend securitypolicyviolation seeked seeking select selectionchange selectstart ' +
+     'slotchange stalled submit suspend timeupdate toggle touchcancel touchend touchmove ' +
+     'touchstart transitioncancel transitionend transitionrun transitionstart volumechange ' +
+     'waiting wheel').split(' ').forEach(function (type) {
+        HANDLER_TYPES[type] = true;
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () { return elementHandlerGet(this, type); },
+            set: function (v) { elementHandlerSet(this, type, v); }
+        };
+        Object.defineProperty(HTMLElement.prototype, 'on' + type, desc);
+        Object.defineProperty(g.SVGElement.prototype, 'on' + type, desc);
+    });
+    function elementHandlerGet(t, type) {
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        return t[SLOT] && t.nodeType === 1 ? inlineHandler(t, type) : null;
+    }
+    function handlerValue(v) {
+        return typeof v === 'function' || (typeof v === 'object' && v !== null) ? v : null;
+    }
+    function elementHandlerSet(t, type, v) {
+        var a = ASSIGNED.get(t);
+        if (!a) { a = Object.create(null); ASSIGNED.set(t, a); }
+        a[type] = handlerValue(v);
+    }
+    // HTML §8.1.8.2.1, event handlers on body and frameset elements: the
+    // WindowEventHandlers set (onhashchange, onpopstate, onstorage, ...) and
+    // the Window-reflecting set (onload, onresize, onscroll, onerror,
+    // onfocus, onblur) on the body element are the Window's handlers. The
+    // IDL attributes on HTMLBodyElement.prototype (and the frameset's)
+    // forward to `window.on<type>` for any body or frameset of the global
+    // document (windowHandlerTarget), and `<body onload="...">` is the
+    // Window's `load` handler: compiled from the attribute with the
+    // document and the body in scope, the Window as `this`, and run by the
+    // Window's `load` dispatch (which is where `load` fires; older pages
+    // put their start-up there). A frameset document's body element is its
+    // frameset (§3.1.3), so `<frameset onload>` is the same. A body in
+    // another document has no Window to forward to: null, no assignment.
+    //
+    // `window.on<type>` for these types is an accessor on the Window over
+    // one slot: the value assigned (through the Window or the body), else
+    // the body element's compiled content attribute, else null. Setting or
+    // removing the body element's attribute drops the assigned value, as
+    // on elements. The Window's dispatch reads `window['on' + type]`, so it
+    // sees the slot. The other on<type> on the Window stay data properties.
+    var WINDOW_HANDLER_TYPES = Object.create(null), WINDOW_ASSIGNED = Object.create(null);
+    ('afterprint beforeprint beforeunload blur error focus hashchange languagechange load message ' +
+     'messageerror offline online pagehide pagereveal pageshow pageswap popstate rejectionhandled ' +
+     'resize scroll storage unhandledrejection unload').split(' ').forEach(function (type) {
+        WINDOW_HANDLER_TYPES[type] = true;
+        var name = 'on' + type;
+        Object.defineProperty(g, name, {
+            configurable: true, enumerable: true,
+            get: function () {
+                if (type in WINDOW_ASSIGNED) return WINDOW_ASSIGNED[type];
+                var body = doc.body;
+                return body ? inlineHandler(body, type) : null;
+            },
+            set: function (v) { WINDOW_ASSIGNED[type] = handlerValue(v); }
+        });
+        // §8.1.8.2 getter step 2 / setter step 2: a null target answers
+        // null and takes no assignment.
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () {
+                var target = windowHandlerTarget(this);
+                return target === g ? g[name] : target === null ? null : elementHandlerGet(this, type);
+            },
+            set: function (v) {
+                var target = windowHandlerTarget(this);
+                if (target === g) g[name] = v; else if (target !== null) elementHandlerSet(this, type, v);
+            }
+        };
+        Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
+        Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
+    });
     var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
