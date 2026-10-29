@@ -6761,14 +6761,17 @@ impl LayoutBox {
     /// positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` for a box
     /// that paints in normal flow.
     ///
-    /// The engine transfers `position: relative` and `sticky` as
-    /// `Position::Static` (their geometry path is not ready), so
+    /// The engine transfers `position: relative` as `Position::Static`
+    /// (its geometry path is not ready), so
     /// `self.position` alone put a relative box in normal flow, under an
     /// earlier absolute sibling and with its `z-index` ignored: railway.com's
     /// `relative z-10` hero text painted under its `absolute inset-0` image
     /// (hand test 10-27, R2). Read the computed style for those. A text run
     /// copies its parent's style and an anonymous box is not an element, so
-    /// only element boxes count.
+    /// only element boxes count. `sticky` is left in normal flow: it is
+    /// still laid out as static and scrolls with the page, so painting it
+    /// positioned would lay it over a fixed bar it never reaches in Chrome
+    /// (`render_no_clone_tests::fixed_sticky_images_and_iframes_draw_the_same_under_scroll`).
     pub fn paint_z(&self) -> Option<i32> {
         if self.position != Position::Static {
             return Some(self.z_index);
@@ -6777,10 +6780,7 @@ impl LayoutBox {
             self.box_type,
             BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
         );
-        let relative = matches!(
-            self.style.position,
-            rustkit_css::Position::Relative | rustkit_css::Position::Sticky
-        );
+        let relative = self.style.position == rustkit_css::Position::Relative;
         (element && relative).then_some(self.style.z_index)
     }
 
