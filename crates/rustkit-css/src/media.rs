@@ -18,6 +18,234 @@ pub fn media_query_list_matches(list: &str, width: f32, height: f32) -> bool {
         .any(|q| query_matches(q.trim(), width, height))
 }
 
+/// Serialize a media query list the way `MediaQueryList.media` reports it
+/// (cssom §5.1 "serialize a media query list"): lowercased, whitespace
+/// collapsed, each `(name: value)` feature spaced so, the queries joined
+/// with `, `. A query that does not parse as a Media Queries 4
+/// `<media-query>` (`foo bar`, `screen and`, `not(hover)`, `(a) and (b)
+/// or (c)`, an unbalanced parenthesis) serializes as `not all`, which no
+/// viewport matches; the rest of the list is unaffected. Evaluating the
+/// serialized text with [`media_query_list_matches`] answers what the
+/// original would in Chrome: an invalid query is false, not "unknown type
+/// under `not`".
+pub fn media_query_list_serialize(list: &str) -> String {
+    let list = list.trim();
+    if list.is_empty() {
+        return String::new();
+    }
+    split_top_level(list, ',')
+        .iter()
+        .map(|q| {
+            let lower = collapse_whitespace(&q.to_ascii_lowercase());
+            serialize_query(&lower).unwrap_or_else(|| "not all".to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A depth-0 token of a media query: a word, or the text inside one
+/// balanced parenthesized group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MediaToken<'a> {
+    Word(&'a str),
+    Group(&'a str),
+}
+
+/// Tokenize a whitespace-collapsed query. `None` for an unbalanced
+/// parenthesis or a word run straight into `(` (`not(`, `and(`: a function
+/// token, which no media query grammar production accepts).
+fn tokenize_media_query(s: &str) -> Option<Vec<MediaToken<'_>>> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' => i += 1,
+            b'(' => {
+                let mut depth = 0i32;
+                let mut j = i;
+                loop {
+                    if j >= bytes.len() {
+                        return None;
+                    }
+                    match bytes[j] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                out.push(MediaToken::Group(&s[i + 1..j]));
+                i = j + 1;
+                if i < bytes.len() && bytes[i] != b' ' {
+                    return None;
+                }
+            }
+            b')' => return None,
+            _ => {
+                let end = s[i..].find([' ', '(', ')']).map_or(bytes.len(), |k| i + k);
+                out.push(MediaToken::Word(&s[i..end]));
+                i = end;
+                if i < bytes.len() && bytes[i] == b'(' {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+fn is_css_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '-')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_media_type(s: &str) -> bool {
+    is_css_ident(s) && !matches!(s, "not" | "and" | "or" | "only" | "layer")
+}
+
+/// `<media-query> = <media-condition> | [ not | only ]? <media-type> [ and
+/// <media-condition-without-or> ]?`, serialized; `None` when invalid.
+fn serialize_query(s: &str) -> Option<String> {
+    use MediaToken::{Group, Word};
+    let toks = tokenize_media_query(s)?;
+    let (prefix, rest) = match toks.first()? {
+        Word(kw @ ("not" | "only")) => match toks.get(1)? {
+            // `not <media-condition>`: exactly one parenthesized query.
+            Group(_) if *kw == "not" => {
+                return serialize_condition(&toks, false);
+            }
+            Group(_) => return None,
+            Word(_) => (Some(*kw), &toks[1..]),
+        },
+        Word(_) => (None, &toks[..]),
+        Group(_) => return serialize_condition(&toks, false),
+    };
+    let Some(Word(media_type)) = rest.first() else {
+        return None;
+    };
+    if !is_media_type(media_type) {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(kw) = prefix {
+        out.push_str(kw);
+        out.push(' ');
+    }
+    out.push_str(media_type);
+    match rest.get(1) {
+        None => Some(out),
+        Some(Word("and")) => {
+            let cond = serialize_condition(&rest[2..], true)?;
+            out.push_str(" and ");
+            out.push_str(&cond);
+            Some(out)
+        }
+        Some(_) => None,
+    }
+}
+
+/// `<media-condition> = <media-not> | <media-in-parens> [ <media-and>* |
+/// <media-or>* ]`; with `without_or`, the `<media-condition-without-or>`
+/// production (no `or`).
+fn serialize_condition(toks: &[MediaToken<'_>], without_or: bool) -> Option<String> {
+    use MediaToken::{Group, Word};
+    match toks {
+        [] => None,
+        [Word("not"), Group(inner)] => Some(format!("not {}", serialize_in_parens(inner)?)),
+        [Word("not"), ..] => None,
+        [Group(first), rest @ ..] => {
+            let mut out = serialize_in_parens(first)?;
+            let mut connector: Option<&str> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                let (Word(word), Some(Group(inner))) = (rest[i], rest.get(i + 1)) else {
+                    return None;
+                };
+                if !(word == "and" || (word == "or" && !without_or)) {
+                    return None;
+                }
+                if connector.is_some_and(|c| c != word) {
+                    return None;
+                }
+                connector = Some(word);
+                out.push(' ');
+                out.push_str(word);
+                out.push(' ');
+                out.push_str(&serialize_in_parens(inner)?);
+                i += 2;
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// `<media-in-parens>`: a nested condition, or a feature in plain, range or
+/// boolean form, serialized with its parentheses.
+fn serialize_in_parens(inner: &str) -> Option<String> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    if inner.starts_with('(') || inner.starts_with("not ") {
+        let toks = tokenize_media_query(inner)?;
+        return Some(format!("({})", serialize_condition(&toks, false)?));
+    }
+    if inner.contains(['<', '>']) || (inner.contains('=') && !inner.contains(':')) {
+        // Range syntax. Its operands are feature names, numbers, dimensions,
+        // ratios and math functions, all ASCII: a non-ASCII char anywhere
+        // makes the feature invalid (Chrome 148: `(ü > 1)` and
+        // `(width > 600pxé)` are both `not all`). Page text, so the walk
+        // below steps by char, never by byte.
+        if !inner.is_ascii() {
+            return None;
+        }
+        // One space around each comparison operator.
+        let mut spaced = String::new();
+        let mut skip = 0;
+        for (i, c) in inner.char_indices() {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            match ["<=", ">=", "<", ">", "="].iter().find(|op| inner[i..].starts_with(*op)) {
+                Some(op) => {
+                    spaced.push(' ');
+                    spaced.push_str(op);
+                    spaced.push(' ');
+                    skip = op.len() - 1;
+                }
+                None => spaced.push(c),
+            }
+        }
+        let spaced = collapse_whitespace(&spaced);
+        return (!spaced.starts_with(['<', '>', '=']) && !spaced.ends_with(['<', '>', '='])
+            && spaced.split(' ').any(is_css_ident))
+            .then(|| format!("({spaced})"));
+    }
+    match inner.split_once(':') {
+        Some((name, value)) => {
+            let (name, value) = (name.trim(), value.trim());
+            (is_css_ident(name) && !value.is_empty()).then(|| format!("({name}: {value})"))
+        }
+        None => is_css_ident(inner).then(|| format!("({inner})")),
+    }
+}
+
 /// Font-relative and viewport units for an `@container` condition: em is
 /// the query container's font size, rem the root element's, vw/vh the
 /// viewport's (css-contain-3 §6.1: relative units resolve against the query
@@ -1132,5 +1360,76 @@ mod tests {
         assert!(m("(min--moz-device-pixel-ratio: 1)", w, h));
         assert!(!m("(frobnicate: yes)", w, h));
         assert!(m("", w, h));
+    }
+
+    /// `MediaQueryList.media` as Chrome 148 serializes it: case and
+    /// whitespace normalized, an invalid query `not all`, and evaluating the
+    /// serialization answers what the original would.
+    #[test]
+    fn serialization_normalizes_and_marks_invalid_queries_not_all() {
+        use super::media_query_list_serialize as ser;
+        assert_eq!(ser("(min-width: 600px)"), "(min-width: 600px)");
+        assert_eq!(ser("(MIN-WIDTH:600PX)"), "(min-width: 600px)");
+        assert_eq!(ser("  ( min-width :  600px )  "), "(min-width: 600px)");
+        assert_eq!(ser("screen and (min-width: 960px)"), "screen and (min-width: 960px)");
+        assert_eq!(ser("only screen and (max-width: 640px)"), "only screen and (max-width: 640px)");
+        assert_eq!(ser("not print"), "not print");
+        assert_eq!(ser("print"), "print");
+        assert_eq!(ser("all"), "all");
+        assert_eq!(ser(""), "");
+        assert_eq!(ser("(width>=600px)"), "(width >= 600px)");
+        assert_eq!(ser("(400px <= width < 700px)"), "(400px <= width < 700px)");
+        assert_eq!(ser("(color)"), "(color)");
+        assert_eq!(ser("not (max-width: 500px)"), "not (max-width: 500px)");
+        assert_eq!(ser("(min-width: 600px) and (max-width: 1300px)"), "(min-width: 600px) and (max-width: 1300px)");
+        assert_eq!(ser("((min-width: 600px) or (hover)) and (color)"), "((min-width: 600px) or (hover)) and (color)");
+        assert_eq!(ser("print, (min-width: 1000px)"), "print, (min-width: 1000px)");
+        assert_eq!(ser("(prefers-color-scheme: dark)"), "(prefers-color-scheme: dark)");
+
+        // Invalid queries, each as Chrome 148 answers them.
+        assert_eq!(ser("foo bar"), "not all");
+        assert_eq!(ser("screen and"), "not all");
+        assert_eq!(ser("not(hover)"), "not all");
+        assert_eq!(ser("(min-width: 600px"), "not all");
+        assert_eq!(ser("min-width: 600px)"), "not all");
+        assert_eq!(ser("()"), "not all");
+        assert_eq!(ser("(a) and (b) or (c)"), "not all");
+        assert_eq!(ser("not (a) and (b)"), "not all");
+        assert_eq!(ser("only (hover)"), "not all");
+        assert_eq!(ser("screen and (hover) or (color)"), "not all");
+        assert_eq!(ser("screen, foo bar"), "screen, not all");
+        assert_eq!(ser("not foo bar"), "not all");
+
+        // The serialization evaluates as the original would in Chrome: an
+        // invalid query is false, even under `not`.
+        let (w, h) = (1280.0, 800.0);
+        assert!(!m(&ser("not foo bar"), w, h));
+        assert!(!m(&ser("not(hover)"), w, h));
+        assert!(m(&ser("screen, foo bar"), w, h));
+        assert!(m(&ser("(MIN-WIDTH:600PX)"), w, h));
+        assert!(!m(&ser("(min-width: 1281px)"), w, h));
+        assert!(m(&ser(""), w, h));
+    }
+
+    /// A non-ASCII char in a range feature is page text the serializer must
+    /// walk by char: #818 R1 H1 stepped it by byte and panicked on `(ü > 1)`
+    /// ("byte index 1 is not a char boundary"), a page-controlled panic
+    /// through `window.matchMedia`. Such a feature is invalid (`not all`, as
+    /// Chrome 148 answers), and a valid range still serializes as before.
+    #[test]
+    fn range_serialization_is_utf8_safe() {
+        use super::media_query_list_serialize as ser;
+        assert_eq!(ser("(ü > 1)"), "not all");
+        assert_eq!(ser("(ü>1)"), "not all");
+        assert_eq!(ser("(width > 600pxé)"), "not all");
+        assert_eq!(ser("(é <= width <= ü)"), "not all");
+        assert_eq!(ser("(width = ü)"), "not all");
+        assert_eq!(ser("screen, (ü > 1)"), "screen, not all");
+        assert_eq!(ser("(width > 600px)"), "(width > 600px)");
+        assert_eq!(ser("(width>600px)"), "(width > 600px)");
+        assert_eq!(ser("(400px <= width < 700px)"), "(400px <= width < 700px)");
+        assert_eq!(ser("(aspect-ratio >= 16/9)"), "(aspect-ratio >= 16/9)");
+        assert!(!m(&ser("(ü > 1)"), 1280.0, 800.0));
+        assert!(m(&ser("(width > 600px)"), 1280.0, 800.0));
     }
 }
