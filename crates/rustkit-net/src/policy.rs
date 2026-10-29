@@ -1758,6 +1758,50 @@ mod tests {
         assert_eq!(order, paths, "origin slots must follow reserve order");
     }
 
+    /// L2 (#827 R1): the slot contract is per origin only. Two origins share
+    /// one page slot and their reservations interleave; tasks first run in
+    /// the reverse order on a multi-thread runtime. Each origin is still
+    /// served in its own reserve order and nothing starves. The order across
+    /// origins is the order page-slot grants land in, which this does not
+    /// pin (the `reserve` docs).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_origins_competing_for_the_page_slot_keep_per_origin_order() {
+        let ok = |_: &Seen| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok");
+        let (s1, s2) = (serve_with(Duration::from_millis(40), ok).await, serve_with(Duration::from_millis(40), ok).await);
+        let limits = FetchLimits { max_in_flight_per_origin: 1, max_in_flight_per_page: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s1.port, s2.port],
+        ));
+        let l = Arc::new(loader());
+        let paths = ["/a", "/b", "/c", "/d"];
+        let mut reserved = Vec::new();
+        for path in paths {
+            for s in [&s1, &s2] {
+                let req = ScriptRequest::get(s.url(path));
+                let r = p.reserve(&req, None).expect("reserved");
+                reserved.push((req, r));
+            }
+        }
+        let mut tasks = Vec::new();
+        for (req, r) in reserved.into_iter().rev() {
+            let (p, l) = (p.clone(), l.clone());
+            tasks.push(tokio::spawn(async move { p.execute_reserved(&l, req, r, None).await }));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let all = async {
+            for t in tasks {
+                t.await.unwrap().expect("served");
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), all).await.expect("an origin starved behind the other");
+        for (name, s) in [("first", &s1), ("second", &s2)] {
+            let order: Vec<String> = s.seen().into_iter().map(|seen| seen.path).collect();
+            assert_eq!(order, paths, "{name} origin left its reserve order");
+            assert_eq!(s.peak.load(Ordering::SeqCst), 1, "{name} origin over its slot");
+        }
+    }
+
     /// G3: a reservation dropped while queued (a navigation) gives its place
     /// up; the request behind it is served, nothing waits forever.
     #[tokio::test]
