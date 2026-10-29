@@ -10393,11 +10393,18 @@ impl layout_ctx::LayoutCtx {
                 // computed style (pseudo-element text lives inside its own
                 // Inline wrapper), so the join loses nothing — and let the
                 // strip run on the joined run. Pre-family runs are joined
-                // verbatim: nothing collapses there.
+                // verbatim: nothing collapses there. The one exception is
+                // text hoisted out of a `display: contents` element: it
+                // carries that element's style and `link_href`, so it only
+                // joins a neighbour with the same style and href.
                 let mut joined: Vec<LayoutBox> = Vec::with_capacity(layout_box.children.len());
                 for child in layout_box.children.drain(..) {
                     let joins_previous = matches!(child.box_type, BoxType::Text(_))
-                        && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
+                        && joined.last().is_some_and(|last| {
+                            matches!(last.box_type, BoxType::Text(_))
+                                && last.link_href == child.link_href
+                                && last.style == child.style
+                        });
                     if !joins_previous {
                         joined.push(child);
                         continue;
