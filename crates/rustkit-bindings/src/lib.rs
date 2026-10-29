@@ -83,6 +83,8 @@ mod meta_refresh_noscript_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod forced_layout_budget_tests;
+#[cfg(test)]
 mod range_tests;
 #[cfg(test)]
 mod scroll_tests;
