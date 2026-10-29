@@ -126,6 +126,7 @@ impl LayoutCtx {
             ("checked_states", lay.checked_states.try_borrow_mut().is_ok()),
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
+            ("boxless_styles", lay.boxless_styles.try_borrow_mut().is_ok()),
         ];
         free.into_iter().find(|(_, free)| !free).map(|(name, _)| name)
     }
@@ -201,6 +202,14 @@ pub(crate) struct ViewLayout {
     /// viewport then takes html's, and a body with its own is a scroller
     /// that clips what it holds (see `scrollable_bottom`).
     pub(crate) html_clips: Cell<bool>,
+    /// Computed style lines (`computed_style_lines`) of this view's
+    /// elements that have no layout box: `display: contents` (hoisted out
+    /// of the tree) and the root, which is styled but not walked. Keyed by
+    /// raw NodeId, so per view like `edit_states`: ids restart in every
+    /// document, and a second view's build must not replace them (R1 M1
+    /// on #786). A full build replaces the map; a restyle keeps the
+    /// entries it does not walk.
+    pub(crate) boxless_styles: RefCell<HashMap<usize, String>>,
 }
 
 #[cfg(test)]

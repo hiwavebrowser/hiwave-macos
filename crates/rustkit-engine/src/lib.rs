@@ -379,6 +379,8 @@ mod script_net_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_display_tests;
+#[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
@@ -7892,7 +7894,7 @@ impl Engine {
         // answer from this layout, measured on the first read.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout, root_element_id(view));
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -8191,7 +8193,7 @@ impl Engine {
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
             let _snapshot_time = time_stage(Stage::Snapshot);
-            publish_geometry(bindings, layout, root_element_id(view));
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
         }
         view.display_list = Some(Arc::new(display_list));
         view.frame_generation += 1;
@@ -8385,6 +8387,63 @@ impl Engine {
         }
     }
 
+    /// CSS 2.1 §9.2.1.1: an inline whose only in-flow boxes are block-level
+    /// is broken around them. It generates no line box and no strut, and
+    /// its border box is the union of those blocks (a culled inline).
+    /// `<x-el><div style="height:9px"></div></x-el>` is that case: the
+    /// host's computed display stays `inline`, but dropping the host as an
+    /// empty inline also dropped the block, so the host and the block both
+    /// measured 0×0 and whatever followed slid up. Lay the host out as a
+    /// block box — computed `display` is unchanged — so the blocks get a
+    /// block container and the host's border box is their union.
+    ///
+    /// An inline that already has line content or its own box (padding,
+    /// border, background, a width) is left as an inline. Those already
+    /// produce a box; reboxing them would change boxes that match.
+    fn rebox_culled_inline(child: &mut LayoutBox) {
+        if !matches!(child.box_type, BoxType::Inline)
+            || child.style.display != rustkit_css::Display::Inline
+        {
+            return;
+        }
+        // Line content (text, an inline image, an atomic inline) is found by
+        // the walk below. `has_content_children` is not used: it counts every
+        // image as line content, block-level ones included.
+        if Self::has_visible_styling(&child.style) {
+            return;
+        }
+        let mut saw_block = false;
+        for grand in &child.children {
+            let out_of_flow = matches!(
+                grand.position,
+                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+            ) || grand.float != rustkit_layout::Float::None;
+            if out_of_flow {
+                continue;
+            }
+            // A replaced box or form control with a block-level display
+            // (`<picture><img style="display:block">`) is a block here too.
+            let block = match grand.box_type {
+                BoxType::Block | BoxType::AnonymousBlock => {
+                    !grand.style.display.is_atomic_inline()
+                }
+                BoxType::Image { .. } | BoxType::FormControl(_) => {
+                    !grand.style.display.is_inline_level()
+                }
+                BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak => false,
+            };
+            if !block {
+                // A text run, an atomic inline, or another inline: this one
+                // still has line content (or nothing we can promote).
+                return;
+            }
+            saw_block = true;
+        }
+        if saw_block {
+            child.box_type = BoxType::Block;
+        }
+    }
+
     /// Check if a layout box has content children (text, images, form controls).
     /// This is used to determine if an inline wrapper should be included.
     fn has_content_children(layout_box: &LayoutBox) -> bool {
@@ -8515,14 +8574,9 @@ impl Engine {
             if matches!(layout_box.box_type, BoxType::Inline) {
                 layout_box.box_type = BoxType::Block;
             }
-            use rustkit_css::Display;
-            layout_box.style.display = match layout_box.style.display {
-                Display::Inline | Display::InlineBlock => Display::Block,
-                Display::InlineFlex => Display::Flex,
-                Display::InlineGrid => Display::Grid,
-                Display::InlineTable => Display::Table,
-                d => d,
-            };
+            // The build walk blockifies before the box exists. This catches
+            // a float whose display was set later.
+            layout_box.style.display = layout_box.style.display.blockified();
         }
     }
 
@@ -8688,6 +8742,12 @@ impl layout_ctx::LayoutCtx {
         external_stylesheets: &[Stylesheet],
         javascript_enabled: bool,
     ) -> LayoutBox {
+        // A full build replaces the view's styles of boxless elements
+        // (`display: contents`, the root). A restyle keeps the ones it does
+        // not walk.
+        if RESTYLE_BUILD.with(|build| build.borrow().is_none()) {
+            self.with_building_lay(|lay| lay.boxless_styles.borrow_mut().clear());
+        }
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
         // `@media` rules apply only where their queries match this view's
@@ -8863,7 +8923,7 @@ impl layout_ctx::LayoutCtx {
             {
                 let _relational = RelationalNodeScope::enter(Some(html.clone()));
                 Some(memoized_style(html.id, || {
-                    self.compute_style_for_element(
+                    let mut style = self.compute_style_for_element(
                         tag_name,
                         attributes,
                         &stylesheets,
@@ -8872,12 +8932,30 @@ impl layout_ctx::LayoutCtx {
                         &[],
                         SiblingContext::SOLE.with_children(true),
                         None,
-                    )
+                    );
+                    // CSS Display 3 §2.7: the root element is always
+                    // blockified, and `display: contents` on it computes
+                    // to `block` (the root always generates a principal box).
+                    // Layout starts at body, so this is the style script
+                    // reads for `<html>` and the parent style body inherits.
+                    if style.display == rustkit_css::Display::Contents {
+                        style.display = rustkit_css::Display::Block;
+                    }
+                    style.display = style.display.blockified();
+                    style
                 }))
             } else {
                 None
             }
         });
+        // `<html>` has no layout box (the walk starts at body). Publish its
+        // computed style anyway, or `getComputedStyle(documentElement)`
+        // reads `display: none` from the "no box" path.
+        if let (Some(html), Some(style)) = (document.document_element(), html_style.as_ref()) {
+            let mut root = LayoutBox::new(BoxType::Block, style.clone());
+            root.node_id = Some(html.id.raw());
+            self.note_boxless_style(&root);
+        }
 
         // `<html>` has no box here, but its width and `container-type` count.
         let _html_container_scope = html_style
@@ -9530,21 +9608,29 @@ impl layout_ctx::LayoutCtx {
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
-                // CSS Display 3 §2.7: the children of a flex or grid
-                // container are blockified — `display` computes to its
-                // block-level equivalent. A `<span>` flex item left Inline
-                // took the inline-box height path, the font's content area
-                // (Arial 8px: 8.9375) with line-height ignored.
-                if parent_style.is_some_and(|p| p.display.is_flex() || p.display.is_grid()) {
-                    style.display = match style.display {
-                        rustkit_css::Display::Inline | rustkit_css::Display::InlineBlock => {
-                            rustkit_css::Display::Block
-                        }
-                        rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
-                        rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
-                        rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
-                        other => other,
-                    };
+                // CSS Display 3 §2.7 / CSS 2.1 §9.7: flex and grid items,
+                // floats, and absolutely positioned boxes are blockified.
+                // `none` and `contents` generate no box, so `blockified`
+                // leaves them. An absolute box's float computes to none
+                // before that, or a `float: left; position: absolute` span
+                // would be blockified twice and still report a float.
+                let out_of_flow = matches!(
+                    style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                );
+                if out_of_flow {
+                    style.float = rustkit_css::Float::None;
+                }
+                let is_item = parent_style.is_some_and(|p| p.display.is_flex() || p.display.is_grid());
+                let floated = style.float != rustkit_css::Float::None;
+                // The root is blockified where `<html>`'s style is computed
+                // (layout starts at body). A document with no body builds
+                // the html box here, so the same rule applies.
+                if tag_lower == "html" && style.display == rustkit_css::Display::Contents {
+                    style.display = rustkit_css::Display::Block;
+                }
+                if is_item || out_of_flow || floated || tag_lower == "html" {
+                    style.display = style.display.blockified();
                 }
 
                 // Handle replaced elements (images)
@@ -10224,7 +10310,7 @@ impl layout_ctx::LayoutCtx {
                         _ => SiblingContext::SOLE,
                     };
                     let restyle = restyle_child(node.id.raw(), child.id.raw());
-                    let child_box = match restyle {
+                    let mut child_box = match restyle {
                         RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
                         _ => self.build_layout_from_parent_style_and_path(
                             child,
@@ -10273,15 +10359,43 @@ impl layout_ctx::LayoutCtx {
                         RestyleChild::Skip | RestyleChild::Walk => continue,
                     }
 
-                    // A `display: contents` child (a <slot>) generates no box:
-                    // its children, already filtered by its own build, take
-                    // its place.
+                    // A `display: contents` child generates no box: its
+                    // children, already filtered by its own build, take its
+                    // place (CSS Display 3). The same hoist covers `<slot>`,
+                    // an author `display: contents` in a shadow tree, and a
+                    // slotted node whose box was built in that flat tree.
+                    // The element keeps a computed style and no geometry, so
+                    // `getComputedStyle` reads `contents` rather than `none`.
+                    // A contents `<a href>` has no box to carry its href, and
+                    // `link_at_point` reads the nearest box's: the hoisted
+                    // children carry it instead, as the pieces of a split
+                    // inline do (`push_child_hoisting_line_breaks`). A child
+                    // that is itself a link keeps its own.
+                    //
+                    // A closed `<details>` shows only its summary: the hoist
+                    // is gated on `shown` like any other child, or the hidden
+                    // content rendered through a contents wrapper. The style
+                    // is still noted: the element is styled, only unboxed.
+                    let shown = !closed_details || details_summary == Some(child_index);
                     if child_box.style.display == rustkit_css::Display::Contents {
-                        for grandchild in child_box.children {
+                        self.note_boxless_style(&child_box);
+                        if !shown {
+                            continue;
+                        }
+                        let link_href = child_box.link_href;
+                        for mut grandchild in child_box.children {
+                            if grandchild.link_href.is_none() {
+                                grandchild.link_href = link_href.clone();
+                            }
                             Engine::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
                         }
                         continue;
                     }
+
+                    // A culled inline (only in-flow block children, no line
+                    // box of its own) becomes a block box before the include
+                    // test, so those children are not discarded with it.
+                    Engine::rebox_culled_inline(&mut child_box);
 
                     // Determine if box should be included in layout tree
                     let should_include = match child_box.box_type {
@@ -10304,7 +10418,6 @@ impl layout_ctx::LayoutCtx {
                         | BoxType::LineBreak => true,
                     };
 
-                    let shown = !closed_details || details_summary == Some(child_index);
                     if should_include && shown {
                         Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
                     } else if shown && matches!(child_box.box_type, BoxType::Inline) {
@@ -10366,11 +10479,18 @@ impl layout_ctx::LayoutCtx {
                 // computed style (pseudo-element text lives inside its own
                 // Inline wrapper), so the join loses nothing — and let the
                 // strip run on the joined run. Pre-family runs are joined
-                // verbatim: nothing collapses there.
+                // verbatim: nothing collapses there. The one exception is
+                // text hoisted out of a `display: contents` element: it
+                // carries that element's style and `link_href`, so it only
+                // joins a neighbour with the same style and href.
                 let mut joined: Vec<LayoutBox> = Vec::with_capacity(layout_box.children.len());
                 for child in layout_box.children.drain(..) {
                     let joins_previous = matches!(child.box_type, BoxType::Text(_))
-                        && matches!(joined.last().map(|b| &b.box_type), Some(BoxType::Text(_)));
+                        && joined.last().is_some_and(|last| {
+                            matches!(last.box_type, BoxType::Text(_))
+                                && last.link_href == child.link_href
+                                && last.style == child.style
+                        });
                     if !joins_previous {
                         joined.push(child);
                         continue;
@@ -10828,17 +10948,19 @@ impl layout_ctx::LayoutCtx {
         }
 
         // CSS Display 3 §2.7: a flex or grid container's pseudos are its
-        // items, and blockify like its element children.
-        if parent.is_some_and(|p| p.display.is_flex() || p.display.is_grid()) {
-            pseudo_style.display = match pseudo_style.display {
-                rustkit_css::Display::Inline | rustkit_css::Display::InlineBlock => {
-                    rustkit_css::Display::Block
-                }
-                rustkit_css::Display::InlineFlex => rustkit_css::Display::Flex,
-                rustkit_css::Display::InlineGrid => rustkit_css::Display::Grid,
-                rustkit_css::Display::InlineTable => rustkit_css::Display::Table,
-                other => other,
-            };
+        // items. A positioned or floated pseudo blockifies the same way.
+        let pseudo_out_of_flow = matches!(
+            pseudo_style.position,
+            rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+        );
+        if pseudo_out_of_flow {
+            pseudo_style.float = rustkit_css::Float::None;
+        }
+        if parent.is_some_and(|p| p.display.is_flex() || p.display.is_grid())
+            || pseudo_out_of_flow
+            || pseudo_style.float != rustkit_css::Float::None
+        {
+            pseudo_style.display = pseudo_style.display.blockified();
         }
 
         // font-size absolutizes against the parent's, as for elements in the
@@ -10910,6 +11032,12 @@ impl layout_ctx::LayoutCtx {
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
+        // CSS Display 3: the initial value of `display` is `inline`.
+        // `ComputedStyle`'s Rust default is `Block`, which made every
+        // unknown and custom element a block box (`shreddit-post-flair`
+        // filled the post width). The UA arms below set the elements HTML
+        // renders as blocks; everything else stays inline.
+        style.display = rustkit_css::Display::Inline;
 
         // CSS inheritance (CSS 2.1 §6.2): inherited properties default to the
         // PARENT's computed value; UA defaults and author rules below
@@ -11155,7 +11283,7 @@ impl layout_ctx::LayoutCtx {
                 style.font_family = "monospace".to_string();
             }
             // Lists
-            "ul" | "ol" => {
+            "ul" | "ol" | "menu" | "dir" => {
                 style.display = rustkit_css::Display::Block;
                 style.margin_top = rustkit_css::Length::Px(16.0); // 1em
                 style.margin_bottom = rustkit_css::Length::Px(16.0);
@@ -11197,7 +11325,8 @@ impl layout_ctx::LayoutCtx {
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
             }
             // Sections
-            "article" | "aside" | "footer" | "header" | "main" | "nav" | "section" => {
+            "article" | "aside" | "footer" | "header" | "hgroup" | "main" | "nav" | "search"
+            | "section" => {
                 style.display = rustkit_css::Display::Block;
             }
             // Figure
@@ -11337,21 +11466,93 @@ impl layout_ctx::LayoutCtx {
                 style.display = rustkit_css::Display::Inline;
                 style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE;
             }
+            // HTML elements the UA sheet renders as blocks and that the
+            // arms above don't name. Without these, the inline initial
+            // value would shrink-wrap them.
+            "details" | "summary" | "optgroup" | "option" | "frameset" | "frame" => {
+                style.display = rustkit_css::Display::Block;
+            }
+            "center" => {
+                style.display = rustkit_css::Display::Block;
+                style.text_align = rustkit_css::TextAlign::Center;
+            }
+            "meter" | "progress" => {
+                style.display = rustkit_css::Display::InlineBlock;
+            }
+            // Chromium html.css: these generate no box.
+            "datalist" | "param" | "base" | "basefont" | "noembed" | "noframes" => {
+                style.display = rustkit_css::Display::None;
+            }
             _ => {}
         }
 
-        // HTML §15.3.1's UA rules that hide by attribute: `[hidden]`,
-        // `dialog:not([open])`, `[popover]:not(:popover-open)` (nothing opens
-        // a popover without script) and `template`. Set before the author
-        // cascade, like every UA default above, so `[hidden]{display:flex}`
-        // style overrides still show the element. `hidden=until-found` is
-        // `content-visibility: hidden` in Chrome, not `display: none`, and is
-        // left alone.
+        // HTML rendering section / Chromium html.css, applied before the
+        // author cascade so an author `display` still wins (the same origin
+        // as Chrome: the popover `display: none` rule is not `!important`).
+        //
+        // `dialog` is `position: absolute` with `inset-inline: 0`,
+        // `width`/`height: fit-content` and `margin: auto`, and
+        // `display: none` until `[open]`. `[popover]` is `position: fixed`
+        // with `inset: 0`, the same fit-content size and auto margins.
+        // Without the box (and with only `display: none`), an author rule
+        // that shows the popover — Reddit's header search does — laid it
+        // out as an in-flow block the width of the page, and the ~200px
+        // "Search" label covered the feed. `hidden=until-found` is
+        // `content-visibility: hidden`, not `display: none`, and is left
+        // alone. Nothing here opens a popover; `:popover-open` matches
+        // nothing until script shows one.
         let tag_is = |t: &str| tag_name.eq_ignore_ascii_case(t);
         let hidden_attr = attributes
             .get("hidden")
             .is_some_and(|v| !v.eq_ignore_ascii_case("until-found"));
         let open_dialog = tag_is("dialog") && attributes.contains_key("open");
+        if tag_is("dialog") {
+            style.position = rustkit_css::Position::Absolute;
+            style.left = Some(rustkit_css::Length::Zero);
+            style.right = Some(rustkit_css::Length::Zero);
+            style.width = rustkit_css::Length::FitContent;
+            style.height = rustkit_css::Length::FitContent;
+            style.margin_top = rustkit_css::Length::Auto;
+            style.margin_right = rustkit_css::Length::Auto;
+            style.margin_bottom = rustkit_css::Length::Auto;
+            style.margin_left = rustkit_css::Length::Auto;
+            style.padding_top = rustkit_css::Length::Em(1.0);
+            style.padding_right = rustkit_css::Length::Em(1.0);
+            style.padding_bottom = rustkit_css::Length::Em(1.0);
+            style.padding_left = rustkit_css::Length::Em(1.0);
+            let edge = rustkit_css::Length::Px(3.0);
+            style.border_top_width = edge.clone();
+            style.border_right_width = edge.clone();
+            style.border_bottom_width = edge.clone();
+            style.border_left_width = edge;
+            if open_dialog {
+                style.display = rustkit_css::Display::Block;
+            }
+        }
+        if attributes.contains_key("popover") {
+            style.position = rustkit_css::Position::Fixed;
+            style.top = Some(rustkit_css::Length::Zero);
+            style.right = Some(rustkit_css::Length::Zero);
+            style.bottom = Some(rustkit_css::Length::Zero);
+            style.left = Some(rustkit_css::Length::Zero);
+            style.width = rustkit_css::Length::FitContent;
+            style.height = rustkit_css::Length::FitContent;
+            style.margin_top = rustkit_css::Length::Auto;
+            style.margin_right = rustkit_css::Length::Auto;
+            style.margin_bottom = rustkit_css::Length::Auto;
+            style.margin_left = rustkit_css::Length::Auto;
+            style.padding_top = rustkit_css::Length::Em(0.25);
+            style.padding_right = rustkit_css::Length::Em(0.25);
+            style.padding_bottom = rustkit_css::Length::Em(0.25);
+            style.padding_left = rustkit_css::Length::Em(0.25);
+            let edge = rustkit_css::Length::Px(3.0);
+            style.border_top_width = edge.clone();
+            style.border_right_width = edge.clone();
+            style.border_bottom_width = edge.clone();
+            style.border_left_width = edge;
+            style.overflow_x = rustkit_css::Overflow::Auto;
+            style.overflow_y = rustkit_css::Overflow::Auto;
+        }
         if hidden_attr
             || (tag_is("dialog") && !open_dialog)
             || (attributes.contains_key("popover") && !open_dialog)
@@ -12455,6 +12656,8 @@ impl layout_ctx::LayoutCtx {
             }
             "display" => {
                 if value.trim().eq_ignore_ascii_case("contents") {
+                    style.display = rustkit_css::Display::Contents;
+                    style.webkit_box = None;
                     style.display_contents_declared = true;
                 } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);
@@ -18536,10 +18739,11 @@ impl Engine {
             // on the first read that needs them, as `publish_geometry` does:
             // a scrollTo after the write needs only `max_scroll`.
             let snapshot_of = built.clone();
+            let styled = lay.clone();
             Some(rustkit_bindings::ForcedGeometry {
                 source: Box::new(move || {
                     let _snapshot_time = time_stage(Stage::Snapshot);
-                    geometry_with_root(&snapshot_of, root_element)
+                    geometry_with_root(&snapshot_of, root_element, &styled.boxless_styles.borrow())
                 }),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
                 max_scroll,
@@ -18575,7 +18779,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get(&id) {
             if let Some(layout) = view.layout.as_ref() {
-                publish_geometry(bindings, layout, root_element_id(view));
+                publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
             }
             bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
         }
@@ -21573,7 +21777,14 @@ fn first_named_box_id(layout: &LayoutBox) -> Option<usize> {
 ///
 /// `root_element` is the document element's raw NodeId. It has no box of its
 /// own: the layout's anonymous root stands in for it, and reports as it.
-fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element: Option<usize>) {
+/// `lay` is the view's: its `boxless_styles` are read when the snapshot is
+/// built, so the read sees this view's map however many views built since.
+fn publish_geometry(
+    bindings: &DomBindings,
+    layout: &Rc<LayoutBox>,
+    root_element: Option<usize>,
+    lay: Rc<layout_ctx::ViewLayout>,
+) {
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade())));
@@ -21583,7 +21794,7 @@ fn publish_geometry(bindings: &DomBindings, layout: &Rc<LayoutBox>, root_element
         };
         let _snapshot_time = time_stage(Stage::Snapshot);
         let started = std::time::Instant::now();
-        let snapshot = geometry_with_root(&layout, root_element);
+        let snapshot = geometry_with_root(&layout, root_element, &lay.boxless_styles.borrow());
         debug!(
             elements = snapshot.0.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -21609,16 +21820,40 @@ fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> ru
     })
 }
 
-/// `geometry_snapshot`, with the document element reported as the root box.
+/// `geometry_snapshot`, with the document element reported as the root box
+/// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
+/// display: contents, the root) added. A node that also produced a box
+/// keeps that box's style.
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
+    boxless: &HashMap<usize, String>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
     }
+    for (node, lines) in boxless {
+        snapshot.1.entry(*node).or_insert_with(|| lines.clone());
+    }
     snapshot
+}
+
+impl layout_ctx::LayoutCtx {
+    /// Remember `box_`'s computed style for an element the box tree will
+    /// not keep (`display: contents`, the root), in the map of the view
+    /// being built (`ViewLayout::boxless_styles`). A later real box for the
+    /// same node wins in `geometry_with_root`. An ad-hoc build with no view
+    /// has no script to read it, and notes nothing.
+    fn note_boxless_style(&self, box_: &LayoutBox) {
+        let Some(node) = box_.node_id else {
+            return;
+        };
+        self.with_building_lay(|lay| {
+            let lines = computed_style_lines(box_);
+            lay.boxless_styles.borrow_mut().insert(node, lines);
+        });
+    }
 }
 
 /// Where the layout put every element, by DOM node, for script geometry reads
@@ -21871,6 +22106,13 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         _ => "normal".to_string(),
     };
     let box_edges = d.border_box();
+    // `display: contents` has no used box. CSSOM returns the computed
+    // value, which for `width`/`height: auto` is `auto`, not `0px`.
+    let (width, height) = if s.display == rustkit_css::Display::Contents {
+        ("auto".to_string(), "auto".to_string())
+    } else {
+        (css_px(d.content.width), css_px(d.content.height))
+    };
     let radii = [
         corner_radii_px(&s.border_top_left_radius, font_px, box_edges.width, box_edges.height),
         corner_radii_px(&s.border_top_right_radius, font_px, box_edges.width, box_edges.height),
@@ -21889,8 +22131,8 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("box-sizing", css_keyword(&format!("{:?}", s.box_sizing))),
         // The computed style keeps `auto` as 0, so an explicit `z-index: 0` reads `auto`.
         ("z-index", if s.z_index == 0 { "auto".into() } else { s.z_index.to_string() }),
-        ("width", css_px(d.content.width)),
-        ("height", css_px(d.content.height)),
+        ("width", width),
+        ("height", height),
         ("margin-top", css_px(d.margin.top)),
         ("margin-right", css_px(d.margin.right)),
         ("margin-bottom", css_px(d.margin.bottom)),
@@ -41179,6 +41421,87 @@ mod blockify_tests {
             assert_eq!(d("g"), rustkit_css::Display::Grid);
             assert_eq!(d("b"), rustkit_css::Display::Block);
             assert_eq!(d("out"), rustkit_css::Display::InlineBlock, "only flex/grid items");
+        }
+    }
+
+    #[test]
+    fn an_absolute_anchor_and_a_float_are_blockified() {
+        for root in laid_out(concat!(
+            r#"<style>a#a{position:absolute;display:inline;float:left;top:0;left:0}"#,
+            r#"span#f{float:left;display:inline}</style>"#,
+            r#"<body style="margin:0"><a id="a" href="https://example.com">x</a>"#,
+            r#"<span id="f">y</span></body>"#,
+        )) {
+            let a = by_id(&root, "a").expect("anchor");
+            assert_eq!(a.style.display, rustkit_css::Display::Block);
+            assert_eq!(a.position, rustkit_layout::Position::Absolute);
+            assert_eq!(a.style.float, rustkit_css::Float::None);
+            let f = by_id(&root, "f").expect("float");
+            assert_eq!(f.style.display, rustkit_css::Display::Block);
+            assert_eq!(f.float, rustkit_css::Float::Left);
+        }
+    }
+
+    #[test]
+    fn an_unknown_element_stays_inline_and_known_blocks_stay_blocks() {
+        for root in laid_out(concat!(
+            r#"<body style="margin:0"><shreddit-post-flair id="f">flair</shreddit-post-flair>"#,
+            r#"<div id="d">d</div><hgroup id="hg">h</hgroup><search id="se">s</search>"#,
+            r#"<details id="de" open>d</details><summary id="su">u</summary></body>"#,
+        )) {
+            let flair = by_id(&root, "f").expect("flair");
+            assert_eq!(flair.style.display, rustkit_css::Display::Inline);
+            assert!(
+                flair.dimensions.border_box().width < 400.0,
+                "inline flair filled the line: {}",
+                flair.dimensions.border_box().width
+            );
+            assert_eq!(by_id(&root, "d").expect("div").style.display, rustkit_css::Display::Block);
+            assert!(by_id(&root, "d").expect("div").dimensions.border_box().width > 700.0);
+            for id in ["hg", "se", "de", "su"] {
+                assert_eq!(
+                    by_id(&root, id).unwrap_or_else(|| panic!("no box #{id}")).style.display,
+                    rustkit_css::Display::Block,
+                    "#{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn display_contents_hoists_its_children_and_keeps_no_box() {
+        for root in laid_out(concat!(
+            r#"<style>body{margin:0}#host{display:flex;width:400px;height:40px;margin:0}"#,
+            r#"#slotted{display:block;width:60px;height:40px;margin:0;padding:0}</style>"#,
+            r#"<body><div id="host"><template shadowrootmode="open">"#,
+            r#"<style>.contents{display:contents}"#,
+            r#"#kid{display:block;width:50px;height:40px;margin:0;padding:0}</style>"#,
+            r#"<div id="bar" class="contents"><div id="kid"></div><slot id="slot" name="s"></slot></div>"#,
+            r#"</template><span id="slotted" slot="s"></span></div></body>"#,
+        )) {
+            assert!(by_id(&root, "bar").is_none(), "contents element generated a box");
+            assert!(by_id(&root, "slot").is_none(), "slot generated a box");
+            // Shadow boxes are not addressed by `#id` in the identity path
+            // the light-tree finder uses. The host's flex line is the check:
+            // a 50px shadow child and the 60px assigned span, side by side.
+            let host = by_id(&root, "host").expect("host");
+            let mut sized = Vec::new();
+            fn collect(b: &LayoutBox, out: &mut Vec<rustkit_layout::Rect>) {
+                let rect = b.dimensions.border_box();
+                if rect.width > 1.0 && rect.height > 1.0 {
+                    out.push(rect);
+                }
+                for child in &b.children {
+                    collect(child, out);
+                }
+            }
+            collect(host, &mut sized);
+            let kid = sized.iter().find(|r| (r.width - 50.0).abs() < 0.5).expect("50px child");
+            let slotted = sized.iter().find(|r| (r.width - 60.0).abs() < 0.5).expect("60px child");
+            assert!(
+                (slotted.x - (kid.x + 50.0)).abs() < 0.5,
+                "slotted child was not a flex item beside the shadow child: {sized:?}"
+            );
         }
     }
 }
