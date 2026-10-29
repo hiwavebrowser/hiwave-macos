@@ -90,10 +90,12 @@ fn counters_logged() -> bool {
     })
 }
 
-/// A console read for the service.
+/// A console (or network) read for the service.
 struct ConsoleRead {
     inspector: Arc<Inspector>,
     since: u64,
+    /// The current document's requests instead of console lines (T7).
+    network: bool,
     reply: oneshot::Sender<DevtoolsAnswer>,
     /// Wake the window's loop when the answer has something new, as the
     /// content thread's page did. Counted here, not on the page.
@@ -189,7 +191,8 @@ impl Service {
             };
             for read in reads {
                 let inspector = Arc::downgrade(&read.inspector);
-                let next_seq = answer(read);
+                // A network read leaves the console's read mark alone.
+                let Some(next_seq) = answer(read) else { continue };
                 let mut inbox = self.inbox();
                 if let Some(watch) = inbox.watches.iter_mut().find(|w| Weak::ptr_eq(&w.inspector, &inspector)) {
                     watch.read_to = watch.read_to.max(next_seq);
@@ -299,8 +302,19 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
     inspector.set_watched(watched);
 }
 
-/// Answer `read`; returns the `next_seq` it answered up to.
-fn answer(read: ConsoleRead) -> u64 {
+/// Answer `read`; returns the `next_seq` a console read answered up to.
+fn answer(read: ConsoleRead) -> Option<u64> {
+    if read.network {
+        let (snapshot, doc) = read.inspector.snapshot_and_doc(0);
+        let mut network = crate::devtools_network(&snapshot, doc);
+        // The second guard, as for console lines.
+        for request in &mut network.requests {
+            request.url = read.inspector.url_text(&request.url);
+            request.failure = request.failure.as_deref().map(|f| read.inspector.scrub_text(f));
+        }
+        let _ = read.reply.send(DevtoolsAnswer::Network(network));
+        return None;
+    }
     let mut console = devtools_console_entries(&read.inspector.snapshot_since(read.since));
     console.page_crashed = read.inspector.page_crashed();
     console.held = read.inspector.console_held();
@@ -313,7 +327,7 @@ fn answer(read: ConsoleRead) -> u64 {
         counters.window_wake();
         crate::script_net::poke_live_turn();
     }
-    next_seq
+    Some(next_seq)
 }
 
 /// The second guard (T6 R1 condition 7). Redaction happens when a record is
@@ -338,12 +352,31 @@ pub fn ask_console(
     wake_window: Option<Arc<DevtoolsCounters>>,
 ) -> oneshot::Receiver<DevtoolsAnswer> {
     let (reply, rx) = oneshot::channel();
-    let read = ConsoleRead {
+    submit(ConsoleRead {
         inspector,
         since,
+        network: false,
         reply,
         wake_window,
-    };
+    });
+    rx
+}
+
+/// The current document's requests `inspector` recorded, answered on the
+/// devtools thread: served while the page thread is blocked (T7).
+pub fn ask_network(inspector: Arc<Inspector>) -> oneshot::Receiver<DevtoolsAnswer> {
+    let (reply, rx) = oneshot::channel();
+    submit(ConsoleRead {
+        inspector,
+        since: 0,
+        network: true,
+        reply,
+        wake_window: None,
+    });
+    rx
+}
+
+fn submit(read: ConsoleRead) {
     let service = service();
     let mut inbox = service.inbox();
     if service.start(&mut inbox) {
@@ -353,7 +386,6 @@ pub fn ask_console(
         drop(inbox);
         answer_unserved(read);
     }
-    rx
 }
 
 /// No devtools thread could be started. The caller is the window (or the
@@ -361,6 +393,10 @@ pub fn ask_console(
 /// gets an empty answer and a log line instead.
 fn answer_unserved(read: ConsoleRead) {
     tracing::warn!(target: "devtools", "devtools thread did not start; console read answered empty");
+    if read.network {
+        let _ = read.reply.send(DevtoolsAnswer::Network(crate::DevtoolsNetwork::default()));
+        return;
+    }
     let console = crate::DevtoolsConsole {
         next_seq: read.since,
         ..Default::default()
@@ -538,7 +574,7 @@ mod tests {
         let inspector = tab();
         inspector.console(ConsoleLevel::Log, "a", None);
         let (reply, mut rx) = oneshot::channel();
-        answer_unserved(ConsoleRead { inspector, since: 7, reply, wake_window: None });
+        answer_unserved(ConsoleRead { inspector, since: 7, network: false, reply, wake_window: None });
         match rx.try_recv() {
             Ok(DevtoolsAnswer::Console(console)) => {
                 assert!(console.entries.is_empty(), "{:?}", console.entries);
