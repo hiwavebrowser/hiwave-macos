@@ -397,6 +397,8 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
+mod positioned_paint_order_tests;
+#[cfg(test)]
 mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;

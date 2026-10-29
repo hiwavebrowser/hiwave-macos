@@ -6802,16 +6802,42 @@ impl LayoutBox {
         }
     }
 
+    /// The z-index this box paints at among its siblings when it is
+    /// positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` for a box
+    /// that paints in normal flow.
+    ///
+    /// The engine transfers `position: relative` as `Position::Static`
+    /// (its geometry path is not ready), so
+    /// `self.position` alone put a relative box in normal flow, under an
+    /// earlier absolute sibling and with its `z-index` ignored: railway.com's
+    /// `relative z-10` hero text painted under its `absolute inset-0` image
+    /// (hand test 10-27, R2). Read the computed style for those. A text run
+    /// copies its parent's style and an anonymous box is not an element, so
+    /// only element boxes count. `sticky` is left in normal flow: it is
+    /// still laid out as static and scrolls with the page, so painting it
+    /// positioned would lay it over a fixed bar it never reaches in Chrome
+    /// (`render_no_clone_tests::fixed_sticky_images_and_iframes_draw_the_same_under_scroll`).
+    pub fn paint_z(&self) -> Option<i32> {
+        if self.position != Position::Static {
+            return Some(self.z_index);
+        }
+        let element = !matches!(
+            self.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        let relative = self.style.position == rustkit_css::Position::Relative;
+        (element && relative).then_some(self.style.z_index)
+    }
+
     /// Get children sorted by z-index for painting.
     pub fn get_paint_order(&self) -> Vec<&LayoutBox> {
         let mut normal_flow: Vec<&LayoutBox> = Vec::new();
         let mut positioned: Vec<(&LayoutBox, i32)> = Vec::new();
 
         for child in &self.children {
-            if child.position == Position::Static {
-                normal_flow.push(child);
-            } else {
-                positioned.push((child, child.z_index));
+            match child.paint_z() {
+                None => normal_flow.push(child),
+                Some(z) => positioned.push((child, z)),
             }
         }
 
@@ -8912,8 +8938,8 @@ impl DisplayList {
             *layer += 1;
             let child_layer = *layer;
 
-            if child.position != Position::Static {
-                if child.z_index < 0 {
+            if let Some(z) = child.paint_z() {
+                if z < 0 {
                     negative_z.push((child, child_layer));
                 } else {
                     positive_z.push((child, child_layer));
@@ -8928,7 +8954,7 @@ impl DisplayList {
 
         // Sort by z-index, then by layer for stability
         negative_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = a.0.paint_z().unwrap_or(0).cmp(&b.0.paint_z().unwrap_or(0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8936,7 +8962,7 @@ impl DisplayList {
             }
         });
         positive_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = a.0.paint_z().unwrap_or(0).cmp(&b.0.paint_z().unwrap_or(0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
