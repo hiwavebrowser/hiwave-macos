@@ -247,6 +247,18 @@ fn the_kill_switch_and_an_unlistened_view_keep_requests_working() {
 }
 
 #[test]
+fn the_worker_count_is_one_to_eight_and_two_by_default() {
+    // T8: `HIWAVE_NET_WORKERS`; `1` is T7a's single thread, for the A/B.
+    use crate::script_net::net_workers_switch;
+    for (value, n) in [(None, 2), (Some(""), 2), (Some("1"), 1), (Some("2"), 2), (Some(" 4 "), 4), (Some("8"), 8)] {
+        assert_eq!(net_workers_switch(value), n, "{value:?}");
+    }
+    for bad in ["0", "9", "-1", "two"] {
+        assert_eq!(net_workers_switch(Some(bad)), 2, "{bad}");
+    }
+}
+
+#[test]
 fn the_kill_switch_is_off_only_for_its_three_words() {
     // T7 test 9, the env half: what `HIWAVE_NET_RUNTIME` turns off.
     use crate::script_net::net_runtime_switch;
