@@ -1112,9 +1112,8 @@ pub enum Display {
     TableColumn,
     TableColumnGroup,
     /// `contents`: the element generates no box; its children take its
-    /// place. Only the UA style of `<slot>` sets it (author `display:
-    /// contents` is still unsupported, see `parse_display`), and the
-    /// engine's box-tree build removes such boxes, so layout never sees one.
+    /// place (CSS Display 3). Author `display: contents` and the UA style
+    /// of `<slot>` both set it, and the box-tree build removes such boxes.
     Contents,
 }
 
@@ -1155,6 +1154,30 @@ impl Display {
             self,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// CSS Display 3 §2.7: the block-level equivalent of this display.
+    ///
+    /// `inline` / `inline-block` become `block`, the inline-level inner
+    /// displays become their block-level forms, and a table-internal
+    /// display becomes `block`. `none` and `contents` generate no box, so
+    /// they are left alone (there is nothing to blockify).
+    pub fn blockified(self) -> Self {
+        match self {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
+            Display::InlineTable => Display::Table,
+            Display::TableRow
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableCell
+            | Display::TableCaption
+            | Display::TableColumn
+            | Display::TableColumnGroup => Display::Block,
+            other => other,
+        }
     }
 
     /// `table` or `inline-table`: the box that runs table layout.
@@ -2719,9 +2742,9 @@ pub struct ComputedStyle {
     /// does not split into columns for them yet, but `@container` treats a
     /// child's width as unknown. Not inherited.
     pub columns_declared: bool,
-    /// An author `display: contents`, which layout does not honour yet
-    /// (only `<slot>` gets `Display::Contents`): the box is still laid out,
-    /// but `@container` treats it as having no size. Not inherited.
+    /// An author `display: contents` (with `display` set to
+    /// `Display::Contents`): the element generates no box, and `@container`
+    /// treats it as having no size. Not inherited.
     pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
@@ -3172,7 +3195,7 @@ pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_serialize};
 
 pub mod content;
 pub mod selector_escape;
@@ -3893,7 +3916,7 @@ pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
 /// (its new formatting context only matters for floats and margin collapse);
 /// `list-item` lays out as its outer display, with no marker. The CSS 2.1
 /// table keywords (and `block table` / `inline table`) map to the table
-/// variants. `contents` and `ruby` stay unsupported (`None`).
+/// variants. `ruby` stays unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3905,6 +3928,7 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "contents" => return Some(Display::Contents),
         "table" => return Some(Display::Table),
         "inline-table" => return Some(Display::InlineTable),
         "table-row-group" => return Some(Display::TableRowGroup),
@@ -4000,8 +4024,8 @@ mod tests {
             // Legacy keywords are unchanged.
             ("inline-block", Some(Display::InlineBlock)),
             ("none", Some(Display::None)),
-            // Unsupported or invalid: still ignored.
-            ("contents", None),
+            ("contents", Some(Display::Contents)),
+            // Invalid: still ignored.
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -4056,6 +4080,22 @@ mod tests {
             s.apply_line_clamp_display();
             assert_eq!(s.display, Display::Inline);
         }
+    }
+
+    #[test]
+    fn display_blockifies_inline_level_and_table_internal_values() {
+        assert_eq!(Display::Inline.blockified(), Display::Block);
+        assert_eq!(Display::InlineBlock.blockified(), Display::Block);
+        assert_eq!(Display::InlineFlex.blockified(), Display::Flex);
+        assert_eq!(Display::InlineGrid.blockified(), Display::Grid);
+        assert_eq!(Display::InlineTable.blockified(), Display::Table);
+        assert_eq!(Display::TableCell.blockified(), Display::Block);
+        assert_eq!(Display::TableRow.blockified(), Display::Block);
+        assert_eq!(Display::TableCaption.blockified(), Display::Block);
+        assert_eq!(Display::Contents.blockified(), Display::Contents);
+        assert_eq!(Display::None.blockified(), Display::None);
+        assert_eq!(Display::Block.blockified(), Display::Block);
+        assert_eq!(Display::Flex.blockified(), Display::Flex);
     }
 
     #[test]

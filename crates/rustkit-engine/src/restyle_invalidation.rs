@@ -83,13 +83,14 @@ impl InvalidationIndex {
     /// Record one rule's selector (a list).
     pub(crate) fn note_selector(&mut self, selector: &str) {
         for member in SelectorMatcher::split_top_level_commas(selector) {
-            self.note_complex(member.trim(), None);
+            self.note_complex(member.trim(), None, false);
         }
     }
 
     /// One complex selector. `forced` places every token in it (`ANYWHERE`
-    /// inside `:has()`).
-    fn note_complex(&mut self, member: &str, forced: Option<u8>) {
+    /// inside `:has()`); `outer_positional` is the flag of the selector it
+    /// is a member of.
+    fn note_complex(&mut self, member: &str, forced: Option<u8>, outer_positional: bool) {
         let tokens = SelectorMatcher.tokenize_selector(member);
         let bare = unquoted(member);
         let count = |c: char| bare.matches(c).count();
@@ -100,7 +101,8 @@ impl InvalidationIndex {
             self.note_compound(member, ANYWHERE, false);
             return;
         }
-        let positional = tokens.iter().any(|(_, c)| c == "+" || c == "~")
+        let positional = outer_positional
+            || tokens.iter().any(|(_, c)| c == "+" || c == "~")
             || STRUCTURAL.iter().any(|name| member.contains(&format!(":{name}")));
         self.positional |= positional;
         for (compound, combinator) in &tokens {
@@ -168,10 +170,16 @@ impl InvalidationIndex {
                             for member in SelectorMatcher::split_top_level_commas(&argument) {
                                 let member = member.trim();
                                 let simple = SelectorMatcher.tokenize_selector(member).len() <= 1;
-                                match simple {
-                                    true => self.note_compound(member, at, positional),
-                                    // A combinator inside: placed nowhere.
-                                    false => self.note_complex(member, Some(ANYWHERE)),
+                                match (simple, at) {
+                                    (true, _) => self.note_compound(member, at, positional),
+                                    // A complex member of the subject's own
+                                    // list has the subject as its subject:
+                                    // its tokens place as a rule's would
+                                    // (`.dark` of `.x:is(.dark *)` is an
+                                    // ancestor). Left of a combinator, or
+                                    // forced, its tokens place nowhere.
+                                    (false, SUBJECT) => self.note_complex(member, None, positional),
+                                    (false, _) => self.note_complex(member, Some(ANYWHERE), positional),
                                 }
                             }
                         }
@@ -179,7 +187,7 @@ impl InvalidationIndex {
                             self.has = true;
                             for member in SelectorMatcher::split_top_level_commas(&argument.unwrap_or_default()) {
                                 let member = member.trim().trim_start_matches(['>', '+', '~']).trim();
-                                self.note_complex(member, Some(ANYWHERE));
+                                self.note_complex(member, Some(ANYWHERE), false);
                             }
                         }
                         ("nth-child" | "nth-last-child", Some(argument)) => {
@@ -204,7 +212,7 @@ impl InvalidationIndex {
 
     fn note_selector_anywhere(&mut self, list: &str) {
         for member in SelectorMatcher::split_top_level_commas(list) {
-            self.note_complex(member.trim(), Some(ANYWHERE));
+            self.note_complex(member.trim(), Some(ANYWHERE), false);
         }
     }
 

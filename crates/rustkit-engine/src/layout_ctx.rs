@@ -49,6 +49,15 @@ pub(crate) struct LayoutCtx {
     /// rejects them as "Unknown image format") and are spliced into the
     /// display list as vector commands at build time.
     pub(crate) svg_cache: RefCell<HashMap<String, rustkit_svg::SvgDocument>>,
+    /// The SVG paint declarations (`fill`, `stroke`, `stop-color`, ...)
+    /// author rules give each element inside an inline `<svg>`, by raw
+    /// NodeId. Filled by `cache_svg_paint_styles` before each build (a
+    /// relayout's and a forced one's); the serializer writes them into the
+    /// element's `style` so rustkit-svg, which sees only the markup, paints
+    /// with them. One map per context, so between builds it is the map of
+    /// the view built last: `export_layout_json`, which reads it outside a
+    /// build, recomputes it for the view it exports.
+    pub(crate) svg_paint_styles: RefCell<HashMap<usize, crate::SvgPaintStyle>>,
 }
 
 impl Default for LayoutCtx {
@@ -59,6 +68,7 @@ impl Default for LayoutCtx {
             style_trace: RefCell::default(),
             building: RefCell::default(),
             svg_cache: RefCell::default(),
+            svg_paint_styles: RefCell::default(),
         }
     }
 }
@@ -108,6 +118,7 @@ impl LayoutCtx {
         let free = [
             ("building", self.building.try_borrow().is_ok_and(|b| b.is_none())),
             ("svg_cache", self.svg_cache.try_borrow_mut().is_ok()),
+            ("svg_paint_styles", self.svg_paint_styles.try_borrow_mut().is_ok()),
             ("style_trace", self.style_trace.try_borrow_mut().is_ok()),
             ("hover_chain", lay.hover_chain.try_borrow_mut().is_ok()),
             ("active_chain", lay.active_chain.try_borrow_mut().is_ok()),
@@ -115,6 +126,7 @@ impl LayoutCtx {
             ("checked_states", lay.checked_states.try_borrow_mut().is_ok()),
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
+            ("boxless_styles", lay.boxless_styles.try_borrow_mut().is_ok()),
         ];
         free.into_iter().find(|(_, free)| !free).map(|(name, _)| name)
     }
@@ -190,6 +202,14 @@ pub(crate) struct ViewLayout {
     /// viewport then takes html's, and a body with its own is a scroller
     /// that clips what it holds (see `scrollable_bottom`).
     pub(crate) html_clips: Cell<bool>,
+    /// Computed style lines (`computed_style_lines`) of this view's
+    /// elements that have no layout box: `display: contents` (hoisted out
+    /// of the tree) and the root, which is styled but not walked. Keyed by
+    /// raw NodeId, so per view like `edit_states`: ids restart in every
+    /// document, and a second view's build must not replace them (R1 M1
+    /// on #786). A full build replaces the map; a restyle keeps the
+    /// entries it does not walk.
+    pub(crate) boxless_styles: RefCell<HashMap<usize, String>>,
 }
 
 #[cfg(test)]

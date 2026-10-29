@@ -3,9 +3,16 @@
 //!
 //! When it is off, every function here returns before taking a lock, reading
 //! an error report, or writing a line. The Inspector is unchanged: it stays
-//! off unless something else turns it on, and this mirror does not use its
-//! URL scrubbing. Script names such as `inserted#N` are recorded here, only
-//! while the switch is on, so a line can show the script's URL.
+//! off unless something else turns it on; this mirror shares only its pure
+//! URL scrub ([`crate::inspector::scrub_url`]): [`brief_url`] drops the
+//! query, fragment, `;params` and userinfo of every URL a line names as a
+//! URL: requests, locations, script places (console and error frames),
+//! inserted scripts and dynamic imports (T7 C1). Page text a line quotes (a console message, an error
+//! message, a source snippet) is not parsed for URLs. Script names such as `inserted#N` are recorded here, only while
+//! the switch is on, so a line can show the script's URL. Lines for live
+//! script requests are also written on the `rustkit-net` runtime (T7); its
+//! tasks carry the page's nav id, and in tests the switch and sink, from the
+//! page thread.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
@@ -58,6 +65,24 @@ pub(crate) fn install_sink(sink: Option<std::sync::Arc<Mutex<Vec<String>>>>) {
     SINK.with(|slot| *slot.borrow_mut() = sink);
 }
 
+/// This thread's forced switch and sink, carried to a network-runtime task.
+#[cfg(test)]
+pub(crate) type TestHooks = (Option<bool>, Option<std::sync::Arc<Mutex<Vec<String>>>>);
+
+#[cfg(test)]
+pub(crate) fn test_hooks() -> TestHooks {
+    (FORCE.with(std::cell::Cell::get), SINK.with(|slot| slot.borrow().clone()))
+}
+
+/// Install `hooks` on this thread; returns the ones they replace.
+#[cfg(test)]
+pub(crate) fn swap_test_hooks(hooks: TestHooks) -> TestHooks {
+    let before = test_hooks();
+    FORCE.with(|cell| cell.set(hooks.0));
+    SINK.with(|slot| *slot.borrow_mut() = hooks.1);
+    before
+}
+
 /// `name` (an engine script label) was loaded from `url`. Ignored when the
 /// switch is off.
 pub(crate) fn alias(name: &str, url: &str) {
@@ -73,16 +98,14 @@ pub(crate) fn alias(name: &str, url: &str) {
     map.entries.push_back((name.to_string(), url.to_string()));
 }
 
+/// The URL an engine script label stands for, or `path` itself; either
+/// way through [`brief_place`].
 fn resolve(path: &str) -> String {
     let Ok(map) = aliases().lock() else {
-        return path.to_string();
+        return brief_place(path);
     };
-    map.entries
-        .iter()
-        .rev()
-        .find(|(name, _)| name == path)
-        .map(|(_, url)| url.clone())
-        .unwrap_or_else(|| path.to_string())
+    let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
+    brief_place(place)
 }
 
 fn emit(line: String) {
@@ -246,7 +269,7 @@ pub(crate) fn inserted_script(url: &str, event: &str) {
     if !enabled() {
         return;
     }
-    emit(format!("inserted script {event} {url}"));
+    emit(format!("inserted script {event} {}", brief_place(url)));
 }
 
 /// A dynamic `import()` whose promise rejected. `url` is empty when the
@@ -274,27 +297,98 @@ pub(crate) fn sync_diag_armed() {
     }
 }
 
-/// Path, query truncated to 48 characters, whole string capped at 180.
+/// Origin and path only, capped at 180 characters. The query, fragment,
+/// `;params` and `user:pass@` are dropped, as everywhere else devtools
+/// writes a URL (Pete 10-23, shapes only; T7 C1): they carry tokens, and
+/// since T7 these lines are written on the network runtime too.
+///
+/// An absolute string is parsed by `url` and scrubbed by the Inspector's
+/// [`crate::inspector::scrub_url`], so the parser's reading of the string
+/// (`http:u:pw@host`, `https:\\u:pw@host`, a tab in the scheme, leading
+/// space) is what is cut, not this module's; it also reduces `data:` to a
+/// known MIME type, `blob:` to its origin and `javascript:` to its scheme,
+/// and lowercases scheme and host (T7a R1 HOLD 5682590983). A string the
+/// parser rejects after reading a scheme prints no part of itself. Only a
+/// string the parser found no scheme in is cut by hand, as a relative
+/// string: a `://` in its query is not a scheme.
 pub(crate) fn brief_url(url: &str) -> String {
-    let (path, query) = match url.split_once('?') {
-        Some((path, query)) => {
-            let mut q: String = query.chars().take(48).collect();
-            if query.chars().count() > 48 {
-                q.push('…');
-            }
-            (path, Some(q))
-        }
-        None => (url, None),
+    match url::Url::parse(url) {
+        Ok(parsed) => cap_url(crate::inspector::scrub_url(&parsed, false)),
+        // The parser's verdict on whether there is a scheme is the only one
+        // used here. `Url::parse` trims leading and trailing C0 controls
+        // and spaces and strips tabs, CRs and LFs before it reads the
+        // scheme, so a raw-string check (`^[A-Za-z][A-Za-z0-9+.-]*:`)
+        // disagrees with it on ` https://u:pw@h` or `ht\ttps://u:pw@h`, and
+        // would hand those to the relative cut, which prints the user and
+        // part of the password. In url 2.5.7 `RelativeUrlWithoutBase` is
+        // the only error returned before a scheme is read (R1 B1).
+        Err(url::ParseError::RelativeUrlWithoutBase) => brief_relative(url),
+        // Every other error comes after a scheme was read (a bad port, host
+        // or IPv6 literal); whatever follows it may be a credential cut in
+        // the wrong place, so none of it is printed.
+        Err(_) => "…".to_string(),
+    }
+}
+
+/// The base a relative string is joined onto to learn whether the parser
+/// reads it as scheme-relative. Reserved under RFC 2606; no page has it.
+const RELATIVE_BASE: &str = "https://relative.invalid/";
+const RELATIVE_HOST: &str = "relative.invalid";
+
+/// A relative string, cut as the parser reads it joined onto a fixed base
+/// (R1 B2). When the join lands on another host, or carries userinfo, the
+/// string was scheme-relative in disguise (`\\u:pw@h/x`, `/\u:pw@h/x`,
+/// `\/u:pw@h/x`, a leading space or tab, a tab inside the slashes: with a
+/// special base the parser reads each as `user=u, password=pw, host=h`),
+/// and only `//`, the host[:port] and the path without its `;params` are
+/// printed. A string the join rejects prints no part of itself. Any other
+/// string is cut by hand, so `./`, `../` and bare specifiers stay as the
+/// page wrote them: at `?` or `#`, and without the path's `;params`
+/// (`../a;jsessionid=S/b` is `../a/b`, as on the absolute side).
+fn brief_relative(url: &str) -> String {
+    let base = url::Url::parse(RELATIVE_BASE).expect("fixed base parses");
+    let Ok(joined) = base.join(url) else {
+        return "…".to_string();
     };
-    let mut brief = match query {
-        Some(q) => format!("{path}?{q}"),
-        None => path.to_string(),
+    let host = joined.host_str().unwrap_or("");
+    if host != RELATIVE_HOST || !joined.username().is_empty() || joined.password().is_some() {
+        let port = joined.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let path = crate::inspector::drop_path_params(joined.path());
+        return cap_url(format!("//{host}{port}{path}"));
+    }
+    let (slashes, rest) = url.strip_prefix("//").map_or(("", url), |rest| ("//", rest));
+    // Userinfo and the authority only after `//`; `;params` only after it.
+    let (host, path) = if slashes.is_empty() {
+        ("", rest)
+    } else {
+        let authority = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let (authority, path) = rest.split_at(authority);
+        (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    cap_url(format!("{slashes}{host}{}", crate::inspector::drop_path_params(&path[..end])))
+}
+
+/// At most 180 characters, the last one `…` when cut.
+fn cap_url(mut brief: String) -> String {
     if brief.chars().count() > 180 {
         brief = brief.chars().take(179).collect();
         brief.push('…');
     }
     brief
+}
+
+/// A script's place as a line shows it: an engine label (`inline#1`,
+/// `inserted#4`: a word, `#`, digits only) as it is, anything else (a URL,
+/// a relative specifier, `app#token`) through [`brief_url`].
+fn brief_place(place: &str) -> String {
+    let label = place.split_once('#').is_some_and(|(kind, n)| {
+        !kind.is_empty()
+            && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+    });
+    if label { place.to_string() } else { brief_url(place) }
 }
 
 fn dash(text: &str) -> &str {
@@ -374,10 +468,10 @@ pub(crate) fn dynamic_import_failed(specifier: &str, url: &str, reason: &str) {
     if !enabled() {
         return;
     }
-    let url = if url.is_empty() { "-" } else { url };
+    let url = if url.is_empty() { "-".to_string() } else { brief_place(url) };
     let (reason, _) = cap(reason, MAX_MESSAGE_CHARS);
     let reason = reason.replace(['\n', '\r'], " ");
-    emit(format!("dynamic import {specifier} -> {url}: {reason}"));
+    emit(format!("dynamic import {} -> {url}: {reason}", brief_place(specifier)));
 }
 
 #[cfg(test)]
@@ -512,14 +606,242 @@ mod tests {
     }
 
     #[test]
-    fn brief_url_keeps_a_short_query_and_cuts_a_long_one() {
+    fn brief_url_drops_the_query_and_fragment() {
+        // T7 C1: shapes only, URL queries too.
         assert_eq!(brief_url("https://www.reddit.com/svc/shreddit"), "https://www.reddit.com/svc/shreddit");
         let long = format!("https://www.reddit.com/svc/shreddit/gql?{}", "q".repeat(80));
-        let brief = brief_url(&long);
-        assert!(brief.starts_with("https://www.reddit.com/svc/shreddit/gql?"), "{brief}");
-        assert!(brief.ends_with('…'), "{brief}");
-        assert!(brief.chars().count() < long.chars().count(), "{brief}");
+        assert_eq!(brief_url(&long), "https://www.reddit.com/svc/shreddit/gql");
+        assert_eq!(brief_url("https://a.test/p?token=SECRET#frag"), "https://a.test/p");
+        assert_eq!(brief_url("https://a.test/p#SECRET?x"), "https://a.test/p");
         assert!(brief_url(&format!("https://example.test/{}", "p".repeat(300))).chars().count() <= 180);
+        // `;params` and userinfo carry tokens too (T7a review).
+        assert_eq!(brief_url("https://a.test/p;jsessionid=SECRET?x"), "https://a.test/p");
+        assert_eq!(brief_url("https://user:SECRET@a.test/p"), "https://a.test/p");
+        assert_eq!(brief_url("https://a.test/p@q"), "https://a.test/p@q");
+    }
+
+    #[test]
+    fn brief_url_takes_a_scheme_only_at_the_start() {
+        // T7a R1 delta (Atlas 1, Prometheus 7): a `://` later in the URL
+        // is not the scheme, so a relative URL keeps its query cut too.
+        assert_eq!(brief_url("/api?token=SECRET&next=https://x.test/p"), "/api");
+        assert_eq!(brief_url("./m.js?a=1&u=http://e.test/"), "./m.js");
+        assert_eq!(brief_url("m.js#SECRET://x"), "m.js");
+        // `;` is cut after the authority only.
+        assert_eq!(brief_url("https://a.test/p;s=SECRET"), "https://a.test/p");
+    }
+
+    #[test]
+    fn brief_url_strips_userinfo_after_a_leading_double_slash() {
+        // T7a R1 delta (Atlas 2).
+        assert_eq!(brief_url("//u:SECRET@host.test/x"), "//host.test/x");
+        assert_eq!(brief_url("//host.test/x?SECRET"), "//host.test/x");
+    }
+
+    #[test]
+    fn brief_url_reduces_a_data_url_to_its_mime_type() {
+        // T7a R1 delta (Atlas 3): the payload is page content.
+        assert_eq!(brief_url("data:text/javascript;base64,U0VDUkVU"), "data:text/javascript,…");
+        assert_eq!(brief_url("data:text/plain,SECRET?x#y"), "data:text/plain,…");
+        assert_eq!(brief_url("DATA:,SECRET"), "data:,…");
+        // An unknown MIME type is page text; a query in it is still a query.
+        assert_eq!(brief_url("data:SECRETTOKEN,x"), "data:,…");
+    }
+
+    // T7a R1 HOLD 5682590983: absolute strings go through `Url::parse` and
+    // the Inspector's `scrub_url`, so what the parser reads as credentials
+    // is what is cut. One test per leak row.
+
+    #[test]
+    fn brief_url_http_with_no_slashes_drops_the_userinfo() {
+        assert_eq!(brief_url("http:u:SECRET@host/x"), "http://host/x");
+    }
+
+    #[test]
+    fn brief_url_https_with_one_slash_drops_the_userinfo() {
+        assert_eq!(brief_url("https:/u:SECRET@host"), "https://host/");
+    }
+
+    #[test]
+    fn brief_url_https_with_backslashes_drops_the_userinfo_and_query() {
+        assert_eq!(brief_url(r"https:\\u:SECRET@host\x?q=1"), "https://host/x");
+    }
+
+    #[test]
+    fn brief_url_https_with_a_slash_and_backslash_drops_the_userinfo() {
+        assert_eq!(brief_url(r"https:/\u:SECRET@host/x"), "https://host/x");
+    }
+
+    #[test]
+    fn brief_url_with_a_leading_space_is_still_absolute() {
+        assert_eq!(brief_url(" https://u:SECRET@h/x?q"), "https://h/x");
+    }
+
+    #[test]
+    fn brief_url_with_a_tab_in_the_scheme_is_still_absolute() {
+        assert_eq!(brief_url("ht\ttp://u:SECRET@h/x"), "http://h/x");
+    }
+
+    #[test]
+    fn brief_url_data_url_with_a_query_in_its_mime_prints_no_query() {
+        let brief = brief_url("data:text/plain?tok=SECRET#f");
+        assert_eq!(brief, "data:,…");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_javascript_url_keeps_only_its_scheme() {
+        let brief = brief_url("javascript:alert('SECRET')");
+        assert_eq!(brief, "javascript:");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_blob_url_keeps_only_its_origin() {
+        let brief = brief_url("blob:https://u:SECRET@a/b?x");
+        assert_eq!(brief, "blob:https://a");
+        assert!(!brief.contains("SECRET"), "{brief}");
+    }
+
+    #[test]
+    fn brief_url_prints_nothing_of_a_schemed_string_that_does_not_parse() {
+        // `p?w` reads as a port, so the parser rejects it; a hand cut at
+        // `?` would print the user and part of the password.
+        let brief = brief_url("https://user:SECRET?w@host/x");
+        assert_eq!(brief, "…");
+        assert!(!brief.contains("user") && !brief.contains("SECRET"), "{brief}");
+        assert_eq!(brief_url("http://[::1"), "…");
+    }
+
+    /// R1 B1 @ 9ceed2a5: the parser trims leading space and strips a tab
+    /// before reading the scheme, so these are schemed strings that do not
+    /// parse, not relative ones; a raw-string scheme check would have sent
+    /// them to the hand cut, which prints the user and part of the password.
+    #[test]
+    fn brief_url_prints_nothing_of_a_schemed_string_the_parser_had_to_trim_first() {
+        for u in [" https://user:SECRET?w@host/x", "ht\ttps://user:SECRET?w@host/x", " http://u:SECRET@host:bad/x"] {
+            let brief = brief_url(u);
+            assert_eq!(brief, "…", "{u:?}");
+            assert!(!brief.contains("SECRET"), "{u:?} -> {brief}");
+        }
+    }
+
+    /// R1 M1 @ 9ceed2a5: a `javascript:` URL with an authority is a base
+    /// URL to the parser, so the `cannot_be_a_base` reduction missed it.
+    #[test]
+    fn brief_url_javascript_url_with_an_authority_keeps_only_its_scheme() {
+        for u in ["javascript://h/alert(SECRET)", "javascript://alert(1)"] {
+            let brief = brief_url(u);
+            assert_eq!(brief, "javascript:", "{u:?}");
+            assert!(!brief.contains('(') && !brief.contains("SECRET"), "{u:?} -> {brief}");
+        }
+    }
+
+    #[test]
+    fn brief_url_lowercases_the_scheme_and_host_only() {
+        assert_eq!(brief_url("HTTPS://USER:SECRET@HOST.TEST/X?TOKEN=S#F"), "https://host.test/X");
+        assert_eq!(brief_url("http://[::1]:8080/x?q=1"), "http://[::1]:8080/x");
+        assert_eq!(brief_url("wss://u:SECRET@h/x;s=1"), "wss://h/x");
+    }
+
+    #[test]
+    fn brief_url_cuts_semicolon_params_in_the_path_and_keeps_an_authority_semicolon() {
+        // The authority's `;` is the parser's to read; only the path's
+        // `;params` are cut (T7a Atlas pin).
+        assert_eq!(brief_url("https://h/p@q;r?s"), "https://h/p@q");
+        let brief = brief_url("https://h;x/p");
+        assert!(!brief.contains('?'), "{brief}");
+        assert!(brief == "…" || brief.starts_with("https://h;x/"), "{brief}");
+        assert_eq!(brief_url("https://h/a;jsessionid=SECRET/b"), "https://h/a/b");
+    }
+
+    // T7a R1 HOLD 5685085123 (B2): a relative string is joined onto a fixed
+    // base, so a scheme-relative string in disguise is cut as the parser
+    // reads it. One test per leak row; none may print the user or password.
+
+    /// `brief_url(input)`, checked to print neither the user nor the password.
+    fn brief_without_userinfo(input: &str) -> String {
+        let brief = brief_url(input);
+        assert!(!brief.contains("SECRET"), "{input:?} printed {brief:?}");
+        assert!(!brief.contains("u:"), "{input:?} printed {brief:?}");
+        assert!(!brief.contains('@'), "{input:?} printed {brief:?}");
+        brief
+    }
+
+    #[test]
+    fn brief_relative_two_backslashes_drop_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"\\u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_slash_backslash_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"/\u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_backslash_slash_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(r"\/u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_leading_space_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo(" //u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_leading_tab_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo("\t//u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_with_a_tab_between_the_slashes_drops_the_userinfo() {
+        assert_eq!(brief_without_userinfo("/\t/u:SECRET@h/x"), "//h/x");
+    }
+
+    #[test]
+    fn brief_relative_scheme_relative_keeps_the_port_and_cuts_the_rest() {
+        assert_eq!(brief_without_userinfo(r"\\u:SECRET@h:8443/a;jsessionid=SECRET/b?t=SECRET#SECRET"), "//h:8443/a/b");
+    }
+
+    #[test]
+    fn brief_relative_plain_paths_stay_as_the_page_wrote_them() {
+        assert_eq!(brief_url("../a/b?x"), "../a/b");
+        assert_eq!(brief_url("/api?token=SECRET"), "/api");
+        assert_eq!(brief_url("./m.js?a=1&u=http://e.test/"), "./m.js");
+        assert_eq!(brief_url("/a;jsessionid=SECRET/b"), "/a/b");
+        assert_eq!(brief_url("m.js"), "m.js");
+    }
+
+    #[test]
+    fn brief_place_keeps_only_numbered_engine_labels() {
+        // T7a R1 delta (Atlas 5): `word#` is a label only when digits follow.
+        assert_eq!(brief_place("inline#1"), "inline#1");
+        assert_eq!(brief_place("unparseable#12"), "unparseable#12");
+        assert_eq!(brief_place("app#SECRET"), "app");
+        assert_eq!(brief_place("app#"), "app");
+    }
+
+    #[test]
+    fn script_places_inserted_scripts_and_imports_drop_the_query_too() {
+        // T7a review: the header says every URL a line names; these were
+        // printed raw.
+        let _reset = Reset;
+        force_for_test(Some(true));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        install_sink(Some(Arc::clone(&sink)));
+        alias("chunk#q-unit", "https://cdn.example/c.js?token=SECRET");
+        let at = ScriptPosition { path: "chunk#q-unit".into(), line: 2, column: 3 };
+        console_message(LogLevel::Log, "hi", Some(&at));
+        let inline = ScriptPosition { path: "inline#1".into(), line: 1, column: 1 };
+        console_message(LogLevel::Log, "hi", Some(&inline));
+        inserted_script("https://cdn.example/i.js?token=SECRET#f", "load");
+        dynamic_import_failed("./m.js?token=SECRET", "https://u:SECRET@cdn.example/m.js;s=SECRET", "not found");
+        let text = sink.lock().unwrap().join("\n");
+        assert!(text.contains("console log https://cdn.example/c.js:2:3 hi"), "{text}");
+        assert!(text.contains("console log inline#1:1:1 hi"), "{text}");
+        assert!(text.contains("inserted script load https://cdn.example/i.js"), "{text}");
+        assert!(text.contains("dynamic import ./m.js -> https://cdn.example/m.js: not found"), "{text}");
+        assert!(!text.contains("SECRET"), "{text}");
     }
 
     #[test]
@@ -803,11 +1125,11 @@ location.assign('/next');\
         assert!(text.contains("doc document-replace"), "{text}");
         assert!(text.contains("doc dom-remove") && text.contains("parent=div#feed") && text.contains("nodes="), "{text}");
         assert!(text.contains("doc location") && text.contains("assign") && text.contains("/next"), "{text}");
-        let gql: Vec<_> = lines.iter().filter(|line| line.contains("/gql?")).cloned().collect();
+        let gql: Vec<_> = lines.iter().filter(|line| line.contains("/gql")).cloned().collect();
         assert!(gql.iter().any(|line| line.contains("net start") && line.contains("GET")), "{gql:#?}\n{text}");
         assert!(gql.iter().any(|line| line.contains("status=200") && line.contains("response")), "{gql:#?}");
         assert!(gql.iter().any(|line| line.contains("delivered") || line.contains("nav=")), "{gql:#?}");
-        assert!(gql.iter().all(|line| !line.contains(&"q".repeat(60))), "query was not truncated: {gql:#?}");
-        assert!(gql.iter().any(|line| line.contains('…')), "long query should be marked truncated: {gql:#?}");
+        // T7 C1: the query is dropped, not truncated.
+        assert!(gql.iter().all(|line| !line.contains("/gql?") && !line.contains("qqq")), "a query reached the mirror: {gql:#?}");
     }
 }
