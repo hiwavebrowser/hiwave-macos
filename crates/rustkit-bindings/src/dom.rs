@@ -3395,6 +3395,13 @@ const WRAPPERS_JS: &str = r#"
             signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
         }
     };
+    // Does `target` have a listener for `type` right now? For the installs
+    // that keep a target alive only while something can hear it
+    // (web_match_media.js prunes its document list of media query lists).
+    HOOKS.hasListener = function (target, type) {
+        var all = LISTENERS.get(thisTarget(target)), list = all && all[String(type)];
+        return !!(list && list.length > 0);
+    };
     EventTarget.prototype.removeEventListener = function (type, cb, opts) {
         var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
         if (!list) return;

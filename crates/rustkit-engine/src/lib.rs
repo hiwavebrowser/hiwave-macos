@@ -389,6 +389,8 @@ mod content_string_tests;
 #[cfg(test)]
 mod html_element_ancestor_tests;
 #[cfg(test)]
+mod match_media_tests;
+#[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
@@ -2943,6 +2945,9 @@ impl Engine {
                         "resize",
                     )
                 });
+                // Then the media query lists whose answer flipped hear
+                // `change` (after `resize`, as in the rendering update).
+                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
                 let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
