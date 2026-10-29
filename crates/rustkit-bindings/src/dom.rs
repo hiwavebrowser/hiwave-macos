@@ -1922,11 +1922,17 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Removing an absent attribute runs no attribute-change steps (DOM
+        // "remove an attribute by name"), so it must not drop an assigned
+        // on<type> handler. N.attr matches the name as the write does.
+        var changed = op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
+        if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
@@ -3423,19 +3429,18 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
-    // An element's on<type> handler: the property when one was assigned
-    // (`null` included, which turns the handler off), else its `on<type>`
-    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
-    // `function (event)`, with the element and its document in scope,
-    // compiled on first use and again when the text changes. A body that
-    // does not compile is logged once and is no handler.
-    var INLINE = new WeakMap();
-    function handlerOf(t, type) {
-        if (PLAIN.has(t)) return undefined;
-        var h = t['on' + type];
-        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+    // An element's on<type> handler (HTML §8.1.8): the value assigned through
+    // its `on<type>` IDL attribute (`null` included, which turns the handler
+    // off), else its `on<type>` content attribute. The attribute's text is
+    // the body of `function (event)`, with the element and its document in
+    // scope, compiled on first use and again when the text changes. A body
+    // that does not compile is logged once and is no handler. Setting or
+    // removing the attribute drops the assigned value: the attribute is the
+    // handler again (§8.1.8.1 "event handler content attributes").
+    var INLINE = new WeakMap(), ASSIGNED = new WeakMap();
+    function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return h;
+        if (src === null) return null;
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
@@ -3450,6 +3455,72 @@ const WRAPPERS_JS: &str = r#"
         }
         return c.fn;
     }
+    function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
+        // A type with no accessor (a custom event) is still a data property.
+        if (!HANDLER_TYPES[type]) {
+            var h = t['on' + type];
+            if (h !== undefined) return h;
+        }
+        return inlineHandler(t, type);
+    }
+    function attributeChanged(t, name) {
+        // The native setAttr/removeAttr lowercases the name for HTML elements
+        // (`OnClick` is the `onclick` attribute), so compare the lowercased
+        // name here too. Lowercasing unconditionally is fine: SVG's on<type>
+        // attributes are lowercase already, so a case-sensitive SVG name
+        // either is lowercase or names no handler attribute at all.
+        name = String(name).toLowerCase();
+        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+            var a = ASSIGNED.get(t);
+            if (a) delete a[name.slice(2)];
+        }
+    }
+    // HTML §8.1.8.2 GlobalEventHandlers: `on<type>` is an accessor on
+    // HTMLElement.prototype (and SVGElement.prototype), not a data property
+    // of each element. The getter answers the assigned value, else the
+    // compiled content attribute, else null; the setter keeps a function or
+    // object and makes anything else null. Script that wraps the native
+    // accessor needs the descriptor to exist: a script-retry shim takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own, and
+    // without it every later `onerror` read and write on any element threw,
+    // which stopped Next's bootstrap and webpack's chunk loader at the first
+    // `<script src>` they inserted.
+    var HANDLER_TYPES = Object.create(null);
+    ('abort animationcancel animationend animationiteration animationstart auxclick beforeinput ' +
+     'beforematch beforetoggle blur cancel canplay canplaythrough change click close contextlost ' +
+     'contextmenu contextrestored copy cuechange cut dblclick drag dragend dragenter dragleave ' +
+     'dragover dragstart drop durationchange emptied ended error focus formdata gotpointercapture ' +
+     'input invalid keydown keypress keyup load loadeddata loadedmetadata loadstart ' +
+     'lostpointercapture mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup ' +
+     'paste pause play playing pointercancel pointerdown pointerenter pointerleave pointermove ' +
+     'pointerout pointerover pointerrawupdate pointerup progress ratechange reset resize scroll ' +
+     'scrollend securitypolicyviolation seeked seeking select selectionchange selectstart ' +
+     'slotchange stalled submit suspend timeupdate toggle touchcancel touchend touchmove ' +
+     'touchstart transitioncancel transitionend transitionrun transitionstart volumechange ' +
+     'waiting wheel').split(' ').forEach(function (type) {
+        HANDLER_TYPES[type] = true;
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () {
+                var a = ASSIGNED.get(this);
+                if (a && type in a) return a[type];
+                return this[SLOT] && this.nodeType === 1 ? inlineHandler(this, type) : null;
+            },
+            set: function (v) {
+                if (typeof v !== 'function' && (typeof v !== 'object' || v === null)) v = null;
+                var a = ASSIGNED.get(this);
+                if (!a) { a = Object.create(null); ASSIGNED.set(this, a); }
+                a[type] = v;
+            }
+        };
+        Object.defineProperty(HTMLElement.prototype, 'on' + type, desc);
+        Object.defineProperty(g.SVGElement.prototype, 'on' + type, desc);
+    });
     var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
