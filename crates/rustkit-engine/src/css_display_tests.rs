@@ -490,3 +490,53 @@ fn a_contents_child_of_a_closed_details_is_not_rendered() {
     let width: f64 = width.parse().expect(&width);
     assert!(width > 0.0, "the shown span has no box");
 }
+
+/// Independent R1 on #786 (10-29). The adjacent-text join assumed bare text
+/// siblings always share their parent's computed style. A text node hoisted
+/// out of a `display: contents` element carries that element's style and
+/// `link_href`, so joining it into the neighbouring run lost the link and
+/// the colour. The join now requires the same style and the same href.
+#[test]
+fn text_hoisted_from_a_contents_element_keeps_its_style_and_href() {
+    let (mut engine, view) = loaded(concat!(
+        r#"<!doctype html><style>body{margin:0;font:16px/20px Arial}"#,
+        r#"a{color:rgb(1,2,3);text-decoration:none}</style><body>"#,
+        r#"<p id="p">s <a href="https://example.com/here" style="display:contents">"#,
+        r#"hereherehereherehere</a> t</p>"#,
+        r#"<p id="q">a <span style="display:contents;color:rgb(4,5,6)">b</span> c</p>"#,
+        r#"</body>"#,
+    ));
+    // The <p> keeps its 16 px default margin, so its line is y 16..36. "s "
+    // is far narrower than 100 px at 16 px; the anchor text runs well past it.
+    assert_eq!(
+        engine.link_at_point(view, 100.0, 26.0).as_deref(),
+        Some("https://example.com/here"),
+        "the hoisted anchor text was joined into the previous run and lost its href"
+    );
+    assert_eq!(
+        engine.link_at_point(view, 2.0, 26.0),
+        None,
+        "the leading text took the anchor's href"
+    );
+    let list = engine.views[&view].display_list.as_ref().expect("display list");
+    let runs: Vec<(String, (u8, u8, u8))> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            rustkit_layout::DisplayCommand::Text { text, color, .. } => {
+                Some((text.clone(), (color.r, color.g, color.b)))
+            }
+            _ => None,
+        })
+        .collect();
+    let colour_of = |needle: &str| {
+        runs.iter()
+            .find(|(t, _)| t.trim() == needle)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("no run {needle:?} in {runs:?}"))
+    };
+    assert_eq!(colour_of("hereherehereherehere"), (1, 2, 3), "anchor text lost its colour");
+    assert_eq!(colour_of("b"), (4, 5, 6), "contents span's text lost its colour");
+    assert_eq!(colour_of("s"), (0, 0, 0));
+    assert_eq!(colour_of("c"), (0, 0, 0));
+}
