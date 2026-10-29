@@ -366,7 +366,18 @@ fn brief_relative(url: &str) -> String {
         (authority.rfind('@').map_or(authority, |at| &authority[at + 1..]), path)
     };
     let end = path.find(['?', '#']).unwrap_or(path.len());
-    cap_url(format!("{slashes}{host}{}", crate::inspector::drop_path_params(&path[..end])))
+    let path = &path[..end];
+    // A not-quite-scheme (`ht tp://u:pw@h`, `1http://...`) or an `@` before
+    // the first `/` (`a b:pw@h/x`) is a credential the parser did not read
+    // as one; none of it is printed (T8, carried from T7a).
+    let first_slash = path.find('/').unwrap_or(path.len());
+    if slashes.is_empty() && (path.contains("://") || path.find('@').is_some_and(|at| at < first_slash)) {
+        return "…".to_string();
+    }
+    // Control characters become spaces, so a specifier cannot start a
+    // forged mirror line.
+    let brief = format!("{slashes}{host}{}", crate::inspector::drop_path_params(path));
+    cap_url(brief.chars().map(|c| if c.is_control() { ' ' } else { c }).collect())
 }
 
 /// At most 180 characters, the last one `…` when cut.
@@ -810,6 +821,46 @@ mod tests {
         assert_eq!(brief_url("./m.js?a=1&u=http://e.test/"), "./m.js");
         assert_eq!(brief_url("/a;jsessionid=SECRET/b"), "/a/b");
         assert_eq!(brief_url("m.js"), "m.js");
+    }
+
+    // T8 (T7a nits carried, Atlas 75f82d34 residue + Prometheus 295816ff).
+
+    #[test]
+    fn brief_relative_prints_nothing_of_a_not_quite_scheme_with_userinfo() {
+        // The parser finds no scheme in these, so they reach the hand cut,
+        // which printed them whole.
+        for u in ["ht tp://u:SECRET@h/x", "1http://u:SECRET@h/x", "-http://u:SECRET@h/x", "h ttps://u:SECRET@h/x?q"] {
+            let brief = brief_without_userinfo(u);
+            assert_eq!(brief, "…", "{u:?}");
+        }
+    }
+
+    #[test]
+    fn brief_relative_prints_nothing_of_a_userinfo_before_the_first_slash() {
+        for u in ["a b:SECRET@h/x", "u%3ASECRET@h/x"] {
+            assert_eq!(brief_without_userinfo(u), "…", "{u:?}");
+        }
+        // An `@` in the path, after the first `/`, is path text.
+        assert_eq!(brief_url("./a/b@c"), "./a/b@c");
+    }
+
+    #[test]
+    fn scrub_url_keeps_a_hostless_path_a_path_when_its_params_are_cut() {
+        // `foo:/;x/a@b`: cutting `;x` leaves `//a@b`, which url's `set_path`
+        // serialised as `foo://a@b`, so the record re-read as user `a`,
+        // host `b`.
+        let brief = brief_url("foo:/;x/a@b");
+        assert_eq!(brief, "foo:/.//a@b");
+        let reread = url::Url::parse(&brief).unwrap();
+        assert!(reread.host().is_none() && reread.username().is_empty(), "{brief}");
+    }
+
+    #[test]
+    fn brief_relative_maps_control_characters_so_a_line_cannot_be_forged() {
+        let brief = brief_url("./x\nnet response GET https://evil status=200");
+        assert!(!brief.contains('\n'), "{brief:?}");
+        let brief = brief_url("/a\tb?S");
+        assert!(!brief.contains('\t') && !brief.contains('S'), "{brief:?}");
     }
 
     #[test]

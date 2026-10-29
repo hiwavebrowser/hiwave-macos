@@ -223,9 +223,14 @@ pub struct DevtoolsNetwork {
 /// `response` or `failure`, if one has been recorded.
 pub fn devtools_network(snapshot: &InspectorSnapshot, doc: u32) -> DevtoolsNetwork {
     let mut requests: Vec<DevtoolsRequest> = Vec::new();
+    // Request id to its place in `requests`: a terminal record finds its
+    // request at once, not by a scan (T8).
+    let mut at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for record in snapshot.records.iter().filter(|r| r.doc == doc) {
         match &record.event {
-            InspectorEvent::Request { id, url, method, initiator, .. } => requests.push(DevtoolsRequest {
+            InspectorEvent::Request { id, url, method, initiator, .. } => {
+                at.entry(*id).or_insert(requests.len());
+                requests.push(DevtoolsRequest {
                 id: *id,
                 url: url.clone(),
                 method: method.clone(),
@@ -234,16 +239,17 @@ pub fn devtools_network(snapshot: &InspectorSnapshot, doc: u32) -> DevtoolsNetwo
                 status: None,
                 failure: None,
                 duration_ms: None,
-            }),
+                })
+            }
             InspectorEvent::Response { id, status, duration_ms, .. } => {
-                if let Some(r) = requests.iter_mut().find(|r| r.id == *id) {
+                if let Some(r) = at.get(id).map(|&i| &mut requests[i]) {
                     r.state = "response";
                     r.status = Some(*status);
                     r.duration_ms = Some(*duration_ms);
                 }
             }
             InspectorEvent::Failure { id, stage, reason, duration_ms, .. } => {
-                if let Some(r) = requests.iter_mut().find(|r| r.id == *id) {
+                if let Some(r) = at.get(id).map(|&i| &mut requests[i]) {
                     let stage = serde_json::to_value(stage).ok().and_then(|v| v.as_str().map(str::to_string));
                     r.state = "failure";
                     r.failure = Some(format!("{}: {reason}", stage.unwrap_or_default()));
@@ -580,7 +586,7 @@ impl Engine {
     /// `request`, `scrub_text` on `fail`); this path scrubs nothing again.
     pub fn devtools_network(&self, id: EngineViewId) -> Result<DevtoolsNetwork, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
-        let (snapshot, doc) = view.inspector.snapshot_and_doc(0);
+        let (snapshot, doc) = view.inspector.network_for_current_doc();
         Ok(devtools_network(&snapshot, doc))
     }
 

@@ -305,7 +305,7 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
 /// Answer `read`; returns the `next_seq` a console read answered up to.
 fn answer(read: ConsoleRead) -> Option<u64> {
     if read.network {
-        let (snapshot, doc) = read.inspector.snapshot_and_doc(0);
+        let (snapshot, doc) = read.inspector.network_for_current_doc();
         let mut network = crate::devtools_network(&snapshot, doc);
         // The second guard, as for console lines.
         for request in &mut network.requests {
@@ -460,6 +460,53 @@ mod tests {
             inspector.watermark()
         );
         watch(&inspector, &counters, false);
+    }
+
+    /// T8: the network read clones only the current document's network
+    /// records, and answers exactly what the whole-ring read answered: two
+    /// documents, a full ring of console lines around their requests, a
+    /// response, a failure, one left open. Prints the read's time on the full
+    /// ring both ways (the lock is held for the clone).
+    #[test]
+    fn the_network_read_clones_only_the_current_documents_requests() {
+        use crate::inspector::{FailureStage, ResourceType};
+        let inspector = tab();
+        let url = |p: &str| url::Url::parse(&format!("https://a.test/{p}?q=SECRET")).unwrap();
+        let old = inspector.begin_request(&url("old"), "GET", ResourceType::Fetch, Some("fetch")).unwrap();
+        old.response(200, Some("text/plain"), None, Some(1), false);
+        inspector.navigation_started(Some(&url("next")));
+        let console = TAB_RING_CAPACITY - 160;
+        let mut open = Vec::new();
+        for i in 0..150 {
+            for _ in 0..console / 150 {
+                inspector.console(ConsoleLevel::Log, "line", None);
+            }
+            let g = inspector.begin_request(&url(&format!("r{i}")), "GET", ResourceType::Fetch, Some("fetch")).unwrap();
+            match i % 3 {
+                0 => g.response(200, Some("text/plain"), None, Some(1), false),
+                1 => g.fail(FailureStage::Connect, "refused"),
+                _ => open.push(g),
+            }
+        }
+        let started = Instant::now();
+        let (whole, doc) = inspector.snapshot_and_doc(0);
+        let before = crate::devtools_network(&whole, doc);
+        let whole_took = started.elapsed();
+        let started = Instant::now();
+        let (network, now_doc) = inspector.network_for_current_doc();
+        let after = crate::devtools_network(&network, now_doc);
+        let network_took = started.elapsed();
+        eprintln!(
+            "T8 network read on a ring of {} records: whole ring {} cloned in {whole_took:?}, current doc's network {} cloned in {network_took:?}",
+            whole.records.len(),
+            whole.records.len(),
+            network.records.len()
+        );
+        assert_eq!(after, before);
+        assert_eq!(after.requests.len(), 150, "the old document's request is not listed");
+        assert!(network.records.len() < whole.records.len() / 4, "{} of {}", network.records.len(), whole.records.len());
+        assert!(network.records.iter().all(|r| r.doc == now_doc));
+        drop(open);
     }
 
     /// T6 R1 condition 3: twenty tabs with an open panel each, full rings,

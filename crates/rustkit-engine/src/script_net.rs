@@ -253,25 +253,36 @@ pub(crate) fn net_runtime_switch(value: Option<&str>) -> bool {
     !matches!(value, Some("0" | "off" | "false"))
 }
 
-/// The process's network runtime (T7): one `rustkit-net` thread that runs
-/// live script requests, so their bytes are read and their response and
-/// failure records written while the page thread is busy. Built on first
-/// use. `None` when it is switched off or could not be built; the page then
-/// polls its requests itself, as before. It is never shut down: requests
-/// still out at process exit end unrecorded, with the ring that would have
-/// held their records.
+/// How many `rustkit-net` workers: `HIWAVE_NET_WORKERS`, 1 to 8, default 2.
+/// `1` is T7a's one current-thread runtime (D1), kept for the A/B.
+fn net_workers() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| net_workers_switch(std::env::var("HIWAVE_NET_WORKERS").ok().as_deref()))
+}
+
+/// `HIWAVE_NET_WORKERS`'s value read as a worker count: a number from 1 to
+/// 8; unset, empty or anything else is 2.
+pub(crate) fn net_workers_switch(value: Option<&str>) -> usize {
+    value.and_then(|v| v.trim().parse().ok()).filter(|n| (1..=8).contains(n)).unwrap_or(2)
+}
+
+/// The process's network runtime (T7): `rustkit-net` workers (two by
+/// default, [`net_workers`]) that run live script requests, so their bytes
+/// are read and their response and failure records written while the page
+/// thread is busy. Built on first use. `None` when it is switched off or
+/// could not be built; the page then polls its requests itself, as before.
+/// It is never shut down: requests still out at process exit end
+/// unrecorded, with the ring that would have held their records.
 ///
-/// One current-thread runtime, not the note's two workers (deviation D1):
-/// the policy's in-flight slots are FIFO semaphores, taken at a request's
-/// first poll, and one thread first-polls new tasks in the order they were
-/// spawned, so slots still go in request order. With two workers the tasks
-/// raced and a later request could take an earlier one's slot (T2's
-/// combined fixture: `/hang/4` capped instead of `/hang/6`). That order is
-/// the scheduler's, not a contract; the follow-up takes the slot ticket in
-/// [`begin`] on the page thread so the worker count stops mattering. What
-/// runs here is serial across every view: socket waits, but also TLS
-/// handshakes, body decode, the base64 of [`delivery`], Shield matching and
-/// the Inspector records. Nothing runs a page script.
+/// The worker count does not reorder requests (T8): the policy's per-origin
+/// slots are FIFO semaphores, and [`start_live`] takes each request's place
+/// in them on the page thread ([`FetchPolicy::reserve`]), in the order the
+/// page started them. Before that the place was taken at the task's first
+/// poll, which two workers raced (T2's combined fixture: `/hang/4` capped
+/// instead of `/hang/6`), so T7a ran one thread (D1). [`DiagContext`] is
+/// set per poll, which a work-stealing runtime needs. What runs here:
+/// socket waits, TLS handshakes, body decode, the base64 of [`delivery`],
+/// Shield matching and the Inspector records. Nothing runs a page script.
 fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
     static NET: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
     #[cfg(test)]
@@ -282,7 +293,15 @@ fn net_runtime() -> Option<&'static tokio::runtime::Handle> {
         return None;
     }
     NET.get_or_init(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let workers = net_workers();
+        let mut builder = if workers == 1 {
+            tokio::runtime::Builder::new_current_thread()
+        } else {
+            let mut b = tokio::runtime::Builder::new_multi_thread();
+            b.worker_threads(workers).thread_name("rustkit-net");
+            b
+        };
+        let runtime = builder
             .enable_all()
             .build()
             .map_err(|e| tracing::warn!(error = %e, "network runtime not built; the page polls its requests"))
@@ -437,6 +456,19 @@ pub(crate) fn start_live(
         }
         return Box::pin(std::future::ready((id, NetDelivery::Error(NETWORK_ERROR.into()))));
     }
+    // The slot ticket (T8): the budget, the shape check and the place in the
+    // origin's slot queue are taken here, on the page thread, in the order
+    // the page started its requests, so the net runtime's worker count does
+    // not reorder them. A refusal is recorded here, as the task would have.
+    let mut started = started;
+    let wait = started.guard.as_ref().and_then(|g| g.slot()).cloned();
+    match policy.reserve(&started.script_request, wait.as_ref()) {
+        Ok(reservation) => started.reservation = Some(reservation),
+        Err(denial) => {
+            let Started { id, guard, method, url, .. } = started;
+            return Box::pin(std::future::ready((id, denied(id, &method, &url, guard, &denial))));
+        }
+    }
     let (deliver, outcome) = tokio::sync::oneshot::channel();
     let task = net.spawn(DiagContext::new(async move {
         let outcome = finish(&policy, &loader, deadline, started, FailureStage::Timeout).await;
@@ -522,6 +554,9 @@ struct Started {
     /// For the `HIWAVE_CONSOLE_LOG` lines; empty when that is off.
     method: String,
     url: String,
+    /// Its place in the policy's slot queues, when taken where it started
+    /// (T8); otherwise [`finish`] takes it when the request first runs.
+    reservation: Option<rustkit_net::policy::Reservation>,
 }
 
 /// The start of [`execute`], on the page thread: refuse what is malformed,
@@ -550,7 +585,7 @@ fn begin(request: &NetRequest, inspector: &Arc<Inspector>, deadline: tokio::time
                 .waits_on(&rustkit_net::policy::SlotWait::new())
                 .deadline(deadline)
         });
-    Ok(Started { id: request.id, script_request, guard, method, url })
+    Ok(Started { id: request.id, script_request, guard, method, url, reservation: None })
 }
 
 /// The rest of [`execute`]: send, and record the response or failure where
@@ -565,7 +600,7 @@ async fn finish(
     on_deadline: FailureStage,
 ) -> NetDelivery {
     use futures::FutureExt as _;
-    let Started { id, script_request, guard, method, url } = started;
+    let Started { id, script_request, guard, method, url, reservation } = started;
     let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
     #[cfg(test)]
     if script_request.url.path() == FAIL_NAMING_URL_PATH {
@@ -579,7 +614,13 @@ async fn finish(
         if script_request.url.path() == TASK_PANIC_PATH {
             panic!("injected request task panic");
         }
-        tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await
+        match reservation {
+            Some(reservation) => {
+                let sent = policy.execute_reserved(loader, script_request, reservation, wait.as_ref());
+                tokio::time::timeout_at(deadline, sent).await
+            }
+            None => tokio::time::timeout_at(deadline, policy.execute_waited(loader, script_request, wait.as_ref())).await,
+        }
     })
     .catch_unwind()
     .await;
@@ -598,15 +639,7 @@ async fn finish(
             }
             delivery(response)
         }
-        Ok(Err(denial)) => {
-            debug!(id, ?denial, "Script request denied");
-            log_denial(&method, &url, &denial);
-            if let Some(guard) = guard {
-                let (stage, reason) = inspector::denial_stage(&denial);
-                guard.blocked_by(inspector::denial_block_reason(&denial)).fail(stage, reason);
-            }
-            NetDelivery::Error(NETWORK_ERROR.into())
-        }
+        Ok(Err(denial)) => denied(id, &method, &url, guard, &denial),
         Err(_) => {
             debug!(id, "Script request hit its network cap");
             log_request(&method, &url, "-", "timeout");
@@ -620,6 +653,23 @@ async fn finish(
             NetDelivery::Error(NETWORK_ERROR.into())
         }
     }
+}
+
+/// A request the policy refused, logged and recorded where it was refused.
+fn denied(
+    id: u64,
+    method: &str,
+    url: &str,
+    guard: Option<inspector::RequestGuard>,
+    denial: &rustkit_net::policy::Denial,
+) -> NetDelivery {
+    debug!(id, ?denial, "Script request denied");
+    log_denial(method, url, denial);
+    if let Some(guard) = guard {
+        let (stage, reason) = inspector::denial_stage(denial);
+        guard.blocked_by(inspector::denial_block_reason(denial)).fail(stage, reason);
+    }
+    NetDelivery::Error(NETWORK_ERROR.into())
 }
 
 /// The bridge's plain data as the policy's request type. Anything malformed

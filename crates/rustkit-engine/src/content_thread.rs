@@ -1854,6 +1854,89 @@ mod tests {
     }
 
     #[test]
+    fn a_navigation_mid_flight_closes_the_stream_the_server_sees() {
+        // T7 test 2, the server's side (Prometheus nit, carried to T8): the
+        // aborted task drops its connection, so the server reads EOF within
+        // the T7a C4 bound (about 1 s) of the navigation.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hang_seen = Arc::new(AtomicBool::new(false));
+        let closed: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let (seen_for_server, closed_for_server) = (Arc::clone(&hang_seen), Arc::clone(&closed));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (hang_seen, closed) = (Arc::clone(&seen_for_server), Arc::clone(&closed_for_server));
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&request).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    if path.starts_with("/hang") {
+                        hang_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
+                        let until = Instant::now() + Duration::from_secs(10);
+                        while Instant::now() < until {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                        if Instant::now() < until {
+                            *closed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                        }
+                        return;
+                    }
+                    let body = b"<p id=\"t\">ready</p>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                });
+            }
+        });
+        let page = page();
+        let complete = |events: &[PageEvent]| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        };
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        assert!(complete(&poll_until(&page, Duration::from_secs(8), complete)));
+        let mut started = page.eval("fetch('/hang'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !hang_seen.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the fetch never reached the server");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let navigated = Instant::now();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/next.html")).unwrap());
+        let deadline = navigated + Duration::from_secs(3);
+        let closed_at = loop {
+            if let Some(at) = *closed.lock().unwrap_or_else(|e| e.into_inner()) {
+                break Some(at);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let closed_at = closed_at.expect("the server never saw the stream close after the navigation");
+        let after = closed_at.saturating_duration_since(navigated);
+        assert!(after < Duration::from_secs(1), "the stream closed {after:?} after the navigation");
+    }
+
+    #[test]
     fn a_closed_view_frees_its_inspector_with_a_request_out() {
         // T7 test 3 (S5): the task holds the view's Inspector only until its
         // abort is processed. C4: within about a second of the close.
