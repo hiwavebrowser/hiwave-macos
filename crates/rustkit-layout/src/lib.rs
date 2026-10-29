@@ -6757,16 +6757,44 @@ impl LayoutBox {
         }
     }
 
+    /// The z-index `child` paints at among this box's children when it
+    /// paints positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` when
+    /// it paints in normal flow.
+    ///
+    /// A flex or grid item whose `z-index` is not `auto` paints as if it
+    /// were `position: relative`, even when it is static (CSS Flexbox §4.3,
+    /// CSS Grid §9.5). netflix.com's hero text and email form are a
+    /// `static; z-index: 3` flex item after an absolute poster-collage
+    /// layer; in normal flow they painted under it (hand test 10-27, N1b).
+    /// The engine keeps `z-index: auto` as 0, so an item with an explicit
+    /// `z-index: 0` stays in normal flow here. Only element boxes count: a
+    /// text run copies its parent's style and an anonymous box is no item.
+    pub fn child_paint_z(&self, child: &LayoutBox) -> Option<i32> {
+        if child.position != Position::Static {
+            return Some(child.z_index);
+        }
+        let item = matches!(
+            self.style.display,
+            rustkit_css::Display::Flex
+                | rustkit_css::Display::InlineFlex
+                | rustkit_css::Display::Grid
+                | rustkit_css::Display::InlineGrid
+        ) && !matches!(
+            child.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        (item && child.style.z_index != 0).then_some(child.style.z_index)
+    }
+
     /// Get children sorted by z-index for painting.
     pub fn get_paint_order(&self) -> Vec<&LayoutBox> {
         let mut normal_flow: Vec<&LayoutBox> = Vec::new();
         let mut positioned: Vec<(&LayoutBox, i32)> = Vec::new();
 
         for child in &self.children {
-            if child.position == Position::Static {
-                normal_flow.push(child);
-            } else {
-                positioned.push((child, child.z_index));
+            match self.child_paint_z(child) {
+                None => normal_flow.push(child),
+                Some(z) => positioned.push((child, z)),
             }
         }
 
@@ -8867,8 +8895,8 @@ impl DisplayList {
             *layer += 1;
             let child_layer = *layer;
 
-            if child.position != Position::Static {
-                if child.z_index < 0 {
+            if let Some(z) = layout_box.child_paint_z(child) {
+                if z < 0 {
                     negative_z.push((child, child_layer));
                 } else {
                     positive_z.push((child, child_layer));
@@ -8882,8 +8910,10 @@ impl DisplayList {
         }
 
         // Sort by z-index, then by layer for stability
+        // Floats ride in `positive_z` at 0, as before.
+        let z_of = |b: &LayoutBox| layout_box.child_paint_z(b).unwrap_or(0);
         negative_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8891,7 +8921,7 @@ impl DisplayList {
             }
         });
         positive_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
