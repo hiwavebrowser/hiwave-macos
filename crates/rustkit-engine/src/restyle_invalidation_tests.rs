@@ -67,8 +67,8 @@ fn index_reads_into_functional_pseudo_classes() {
     assert_eq!(flags(&ix.classes, "c"), ANCESTOR);
     assert_eq!(flags(&ix.classes, "d"), ANCESTOR);
     assert_eq!(flags(&ix.classes, "e"), SUBJECT);
-    assert_eq!(flags(&ix.classes, "g") & ANYWHERE, ANYWHERE, "a combinator inside :not() is unplaced");
-    assert_eq!(flags(&ix.classes, "h") & ANYWHERE, ANYWHERE);
+    assert_eq!(flags(&ix.classes, "g"), ANCESTOR, "a complex member of the subject's list places as a rule");
+    assert_eq!(flags(&ix.classes, "h"), SUBJECT);
     assert_eq!(flags(&ix.classes, "i"), SUBJECT);
     assert_eq!(flags(&ix.classes, "j") & ANYWHERE, ANYWHERE, ":has() reaches ancestors");
     assert!(ix.has);
@@ -77,6 +77,20 @@ fn index_reads_into_functional_pseudo_classes() {
     assert_eq!(flags(&ix.classes, "n") & ANYWHERE, ANYWHERE);
     assert_eq!(flags(&ix.classes, "m"), SUBJECT);
     assert_eq!(flags(&ix.pseudos, "checked"), SIBLING | POSITIONAL);
+}
+
+#[test]
+fn index_places_complex_list_members_by_their_own_combinators() {
+    let ix = index(&[".dark\\:x:is(.dark *)", ".t:where(.u + .v)", ":is(.w .x) .y", "li:nth-child(odd):is(.m .n)"]);
+    assert_eq!(flags(&ix.classes, "dark"), ANCESTOR, "{:?}", ix.classes);
+    assert_eq!(flags(&ix.classes, "dark:x"), SUBJECT);
+    assert_eq!(flags(&ix.classes, "u"), SIBLING | POSITIONAL);
+    assert_eq!(flags(&ix.classes, "v"), SUBJECT | POSITIONAL);
+    assert_eq!(flags(&ix.classes, "w") & ANYWHERE, ANYWHERE, "left of a combinator: unplaced");
+    assert_eq!(flags(&ix.classes, "x") & ANYWHERE, ANYWHERE);
+    assert_eq!(flags(&ix.classes, "y"), SUBJECT);
+    assert_eq!(flags(&ix.classes, "m"), ANCESTOR | POSITIONAL, "the outer rule's position read carries in");
+    assert_eq!(flags(&ix.classes, "n"), SUBJECT | POSITIONAL);
 }
 
 #[test]
@@ -272,6 +286,15 @@ fn ancestor_compounds_restyle_the_subtree() {
     let (set, ids) = check(PAGE, "document.getElementById('theme').classList.add('dark');");
     assert_eq!(set.bits(ids["theme"]) & SUBTREE_STYLE, SUBTREE_STYLE);
     check(PAGE, "document.getElementById('s1').classList.remove('card');");
+}
+
+#[test]
+fn a_complex_is_member_restyles_the_subtree_of_its_ancestor_token() {
+    let page = PAGE.replace(".dark .item{", ".item:is(.dark *){");
+    let (set, ids) = check(&page, "document.getElementById('theme').classList.add('dark');");
+    assert_eq!(set.would_path(), "subtree", "{set:?}");
+    assert_eq!(set.bits(ids["theme"]) & SUBTREE_STYLE, SUBTREE_STYLE);
+    check_after(&page, "", "document.getElementById('theme').classList.add('dark'); document.getElementById('theme').classList.remove('dark');");
 }
 
 #[test]
