@@ -657,6 +657,20 @@ fn urls_in_events_lose_credentials_query_and_fragment() {
     assert_eq!(scrub_url(&blob, false), "blob:https://example.test");
 }
 
+/// R1 M1 @ 9ceed2a5: `javascript://h/alert(1)` has an authority, so it is a
+/// base URL to the parser and the `cannot_be_a_base` arm missed it; the
+/// script is the page's text and is never printed, with either flag.
+#[test]
+fn javascript_urls_in_events_always_reduce_to_their_scheme() {
+    for u in ["javascript:alert('SECRET')", "javascript://h/alert(SECRET)", "javascript://alert(1)"] {
+        for keep in [false, true] {
+            let out = scrub_url(&Url::parse(u).unwrap(), keep);
+            assert_eq!(out, "javascript:", "{u:?} keep={keep}");
+            assert!(!out.contains('(') && !out.contains("SECRET"), "{u:?} -> {out}");
+        }
+    }
+}
+
 /// Third R1 hold @ 6bda3b2c: a `;` path parameter (a servlet `jsessionid`
 /// is the session cookie) goes with the query, in every segment, unless the
 /// query is kept. The same table as the diagnostics half's `report_url`
