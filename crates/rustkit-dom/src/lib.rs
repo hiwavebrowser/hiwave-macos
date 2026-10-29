@@ -770,6 +770,40 @@ impl Document {
     /// into this document. Returns the top-level nodes in order, detached
     /// and with fresh NodeIds; ids in the fragment join the id table.
     pub fn parse_fragment(&self, html: &str, context: &str) -> Result<Vec<Rc<Node>>, DomError> {
+        self.parse_fragment_in(html, context, true)
+    }
+
+    /// `parse_fragment` for a context element that may be foreign:
+    /// `html_context` is false for an SVG or MathML context element.
+    pub fn parse_fragment_in(
+        &self,
+        html: &str,
+        context: &str,
+        html_context: bool,
+    ) -> Result<Vec<Rc<Node>>, DomError> {
+        // HTML §13.4 step 4: a fragment whose context is a raw text element
+        // starts the tokenizer in RAWTEXT or script data state, one in title
+        // or textarea in RCDATA, and one in plaintext in PLAINTEXT. No tag is
+        // recognised, so the whole string is one text node. A framework that
+        // writes a script's code with `script.innerHTML = code` (Next.js's
+        // script loader) otherwise loses everything from the first `i<n`
+        // onward. noscript is RAWTEXT only with scripting on, which is always
+        // so for an innerHTML set from script. The states are for HTML
+        // elements only: an SVG title, script or style keeps the data state.
+        let context_lower = context.to_ascii_lowercase();
+        let verbatim = match context_lower.as_str() {
+            _ if !html_context => None,
+            "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript"
+            | "plaintext" => Some(html.to_string()),
+            "title" | "textarea" => Some(rustkit_html::entities::decode(html)),
+            _ => None,
+        };
+        if let Some(text) = verbatim {
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![self.create_node(NodeType::Text(text))]);
+        }
         let sink = rustkit_html::parse_fragment(html, DocumentSink::new(), context)
             .map_err(|e| DomError::ParseError(e.to_string()))?;
         Ok(sink

@@ -741,7 +741,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
-                .parse_fragment(html, tag_name)
+                .parse_fragment_in(html, tag_name, is_in_html_content(&node))
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -1089,6 +1089,25 @@ fn string_arg(args: &[JsValue], index: usize) -> Option<&str> {
 fn is_html_element(node: &Node) -> bool {
     matches!(&node.node_type, NodeType::Element { namespace, .. }
         if namespace.is_empty() || namespace == "http://www.w3.org/1999/xhtml")
+}
+
+/// Is `node` an HTML element for the fragment parser? The tree builder gives
+/// every parsed element the HTML namespace, so an element inside `<svg>` or
+/// `<math>` (and not under a `foreignObject`) is foreign by its ancestors.
+fn is_in_html_content(node: &Node) -> bool {
+    if !is_html_element(node) {
+        return false;
+    }
+    let mut up = node.parent();
+    while let Some(ancestor) = up {
+        match ancestor.tag_name().map(str::to_ascii_lowercase).as_deref() {
+            Some("foreignobject") => return true,
+            Some("svg") | Some("math") => return false,
+            _ => {}
+        }
+        up = ancestor.parent();
+    }
+    true
 }
 
 /// Is `node` a descendant of `scope` (not `scope` itself)?
