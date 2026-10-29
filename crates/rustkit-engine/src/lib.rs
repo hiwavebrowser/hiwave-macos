@@ -385,6 +385,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod flex_item_paint_order_tests;
+#[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
