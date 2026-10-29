@@ -33829,6 +33829,41 @@ window.addEventListener('resize', function () {
         assert_eq!(seen, r#"String("200x100,resize:640x480")"#);
     }
 
+    /// HTML §8.1.8.2.1: `<body onload>` and `<body onresize>` are the
+    /// Window's handlers (BW1). `load` fires at the Window only, so the body's
+    /// attribute must be compiled into the Window's slot for it to run at
+    /// all; `document.body.onresize = f` is `window.onresize = f` and runs on
+    /// a resize of the view.
+    #[test]
+    fn body_onload_and_onresize_are_the_windows_handlers() {
+        let html = r#"<html><head><script>
+var seen = [];
+</script></head><body onload="seen.push('load:' + (this === window) + ':' + document.readyState)"
+    onresize="seen.push('attr-resize:' + window.innerWidth)">hi</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete")"#);
+
+        engine
+            .execute_script(
+                view,
+                "document.body.onresize = function () { seen.push('resize:' + window.innerWidth + ':' + (this === window)); }; \
+                 window.onresize === document.body.onresize",
+            )
+            .map(|v| assert_eq!(v, "Boolean(true)"))
+            .unwrap();
+        engine
+            .resize_view(view, Bounds { x: 0, y: 0, width: 640, height: 480 })
+            .expect("resize");
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete,resize:640:true")"#);
+    }
+
     #[test]
     fn page_scripts_run_in_order_with_lifecycle_events_and_timers() {
         let page = r#"<html><head>

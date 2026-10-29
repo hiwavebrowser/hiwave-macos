@@ -631,15 +631,16 @@ impl Document {
             .find(|n| n.tag_name() == Some("head"))
     }
 
-    /// Get the <body> element.
+    /// The body element (HTML §3.1.3): the first child of the html element
+    /// that is a `body` OR a `frameset` element, or None. A frameset
+    /// document's body element is its frameset; callers that need a `<body>`
+    /// specifically must check the tag.
     pub fn body(&self) -> Option<Rc<Node>> {
-        // First try to find body as a direct child of the document element (html)
-        // This is the correct DOM structure per spec
         if let Some(html_element) = self.document_element() {
             if let Some(body) = html_element
                 .children()
                 .into_iter()
-                .find(|n| n.tag_name() == Some("body"))
+                .find(|n| matches!(n.tag_name(), Some("body") | Some("frameset")))
             {
                 return Some(body);
             }
@@ -880,6 +881,21 @@ mod tests {
         let main = doc.get_element_by_id("main").unwrap();
         assert_eq!(main.tag_name(), Some("p"));
         assert_eq!(main.text_content(), "Hello, world!");
+    }
+
+    /// HTML §3.1.3 "the body element": the first child of the html element
+    /// that is a body OR a frameset element. A frameset document's body
+    /// element is its frameset.
+    #[test]
+    fn body_of_a_frameset_document_is_the_frameset() {
+        let doc = Document::parse_html(
+            "<!DOCTYPE html><html><head><title>f</title></head><frameset cols='*'><frame src='a'></frameset></html>",
+        )
+        .unwrap();
+        let body = doc.body().expect("a frameset document's body element is its frameset");
+        assert_eq!(body.tag_name(), Some("frameset"));
+        assert_eq!(body.parent().and_then(|p| p.tag_name().map(str::to_string)), Some("html".to_string()));
+        assert_eq!(doc.head().map(|h| h.tag_name() == Some("head")), Some(true));
     }
 
     #[test]
