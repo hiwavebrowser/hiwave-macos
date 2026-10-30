@@ -22,6 +22,13 @@ const OVERLAY_SHARE: f64 = 0.50;
 const BANDS: usize = 3;
 /// Selectors are page-chosen names: capped.
 const MAX_SELECTOR_CHARS: usize = 64;
+/// A placeholder is at least this thick and this long; anything smaller is a
+/// rule or a dot.
+const MIN_PLACEHOLDER_PX: (f64, f64) = (4.0, 16.0);
+/// This many empty painted boxes in a band fire R11; fewer are decoration.
+const MIN_EMPTY_PAINTED: u64 = 8;
+/// A layout this close to the capture's end means the page was still moving.
+const SETTLED_MS: f64 = 2000.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
@@ -38,6 +45,11 @@ pub struct Report {
     pub covering: Vec<Covering>,
     /// Content per band of one viewport height, from the document's top.
     pub bands: Vec<Band>,
+    /// The capture installed the shield (`--shield`).
+    pub shield: bool,
+    /// Was the page still moving when a `--live-ms` capture ended; `None`
+    /// without a live window.
+    pub settled: Option<Settled>,
     /// Most likely first.
     pub ranked: Vec<Cause>,
     /// Rules this build did not run, and why.
@@ -73,6 +85,30 @@ pub struct Band {
     pub text: u64,
     /// `img`, `svg`, `picture`, `video`, `canvas` boxes starting in the band.
     pub images: u64,
+    /// Boxes starting in the band that paint a background and hold nothing:
+    /// no text, no element children, no `url()` image. Skeleton rows look
+    /// like this; so does an empty ad slot.
+    pub empty_painted: u64,
+}
+
+/// What the capture knew when it ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CaptureFacts {
+    pub shield: bool,
+    /// `--live-ms`: milliseconds from the load's start to the window's end.
+    pub capture_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Settled {
+    /// A layout within [`SETTLED_MS`] of the end, a request still open, or a
+    /// navigation during the capture.
+    pub changing: bool,
+    /// `None`: no layout recorded, or the page navigated during the capture
+    /// and its record times restarted.
+    pub last_relayout_ms_before: Option<f64>,
+    pub open_requests: u64,
+    pub navigated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -139,6 +175,24 @@ fn visible(element: &Value) -> bool {
     element["box"]["has_box"].as_bool() == Some(true)
         && style(element, "visibility") != Some("hidden")
         && style(element, "opacity").and_then(|o| o.parse::<f64>().ok()) != Some(0.0)
+}
+
+/// A box with a background and nothing in it. Looks at the computed style
+/// only: a white box on a white page counts, and a `url()` background counts
+/// as an image even if it never loaded.
+fn empty_painted(element: &Value, width: f64, height: f64) -> bool {
+    let tag = element["identity"]["tag"].as_str().unwrap_or("");
+    if matches!(tag, "input" | "button" | "select" | "textarea" | "hr" | "iframe" | "embed" | "object" | "meter" | "progress")
+        || element["tree"]["text_length"].as_u64() != Some(0)
+        || element["tree"]["child_count"].as_u64() != Some(0)
+        || width.min(height) < MIN_PLACEHOLDER_PX.0
+        || width.max(height) < MIN_PLACEHOLDER_PX.1
+    {
+        return false;
+    }
+    let image = style(element, "background-image").unwrap_or("none");
+    let colour = style(element, "background-color").is_some_and(|c| !(c.starts_with("rgba(") && c.ends_with(", 0)")));
+    !image.contains("url(") && (colour || image != "none")
 }
 
 /// The report for a diagnostics dump (as `all_element_diagnostics`
@@ -221,7 +275,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     covering.sort_by(|a, b| b.covers_pct.partial_cmp(&a.covers_pct).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut bands: Vec<Band> = (0..BANDS)
-        .map(|i| Band { top: i as f64 * viewport.1, bottom: (i + 1) as f64 * viewport.1, text: 0, images: 0 })
+        .map(|i| Band { top: i as f64 * viewport.1, bottom: (i + 1) as f64 * viewport.1, text: 0, images: 0, empty_painted: 0 })
         .collect();
     // What is inside a fixed box is not the document's content.
     let fixed: Vec<&str> = elements
@@ -246,6 +300,8 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
             && element["tree"]["child_count"].as_u64() == Some(0)
         {
             band.text += 1;
+        } else if empty_painted(element, w, h) {
+            band.empty_painted += 1;
         }
     }
 
@@ -313,6 +369,17 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
             ),
         });
     }
+    // R11: placeholders count as neither text nor image, so a feed of grey
+    // rows read as a band with some content in it (yahoo, T9).
+    for band in bands.iter().filter(|b| b.empty_painted >= MIN_EMPTY_PAINTED) {
+        ranked.push(Cause {
+            rule: "R11",
+            line: format!(
+                "y {:.0}..{:.0}: {} painted boxes with no text and no image (skeleton?)",
+                band.top, band.bottom, band.empty_painted
+            ),
+        });
+    }
 
     Report {
         schema: REPORT_SCHEMA,
@@ -324,6 +391,8 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
         root_styles,
         covering,
         bands,
+        shield: false,
+        settled: None,
         ranked,
         not_checked: vec![
             "R3-R8 (scripts that never finished or starved, uncaught errors, blocked or failed requests, \
@@ -535,9 +604,6 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
         (!blocked, !matches!(kind, "script" | "module" | "stylesheet"))
     };
     failures.sort_by_key(|f| weight(f));
-    if !records.iter().any(|r| r.get("blocked_by").is_some()) {
-        not_checked.push("R6 shield list/rule: no `blocked_by` field on this build (dev-tools T2)".to_string());
-    }
     for f in failures.iter().filter(|f| f["stage"] != "cancelled").take(PER_RULE) {
         let (url, kind) = f["id"].as_u64().and_then(|id| urls.get(&id)).copied().unwrap_or(("-", "-"));
         let line = match f["blocked_by"].as_object() {
@@ -587,17 +653,18 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     }
     // An error in the page's own site's script ranks first of the event
     // causes (design note R5): yahoo's chunk 7730 SyntaxError is the app
-    // bundle failing, where an ad script's error is noise. Its line says how
-    // many fetch/XHR went to the page's own host afterwards (yahoo: none to
-    // www.yahoo.com, so the feed never asked for its data). The host, not the
+    // bundle failing, where an ad script's error is noise. Its line says when
+    // it fell and how many fetch/XHR went to the page's own host either side:
+    // an error late in a fixed window has few calls after it whatever it
+    // broke (yahoo, T9: 2, 1 and 0 after, 8 to 10 before). The host, not the
     // site: yahoo's ad and analytics hosts share the site.
     let page_url = of("navigation_start").next().and_then(|r| r["url"].as_str());
     let site = page_url.and_then(site_of);
     let page_host = page_url.and_then(host_of);
-    let own_calls_after = |t: f64| {
+    let own_calls = |keep: &dyn Fn(f64) -> bool| {
         of("request")
             .filter(|r| matches!(r["resource_type"].as_str(), Some("fetch" | "xhr")))
-            .filter(|r| ms(&r["t_ms"]).is_some_and(|at| at >= t))
+            .filter(|r| ms(&r["t_ms"]).is_some_and(keep))
             .filter(|r| r["url"].as_str().and_then(host_of) == page_host)
             .count()
     };
@@ -605,9 +672,10 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     for (key, n, first) in errors.into_iter().take(PER_RULE) {
         let mut line = if n > 1 { format!("{key} (x{n})") } else { key };
         if site.is_some() && site_of_error(&line) == site {
-            let calls = own_calls_after(first);
+            let before = own_calls(&|at| at < first);
+            let after = own_calls(&|at| at >= first);
             let host = page_host.as_deref().unwrap_or("-");
-            line = format!("{OWN_SITE}{line}; then {calls} fetch/XHR to {host}");
+            line = format!("{OWN_SITE}{line}; at t={:.1} s; {before} fetch/XHR to {host} before, {after} after", first / 1000.0);
         }
         causes.push(Cause { rule: "R5", line });
     }
@@ -687,15 +755,49 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     (causes, not_checked)
 }
 
+/// Was the page moving when the window ended at `end` ms? Records after `end`
+/// are the capture's teardown (it cancels what is open), not the page's.
+fn settled(records: &[Value], end: f64) -> Settled {
+    let of = |kinds: &'static [&'static str]| {
+        records.iter().filter(move |r| kinds.contains(&r["type"].as_str().unwrap_or("")))
+    };
+    let in_window = |r: &&Value| ms(&r["t_ms"]).is_some_and(|t| t <= end);
+    // Record times restart at a navigation, so they can't be read against `end`.
+    let navigated = of(&["navigation_start"]).count() > 1;
+    let answered: std::collections::HashSet<u64> =
+        of(&["response", "failure"]).filter(in_window).filter_map(|r| r["id"].as_u64()).collect();
+    let open_requests = of(&["request"])
+        .filter(in_window)
+        .filter(|r| r["id"].as_u64().is_some_and(|id| !answered.contains(&id)))
+        .count() as u64;
+    let last_relayout_ms_before = of(&["first_layout", "relayout"])
+        .filter(in_window)
+        .filter_map(|r| ms(&r["t_ms"]))
+        .reduce(f64::max)
+        .filter(|_| !navigated)
+        .map(|t| end - t);
+    Settled {
+        changing: navigated || open_requests > 0 || last_relayout_ms_before.is_some_and(|ago| ago < SETTLED_MS),
+        last_relayout_ms_before,
+        open_requests,
+        navigated,
+    }
+}
+
 /// Add the event-log rules to a layout report: layout causes keep the top
-/// (R1, R2), then an empty band (R9), then the event causes in the design
-/// note's order.
-pub fn apply_events(report: &mut Report, records: &[Value]) {
+/// (R1, R2), then an empty band (R9) or placeholders (R11), then the event
+/// causes in the design note's order.
+pub fn apply_events(report: &mut Report, records: &[Value], facts: CaptureFacts) {
+    report.shield = facts.shield;
+    report.settled = facts.capture_ms.map(|end| settled(records, end));
+    if !facts.shield {
+        report.not_checked.push("R6 shield: not installed, nothing could be blocked".to_string());
+    }
     let (events, not_checked) = event_causes(records);
     // "R5*" is an R5 line about the page's own site. "R5!" is an uncaught
     // one when the first viewport is blank (R10): the cause goes above the
     // symptom (Atlas 10-26; yahoo's chunk 7730 SyntaxError under R10).
-    let order = ["R5!", "R1", "R2", "R10", "R9", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
+    let order = ["R5!", "R1", "R2", "R10", "R9", "R11", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
     let blank = report.ranked.iter().any(|c| c.rule == "R10");
     let uncaught = format!("{OWN_SITE}uncaught ");
     report.ranked.extend(events);
@@ -730,6 +832,15 @@ pub fn report_text(report: &Report) -> String {
         out.push_str(&format!("  {}. [{}] {}\n", i + 1, cause.rule, cause.line));
     }
     out.push_str("\nFacts:\n");
+    if let Some(s) = &report.settled {
+        let state = if s.changing { "still changing" } else { "settled" };
+        let layout = match s.last_relayout_ms_before {
+            Some(ago) => format!("last relayout {ago:.0} ms before"),
+            None if s.navigated => "the page navigated during the capture".to_string(),
+            None => "no layout recorded".to_string(),
+        };
+        out.push_str(&format!("  {state} at capture end: {layout}; {} requests open\n", s.open_requests));
+    }
     for r in &report.root_styles {
         out.push_str(&format!(
             "  {}: overflow-y {}, position {}\n",
@@ -752,9 +863,14 @@ pub fn report_text(report: &Report) -> String {
         ));
     }
     for b in &report.bands {
-        out.push_str(&format!("  y {:.0}..{:.0}: text {}, images {}\n", b.top, b.bottom, b.text, b.images));
+        out.push_str(&format!(
+            "  y {:.0}..{:.0}: text {}, images {}, empty painted {}\n",
+            b.top, b.bottom, b.text, b.images, b.empty_painted
+        ));
     }
-    out.push_str("\nNot checked:\n");
+    if !report.not_checked.is_empty() {
+        out.push_str("\nNot checked:\n");
+    }
     for n in &report.not_checked {
         out.push_str(&format!("  {n}\n"));
     }
@@ -981,7 +1097,7 @@ mod tests {
             json!({"t_ms": 16800.0, "type": "load_finished"}),
         ];
         let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
-        apply_events(&mut report, &records);
+        apply_events(&mut report, &records, CaptureFacts::default());
         let ranked: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
         // The dump has no elements, so R10 fires; the own-site uncaught error
         // is its cause and goes above it. R8 lines follow (the records are
@@ -990,7 +1106,7 @@ mod tests {
         assert_eq!(
             [ranked[0].as_str(), ranked[2].as_str(), ranked[3].as_str()],
             [
-                "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 1 fetch/XHR to www.x.test",
+                "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; at t=1.0 s; 1 fetch/XHR to www.x.test before, 1 after",
                 "R4 inserted script https://x.test/67222.js arrived in 1853 ms and waited 5.4 s for a turn",
                 "R5 uncaught TypeError in https://ads.y.test/ad.js:1:5",
             ]
@@ -1016,11 +1132,11 @@ mod tests {
             if painted {
                 report.ranked.retain(|c| c.rule != "R10");
             }
-            apply_events(&mut report, records);
+            apply_events(&mut report, records, CaptureFacts::default());
             report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect::<Vec<_>>()
         };
         let own = uncaught("https://www.x.test/chunks/7730.js");
-        let own_line = "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; then 0 fetch/XHR to www.x.test";
+        let own_line = "R5 the page's own script: uncaught SyntaxError in https://www.x.test/chunks/7730.js:1:6278; at t=1.0 s; 0 fetch/XHR to www.x.test before, 0 after";
         let blank = ranked(&[nav.clone(), own.clone()], false);
         assert_eq!(blank[0], own_line, "{blank:?}");
         assert!(blank[1].starts_with("R10 "), "{blank:?}");
@@ -1055,8 +1171,8 @@ mod tests {
         assert_eq!(
             lines(&records)[..2],
             [
-                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:1:6198; then 0 fetch/XHR to www.x.test",
-                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:9:40 (x2); then 0 fetch/XHR to www.x.test",
+                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:1:6198; at t=7.8 s; 0 fetch/XHR to www.x.test before, 0 after",
+                "R5 the page's own script: logged TypeError thrown in https://www.x.test/7730.js:9:40 (x2); at t=9.8 s; 0 fetch/XHR to www.x.test before, 0 after",
             ]
         );
     }
@@ -1065,7 +1181,142 @@ mod tests {
     fn a_build_without_t2_or_t3_records_says_which_rules_it_skipped() {
         let (causes, skipped) = event_causes(&[json!({"t_ms": 1.0, "type": "load_finished"})]);
         assert!(causes.is_empty());
-        assert_eq!(skipped.len(), 3, "{skipped:?}");
-        assert!(skipped[0].starts_with("R3, R4") && skipped[1].starts_with("R6") && skipped[2].starts_with("R7"));
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert!(skipped[0].starts_with("R3, R4") && skipped[1].starts_with("R7"));
+    }
+
+    /// T9 gap 2: yahoo's R5 read "then 2", "then 1", "then 0" for one error,
+    /// because the error lands late in a fixed window; the same logs held 8
+    /// to 10 own-host fetches before it. Both counts, and the time.
+    #[test]
+    fn an_own_site_error_says_when_it_fell_and_the_fetches_either_side() {
+        let fetch = |t: f64, id: u64, url: &str, kind: &str| {
+            json!({"t_ms": t, "type": "request", "id": id, "resource_type": kind, "url": url})
+        };
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            fetch(100.0, 1, "https://www.x.test/a", "fetch"),
+            fetch(200.0, 2, "https://www.x.test/b", "xhr"),
+            fetch(300.0, 3, "https://www.x.test/c.js", "script"),
+            fetch(400.0, 4, "https://cdn.x.test/d", "fetch"),
+            json!({"t_ms": 24400.0, "type": "console", "level": "error", "message": "<Error message len=191>",
+                   "error_stack": "    at f (https://www.x.test/app.js:1:2)"}),
+            fetch(24500.0, 5, "https://www.x.test/e", "fetch"),
+        ];
+        // Other rules fire on the sparse records (an open script, a silent stretch).
+        let all = lines(&records);
+        assert!(
+            all.iter().any(|l| l
+                == "R5 the page's own script: logged Error thrown in https://www.x.test/app.js:1:2; at t=24.4 s; 2 fetch/XHR to www.x.test before, 1 after"),
+            "{all:?}"
+        );
+    }
+
+    fn settled_for(records: &[Value], capture_ms: Option<f64>) -> Report {
+        let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+        apply_events(&mut report, records, CaptureFacts { shield: false, capture_ms });
+        report
+    }
+
+    /// T9 gap 4: yahoo's last relayout was 90 ms before the capture ended and
+    /// one run had 20 requests open, and nothing said so. A record written
+    /// after the window ended (a view's teardown cancels what is open) does
+    /// not count as an answer.
+    #[test]
+    fn a_page_still_moving_at_capture_end_says_so() {
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 900.0, "type": "first_layout"}),
+            json!({"t_ms": 1000.0, "type": "request", "id": 1, "resource_type": "fetch", "url": "https://www.x.test/a"}),
+            json!({"t_ms": 1100.0, "type": "request", "id": 2, "resource_type": "image", "url": "https://www.x.test/b"}),
+            json!({"t_ms": 1200.0, "type": "request", "id": 3, "resource_type": "script", "url": "https://www.x.test/c"}),
+            json!({"t_ms": 1300.0, "type": "response", "id": 1}),
+            json!({"t_ms": 24910.0, "type": "relayout", "cause": "", "took_ms": 1.0}),
+            json!({"t_ms": 25010.0, "type": "failure", "id": 3, "stage": "cancelled", "reason": "abandoned", "blocked_by": null}),
+        ];
+        let report = settled_for(&records, Some(25000.0));
+        assert_eq!(
+            report.settled,
+            Some(Settled { changing: true, last_relayout_ms_before: Some(90.0), open_requests: 2, navigated: false })
+        );
+        let text = report_text(&report);
+        assert!(text.contains("  still changing at capture end: last relayout 90 ms before; 2 requests open\n"), "{text}");
+    }
+
+    #[test]
+    fn a_quiet_page_is_settled_and_a_capture_without_a_window_says_nothing() {
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 900.0, "type": "first_layout"}),
+            json!({"t_ms": 1000.0, "type": "request", "id": 1, "resource_type": "fetch", "url": "https://www.x.test/a"}),
+            json!({"t_ms": 1300.0, "type": "failure", "id": 1, "stage": "timeout", "reason": "x", "blocked_by": null}),
+        ];
+        let report = settled_for(&records, Some(25000.0));
+        assert_eq!(
+            report.settled,
+            Some(Settled { changing: false, last_relayout_ms_before: Some(24100.0), open_requests: 0, navigated: false })
+        );
+        let text = report_text(&report);
+        assert!(text.contains("  settled at capture end: last relayout 24100 ms before; 0 requests open\n"), "{text}");
+        let none = settled_for(&records, None);
+        assert_eq!(none.settled, None);
+        assert!(!report_text(&none).contains("capture end"));
+    }
+
+    /// Record times restart at a navigation, so the window's length says
+    /// nothing about them: no figure, and the page was not finished.
+    #[test]
+    fn a_page_that_navigated_during_the_capture_gives_no_relayout_figure() {
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/next"}),
+            json!({"t_ms": 500.0, "type": "relayout", "cause": "", "took_ms": 1.0}),
+        ];
+        let report = settled_for(&records, Some(25000.0));
+        assert_eq!(
+            report.settled,
+            Some(Settled { changing: true, last_relayout_ms_before: None, open_requests: 0, navigated: true })
+        );
+        let text = report_text(&report);
+        assert!(text.contains("  still changing at capture end: the page navigated during the capture; 0 requests open\n"), "{text}");
+    }
+
+    /// T9 gap 5: `blocked_by` exists, as null, on every failure, so "no shield
+    /// blocks" read as checked when no block was possible.
+    #[test]
+    fn a_capture_without_the_shield_says_nothing_could_be_blocked() {
+        let failure = json!({"t_ms": 1.0, "type": "failure", "id": 1, "stage": "timeout", "reason": "x", "blocked_by": null});
+        const LINE: &str = "R6 shield: not installed, nothing could be blocked";
+        let without = settled_for(std::slice::from_ref(&failure), None);
+        assert!(without.not_checked.iter().any(|n| n == LINE), "{:?}", without.not_checked);
+        assert!(!without.shield);
+        let mut with = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+        apply_events(&mut with, &[failure], CaptureFacts { shield: true, capture_ms: None });
+        assert!(with.not_checked.iter().all(|n| !n.starts_with("R6")), "{:?}", with.not_checked);
+        assert!(with.shield);
+    }
+
+    /// T9: the logged Error was the top line and the feed's rows said nothing.
+    /// The symptom on screen ranks with R9, above an own-site error.
+    #[test]
+    fn placeholders_rank_above_an_own_site_error() {
+        let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+        report.ranked = vec![Cause { rule: "R11", line: "placeholders".to_string() }];
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 1.0, "type": "console", "level": "error", "message": "<Error message len=1>",
+                   "error_stack": "    at f (https://www.x.test/app.js:1:2)"}),
+        ];
+        apply_events(&mut report, &records, CaptureFacts::default());
+        assert_eq!(report.ranked[0].rule, "R11", "{:?}", report.ranked);
+        assert_eq!(report.ranked[1].rule, "R5", "{:?}", report.ranked);
+    }
+
+    #[test]
+    fn an_empty_not_checked_section_prints_no_heading() {
+        let mut report = settled_for(&[], None);
+        assert!(report_text(&report).contains("\nNot checked:\n"));
+        report.not_checked.clear();
+        assert!(!report_text(&report).contains("Not checked"));
     }
 }
