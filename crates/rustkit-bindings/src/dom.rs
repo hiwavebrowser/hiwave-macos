@@ -741,7 +741,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
-                .parse_fragment_in(html, tag_name, is_in_html_content(&node))
+                .parse_fragment_in(html, tag_name, is_in_html_content(&node), false)
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates

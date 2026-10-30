@@ -770,7 +770,7 @@ impl Document {
     /// into this document. Returns the top-level nodes in order, detached
     /// and with fresh NodeIds; ids in the fragment join the id table.
     pub fn parse_fragment(&self, html: &str, context: &str) -> Result<Vec<Rc<Node>>, DomError> {
-        self.parse_fragment_in(html, context, true)
+        self.parse_fragment_in(html, context, true, false)
     }
 
     /// `parse_fragment` for a context element that may be foreign:
@@ -780,6 +780,7 @@ impl Document {
         html: &str,
         context: &str,
         html_context: bool,
+        _svg_context: bool,
     ) -> Result<Vec<Rc<Node>>, DomError> {
         // HTML §13.4 step 4: a fragment whose context is a raw text element
         // starts the tokenizer in RAWTEXT or script data state, one in title
@@ -1265,6 +1266,9 @@ mod windows_parser_pins {
         assert!(doc.body().is_some(), "should have body with title");
     }
 }
+
+#[cfg(test)]
+mod svg_name_case_tests;
 
 /// Script writes to a node's own data (js-ladder mutation surface).
 #[cfg(test)]
