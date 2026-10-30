@@ -1490,6 +1490,21 @@ mod tests {
         assert!(text.contains("  y 1600..2400: text 6, images 0, empty painted 0, overlapping 3, past right edge 0\n"), "{text}");
     }
 
+    /// yahoo at 8f0488c6: no two siblings overlap, because a column's content
+    /// runs out of its box and over the next column's. The boxes that lie over
+    /// each other are 3 to 10 levels below their common ancestor.
+    #[test]
+    fn content_in_different_subtrees_overlapping_counts_and_its_wrappers_do_not() {
+        let leaf = |column: usize, y: f64| block(&format!("html > body > main > div:nth-child({column}) > section > p"), 0.0, y, 1200.0, 100.0);
+        let wrapper = |column: usize, y: f64| {
+            with(block(&format!("html > body > main > div:nth-child({column})"), 0.0, y, 1200.0, 100.0), &["tree", "child_count"], json!(1))
+        };
+        let report = page_report(&feed(vec![leaf(1, 900.0), leaf(2, 900.0)]), None);
+        assert_eq!(band(&report, 800.0), (1, 0), "{:?}", report.bands);
+        let wrappers = page_report(&feed(vec![wrapper(1, 900.0), wrapper(2, 900.0)]), None);
+        assert_eq!(band(&wrappers, 800.0), (0, 0), "{:?}", wrappers.bands);
+    }
+
     #[test]
     fn half_an_overlap_or_a_box_that_paints_nothing_is_no_overlap() {
         let at = |i: usize, y: f64, h: f64| block(&format!("html > body > main > div:nth-child({i})"), 0.0, y, 1200.0, h);
@@ -1500,12 +1515,12 @@ mod tests {
         let parent = block("html > body > main", 0.0, 900.0, 1200.0, 300.0);
         let child = block("html > body > main > div", 0.0, 900.0, 1200.0, 300.0);
         assert_eq!(band(&page_report(&feed(vec![parent, child]), None), 800.0), (0, 0));
-        // No text, no image, no background: nothing to see under the sibling.
+        // No text and no image: nothing to read under the other box. A coloured
+        // card behind its own text is how pages are built, so it counts as none.
         let empty = with(at(1, 900.0, 100.0), &["tree", "text_length"], json!(0));
         assert_eq!(band(&page_report(&feed(vec![empty.clone(), at(2, 900.0, 100.0)]), None), 800.0), (0, 0));
-        // A background counts as paint.
         let tinted = with(empty, &["style", "background-color"], json!("rgb(1, 2, 3)"));
-        assert_eq!(band(&page_report(&feed(vec![tinted, at(2, 900.0, 100.0)]), None), 800.0), (1, 0));
+        assert_eq!(band(&page_report(&feed(vec![tinted, at(2, 900.0, 100.0)]), None), 800.0), (0, 0));
     }
 
     /// Stacked slides, a tooltip, a wrapped link's union rect: boxes whose
@@ -1529,6 +1544,15 @@ mod tests {
         let drawer = with(block("html > body > aside", 0.0, 900.0, 1200.0, 100.0), &["style", "position"], json!("absolute"));
         let inside = |i: usize| block(&format!("html > body > aside > div:nth-child({i})"), 0.0, 900.0, 1200.0, 100.0);
         assert_eq!(band(&page_report(&feed(vec![drawer, inside(1), inside(2)]), None), 800.0), (0, 0));
+    }
+
+    /// An image in its own `picture`, or text in a box the fixture calls a
+    /// leaf: one thing, not two.
+    #[test]
+    fn a_box_and_its_own_descendant_do_not_overlap() {
+        let outer = block("html > body > main > picture", 0.0, 900.0, 1200.0, 100.0);
+        let inner = block("html > body > main > picture > img", 0.0, 900.0, 1200.0, 100.0);
+        assert_eq!(band(&page_report(&feed(vec![outer, inner]), None), 800.0), (0, 0));
     }
 
     /// T9 gap 6: hero and row content ran past the right edge. A wide box's
