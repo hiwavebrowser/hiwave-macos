@@ -403,6 +403,8 @@ mod computed_content_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
+mod author_svg_stroke_tests;
+#[cfg(test)]
 mod pseudo_display_none_tests;
 #[cfg(test)]
 mod positioned_paint_order_tests;

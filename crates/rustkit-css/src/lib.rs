@@ -4805,6 +4805,151 @@ mod custom_properties_collapse_tests {
     }
 }
 
+/// #833 RD3: which opacity frame a finished animation paints. The engine
+/// companion is headless-only; this pure settle pin runs on every
+/// `cargo test -p rustkit-css --lib`.
+#[cfg(test)]
+mod settle_animation_opacity_tests {
+    use super::*;
+    use rustkit_cssparser::KeyframesAst;
+
+    #[test]
+    fn settle_animation_opacity_picks_the_frame_the_fill_holds() {
+        let sheets = |first: Option<f32>, last: Option<f32>| -> [Stylesheet; 1] {
+            [Stylesheet {
+                keyframes: vec![KeyframesAst {
+                    name: "x".into(),
+                    first,
+                    last,
+                }],
+                ..Default::default()
+            }]
+        };
+        let settle = |fill: AnimationFillMode,
+                      direction: AnimationDirection,
+                      count: AnimationIterationCount,
+                      opacity: f32,
+                      frames: &[Stylesheet]| {
+            let mut style = ComputedStyle::new();
+            style.opacity = opacity;
+            style.animation_name = "x".into();
+            style.animation_fill_mode = fill;
+            style.animation_direction = direction;
+            style.animation_iteration_count = count;
+            style.settle_animation_opacity(frames);
+            style.animation_settled_opacity
+        };
+
+        let fade = sheets(Some(0.0), Some(1.0));
+        assert_eq!(
+            settle(
+                AnimationFillMode::None,
+                AnimationDirection::Normal,
+                AnimationIterationCount::Infinite,
+                0.75,
+                &fade
+            ),
+            Some(0.0),
+            "infinite paints the first keyframe"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.0,
+                &fade
+            ),
+            Some(1.0),
+            "forwards holds the last"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Both,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.0,
+                &fade
+            ),
+            Some(1.0),
+            "both holds the last"
+        );
+        // No forward fill: settle on the box's own value (fade-in idiom).
+        assert_eq!(
+            settle(
+                AnimationFillMode::None,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.5,
+                &fade
+            ),
+            Some(0.5)
+        );
+        // Alternate + ceil even/odd (incl. fractional longhand counts).
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Alternate,
+                AnimationIterationCount::Count(2.0),
+                1.0,
+                &fade
+            ),
+            Some(0.0),
+            "2 alternate runs land on start"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Alternate,
+                AnimationIterationCount::Count(2.5),
+                1.0,
+                &fade
+            ),
+            Some(1.0),
+            "2.5 alternate runs ceil to odd → end"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::AlternateReverse,
+                AnimationIterationCount::Count(2.0),
+                1.0,
+                &fade
+            ),
+            Some(1.0),
+            "alternate-reverse start is last; even lands there"
+        );
+
+        // Unsettleable: field stays None so layout paints at full opacity.
+        let mut multi = ComputedStyle::new();
+        multi.opacity = 0.0;
+        multi.animation_name = "a, b".into();
+        multi.animation_fill_mode = AnimationFillMode::Forwards;
+        multi.settle_animation_opacity(&fade);
+        assert_eq!(multi.animation_settled_opacity, None);
+
+        let mut missing = ComputedStyle::new();
+        missing.opacity = 0.0;
+        missing.animation_name = "nosuch".into();
+        missing.animation_fill_mode = AnimationFillMode::Forwards;
+        missing.settle_animation_opacity(&fade);
+        assert_eq!(missing.animation_settled_opacity, None);
+
+        // End sets no opacity → hold the box's own.
+        let no_end = sheets(Some(0.2), None);
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.75,
+                &no_end
+            ),
+            Some(0.75)
+        );
+    }
+}
+
 // ── ported from hiwave-windows (#37, #49): a shadow with no visible colour or
 //    no geometry is not visible, so paint never spends a command on it. ──
 #[cfg(test)]
