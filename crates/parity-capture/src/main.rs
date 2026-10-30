@@ -2236,4 +2236,54 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert!(before >= 3000.0, "{settled}");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// T9 gap 7, through the engine's own console record: a string logged by
+    /// the page's inline script reaches R5, and its text does not.
+    #[test]
+    fn a_string_console_error_from_the_page_reaches_r5_as_a_shape() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let body = "<html><body><p>top</p><script>console.error('SECRET-TEXT');</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-string-error-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (json, log) = (dir.join("report.json"), dir.join("events.jsonl"));
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--event-log",
+            log.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let written = fs::read_to_string(&json).unwrap();
+        assert!(!written.contains("SECRET-TEXT"), "{written}");
+        let report: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let lines = causes(&report);
+        assert!(
+            lines.iter().any(|l| l.starts_with("R5 the page's own script: logged string in inline#1:1:9;")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

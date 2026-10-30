@@ -736,24 +736,27 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     // An error the page caught and passed to console.error carries its own
     // stack (`error_stack`); it is named by where it was thrown. yahoo with
     // #777 merged: two such TypeErrors, no uncaught one, and a blank page.
-    // A string has no stack of its own, so it is named by the script that
-    // logged it (T9 gap 7); only an own site's is kept, below. The shape says
-    // it was a string: a run that kept console text can't tell, and is left out.
-    let frame_place = |frame: &'_ str| -> String {
+    let page_url = of("navigation_start").next().and_then(|r| r["url"].as_str());
+    let site = page_url.and_then(site_of);
+    let page_host = page_url.and_then(host_of);
+    // A string has no stack of its own, so it is named by the first of the
+    // page's own frames that logged it (T9 gap 7): the call's place, then its
+    // callers, since yahoo wraps `console.error` from another host. Other
+    // sites' strings are ads' noise. The shape says it was a string: a run
+    // that kept console text can't tell, and is left out.
+    let frame_place = |frame: &str| -> String {
         let place = frame.trim().trim_start_matches("at ");
         place.rsplit_once(" (").map_or(place, |(_, p)| p.trim_end_matches(')')).to_string()
     };
+    let own_place = |place: &str| site.is_some() && (place.starts_with("inline#") || site_of(place) == site);
     for c in of("console").filter(|c| c["level"] == "error") {
         let key = if let Some(thrown) = c["error_stack"].as_str().and_then(|s| s.lines().next()) {
             format!("logged {} thrown in {}", error_name(text(&c["message"])), frame_place(thrown))
         } else if text(&c["message"]).contains("<string len=") {
             let at = &c["location"];
-            let place = if at.is_null() {
-                c["stack"].as_str().and_then(|s| s.lines().next()).map(frame_place)
-            } else {
-                Some(format!("{}:{}:{}", text(&at["url"]), at["line"], at["column"]))
-            };
-            let Some(place) = place else { continue };
+            let located = (!at.is_null()).then(|| format!("{}:{}:{}", text(&at["url"]), at["line"], at["column"]));
+            let callers = c["stack"].as_str().unwrap_or("").lines().map(frame_place);
+            let Some(place) = located.into_iter().chain(callers).find(|p| own_place(p)) else { continue };
             format!("{LOGGED_STRING}{place}")
         } else {
             continue;
@@ -770,9 +773,6 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     // an error late in a fixed window has few calls after it whatever it
     // broke (yahoo, T9: 2, 1 and 0 after, 8 to 10 before). The host, not the
     // site: yahoo's ad and analytics hosts share the site.
-    let page_url = of("navigation_start").next().and_then(|r| r["url"].as_str());
-    let site = page_url.and_then(site_of);
-    let page_host = page_url.and_then(host_of);
     let own_calls = |keep: &dyn Fn(f64) -> bool| {
         of("request")
             .filter(|r| matches!(r["resource_type"].as_str(), Some("fetch" | "xhr")))
@@ -780,14 +780,12 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
             .filter(|r| r["url"].as_str().and_then(host_of) == page_host)
             .count()
     };
-    // A logged string in the page's inline script is the page's own. Strings
-    // from elsewhere are ads' noise, and an own-site string never pushes an
-    // error off the list.
+    // A logged string in the page's inline script is the page's own, and an
+    // own-site string never pushes an error off the list.
     let is_string = |key: &str| key.starts_with(LOGGED_STRING);
     let is_own = |key: &str| {
         site.is_some() && (site_of_error(key) == site || key.starts_with(&format!("{LOGGED_STRING}inline#")))
     };
-    errors.retain(|(key, _, _)| !is_string(key) || is_own(key));
     errors.sort_by_key(|(key, _, _)| (!is_own(key), is_string(key)));
     for (key, n, first) in errors.into_iter().take(PER_RULE) {
         let mut line = if n > 1 { format!("{key} (x{n})") } else { key };
