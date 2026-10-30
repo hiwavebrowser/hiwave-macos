@@ -119,6 +119,50 @@ fn a_script_write_names_its_kind_and_node() {
     assert_eq!(stats(&engine, view).relayouts, before);
 }
 
+/// #655: a control `.value` write must land under `form_value` in
+/// `RelayoutStats.mutations`, not as a generic attribute/style write — W7-C
+/// attribution depends on the engine rollup matching the bindings tally.
+#[test]
+fn a_form_value_write_is_counted_under_form_value() {
+    let (mut engine, view) = engine_and_view();
+    engine
+        .load_html(view, r#"<input id="i" value="a"><input id="c" type="checkbox">"#)
+        .expect("load_html");
+    engine
+        .execute_script(view, "document.getElementById('i').value = 'typed';")
+        .expect("script");
+    assert_eq!(
+        last(&engine, view),
+        Some(RelayoutCause::ScriptMutation {
+            kind: MutationKind::FormValue,
+            node: "input#i".into()
+        })
+    );
+    let s = stats(&engine, view);
+    assert!(
+        s.mutations.get("form_value") >= 1,
+        "form_value missing from mutations: {}",
+        s.mutations
+    );
+    assert_eq!(s.by_cause.get("script_mutation"), 1);
+
+    engine
+        .execute_script(view, "document.getElementById('c').checked = true;")
+        .expect("checked");
+    assert_eq!(
+        last(&engine, view),
+        Some(RelayoutCause::ScriptMutation {
+            kind: MutationKind::FormValue,
+            node: "input#c".into()
+        })
+    );
+    assert!(
+        stats(&engine, view).mutations.get("form_value") >= 2,
+        "checked write must also tally as form_value: {}",
+        stats(&engine, view).mutations
+    );
+}
+
 #[test]
 fn a_scroll_listener_write_is_a_scroll() {
     let (mut engine, view, _server, _rt) = load(tall(

@@ -1073,6 +1073,82 @@ mod tests {
         assert!(text.contains("shown"), "the 205 replaced the document on screen: {text}");
     }
 
+    /// Content-thread Stop cancels the in-flight load first (`signal_stop`),
+    /// so the page reports `Failed { "cancelled" }` — not `"stopped"` (that
+    /// string is for `Engine::stop` on a yielded load_tail). The shown
+    /// document must stay and the held navigation must not Complete.
+    #[test]
+    fn stop_during_a_held_navigation_fails_as_cancelled_and_keeps_the_shown_page() {
+        let (port, release, seen) = serve(|path, release_flag| {
+            if path == "/slow" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire)
+                    && start.elapsed() < Duration::from_secs(8)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return (200, "text/html", b"<p id=t>slow</p>".to_vec());
+            }
+            (200, "text/html", b"<p id=t>shown</p>".to_vec())
+        });
+        let page = page();
+        let first = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        wait_complete(&page, first);
+
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/slow")).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow"),
+            "the held navigation never reached the server"
+        );
+
+        page.stop();
+        release.store(true, Ordering::Release);
+
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PageEvent::LoadState {
+                    state: LoadState::Failed { error },
+                    ..
+                } if error == "cancelled"
+            )),
+            "content-thread Stop must fail the held load as cancelled: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the held navigation must not complete after Stop: {events:?}"
+        );
+        let mut text = page.eval(
+            "document.getElementById('t') ? document.getElementById('t').textContent : 'gone'",
+        );
+        let text = wait_recv(&mut text, Duration::from_secs(5))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            text.contains("shown"),
+            "Stop must leave the previous document on screen: {text}"
+        );
+    }
+
     #[test]
     fn a_failed_navigation_is_reported_failed_once() {
         // #730 follow-up (e): an empty error response failed in the engine

@@ -399,6 +399,10 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
+mod css_display_apply_tests;
+#[cfg(test)]
+mod pseudo_display_none_tests;
+#[cfg(test)]
 mod positioned_paint_order_tests;
 #[cfg(test)]
 mod abspos_percent_height_image_tests;
@@ -10997,6 +11001,12 @@ impl Engine {
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
+        // `display: none` generates no box (CSS Display 3 §2.5). It used to
+        // fall to the Block arm below, and an abspos one painted (reddit's
+        // interstitial disc over its logo).
+        if pseudo_style.display == rustkit_css::Display::None {
+            return None;
+        }
 
         // The box type follows `display`, as for elements. An always-Inline
         // pseudo put `::before { content:""; display:block; height:0;
@@ -33611,6 +33621,102 @@ mod stop_navigation_tests {
         assert!(e.stop(id), "third stop");
     }
 
+    /// Idle Stop must not emit `NavigationFailed { "stopped" }` — UI listeners
+    /// must not see "stopped" spam from a Stop mash on a settled page.
+    #[test]
+    fn stop_on_an_idle_view_emits_no_navigation_failed() {
+        let (mut e, id) = engine_with_view();
+        let mut rx = e.take_event_receiver().expect("event receiver");
+        assert!(e.stop(id));
+        let seen: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !seen
+                .iter()
+                .any(|ev| matches!(ev, EngineEvent::NavigationFailed { .. })),
+            "idle Stop must not fail a navigation: {seen:?}"
+        );
+    }
+
+    /// #727 / #701: Stop on a load that yielded with its tail still open
+    /// fails as `"stopped"`, drops the tail so `load` never fires, and
+    /// leaves the committed document runnable.
+    #[test]
+    fn stop_on_a_yielded_load_fails_as_stopped_and_drops_the_tail() {
+        use crate::error_page_script_tests::serve;
+        fn held(
+            path: &str,
+            _: &str,
+        ) -> (
+            u16,
+            &'static str,
+            Vec<(&'static str, &'static str)>,
+            String,
+        ) {
+            match path {
+                "/slow.js" => {
+                    std::thread::sleep(std::time::Duration::from_millis(3_000));
+                    (200, "text/javascript", vec![], "window.__slow = 1;".into())
+                }
+                _ => (
+                    200,
+                    "text/html",
+                    vec![],
+                    r#"<html><body><p id="t">shown</p><script>
+var s = document.createElement('script');
+s.src = '/slow.js';
+document.head.appendChild(s);
+</script></body></html>"#
+                        .into(),
+                ),
+            }
+        }
+        let server = serve(held);
+        let (mut e, id) = engine_with_view();
+        let mut rx = e.take_event_receiver().expect("event receiver");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let yielded = rt
+            .block_on(e.load_url_yielding(id, server.url("/")))
+            .expect("load");
+        assert_eq!(yielded, LoadYield::Yielded, "the slow script is still out");
+        assert!(
+            e.views[&id].load_tail.is_some(),
+            "Stop's product path needs an open tail"
+        );
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        assert!(e.stop(id));
+        assert!(
+            e.views[&id].load_tail.is_none(),
+            "Stop must drop the yielded tail"
+        );
+        let seen: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            seen.iter().any(|ev| matches!(
+                ev,
+                EngineEvent::NavigationFailed { error, .. } if error == "stopped"
+            )),
+            "yielded-load Stop must fail as stopped: {seen:?}"
+        );
+        // Engine::stop raises ALL so an interrupted script can unwind;
+        // PageCmd::Stop clears it afterwards. Mirror that so the document
+        // is runnable again.
+        e.view_control(id).expect("control").clear_all();
+        let text = e
+            .views[&id]
+            .document
+            .as_ref()
+            .and_then(|doc| doc.get_element_by_id("t"))
+            .map(|n| n.text_content())
+            .unwrap_or_default();
+        assert_eq!(text, "shown", "the committed document stays on screen");
+        assert_eq!(
+            e.execute_script(id, "1 + 1").expect("script runs after clear_all"),
+            "Number(2.0)"
+        );
+    }
+
     /// Stopping a view that does not exist is false, not a panic.
     #[test]
     fn stop_on_a_missing_view_is_false_not_a_panic() {
@@ -35278,18 +35384,30 @@ impl AncestorCompound {
     /// parts too where the ancestor carries its attributes.
     fn matches_ancestor(&self, ancestor: &AncestorKey) -> bool {
         let (tag, classes, id, attributes) = ancestor;
-        if !self.matches(tag, classes, id.as_ref()) {
+        self.matches_carried(tag, classes, id.as_ref(), attributes.as_deref())
+    }
+
+    /// [`Self::matches_ancestor`] for an element known by its parts:
+    /// `attributes` is `None` where they are not carried, and then the
+    /// attribute and `:not()` parts stay permissive.
+    fn matches_carried(
+        &self,
+        tag: &str,
+        classes: &[String],
+        id: Option<&String>,
+        attributes: Option<&HashMap<String, String>>,
+    ) -> bool {
+        if !self.matches(tag, classes, id) {
             return false;
         }
-        let Some(attributes) = attributes.as_deref() else {
-            return !self.excluded_by_relational_not(tag, classes, id.as_ref());
+        let Some(attributes) = attributes else {
+            return !self.excluded_by_relational_not(tag, classes, id);
         };
         self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
-            && !self.none_of.iter().any(|n| n.matches_ancestor(ancestor))
-            && self
-                .any_of
-                .iter()
-                .all(|alts| alts.undecidable() || alts.compounds.iter().any(|a| a.matches_ancestor(ancestor)))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id, Some(attributes)))
+            && self.any_of.iter().all(|alts| {
+                alts.undecidable() || alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, Some(attributes)))
+            })
     }
 
     /// [`Self::matches_ancestor`] for `ancestors[idx]`, with the complex
@@ -35348,6 +35466,10 @@ impl AncestorCompound {
         if self.any_of.iter().all(|alts| !alts.undecidable()) {
             return true;
         }
+        // The compound members read the attributes and `:not()` as
+        // `matches_ancestor` does, from the carried map only; read by tag,
+        // classes and id alone, `[data-theme="dark"]` matched every element.
+        let carried = attributes;
         let synthesized;
         let attributes = match attributes {
             Some(attributes) => attributes,
@@ -35357,7 +35479,7 @@ impl AncestorCompound {
             }
         };
         self.any_of.iter().filter(|alts| alts.undecidable()).all(|alts| {
-            alts.compounds.iter().any(|a| a.matches(tag, classes, id))
+            alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, carried))
                 || alts.complex.iter().any(|p| {
                     SelectorMatcher.selector_matches_prepared(p, tag, attributes, chain, &[], SiblingContext::SOLE)
                 })
