@@ -585,8 +585,9 @@ pub enum Paint {
     /// Solid color.
     Color(Color),
     /// URL reference (gradients, patterns) the document has not resolved:
-    /// it names nothing this crate paints, and paints nothing.
-    Url(String),
+    /// it names nothing this crate paints, so it paints its fallback (the
+    /// color, `currentColor` or `none` after the `url()`), or nothing.
+    Url(String, Option<Box<Paint>>),
     /// A gradient paint server, resolved from its `url(#id)` reference.
     Gradient(Arc<Gradient>),
     /// Current color.
@@ -611,15 +612,21 @@ impl Paint {
             _ if s.starts_with("url(") => {
                 // The id is case-sensitive, so it is read from the authored
                 // text; a fallback color may follow the closing paren.
-                let url = raw[4..]
-                    .split(')')
-                    .next()
-                    .unwrap_or("")
+                let (inner, after) = raw[4..].split_once(')').unwrap_or((&raw[4..], ""));
+                let url = inner
                     .trim()
                     .trim_matches(|c| c == '"' || c == '\'')
                     .trim_start_matches('#')
                     .to_string();
-                Paint::Url(url)
+                let after = after.trim().to_lowercase();
+                let fallback = match after.as_str() {
+                    "" => None,
+                    "none" => Some(Paint::None),
+                    "currentcolor" => Some(Paint::CurrentColor),
+                    other => parse_svg_color(other).map(Paint::Color),
+                }
+                .map(Box::new);
+                Paint::Url(url, fallback)
             }
             _ => {
                 if let Some(color) = parse_svg_color(&s) {
@@ -639,11 +646,13 @@ impl Paint {
     }
 
     /// Get the solid color this paint draws with, resolving `currentColor`
-    /// to `current_color`. `None` for `none` and unresolved `url()` paints.
+    /// to `current_color`. `None` for `none` and for an unresolved `url()`
+    /// paint without a fallback.
     pub fn resolve(&self, current_color: Color) -> Option<Color> {
         match self {
             Paint::Color(c) => Some(*c),
             Paint::CurrentColor => Some(current_color),
+            Paint::Url(_, Some(fallback)) => fallback.resolve(current_color),
             _ => None,
         }
     }
@@ -1358,7 +1367,7 @@ impl SvgElement {
                 return;
             }
         };
-        if let Paint::Url(id) = &style.fill {
+        if let Paint::Url(id, _) = &style.fill {
             if let Some(gradient) = servers.get(id) {
                 style.fill = Paint::Gradient(gradient.clone());
             }
@@ -4127,7 +4136,7 @@ mod tests {
     fn test_paint_parse() {
         assert!(matches!(Paint::parse("none"), Paint::None));
         assert!(matches!(Paint::parse("#ff0000"), Paint::Color(_)));
-        assert!(matches!(Paint::parse("url(#gradient)"), Paint::Url(_)));
+        assert!(matches!(Paint::parse("url(#gradient)"), Paint::Url(_, None)));
     }
 
     #[test]
