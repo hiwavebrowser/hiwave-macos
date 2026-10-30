@@ -2133,7 +2133,25 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert_eq!(report["bands"][2]["empty_painted"], 10, "{text}");
         assert_eq!(report["bands"][0]["empty_painted"], 0, "{text}");
         assert_eq!(causes(&report), vec!["R11 y 1600..2400: 10 painted boxes with no text and no image (skeleton?)"], "{text}");
-        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10\n"), "{text}");
+        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10, overlapping 0, past right edge 0\n"), "{text}");
+    }
+
+    /// T9 gap 6, through a real layout: three rows pulled over the one before,
+    /// three pushed past the right edge. A clipped strip of slides and an
+    /// out-of-flow label on a row count as neither.
+    #[test]
+    fn overlap_and_overflow_below_the_fold_are_named_from_a_real_layout() {
+        let over = "<div style=\"height:40px;margin-top:-30px\">row</div>".repeat(3);
+        let wide = "<div style=\"width:1500px;height:20px\">wide</div>".repeat(3);
+        let clipped = "<div style=\"overflow:hidden;height:40px\"><div style=\"width:3000px;height:40px\">slides</div></div>";
+        let label = "<div style=\"position:relative;height:40px\">row<div style=\"position:absolute;top:0;left:0\">ad</div></div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div><div style=\"height:40px\">first</div>{over}<div style=\"height:40px\"></div>{wide}{clipped}{label}</body></html>"
+        );
+        let (report, text) = report_for("misplaced", &html);
+        assert_eq!(report["bands"][2]["overlapping"], 3, "{text}");
+        assert_eq!(report["bands"][2]["past_right"], 3, "{text}");
+        assert_eq!(causes(&report), vec!["R12 y 1600..2400: 3 boxes overlap other content, 3 run past the right edge"], "{text}");
     }
 
     /// A few empty boxes are a page's decoration, not a placeholder feed.
@@ -2216,6 +2234,56 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         // The layout came with the load, the whole window before the end.
         let before = settled["last_relayout_ms_before"].as_f64().expect("a layout was recorded");
         assert!(before >= 3000.0, "{settled}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T9 gap 7, through the engine's own console record: a string logged by
+    /// the page's inline script reaches R5, and its text does not.
+    #[test]
+    fn a_string_console_error_from_the_page_reaches_r5_as_a_shape() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    let body = "<html><body><p>top</p><script>console.error('SECRET-TEXT');</script></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-string-error-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (json, log) = (dir.join("report.json"), dir.join("events.jsonl"));
+        let url = format!("http://127.0.0.1:{port}/");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--event-log",
+            log.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+        ])
+        .unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let written = fs::read_to_string(&json).unwrap();
+        assert!(!written.contains("SECRET-TEXT"), "{written}");
+        let report: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let lines = causes(&report);
+        assert!(
+            lines.iter().any(|l| l.starts_with("R5 the page's own script: logged string in inline#1:1:9;")),
+            "{lines:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
