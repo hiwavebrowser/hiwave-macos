@@ -15,7 +15,9 @@
 //! page thread.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 use rustkit_js::{ErrorReport, LogLevel, ScriptPosition};
 
@@ -33,13 +35,25 @@ struct AliasMap {
     entries: VecDeque<(String, String)>,
 }
 
-fn aliases() -> &'static Mutex<AliasMap> {
+/// Run `f` on the label map. The process shares one; each test thread has
+/// its own, emptied by [`force_for_test`], so parallel tests that both
+/// record `inserted#1` never read each other's URL (CA1 item 5).
+#[cfg(not(test))]
+fn with_aliases<R>(f: impl FnOnce(&mut AliasMap) -> R) -> Option<R> {
     static ALIASES: OnceLock<Mutex<AliasMap>> = OnceLock::new();
-    ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() }))
+    let mut map = ALIASES.get_or_init(|| Mutex::new(AliasMap { entries: VecDeque::new() })).lock().ok()?;
+    Some(f(&mut map))
+}
+
+#[cfg(test)]
+fn with_aliases<R>(f: impl FnOnce(&mut AliasMap) -> R) -> Option<R> {
+    TEST_ALIASES.with(|map| Some(f(&mut map.borrow_mut())))
 }
 
 #[cfg(test)]
 thread_local! {
+    static TEST_ALIASES: std::cell::RefCell<AliasMap> =
+        const { std::cell::RefCell::new(AliasMap { entries: VecDeque::new() }) };
     static FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static SINK: std::cell::RefCell<Option<std::sync::Arc<Mutex<Vec<String>>>>> =
         const { std::cell::RefCell::new(None) };
@@ -57,6 +71,7 @@ pub(crate) fn enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn force_for_test(on: Option<bool>) {
     FORCE.with(|cell| cell.set(on));
+    TEST_ALIASES.with(|map| map.borrow_mut().entries.clear());
     sync_diag_armed();
 }
 
@@ -89,23 +104,19 @@ pub(crate) fn alias(name: &str, url: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut map) = aliases().lock() else {
-        return;
-    };
-    if map.entries.len() >= ALIAS_CAP {
-        map.entries.pop_front();
-    }
-    map.entries.push_back((name.to_string(), url.to_string()));
+    with_aliases(|map| {
+        if map.entries.len() >= ALIAS_CAP {
+            map.entries.pop_front();
+        }
+        map.entries.push_back((name.to_string(), url.to_string()));
+    });
 }
 
 /// The URL an engine script label stands for, or `path` itself; either
 /// way through [`brief_place`].
 fn resolve(path: &str) -> String {
-    let Ok(map) = aliases().lock() else {
-        return brief_place(path);
-    };
-    let place = map.entries.iter().rev().find(|(name, _)| name == path).map_or(path, |(_, url)| url.as_str());
-    brief_place(place)
+    let url = with_aliases(|map| map.entries.iter().rev().find(|(name, _)| name == path).map(|(_, url)| url.clone()));
+    brief_place(url.flatten().as_deref().unwrap_or(path))
 }
 
 fn emit(line: String) {
@@ -496,6 +507,33 @@ mod tests {
             force_for_test(None);
             install_sink(None);
         }
+    }
+
+    /// CA1 item 5: test threads ran with one process-wide alias map, so a
+    /// label another test recorded (`inserted#1` from a different page) won
+    /// the reverse lookup and a parallel run read its URL.
+    #[test]
+    fn a_label_recorded_on_another_test_thread_does_not_resolve_here() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90001", "https://mine.example/a.js");
+        std::thread::spawn(|| {
+            force_for_test(Some(true));
+            alias("inserted#90001", "https://theirs.example/b.js");
+            force_for_test(None);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(resolve("inserted#90001"), "https://mine.example/a.js");
+    }
+
+    #[test]
+    fn forcing_the_switch_starts_with_no_labels() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90002", "https://old.example/a.js");
+        force_for_test(Some(true));
+        assert_eq!(resolve("inserted#90002"), "inserted#90002");
     }
 
     #[test]
