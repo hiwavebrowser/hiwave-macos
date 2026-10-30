@@ -35284,18 +35284,30 @@ impl AncestorCompound {
     /// parts too where the ancestor carries its attributes.
     fn matches_ancestor(&self, ancestor: &AncestorKey) -> bool {
         let (tag, classes, id, attributes) = ancestor;
-        if !self.matches(tag, classes, id.as_ref()) {
+        self.matches_carried(tag, classes, id.as_ref(), attributes.as_deref())
+    }
+
+    /// [`Self::matches_ancestor`] for an element known by its parts:
+    /// `attributes` is `None` where they are not carried, and then the
+    /// attribute and `:not()` parts stay permissive.
+    fn matches_carried(
+        &self,
+        tag: &str,
+        classes: &[String],
+        id: Option<&String>,
+        attributes: Option<&HashMap<String, String>>,
+    ) -> bool {
+        if !self.matches(tag, classes, id) {
             return false;
         }
-        let Some(attributes) = attributes.as_deref() else {
-            return !self.excluded_by_relational_not(tag, classes, id.as_ref());
+        let Some(attributes) = attributes else {
+            return !self.excluded_by_relational_not(tag, classes, id);
         };
         self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
-            && !self.none_of.iter().any(|n| n.matches_ancestor(ancestor))
-            && self
-                .any_of
-                .iter()
-                .all(|alts| alts.undecidable() || alts.compounds.iter().any(|a| a.matches_ancestor(ancestor)))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id, Some(attributes)))
+            && self.any_of.iter().all(|alts| {
+                alts.undecidable() || alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, Some(attributes)))
+            })
     }
 
     /// [`Self::matches_ancestor`] for `ancestors[idx]`, with the complex
@@ -35354,6 +35366,10 @@ impl AncestorCompound {
         if self.any_of.iter().all(|alts| !alts.undecidable()) {
             return true;
         }
+        // The compound members read the attributes and `:not()` as
+        // `matches_ancestor` does, from the carried map only; read by tag,
+        // classes and id alone, `[data-theme="dark"]` matched every element.
+        let carried = attributes;
         let synthesized;
         let attributes = match attributes {
             Some(attributes) => attributes,
@@ -35363,7 +35379,7 @@ impl AncestorCompound {
             }
         };
         self.any_of.iter().filter(|alts| alts.undecidable()).all(|alts| {
-            alts.compounds.iter().any(|a| a.matches(tag, classes, id))
+            alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, carried))
                 || alts.complex.iter().any(|p| {
                     SelectorMatcher.selector_matches_prepared(p, tag, attributes, chain, &[], SiblingContext::SOLE)
                 })
