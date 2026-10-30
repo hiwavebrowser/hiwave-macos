@@ -27,6 +27,11 @@ const MAX_SELECTOR_CHARS: usize = 64;
 const MIN_PLACEHOLDER_PX: (f64, f64) = (4.0, 16.0);
 /// This many empty painted boxes in a band fire R11; fewer are decoration.
 const MIN_EMPTY_PAINTED: u64 = 8;
+/// This many overlapping boxes, or boxes past the right edge, in a band fire
+/// R12; fewer are a stray badge.
+const MIN_MISPLACED: u64 = 3;
+/// A box lying over this share of the smaller of it and a sibling overlaps it.
+const OVERLAP_SHARE: f64 = 0.5;
 /// A layout this close to the capture's end means the page was still moving.
 const SETTLED_MS: f64 = 2000.0;
 
@@ -198,9 +203,69 @@ fn empty_painted(element: &Value, width: f64, height: f64) -> bool {
     {
         return false;
     }
-    let image = style(element, "background-image").unwrap_or("none");
+    !style(element, "background-image").unwrap_or("none").contains("url(") && has_background(element)
+}
+
+fn has_background(element: &Value) -> bool {
     let colour = style(element, "background-color").is_some_and(|c| !(c.starts_with("rgba(") && c.ends_with(", 0)")));
-    !image.contains("url(") && (colour || image != "none")
+    colour || style(element, "background-image").unwrap_or("none") != "none"
+}
+
+fn is_image(element: &Value) -> bool {
+    matches!(element["identity"]["tag"].as_str(), Some("img" | "svg" | "picture" | "video" | "canvas"))
+}
+
+/// Does this box's layout rect say where it paints something, in the flow?
+/// Not a box out of flow, sticky or inline (a wrapped link's rect is the union
+/// of its lines), clipped by an ancestor, or moved or faded by one.
+fn paints_in_flow(element: &Value) -> bool {
+    visible(element)
+        && !is_root(element)
+        && !matches!(style(element, "position"), Some("absolute" | "fixed" | "sticky"))
+        && !matches!(style(element, "display"), Some("inline" | "contents"))
+        && element["paint"]["clipped"].as_bool() != Some(true)
+        && element["paint"]["in_transform_layer"].as_bool() != Some(true)
+        && element["paint"]["effective_opacity"].as_f64() != Some(0.0)
+        && (element["tree"]["text_length"].as_u64().unwrap_or(0) > 0 || is_image(element) || has_background(element))
+}
+
+fn parent_of(path: &str) -> Option<&str> {
+    path.rsplit_once(" > ").map(|(parent, _)| parent)
+}
+
+/// Fill each band's `overlapping` and `past_right` from the layout rects. The
+/// later sibling is the one counted: it is the one on top.
+fn count_misplaced(elements: &[&Value], viewport_width: f64, scroll_y: f64, bands: &mut [Band]) {
+    let out_of_flow: Vec<&str> = elements
+        .iter()
+        .filter(|e| !is_root(e) && matches!(style(e, "position"), Some("absolute" | "fixed")))
+        .map(|e| structural(e))
+        .collect();
+    let past_right = |e: &Value| rect(e).is_some_and(|(x, _, w, _)| x + w > viewport_width + 1.0);
+    let by_path: std::collections::HashMap<&str, &Value> = elements.iter().map(|e| (structural(e), *e)).collect();
+    let mut earlier: std::collections::HashMap<&str, Vec<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
+    for element in elements {
+        let path = structural(element);
+        if !paints_in_flow(element) || out_of_flow.iter().any(|o| is_within(path, o)) {
+            continue;
+        }
+        let Some(me) = rect(element).filter(|r| r.2 > 0.0 && r.3 > 0.0) else { continue };
+        let parent = parent_of(path).unwrap_or("");
+        let siblings = earlier.entry(parent).or_default();
+        let over = siblings.iter().any(|o| {
+            let w = (me.0 + me.2).min(o.0 + o.2) - me.0.max(o.0);
+            let h = (me.1 + me.3).min(o.1 + o.3) - me.1.max(o.1);
+            w > 0.0 && h > 0.0 && w * h > OVERLAP_SHARE * (me.2 * me.3).min(o.2 * o.3)
+        });
+        siblings.push(me);
+        let top = me.1 + scroll_y;
+        let Some(band) = bands.iter_mut().find(|b| top >= b.top && top < b.bottom) else { continue };
+        band.overlapping += u64::from(over);
+        // A wide box's children are the same fact. A wide body is no box of
+        // its own, so what is in it still counts.
+        let outermost = by_path.get(parent).is_none_or(|p| is_root(p) || !past_right(p));
+        band.past_right += u64::from(past_right(element) && outermost);
+    }
 }
 
 /// The report for a diagnostics dump (as `all_element_diagnostics`
@@ -301,8 +366,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
         }
         let top = y + scroll.1;
         let Some(band) = bands.iter_mut().find(|b| top >= b.top && top < b.bottom) else { continue };
-        let tag = element["identity"]["tag"].as_str().unwrap_or("");
-        if matches!(tag, "img" | "svg" | "picture" | "video" | "canvas") {
+        if is_image(element) {
             band.images += 1;
         } else if element["tree"]["text_length"].as_u64().unwrap_or(0) > 0
             && element["tree"]["child_count"].as_u64() == Some(0)
@@ -312,6 +376,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
             band.empty_painted += 1;
         }
     }
+    count_misplaced(&elements, viewport.0, scroll.1, &mut bands);
 
     let mut ranked = Vec::new();
     let overlay = covering.iter().find(|c| c.takes_centre).or_else(|| covering.first()).or(largest_fixed.as_ref());
@@ -388,6 +453,17 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
             ),
         });
     }
+    // R12: yahoo's footer and labels painted over its feed, and its rows ran
+    // past the right edge (T9).
+    for band in bands.iter().filter(|b| b.overlapping >= MIN_MISPLACED || b.past_right >= MIN_MISPLACED) {
+        ranked.push(Cause {
+            rule: "R12",
+            line: format!(
+                "y {:.0}..{:.0}: {} boxes overlap other content, {} run past the right edge",
+                band.top, band.bottom, band.overlapping, band.past_right
+            ),
+        });
+    }
 
     Report {
         schema: REPORT_SCHEMA,
@@ -422,6 +498,8 @@ const PER_RULE: usize = 3;
 
 /// R5 lines about the page's own site start with this, and rank before R4.
 const OWN_SITE: &str = "the page's own script: ";
+/// An R5 key for a `console.error` of a string, up to its place.
+const LOGGED_STRING: &str = "logged string in ";
 
 /// The last two host labels (`www.yahoo.com` -> `yahoo.com`). Close enough
 /// for ranking; a two-label public suffix (`co.uk`) reads as one site. An
@@ -647,13 +725,28 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
     // An error the page caught and passed to console.error carries its own
     // stack (`error_stack`); it is named by where it was thrown. yahoo with
     // #777 merged: two such TypeErrors, no uncaught one, and a blank page.
+    // A string has no stack of its own, so it is named by the script that
+    // logged it (T9 gap 7); only an own site's is kept, below. The shape says
+    // it was a string: a run that kept console text can't tell, and is left out.
+    let frame_place = |frame: &'_ str| -> String {
+        let place = frame.trim().trim_start_matches("at ");
+        place.rsplit_once(" (").map_or(place, |(_, p)| p.trim_end_matches(')')).to_string()
+    };
     for c in of("console").filter(|c| c["level"] == "error") {
-        let Some(thrown) = c["error_stack"].as_str().and_then(|s| s.lines().next()) else {
+        let key = if let Some(thrown) = c["error_stack"].as_str().and_then(|s| s.lines().next()) {
+            format!("logged {} thrown in {}", error_name(text(&c["message"])), frame_place(thrown))
+        } else if text(&c["message"]).contains("<string len=") {
+            let at = &c["location"];
+            let place = if at.is_null() {
+                c["stack"].as_str().and_then(|s| s.lines().next()).map(frame_place)
+            } else {
+                Some(format!("{}:{}:{}", text(&at["url"]), at["line"], at["column"]))
+            };
+            let Some(place) = place else { continue };
+            format!("{LOGGED_STRING}{place}")
+        } else {
             continue;
         };
-        let place = thrown.trim().trim_start_matches("at ");
-        let place = place.rsplit_once(" (").map_or(place, |(_, p)| p.trim_end_matches(')'));
-        let key = format!("logged {} thrown in {place}", error_name(text(&c["message"])));
         match errors.iter_mut().find(|(k, _, _)| *k == key) {
             Some((_, n, _)) => *n += 1,
             None => errors.push((key, 1, ms(&c["t_ms"]).unwrap_or(0.0))),
@@ -676,10 +769,18 @@ pub fn event_causes(records: &[Value]) -> (Vec<Cause>, Vec<String>) {
             .filter(|r| r["url"].as_str().and_then(host_of) == page_host)
             .count()
     };
-    errors.sort_by_key(|(key, _, _)| !(site.is_some() && site_of_error(key) == site));
+    // A logged string in the page's inline script is the page's own. Strings
+    // from elsewhere are ads' noise, and an own-site string never pushes an
+    // error off the list.
+    let is_string = |key: &str| key.starts_with(LOGGED_STRING);
+    let is_own = |key: &str| {
+        site.is_some() && (site_of_error(key) == site || key.starts_with(&format!("{LOGGED_STRING}inline#")))
+    };
+    errors.retain(|(key, _, _)| !is_string(key) || is_own(key));
+    errors.sort_by_key(|(key, _, _)| (!is_own(key), is_string(key)));
     for (key, n, first) in errors.into_iter().take(PER_RULE) {
         let mut line = if n > 1 { format!("{key} (x{n})") } else { key };
-        if site.is_some() && site_of_error(&line) == site {
+        if is_own(&line) {
             let before = own_calls(&|at| at < first);
             let after = own_calls(&|at| at >= first);
             let host = page_host.as_deref().unwrap_or("-");
@@ -805,7 +906,7 @@ pub fn apply_events(report: &mut Report, records: &[Value], facts: CaptureFacts)
     // "R5*" is an R5 line about the page's own site. "R5!" is an uncaught
     // one when the first viewport is blank (R10): the cause goes above the
     // symptom (Atlas 10-26; yahoo's chunk 7730 SyntaxError under R10).
-    let order = ["R5!", "R1", "R2", "R10", "R9", "R11", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
+    let order = ["R5!", "R1", "R2", "R10", "R9", "R11", "R12", "R5*", "R4", "R3", "R6", "R5", "R7", "R8"];
     let blank = report.ranked.iter().any(|c| c.rule == "R10");
     let uncaught = format!("{OWN_SITE}uncaught ");
     report.ranked.extend(events);
@@ -1437,7 +1538,7 @@ mod tests {
         let wide = |i: usize| block(&format!("html > body > main > section:nth-child({i})"), 100.0, 900.0 + i as f64 * 200.0, 1300.0, 100.0);
         let inner = block("html > body > main > section:nth-child(1) > div", 100.0, 1100.0, 1300.0, 50.0);
         let slide = with(block("html > body > main > ul > li", 1000.0, 1500.0, 400.0, 50.0), &["paint", "clipped"], json!(true));
-        let fits = block("html > body > main > section:nth-child(9)", 0.0, 1550.0, 1280.0, 50.0);
+        let fits = block("html > body > main > section:nth-child(9)", 0.0, 1210.0, 1280.0, 50.0);
         let report = page_report(&feed(vec![wide(1), inner, wide(2), wide(3), slide, fits]), None);
         assert_eq!(band(&report, 800.0), (0, 3), "{:?}", report.bands);
         let causes: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();

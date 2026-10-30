@@ -2133,7 +2133,25 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert_eq!(report["bands"][2]["empty_painted"], 10, "{text}");
         assert_eq!(report["bands"][0]["empty_painted"], 0, "{text}");
         assert_eq!(causes(&report), vec!["R11 y 1600..2400: 10 painted boxes with no text and no image (skeleton?)"], "{text}");
-        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10\n"), "{text}");
+        assert!(text.contains("  y 1600..2400: text 1, images 0, empty painted 10, overlapping 0, past right edge 0\n"), "{text}");
+    }
+
+    /// T9 gap 6, through a real layout: three rows pulled over the one before,
+    /// three pushed past the right edge. A clipped strip of slides and an
+    /// out-of-flow label on a row count as neither.
+    #[test]
+    fn overlap_and_overflow_below_the_fold_are_named_from_a_real_layout() {
+        let over = "<div style=\"height:40px;margin-top:-30px\">row</div>".repeat(3);
+        let wide = "<div style=\"width:1500px;height:20px\">wide</div>".repeat(3);
+        let clipped = "<div style=\"overflow:hidden;height:40px\"><div style=\"width:3000px;height:40px\">slides</div></div>";
+        let label = "<div style=\"position:relative;height:40px\">row<div style=\"position:absolute;top:0;left:0\">ad</div></div>";
+        let html = format!(
+            "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div><div style=\"height:40px\">first</div>{over}<div style=\"height:40px\"></div>{wide}{clipped}{label}</body></html>"
+        );
+        let (report, text) = report_for("misplaced", &html);
+        assert_eq!(report["bands"][2]["overlapping"], 3, "{text}");
+        assert_eq!(report["bands"][2]["past_right"], 3, "{text}");
+        assert_eq!(causes(&report), vec!["R12 y 1600..2400: 3 boxes overlap other content, 3 run past the right edge"], "{text}");
     }
 
     /// A few empty boxes are a page's decoration, not a placeholder feed.
