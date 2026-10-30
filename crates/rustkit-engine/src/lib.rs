@@ -399,6 +399,8 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
+mod css_display_apply_tests;
+#[cfg(test)]
 mod pseudo_display_none_tests;
 #[cfg(test)]
 mod positioned_paint_order_tests;
@@ -33615,6 +33617,102 @@ mod stop_navigation_tests {
         assert!(e.stop(id), "first stop");
         assert!(e.stop(id), "second stop");
         assert!(e.stop(id), "third stop");
+    }
+
+    /// Idle Stop must not emit `NavigationFailed { "stopped" }` — UI listeners
+    /// must not see "stopped" spam from a Stop mash on a settled page.
+    #[test]
+    fn stop_on_an_idle_view_emits_no_navigation_failed() {
+        let (mut e, id) = engine_with_view();
+        let mut rx = e.take_event_receiver().expect("event receiver");
+        assert!(e.stop(id));
+        let seen: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !seen
+                .iter()
+                .any(|ev| matches!(ev, EngineEvent::NavigationFailed { .. })),
+            "idle Stop must not fail a navigation: {seen:?}"
+        );
+    }
+
+    /// #727 / #701: Stop on a load that yielded with its tail still open
+    /// fails as `"stopped"`, drops the tail so `load` never fires, and
+    /// leaves the committed document runnable.
+    #[test]
+    fn stop_on_a_yielded_load_fails_as_stopped_and_drops_the_tail() {
+        use crate::error_page_script_tests::serve;
+        fn held(
+            path: &str,
+            _: &str,
+        ) -> (
+            u16,
+            &'static str,
+            Vec<(&'static str, &'static str)>,
+            String,
+        ) {
+            match path {
+                "/slow.js" => {
+                    std::thread::sleep(std::time::Duration::from_millis(3_000));
+                    (200, "text/javascript", vec![], "window.__slow = 1;".into())
+                }
+                _ => (
+                    200,
+                    "text/html",
+                    vec![],
+                    r#"<html><body><p id="t">shown</p><script>
+var s = document.createElement('script');
+s.src = '/slow.js';
+document.head.appendChild(s);
+</script></body></html>"#
+                        .into(),
+                ),
+            }
+        }
+        let server = serve(held);
+        let (mut e, id) = engine_with_view();
+        let mut rx = e.take_event_receiver().expect("event receiver");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let yielded = rt
+            .block_on(e.load_url_yielding(id, server.url("/")))
+            .expect("load");
+        assert_eq!(yielded, LoadYield::Yielded, "the slow script is still out");
+        assert!(
+            e.views[&id].load_tail.is_some(),
+            "Stop's product path needs an open tail"
+        );
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        assert!(e.stop(id));
+        assert!(
+            e.views[&id].load_tail.is_none(),
+            "Stop must drop the yielded tail"
+        );
+        let seen: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            seen.iter().any(|ev| matches!(
+                ev,
+                EngineEvent::NavigationFailed { error, .. } if error == "stopped"
+            )),
+            "yielded-load Stop must fail as stopped: {seen:?}"
+        );
+        // Engine::stop raises ALL so an interrupted script can unwind;
+        // PageCmd::Stop clears it afterwards. Mirror that so the document
+        // is runnable again.
+        e.view_control(id).expect("control").clear_all();
+        let text = e
+            .views[&id]
+            .document
+            .as_ref()
+            .and_then(|doc| doc.get_element_by_id("t"))
+            .map(|n| n.text_content())
+            .unwrap_or_default();
+        assert_eq!(text, "shown", "the committed document stays on screen");
+        assert_eq!(
+            e.execute_script(id, "1 + 1").expect("script runs after clear_all"),
+            "Number(2.0)"
+        );
     }
 
     /// Stopping a view that does not exist is false, not a panic.
