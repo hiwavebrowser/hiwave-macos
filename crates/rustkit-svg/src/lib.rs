@@ -3780,6 +3780,30 @@ mod tests {
         assert!(doc.render(0.0, 0.0, 10.0, 10.0).is_empty());
     }
 
+    /// SVG 2 §13.2: a `url()` paint that names nothing paints its fallback
+    /// (reddit's interstitial logo is `fill: url(#missing) #ff4500`).
+    #[test]
+    fn test_paint_naming_a_missing_server_paints_its_fallback() {
+        let render = |fill: &str| {
+            let doc = SvgDocument::parse(&format!(
+                r##"<svg width="10" height="10"><rect width="10" height="10" fill="{fill}"/></svg>"##
+            ))
+            .expect("parse");
+            fill_rects(&doc.render_with_color(0.0, 0.0, 10.0, 10.0, Color::from_rgb(0, 0, 255)))
+        };
+        assert_eq!(render("url(#nope) #ff4500"), vec![(0.0, 0.0, 10.0, 10.0, (255, 69, 0))]);
+        assert_eq!(render("url('#nope') currentColor"), vec![(0.0, 0.0, 10.0, 10.0, (0, 0, 255))]);
+        assert!(render("url(#nope) none").is_empty());
+        // With a gradient elsewhere in the document the resolve pass runs;
+        // a reference it cannot find still falls back.
+        let doc = SvgDocument::parse(
+            r##"<svg width="10" height="10"><defs><linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient></defs>
+            <rect width="10" height="10" fill="url(#nope) #00ff00"/></svg>"##,
+        )
+        .expect("parse");
+        assert_eq!(fill_rects(&doc.render(0.0, 0.0, 10.0, 10.0)), vec![(0.0, 0.0, 10.0, 10.0, (0, 255, 0))]);
+    }
+
     /// Every `FillRect` the commands paint, as `(x, y, w, h, (r, g, b))`.
     fn fill_rects(commands: &[DisplayCommand]) -> Vec<(f32, f32, f32, f32, (u8, u8, u8))> {
         commands
