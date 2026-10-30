@@ -10997,6 +10997,12 @@ impl Engine {
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
+        // `display: none` generates no box (CSS Display 3 §2.5). It used to
+        // fall to the Block arm below, and an abspos one painted (reddit's
+        // interstitial disc over its logo).
+        if pseudo_style.display == rustkit_css::Display::None {
+            return None;
+        }
 
         // The box type follows `display`, as for elements. An always-Inline
         // pseudo put `::before { content:""; display:block; height:0;
