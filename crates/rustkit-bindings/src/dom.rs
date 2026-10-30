@@ -2738,13 +2738,19 @@ const WRAPPERS_JS: &str = r#"
     // reads as the empty string.
     var COMPUTED_NAMES = {};
     function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
-    function computedMap(el) {
+    function computedMap(el, pseudo) {
         var raw = info(el, 'computed');
-        var m = {};
+        var m = {}, own = null, prefix = pseudo ? pseudo + ' ' : null;
         if (raw) {
             raw.split('\n').forEach(function (line) {
                 var i = line.indexOf('\t');
-                if (i > 0) m[line.slice(0, i)] = line.slice(i + 1);
+                if (i <= 0) return;
+                var name = line.slice(0, i);
+                // The element's rows, then its pseudo-elements' (`::before name`).
+                if (name.charAt(0) !== ':') m[name] = line.slice(i + 1);
+                else if (prefix && name.indexOf(prefix) === 0) {
+                    (own = own || {})[name.slice(prefix.length)] = line.slice(i + 1);
+                }
             });
         } else if (info(el, 'laidout')) {
             m.display = 'none';
@@ -2766,10 +2772,36 @@ const WRAPPERS_JS: &str = r#"
                 if (v) m[name] = v;
             }
         }
-        return m;
+        return pseudo ? pseudoMap(m, own, pseudo) : m;
     }
-    function makeComputed(el) {
-        var m = computedMap(el);
+    // What a pseudo-element reads: its own cascaded rows, or, with no rule
+    // that set `content`, the initial values and what it inherits.
+    var INHERITED = ['color', 'font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing',
+        'line-height', 'text-align', 'text-transform', 'visibility', 'white-space'];
+    function pseudoMap(m, own, pseudo) {
+        var isBox = pseudo === '::before' || pseudo === '::after';
+        if (own) {
+            if (own.content === 'normal') own.content = 'none';
+            return own;
+        }
+        if (!m.display) return {};
+        var out = { display: 'inline', position: 'static', width: 'auto', height: 'auto',
+            content: isBox ? 'none' : 'normal' };
+        INHERITED.forEach(function (n) { if (m[n]) out[n] = m[n]; });
+        return out;
+    }
+    // The canonical name of getComputedStyle's second argument, '' for the
+    // element itself, or null for one that names no pseudo-element.
+    function pseudoArgument(p) {
+        if (p === undefined || p === null) return '';
+        p = String(p).toLowerCase();
+        if (p === '') return '';
+        var named = /^(?:::?)?(before|after|first-line|first-letter)$/.exec(p);
+        if (named) return '::' + named[1];
+        return /^::(marker|selection|backdrop|placeholder)$/.test(p) ? p : null;
+    }
+    function makeComputed(el, pseudo) {
+        var m = pseudo === null ? {} : computedMap(el, pseudo);
         var names = Object.keys(m).sort();
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
@@ -2795,11 +2827,11 @@ const WRAPPERS_JS: &str = r#"
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
         });
     }
-    g.getComputedStyle = function getComputedStyle(el) {
+    g.getComputedStyle = function getComputedStyle(el, pseudo) {
         if (!el || el.nodeType !== 1) {
             throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
         }
-        return makeComputed(el);
+        return makeComputed(el, pseudoArgument(pseudo));
     };
 
     // The root element's client size is the viewport's, and its scroll size
