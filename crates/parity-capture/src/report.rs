@@ -1674,6 +1674,25 @@ mod tests {
         assert_eq!(r5(&[nav, logged_string(5.0, wrapper, json!(consent))]), Vec::<String>::new());
     }
 
+    /// yahoo at 2dc9a3b2: `console.error("text", err)` read "logged string
+    /// thrown in", one line under the same error logged alone.
+    #[test]
+    fn an_error_logged_after_a_string_is_named_by_the_error() {
+        let logged = |t: f64, message: &str| {
+            json!({"t_ms": t, "type": "console", "level": "error", "message": message,
+                   "error_stack": "    at f (https://www.x.test/app.js:1:2)"})
+        };
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            logged(1000.0, "<TypeError message len=4>"),
+            logged(1100.0, "<string len=9> <TypeError message len=4> <number>"),
+        ];
+        assert_eq!(
+            r5(&records),
+            vec!["R5 the page's own script: logged TypeError thrown in https://www.x.test/app.js:1:2 (x2); at t=1.0 s; 0 fetch/XHR to www.x.test before, 0 after"]
+        );
+    }
+
     /// R5 prints three lines. A chatty logger must not push a real error off.
     #[test]
     fn own_site_strings_do_not_push_an_own_site_error_off_the_list() {
