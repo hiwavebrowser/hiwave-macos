@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::script_net_tests::serve_routes;
+use crate::wgate::HoldBucket;
 
 const PAGE: &str = "<html><head><style>body{margin:0} #a{height:40px;background:#8bc}</style>\
     </head><body><div id=a>a</div></body></html>";
@@ -44,6 +45,52 @@ fn a_script_the_app_runs_on_the_page_is_a_hold() {
     let (entry, ms) = wgate::last_hold().expect("a 90 ms script from the window thread is reported");
     assert_eq!(entry, "script");
     assert!(ms >= 80.0, "{ms}");
+}
+
+/// T12: a script from the window thread is a script turn in its hold line.
+#[test]
+fn a_script_the_app_runs_is_a_script_turn_in_its_hold() {
+    let (mut engine, view, _server, _rt) = load();
+    wgate::clear_last();
+    engine.execute_script(view, &spin(90)).expect("script");
+    let stages = wgate::last_stages();
+    assert!(stages.in_bucket(HoldBucket::Script) >= 80.0, "{stages}");
+    assert_eq!(stages.turns().0, 1, "{stages}");
+}
+
+/// T12: `other_ms` was 88% of a 36.8 s microsoft load hold. A load names its
+/// document fetch, parse, sheets and script turns, and what is left is small.
+#[test]
+fn a_load_hold_names_where_its_time_went() {
+    let page = format!(
+        "<html><head><link rel=stylesheet href=/a.css></head><body><img src=/i.svg>\
+         <div id=a>a</div><script src=/s.js></script><script>{}</script></body></html>",
+        spin(150)
+    );
+    let server = serve_routes(vec![
+        ("/", "text/html", page),
+        ("/a.css", "text/css", "#a{height:40px}".to_string()),
+        ("/i.svg", "image/svg+xml", "<svg xmlns='http://www.w3.org/2000/svg'/>".to_string()),
+        ("/s.js", "text/javascript", spin(1)),
+    ]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    wgate::clear_last();
+    let started = std::time::Instant::now();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let total = started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(wgate::last_entry(), Some("load"));
+    let stages = wgate::last_stages();
+    assert!(stages.in_bucket(HoldBucket::Script) >= 140.0, "{stages}");
+    assert!(stages.turns().0 >= 2, "{stages}");
+    for bucket in [HoldBucket::DocFetch, HoldBucket::Parse, HoldBucket::Sheets, HoldBucket::Style, HoldBucket::Images] {
+        assert!(stages.in_bucket(bucket) > 0.0, "{bucket:?}: {stages}");
+    }
+    assert!(stages.other_ms(total) < total * 0.25, "other of {total} ms: {stages}");
 }
 
 /// The relayout that flushes the script's DOM writes is nested in the
