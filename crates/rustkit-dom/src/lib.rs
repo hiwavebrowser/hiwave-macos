@@ -15,6 +15,7 @@ pub mod events;
 pub mod forms;
 pub mod images;
 pub mod shadow;
+mod svg_names;
 
 pub use events::{
     AddEventListenerOptions, DomEvent, Event, EventDispatcher, EventId, EventListenerCallback,
@@ -195,6 +196,14 @@ impl Node {
             NodeType::Element { tag_name, .. } => Some(tag_name),
             _ => None,
         }
+    }
+
+    /// Are the children the parser makes under this element in the SVG
+    /// namespace: an SVG element that is not an HTML integration point.
+    pub fn holds_svg_content(&self) -> bool {
+        matches!(&self.node_type, NodeType::Element { tag_name, namespace, .. }
+            if namespace == svg_names::SVG_NAMESPACE
+                && !svg_names::is_html_integration_point(tag_name))
     }
 
     /// Get an attribute value.
@@ -388,6 +397,8 @@ struct DocumentSink {
     /// A `<template shadowrootmode>` was seen: declarative shadow roots
     /// are attached once the parse is done (`shadow::attach_declarative`).
     saw_declarative_shadow: bool,
+    /// A fragment whose context element holds SVG content.
+    svg_fragment: bool,
 }
 
 impl DocumentSink {
@@ -396,6 +407,26 @@ impl DocumentSink {
             doc: Document::new(),
             open_elements: vec![],
             saw_declarative_shadow: false,
+            svg_fragment: false,
+        }
+    }
+
+    /// The namespace and names of a parsed element under the current parent.
+    /// `create_element` has no parent yet, so there `in_svg` is false.
+    fn parsed_element(
+        name: String,
+        attrs: Vec<(String, String)>,
+        in_svg: bool,
+    ) -> (String, &'static str, HashMap<String, String>) {
+        let svg = name == "svg" || (in_svg && !svg_names::breaks_out_of_svg(&name, &attrs));
+        if svg {
+            let attributes = attrs
+                .into_iter()
+                .map(|(k, v)| (svg_names::adjust_attribute_name(k), v))
+                .collect();
+            (svg_names::adjust_tag_name(name), svg_names::SVG_NAMESPACE, attributes)
+        } else {
+            (name, "http://www.w3.org/1999/xhtml", attrs.into_iter().collect())
         }
     }
 
@@ -434,17 +465,20 @@ impl rustkit_html::TreeSink for DocumentSink {
         attrs: Vec<(String, String)>,
         self_closing: bool,
     ) -> Self::NodeId {
-        let mut attributes = HashMap::new();
-        for (key, value) in attrs {
-            attributes.insert(key, value);
-        }
-        if name == "template" && attributes.contains_key("shadowrootmode") {
+        let parent = self.current_parent();
+        let in_svg = if matches!(parent.node_type, NodeType::Document) {
+            self.svg_fragment
+        } else {
+            parent.holds_svg_content()
+        };
+        let (tag_name, namespace, attributes) = Self::parsed_element(name, attrs, in_svg);
+        if tag_name == "template" && attributes.contains_key("shadowrootmode") {
             self.saw_declarative_shadow = true;
         }
 
         let node = self.create_node(NodeType::Element {
-            tag_name: name,
-            namespace: String::from("http://www.w3.org/1999/xhtml"),
+            tag_name,
+            namespace: namespace.to_string(),
             attributes,
         });
 
@@ -456,7 +490,6 @@ impl rustkit_html::TreeSink for DocumentSink {
                 .insert(id.to_string(), node.clone());
         }
 
-        let parent = self.current_parent();
         parent.append_child(node.clone());
 
         // Push onto stack for nested elements (but not void/self-closing elements)
@@ -528,14 +561,10 @@ impl rustkit_html::TreeSink for DocumentSink {
     // ==================== AAA (Adoption Agency Algorithm) Methods ====================
 
     fn create_element(&mut self, name: String, attrs: Vec<(String, String)>) -> Self::NodeId {
-        let mut attributes = HashMap::new();
-        for (key, value) in attrs {
-            attributes.insert(key, value);
-        }
-
+        let (tag_name, namespace, attributes) = Self::parsed_element(name, attrs, false);
         self.create_node(NodeType::Element {
-            tag_name: name,
-            namespace: String::from("http://www.w3.org/1999/xhtml"),
+            tag_name,
+            namespace: namespace.to_string(),
             attributes,
         })
     }
@@ -774,13 +803,15 @@ impl Document {
     }
 
     /// `parse_fragment` for a context element that may be foreign:
-    /// `html_context` is false for an SVG or MathML context element.
+    /// `html_context` is false for an SVG or MathML context element, and
+    /// `svg_context` is true when the fragment's top level is SVG content
+    /// (`Node::holds_svg_content` of the context element).
     pub fn parse_fragment_in(
         &self,
         html: &str,
         context: &str,
         html_context: bool,
-        _svg_context: bool,
+        svg_context: bool,
     ) -> Result<Vec<Rc<Node>>, DomError> {
         // HTML §13.4 step 4: a fragment whose context is a raw text element
         // starts the tokenizer in RAWTEXT or script data state, one in title
@@ -805,7 +836,9 @@ impl Document {
             }
             return Ok(vec![self.create_node(NodeType::Text(text))]);
         }
-        let sink = rustkit_html::parse_fragment(html, DocumentSink::new(), context)
+        let mut sink = DocumentSink::new();
+        sink.svg_fragment = svg_context;
+        let sink = rustkit_html::parse_fragment(html, sink, context)
             .map_err(|e| DomError::ParseError(e.to_string()))?;
         Ok(sink
             .doc

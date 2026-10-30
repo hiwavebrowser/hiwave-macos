@@ -2819,11 +2819,8 @@ fn quad_bezier_points(
 
 /// Extract attribute value from XML tag.
 fn extract_attr(tag: &str, name: &str) -> Option<String> {
-    // Both spellings: HTML's tree builder lowercases attribute names, so an
-    // inline <svg viewBox=...> serialized back out of the DOM carries
-    // `viewbox=` — the camelCase spelling only survives in external .svg
-    // files. (The spec-correct place to re-case it is the HTML parser's
-    // "adjust SVG attributes" step, which rustkit-html does not have.)
+    // Both spellings: the parser adjusts `viewBox` on a parsed <svg>, but a
+    // script can still set the lowercase one on an element it made.
     let lower = name.to_lowercase();
     for candidate in [name, lower.as_str()] {
         let pattern = format!("{}=", candidate);
