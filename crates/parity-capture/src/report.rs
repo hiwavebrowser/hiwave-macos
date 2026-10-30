@@ -85,9 +85,9 @@ pub struct Band {
     pub text: u64,
     /// `img`, `svg`, `picture`, `video`, `canvas` boxes starting in the band.
     pub images: u64,
-    /// Boxes starting in the band that paint a background and hold nothing:
-    /// no text, no element children, no `url()` image. Skeleton rows look
-    /// like this; so does an empty ad slot.
+    /// In-flow boxes starting in the band that paint a background and hold
+    /// nothing: no text, no element children, no `url()` image. Skeleton rows
+    /// look like this; so does an empty ad slot.
     pub empty_painted: u64,
 }
 
@@ -177,12 +177,14 @@ fn visible(element: &Value) -> bool {
         && style(element, "opacity").and_then(|o| o.parse::<f64>().ok()) != Some(0.0)
 }
 
-/// A box with a background and nothing in it. Looks at the computed style
-/// only: a white box on a white page counts, and a `url()` background counts
-/// as an image even if it never loaded.
+/// An in-flow box with a background and nothing in it. A positioned one is
+/// an overlay: yahoo stacks 12 gradient scrims over its first viewport's
+/// carousel. Looks at the computed style only: a white box on a white page
+/// counts, and a `url()` background counts as an image even if it never loaded.
 fn empty_painted(element: &Value, width: f64, height: f64) -> bool {
     let tag = element["identity"]["tag"].as_str().unwrap_or("");
     if matches!(tag, "input" | "button" | "select" | "textarea" | "hr" | "iframe" | "embed" | "object" | "meter" | "progress")
+        || matches!(style(element, "position"), Some("absolute" | "fixed"))
         || element["tree"]["text_length"].as_u64() != Some(0)
         || element["tree"]["child_count"].as_u64() != Some(0)
         || width.min(height) < MIN_PLACEHOLDER_PX.0

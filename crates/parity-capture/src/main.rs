@@ -2112,7 +2112,7 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
     /// T9 gap 1: yahoo's feed was grey rows and the bands read as content.
     /// Ten rows count (colour or gradient); what follows them does not: a dot,
     /// a hairline, a transparent box, a box with a picture for a background,
-    /// a form control, a hidden box and a box holding text.
+    /// a form control, a hidden box, a positioned scrim and a box holding text.
     #[test]
     fn a_band_of_empty_painted_boxes_is_named_as_a_possible_skeleton() {
         let rows = "<div style=\"height:20px;margin:4px;background:#eee\"></div>".repeat(8)
@@ -2124,6 +2124,7 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
 <input style=\"background:#eee\">
 <div style=\"height:20px;background:#eee;visibility:hidden\"></div>
 <div style=\"height:20px;background:#eee;opacity:0\"></div>
+<div style=\"position:absolute;left:0;width:100px;height:20px;background:linear-gradient(#eee,#ddd)\"></div>
 <div style=\"height:20px;background:#eee\">words</div>";
         let html = format!(
             "<html><body style=\"margin:0\"><p>top</p><div style=\"height:800px\"></div><p>mid</p><div style=\"height:800px\"></div>{rows}{others}</body></html>"
