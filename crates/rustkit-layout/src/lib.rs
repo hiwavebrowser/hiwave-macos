@@ -4315,6 +4315,27 @@ impl LayoutBox {
         for child in &mut self.children {
             child.reanchor_absolute(&cb);
         }
+        // A flex container's out-of-flow children take their static
+        // position as the sole flex item (Flexbox 1 §4.1). Step 13 placed
+        // them with their pre-pass size, or never ran (only out-of-flow
+        // children, so no lines); this box is final now, so place them
+        // again in its final content box with their final size.
+        if self.style.display.is_flex()
+            && self.children.iter().any(|c| {
+                matches!(
+                    c.style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                )
+            })
+        {
+            let content = self.dimensions.content;
+            let (main, cross) = if self.style.flex_direction.is_row() {
+                (content.width, content.height)
+            } else {
+                (content.height, content.width)
+            };
+            crate::flex::place_static_position_children(self, &cb, content, main, cross);
+        }
     }
 
     /// Apply absolute positioning offsets.
