@@ -2701,6 +2701,9 @@ pub struct ComputedStyle {
     pub animation_direction: AnimationDirection,
     pub animation_fill_mode: AnimationFillMode,
     pub animation_play_state: AnimationPlayState,
+    /// The `opacity` the box's animation settles on, when its `@keyframes`
+    /// are known (see [`Self::settle_animation_opacity`]).
+    pub animation_settled_opacity: Option<f32>,
 
     // Box sizing
     pub box_sizing: BoxSizing,
@@ -3126,6 +3129,66 @@ pub struct Stylesheet {
     pub rules: Vec<Rule>,
     /// The cascade layer names the sheet declares, in declaration order.
     pub layer_statements: Vec<LayerStatement>,
+    /// What each `@keyframes` of the sheet says about `opacity`.
+    pub keyframes: Vec<rustkit_cssparser::KeyframesAst>,
+}
+
+impl ComputedStyle {
+    /// The one frame painted for a box whose animation sets `opacity`, the
+    /// engine running no animations: the frame the animation settles on.
+    ///
+    /// A finite animation with a forward fill holds the keyframe it ends on;
+    /// one without ends on the box's own value (`.page { animation: in .5s }`
+    /// must not stay on its 0% frame). An infinite one never settles and
+    /// paints its first keyframe. An end that sets no `opacity` is the box's
+    /// own, as a keyframe it does not name would be.
+    ///
+    /// Left `None` for what cannot be settled (no `@keyframes` of that name,
+    /// several animations): layout then paints at full opacity, as it did for
+    /// every animated box, so a rule that was not carried never hides a page.
+    pub fn settle_animation_opacity(&mut self, sheets: &[Stylesheet]) {
+        self.animation_settled_opacity = None;
+        let name = self.animation_name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("none") || name.contains(',') {
+            return;
+        }
+        let Some(frames) = sheets
+            .iter()
+            .rev()
+            .flat_map(|sheet| sheet.keyframes.iter().rev())
+            .find(|frames| frames.name == name)
+        else {
+            return;
+        };
+        let reversed = matches!(
+            self.animation_direction,
+            AnimationDirection::Reverse | AnimationDirection::AlternateReverse
+        );
+        let alternates = matches!(
+            self.animation_direction,
+            AnimationDirection::Alternate | AnimationDirection::AlternateReverse
+        );
+        let start = if reversed { frames.last } else { frames.first };
+        let end = if reversed { frames.first } else { frames.last };
+        let holds = matches!(
+            self.animation_fill_mode,
+            AnimationFillMode::Forwards | AnimationFillMode::Both
+        );
+        let frame = match self.animation_iteration_count {
+            AnimationIterationCount::Infinite => start,
+            AnimationIterationCount::One if holds => end,
+            // An even number of alternating runs comes back to where it began.
+            AnimationIterationCount::Count(n) if holds => {
+                if alternates && (n.ceil() as u32) % 2 == 0 {
+                    start
+                } else {
+                    end
+                }
+            }
+            _ => None,
+        };
+        self.animation_settled_opacity = Some(frame.unwrap_or(self.opacity));
+    }
 }
 
 impl Stylesheet {
@@ -3177,6 +3240,7 @@ impl Stylesheet {
         Ok(Stylesheet {
             rules,
             layer_statements,
+            keyframes: ast.keyframes,
         })
     }
 

@@ -381,6 +381,8 @@ mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
+mod keyframes_opacity_tests;
+#[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
@@ -10989,6 +10991,8 @@ impl layout_ctx::LayoutCtx {
             other => other,
         };
 
+        pseudo_style.settle_animation_opacity(stylesheets);
+
         // Without `content` there is no box, so there is nothing to keep:
         // `*::before, *::after { box-sizing: … }` matches on every element.
         pseudo_style.content.is_some().then_some(pseudo_style)
@@ -11913,6 +11917,8 @@ impl layout_ctx::LayoutCtx {
 
         // Needs all three line-clamp properties, whatever their order.
         style.apply_line_clamp_display();
+
+        style.settle_animation_opacity(stylesheets);
 
         style.custom_properties = vars;
 
@@ -13612,7 +13618,32 @@ impl layout_ctx::LayoutCtx {
             // ==================== Animations (parsed, not executed) ====================
             "animation" => {
                 // Shorthand: name duration timing-function delay iteration-count direction fill-mode play-state
-                let parts: Vec<&str> = value.split_whitespace().collect();
+                // It replaces the whole of an earlier `animation`.
+                let initial = ComputedStyle::new();
+                style.animation_name = String::new();
+                style.animation_duration = initial.animation_duration;
+                style.animation_timing_function = initial.animation_timing_function;
+                style.animation_delay = initial.animation_delay;
+                style.animation_iteration_count = initial.animation_iteration_count;
+                style.animation_direction = initial.animation_direction;
+                style.animation_fill_mode = initial.animation_fill_mode;
+                style.animation_play_state = initial.animation_play_state;
+                // Several animations are not modelled: the list stays whole in
+                // the name, which is enough for layout to leave the box alone.
+                let mut depth = 0usize;
+                let several = value.chars().any(|c| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    c == ',' && depth == 0
+                });
+                if several {
+                    style.animation_name = value.trim().to_string();
+                }
+                let parts: Vec<&str> =
+                    if several { Vec::new() } else { value.split_whitespace().collect() };
                 for (i, part) in parts.iter().enumerate() {
                     // First non-time value is usually the name
                     if i == 0 && !part.ends_with('s') && !part.ends_with("ms") {
@@ -13661,8 +13692,11 @@ impl layout_ctx::LayoutCtx {
                                     rustkit_css::AnimationPlayState::Running
                             }
                             _ => {
-                                // Could be timing function or name
-                                if i == 0 || style.animation_name.is_empty() {
+                                // Could be an iteration count, timing function or name
+                                if let Some(n) = part.parse::<f32>().ok().filter(|n| *n >= 0.0) {
+                                    style.animation_iteration_count =
+                                        rustkit_css::AnimationIterationCount::Count(n);
+                                } else if i == 0 || style.animation_name.is_empty() {
                                     style.animation_name = part.to_string();
                                 } else {
                                     style.animation_timing_function = parse_timing_function(part);

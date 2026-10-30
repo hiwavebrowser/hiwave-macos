@@ -9102,14 +9102,15 @@ impl DisplayList {
         if matches!(layout_box.box_type, BoxType::Text(_)) {
             return 1.0;
         }
-        // Keyframe animations are parsed and not run. The fade-in idiom
-        // (`opacity: 0; animation: appear 1s forwards`) would leave its
-        // content invisible for good, so a box that names an animation is
-        // not faded, as no box was before opacity was painted. Remove when
-        // the engine runs animations.
+        // Keyframe animations are parsed and not run, so a box that names one
+        // paints the frame it settles on. The fade-in idiom (`opacity: 0;
+        // animation: appear 1s forwards`) would otherwise be invisible for
+        // good, and an animation that could not be settled is not faded, as
+        // no box was before opacity was painted. Remove when the engine runs
+        // animations.
         let animation = layout_box.style.animation_name.trim();
         if !animation.is_empty() && !animation.eq_ignore_ascii_case("none") {
-            return 1.0;
+            return layout_box.style.animation_settled_opacity.unwrap_or(1.0);
         }
         let opacity = layout_box.style.opacity;
         if opacity.is_nan() {
