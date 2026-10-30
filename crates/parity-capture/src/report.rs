@@ -89,6 +89,12 @@ pub struct Band {
     /// nothing: no text, no element children, no `url()` image. Skeleton rows
     /// look like this; so does an empty ad slot.
     pub empty_painted: u64,
+    /// In-flow boxes starting in the band that lie over an earlier sibling by
+    /// more than half of the smaller box.
+    pub overlapping: u64,
+    /// In-flow boxes starting in the band whose right edge passes the
+    /// viewport, outermost only.
+    pub past_right: u64,
 }
 
 /// What the capture knew when it ended.
@@ -277,7 +283,7 @@ pub fn page_report(dump: &Value, centre: Option<&Value>) -> Report {
     covering.sort_by(|a, b| b.covers_pct.partial_cmp(&a.covers_pct).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut bands: Vec<Band> = (0..BANDS)
-        .map(|i| Band { top: i as f64 * viewport.1, bottom: (i + 1) as f64 * viewport.1, text: 0, images: 0, empty_painted: 0 })
+        .map(|i| Band { top: i as f64 * viewport.1, bottom: (i + 1) as f64 * viewport.1, text: 0, images: 0, empty_painted: 0, overlapping: 0, past_right: 0 })
         .collect();
     // What is inside a fixed box is not the document's content.
     let fixed: Vec<&str> = elements
@@ -866,8 +872,8 @@ pub fn report_text(report: &Report) -> String {
     }
     for b in &report.bands {
         out.push_str(&format!(
-            "  y {:.0}..{:.0}: text {}, images {}, empty painted {}\n",
-            b.top, b.bottom, b.text, b.images, b.empty_painted
+            "  y {:.0}..{:.0}: text {}, images {}, empty painted {}, overlapping {}, past right edge {}\n",
+            b.top, b.bottom, b.text, b.images, b.empty_painted, b.overlapping, b.past_right
         ));
     }
     if !report.not_checked.is_empty() {
@@ -1320,5 +1326,222 @@ mod tests {
         assert!(report_text(&report).contains("\nNot checked:\n"));
         report.not_checked.clear();
         assert!(!report_text(&report).contains("Not checked"));
+    }
+
+    /// A dump's record, as `all_element_diagnostics` serialises it: a block
+    /// with text in it, unless a test changes that.
+    fn block(selector: &str, x: f64, y: f64, w: f64, h: f64) -> Value {
+        let tag = selector.rsplit(" > ").next().unwrap_or("").split(':').next().unwrap_or("");
+        json!({
+            "identity": {"tag": tag, "selector": selector, "classes": []},
+            "tree": {"child_count": 0, "text_length": 40},
+            "style": {"position": "static", "display": "block"},
+            "box": {"has_box": true, "border_box": {"x": x, "y": y, "w": w, "h": h}},
+            "paint": {"clipped": false, "in_transform_layer": false, "effective_opacity": 1.0},
+        })
+    }
+
+    fn with(mut element: Value, path: &[&str], value: Value) -> Value {
+        let mut at = &mut element;
+        for key in path {
+            at = &mut at[*key];
+        }
+        *at = value;
+        element
+    }
+
+    fn dump_of(elements: Vec<Value>) -> Value {
+        json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}, "elements": elements})
+    }
+
+    fn band(report: &Report, top: f64) -> (u64, u64) {
+        let band = report.bands.iter().find(|b| b.top == top).unwrap();
+        (band.overlapping, band.past_right)
+    }
+
+    /// The top viewport has content, so no blank-band rule fires on these.
+    /// Every band below is inside the document or past its end, so R9 is
+    /// kept quiet by a text box in each.
+    fn feed(extra: Vec<Value>) -> Value {
+        let mut elements = vec![
+            block("html > body > header", 0.0, 0.0, 1280.0, 100.0),
+            block("html > body > nav", 0.0, 800.0, 1280.0, 10.0),
+            block("html > body > footer", 0.0, 1600.0, 1280.0, 10.0),
+        ];
+        elements.extend(extra);
+        dump_of(elements)
+    }
+
+    /// T9 gap 6: yahoo's footer and "Advertisement" labels painted over the
+    /// feed, and the report had no word for it.
+    #[test]
+    fn siblings_lying_over_each_other_below_the_fold_are_r12() {
+        let row = |i: usize, y: f64| block(&format!("html > body > main > div:nth-child({i})"), 0.0, y, 1200.0, 100.0);
+        // Three rows each lie over the one before; the last clears them.
+        let report = page_report(
+            &feed(vec![row(1, 1700.0), row(2, 1710.0), row(3, 1720.0), row(4, 1730.0), row(5, 1900.0)]),
+            None,
+        );
+        assert_eq!(band(&report, 1600.0), (3, 0), "{:?}", report.bands);
+        let causes: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
+        assert_eq!(causes, vec!["R12 y 1600..2400: 3 boxes overlap other content, 0 run past the right edge"]);
+        let text = report_text(&report);
+        assert!(text.contains("  y 1600..2400: text 6, images 0, empty painted 0, overlapping 3, past right edge 0\n"), "{text}");
+    }
+
+    #[test]
+    fn half_an_overlap_or_a_box_that_paints_nothing_is_no_overlap() {
+        let at = |i: usize, y: f64, h: f64| block(&format!("html > body > main > div:nth-child({i})"), 0.0, y, 1200.0, h);
+        // Exactly half of the smaller box, and only touching.
+        let half = page_report(&feed(vec![at(1, 900.0, 100.0), at(2, 950.0, 100.0), at(3, 1050.0, 100.0)]), None);
+        assert_eq!(band(&half, 800.0), (0, 0), "{:?}", half.bands);
+        // Inside its parent is not a sibling overlap.
+        let parent = block("html > body > main", 0.0, 900.0, 1200.0, 300.0);
+        let child = block("html > body > main > div", 0.0, 900.0, 1200.0, 300.0);
+        assert_eq!(band(&page_report(&feed(vec![parent, child]), None), 800.0), (0, 0));
+        // No text, no image, no background: nothing to see under the sibling.
+        let empty = with(at(1, 900.0, 100.0), &["tree", "text_length"], json!(0));
+        assert_eq!(band(&page_report(&feed(vec![empty.clone(), at(2, 900.0, 100.0)]), None), 800.0), (0, 0));
+        // A background counts as paint.
+        let tinted = with(empty, &["style", "background-color"], json!("rgb(1, 2, 3)"));
+        assert_eq!(band(&page_report(&feed(vec![tinted, at(2, 900.0, 100.0)]), None), 800.0), (1, 0));
+    }
+
+    /// Stacked slides, a tooltip, a wrapped link's union rect: boxes whose
+    /// layout rect does not say where they paint, or that overlap on purpose.
+    #[test]
+    fn out_of_flow_clipped_inline_and_transformed_boxes_are_not_counted() {
+        let pair = |other: Value| {
+            let first = block("html > body > main > div:nth-child(1)", 0.0, 900.0, 1200.0, 100.0);
+            band(&page_report(&feed(vec![first, other]), None), 800.0)
+        };
+        let second = || block("html > body > main > div:nth-child(2)", 0.0, 900.0, 1200.0, 100.0);
+        assert_eq!(pair(second()), (1, 0), "the control overlaps");
+        for position in ["absolute", "fixed", "sticky"] {
+            assert_eq!(pair(with(second(), &["style", "position"], json!(position))), (0, 0), "{position}");
+        }
+        assert_eq!(pair(with(second(), &["paint", "clipped"], json!(true))), (0, 0), "clipped");
+        assert_eq!(pair(with(second(), &["paint", "in_transform_layer"], json!(true))), (0, 0), "transformed");
+        assert_eq!(pair(with(second(), &["paint", "effective_opacity"], json!(0.0))), (0, 0), "faded by an ancestor");
+        assert_eq!(pair(with(second(), &["style", "display"], json!("inline"))), (0, 0), "inline");
+        // In-flow, but inside an out-of-flow box: not the document's flow.
+        let drawer = with(block("html > body > aside", 0.0, 900.0, 1200.0, 100.0), &["style", "position"], json!("absolute"));
+        let inside = |i: usize| block(&format!("html > body > aside > div:nth-child({i})"), 0.0, 900.0, 1200.0, 100.0);
+        assert_eq!(band(&page_report(&feed(vec![drawer, inside(1), inside(2)]), None), 800.0), (0, 0));
+    }
+
+    /// T9 gap 6: hero and row content ran past the right edge. A wide box's
+    /// children are one fact, and a carousel's clipped slides are not one.
+    #[test]
+    fn boxes_past_the_right_edge_count_outermost_and_unclipped() {
+        let wide = |i: usize| block(&format!("html > body > main > section:nth-child({i})"), 100.0, 900.0 + i as f64 * 200.0, 1300.0, 100.0);
+        let inner = block("html > body > main > section:nth-child(1) > div", 100.0, 1100.0, 1300.0, 50.0);
+        let slide = with(block("html > body > main > ul > li", 1000.0, 1500.0, 400.0, 50.0), &["paint", "clipped"], json!(true));
+        let fits = block("html > body > main > section:nth-child(9)", 0.0, 1550.0, 1280.0, 50.0);
+        let report = page_report(&feed(vec![wide(1), inner, wide(2), wide(3), slide, fits]), None);
+        assert_eq!(band(&report, 800.0), (0, 3), "{:?}", report.bands);
+        let causes: Vec<String> = report.ranked.iter().map(|c| format!("{} {}", c.rule, c.line)).collect();
+        assert_eq!(causes, vec!["R12 y 800..1600: 0 boxes overlap other content, 3 run past the right edge"]);
+        // A body wider than the viewport does not hide the boxes in it.
+        let body = block("html > body", 0.0, 0.0, 1400.0, 2000.0);
+        let child = block("html > body > div", 0.0, 900.0, 1400.0, 100.0);
+        assert_eq!(band(&page_report(&dump_of(vec![body, child]), None), 800.0), (0, 1));
+    }
+
+    #[test]
+    fn a_few_stray_boxes_do_not_fire_r12_but_the_facts_count_them() {
+        let row = |i: usize| block(&format!("html > body > main > div:nth-child({i})"), 0.0, 900.0, 1200.0, 100.0);
+        let report = page_report(&feed(vec![row(1), row(2), row(3)]), None);
+        assert_eq!(band(&report, 800.0), (2, 0), "{:?}", report.bands);
+        assert!(report.ranked.is_empty(), "{:?}", report.ranked);
+    }
+
+    /// R12 follows R11 (the plan's order) and an own-site error follows both.
+    #[test]
+    fn overlap_ranks_after_placeholders_and_before_an_own_site_error() {
+        let mut report = page_report(&json!({"page": {"url": "https://www.x.test/", "viewport": [1280.0, 800.0]}}), None);
+        report.ranked = vec![
+            Cause { rule: "R12", line: "overlap".to_string() },
+            Cause { rule: "R11", line: "placeholders".to_string() },
+        ];
+        let records = vec![
+            json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"}),
+            json!({"t_ms": 1.0, "type": "console", "level": "error", "message": "<Error message len=1>",
+                   "error_stack": "    at f (https://www.x.test/app.js:1:2)"}),
+        ];
+        apply_events(&mut report, &records, CaptureFacts::default());
+        let order: Vec<&str> = report.ranked.iter().take(3).map(|c| c.rule).collect();
+        assert_eq!(order, ["R11", "R12", "R5"], "{:?}", report.ranked);
+    }
+
+    fn logged_string(t: f64, location: Value, stack: Value) -> Value {
+        json!({"t_ms": t, "type": "console", "level": "error", "message": "<string len=161>",
+               "location": location, "stack": stack, "error_stack": null})
+    }
+
+    fn r5(records: &[Value]) -> Vec<String> {
+        lines(records).into_iter().filter(|l| l.starts_with("R5 ")).collect()
+    }
+
+    /// T9 gap 7: yahoo's layout chunk logged `<string len=161>` at 23.9 s and
+    /// R5 never showed it, because it reads only records with `error_stack`.
+    /// Named by the script that logged it; never the text.
+    #[test]
+    fn an_own_site_string_console_error_is_r5_named_by_its_script() {
+        let nav = json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"});
+        let at = |url: &str, line: u32| json!({"url": url, "line": line, "column": 9});
+        let records = vec![
+            nav.clone(),
+            json!({"t_ms": 10.0, "type": "request", "id": 1, "resource_type": "fetch", "url": "https://www.x.test/a"}),
+            logged_string(23900.0, at("https://www.x.test/layout.js", 3), json!("    at https://www.x.test/layout.js:3:9")),
+            logged_string(24000.0, at("https://www.x.test/layout.js", 3), Value::Null),
+            logged_string(24100.0, at("https://ads.y.test/a.js", 1), Value::Null),
+        ];
+        assert_eq!(
+            r5(&records),
+            vec!["R5 the page's own script: logged string in https://www.x.test/layout.js:3:9 (x2); at t=23.9 s; 1 fetch/XHR to www.x.test before, 0 after"]
+        );
+        // The page's inline script is the page's own.
+        assert_eq!(
+            r5(&[nav.clone(), logged_string(5.0, at("inline#3", 1), Value::Null)]),
+            vec!["R5 the page's own script: logged string in inline#3:1:9; at t=0.0 s; 0 fetch/XHR to www.x.test before, 0 after"]
+        );
+        // No location (eval, an `on*` attribute): the first caller frame; no
+        // frame either: nothing to name it by.
+        assert_eq!(
+            r5(&[nav.clone(), logged_string(5.0, Value::Null, json!("    at f (https://www.x.test/b.js:7:1)\n    at https://www.y.test/c.js:1:1"))]),
+            vec!["R5 the page's own script: logged string in https://www.x.test/b.js:7:1; at t=0.0 s; 0 fetch/XHR to www.x.test before, 0 after"]
+        );
+        assert_eq!(r5(&[nav.clone(), logged_string(5.0, Value::Null, Value::Null)]), Vec::<String>::new());
+        // Text never reaches the line on a run that kept it, nor do warnings count.
+        let kept = json!({"t_ms": 5.0, "type": "console", "level": "error", "message": "SECRET text",
+                          "location": at("https://www.x.test/a.js", 1)});
+        assert_eq!(r5(&[nav.clone(), kept]), Vec::<String>::new());
+        let warning = with(logged_string(5.0, at("https://www.x.test/a.js", 1), Value::Null), &["level"], json!("warn"));
+        assert_eq!(r5(&[nav.clone(), warning]), Vec::<String>::new());
+        // A later string argument is still a string call.
+        let second = with(logged_string(5.0, at("https://www.x.test/a.js", 1), Value::Null), &["message"], json!("<number> <string len=3>"));
+        assert_eq!(r5(&[nav, second]).len(), 1);
+    }
+
+    /// R5 prints three lines. A chatty logger must not push a real error off.
+    #[test]
+    fn own_site_strings_do_not_push_an_own_site_error_off_the_list() {
+        let at = |line: u32| json!({"url": "https://www.x.test/a.js", "line": line, "column": 1});
+        let mut records = vec![json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"})];
+        for line in 1..=3 {
+            records.push(logged_string(line as f64, at(line), Value::Null));
+        }
+        records.push(json!({"t_ms": 900.0, "type": "console", "level": "error", "message": "<Error message len=1>",
+                            "error_stack": "    at f (https://www.x.test/app.js:1:2)"}));
+        records.push(json!({"t_ms": 950.0, "type": "script_error", "name": "TypeError", "message": null,
+                            "location": {"url": "https://www.x.test/b.js", "line": 1, "column": 1},
+                            "unhandled_rejection": false, "script": "https://www.x.test/b.js", "value": "error"}));
+        let all = r5(&records);
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert!(all[0].contains("logged string") == false, "{all:?}");
+        assert!(all.iter().any(|l| l.contains("uncaught TypeError")), "{all:?}");
+        assert!(all.iter().any(|l| l.contains("logged Error thrown")), "{all:?}");
+        assert!(all[2].contains("logged string"), "{all:?}");
     }
 }
