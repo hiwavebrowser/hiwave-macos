@@ -3813,6 +3813,41 @@ mod tests {
         assert_eq!(fill_rects(&doc.render(0.0, 0.0, 10.0, 10.0)), vec![(0.0, 0.0, 10.0, 10.0, (0, 255, 0))]);
     }
 
+    /// #832 RD4 companion for stroke: `resolve_paint` only upgrades fill
+    /// gradients, so stroke `url()` fallbacks are the only path that keeps
+    /// stroke-only icons visible when the paint server is missing.
+    #[test]
+    fn a_stroke_naming_a_missing_server_paints_its_fallback() {
+        let stroke_rects = |commands: &[DisplayCommand]| -> Vec<(f32, f32, f32, f32, (u8, u8, u8))> {
+            commands
+                .iter()
+                .filter_map(|c| match c {
+                    DisplayCommand::StrokeRect { rect, color, .. } => {
+                        Some((rect.x, rect.y, rect.width, rect.height, (color.r, color.g, color.b)))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let render = |stroke: &str| {
+            let doc = SvgDocument::parse(&format!(
+                r##"<svg width="10" height="10"><rect width="10" height="10" fill="none" stroke="{stroke}"/></svg>"##
+            ))
+            .expect("parse");
+            stroke_rects(&doc.render_with_color(0.0, 0.0, 10.0, 10.0, Color::from_rgb(0, 0, 255)))
+        };
+        assert_eq!(render("url(#nope) #ff4500"), vec![(0.0, 0.0, 10.0, 10.0, (255, 69, 0))]);
+        assert_eq!(render("url('#nope') currentColor"), vec![(0.0, 0.0, 10.0, 10.0, (0, 0, 255))]);
+        assert!(render("url(#nope) none").is_empty());
+        // Garbage after the url() is not a colour: no fallback, paints nothing.
+        assert!(render("url(#nope) notacolor").is_empty());
+        assert_eq!(
+            Paint::parse("url(#x) notacolor").resolve(Color::BLACK),
+            None,
+            "unparseable fallback must not invent a colour"
+        );
+    }
+
     /// Every `FillRect` the commands paint, as `(x, y, w, h, (r, g, b))`.
     fn fill_rects(commands: &[DisplayCommand]) -> Vec<(f32, f32, f32, f32, (u8, u8, u8))> {
         commands

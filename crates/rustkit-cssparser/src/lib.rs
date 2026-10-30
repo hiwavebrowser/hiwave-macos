@@ -1386,4 +1386,53 @@ mod tests {
         assert_eq!(ast.rules[0].declarations[0].value, "hsl(0, 100%, 50%)");
         assert_eq!(ast.rules[1].declarations[0].value, "hsl(120, 100%, 50%)");
     }
+
+    /// #833 RD3: `@keyframes` opacity ends are what settle paints from. The
+    /// engine companion is headless-gated, so default Linux CI never sees it;
+    /// pin the parser contract here.
+    #[test]
+    fn keyframes_keep_opacity_at_each_end() {
+        let frames = |css: &str| parse_stylesheet(css).expect("parse").keyframes;
+        assert_eq!(
+            frames("@keyframes fade { from { opacity: 0 } to { opacity: 1 } }"),
+            vec![KeyframesAst {
+                name: "fade".into(),
+                first: Some(0.0),
+                last: Some(1.0),
+            }]
+        );
+        assert_eq!(
+            frames("@keyframes p { 0% { opacity: 20% } 100% { opacity: .5 } }"),
+            vec![KeyframesAst {
+                name: "p".into(),
+                first: Some(0.2),
+                last: Some(0.5),
+            }]
+        );
+        // `!important` in a keyframe is invalid and ignored; an end that
+        // only had that declaration stays unset.
+        assert_eq!(
+            frames("@keyframes i { from { opacity: 0 !important } to { opacity: 1 } }"),
+            vec![KeyframesAst {
+                name: "i".into(),
+                first: None,
+                last: Some(1.0),
+            }]
+        );
+        // `var()` cannot be read: the `?` on the parse drops the whole
+        // `@keyframes` (as good as absent), so settle leaves the box at
+        // full opacity rather than guess.
+        assert!(
+            frames("@keyframes v { from { opacity: var(--o) } to { opacity: var(--o) } }").is_empty(),
+            "unreadable opacity must drop the rule"
+        );
+        assert_eq!(
+            frames("@-webkit-keyframes w { to { opacity: .25 } }"),
+            vec![KeyframesAst {
+                name: "w".into(),
+                first: None,
+                last: Some(0.25),
+            }]
+        );
+    }
 }
