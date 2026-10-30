@@ -385,6 +385,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod flex_item_paint_order_tests;
+#[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
 #[cfg(test)]
 mod content_string_tests;
@@ -398,6 +400,10 @@ mod match_media_tests;
 mod computed_content_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
+#[cfg(test)]
+mod pseudo_display_none_tests;
+#[cfg(test)]
+mod positioned_paint_order_tests;
 #[cfg(test)]
 mod abspos_percent_height_image_tests;
 #[cfg(test)]
@@ -10993,6 +10999,12 @@ impl Engine {
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
         // Only create pseudo-element if content property is set
         let content = pseudo_style.content.as_ref()?;
+        // `display: none` generates no box (CSS Display 3 §2.5). It used to
+        // fall to the Block arm below, and an abspos one painted (reddit's
+        // interstitial disc over its logo).
+        if pseudo_style.display == rustkit_css::Display::None {
+            return None;
+        }
 
         // The box type follows `display`, as for elements. An always-Inline
         // pseudo put `::before { content:""; display:block; height:0;
@@ -33927,6 +33939,41 @@ window.addEventListener('resize', function () {
         assert_eq!(seen, r#"String("200x100,resize:640x480")"#);
     }
 
+    /// HTML §8.1.8.2.1: `<body onload>` and `<body onresize>` are the
+    /// Window's handlers (BW1). `load` fires at the Window only, so the body's
+    /// attribute must be compiled into the Window's slot for it to run at
+    /// all; `document.body.onresize = f` is `window.onresize = f` and runs on
+    /// a resize of the view.
+    #[test]
+    fn body_onload_and_onresize_are_the_windows_handlers() {
+        let html = r#"<html><head><script>
+var seen = [];
+</script></head><body onload="seen.push('load:' + (this === window) + ':' + document.readyState)"
+    onresize="seen.push('attr-resize:' + window.innerWidth)">hi</body></html>"#;
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 200, height: 100 })
+            .expect("view");
+        engine.load_html(view, html).expect("load");
+
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete")"#);
+
+        engine
+            .execute_script(
+                view,
+                "document.body.onresize = function () { seen.push('resize:' + window.innerWidth + ':' + (this === window)); }; \
+                 window.onresize === document.body.onresize",
+            )
+            .map(|v| assert_eq!(v, "Boolean(true)"))
+            .unwrap();
+        engine
+            .resize_view(view, Bounds { x: 0, y: 0, width: 640, height: 480 })
+            .expect("resize");
+        let seen = engine.execute_script(view, "seen.join(',')").unwrap();
+        assert_eq!(seen, r#"String("load:true:complete,resize:640:true")"#);
+    }
+
     #[test]
     fn page_scripts_run_in_order_with_lifecycle_events_and_timers() {
         let page = r#"<html><head>
@@ -35335,18 +35382,30 @@ impl AncestorCompound {
     /// parts too where the ancestor carries its attributes.
     fn matches_ancestor(&self, ancestor: &AncestorKey) -> bool {
         let (tag, classes, id, attributes) = ancestor;
-        if !self.matches(tag, classes, id.as_ref()) {
+        self.matches_carried(tag, classes, id.as_ref(), attributes.as_deref())
+    }
+
+    /// [`Self::matches_ancestor`] for an element known by its parts:
+    /// `attributes` is `None` where they are not carried, and then the
+    /// attribute and `:not()` parts stay permissive.
+    fn matches_carried(
+        &self,
+        tag: &str,
+        classes: &[String],
+        id: Option<&String>,
+        attributes: Option<&HashMap<String, String>>,
+    ) -> bool {
+        if !self.matches(tag, classes, id) {
             return false;
         }
-        let Some(attributes) = attributes.as_deref() else {
-            return !self.excluded_by_relational_not(tag, classes, id.as_ref());
+        let Some(attributes) = attributes else {
+            return !self.excluded_by_relational_not(tag, classes, id);
         };
         self.attrs.iter().all(|a| SelectorMatcher.match_attribute_selector(a, attributes))
-            && !self.none_of.iter().any(|n| n.matches_ancestor(ancestor))
-            && self
-                .any_of
-                .iter()
-                .all(|alts| alts.undecidable() || alts.compounds.iter().any(|a| a.matches_ancestor(ancestor)))
+            && !self.none_of.iter().any(|n| n.matches_carried(tag, classes, id, Some(attributes)))
+            && self.any_of.iter().all(|alts| {
+                alts.undecidable() || alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, Some(attributes)))
+            })
     }
 
     /// [`Self::matches_ancestor`] for `ancestors[idx]`, with the complex
@@ -35405,6 +35464,10 @@ impl AncestorCompound {
         if self.any_of.iter().all(|alts| !alts.undecidable()) {
             return true;
         }
+        // The compound members read the attributes and `:not()` as
+        // `matches_ancestor` does, from the carried map only; read by tag,
+        // classes and id alone, `[data-theme="dark"]` matched every element.
+        let carried = attributes;
         let synthesized;
         let attributes = match attributes {
             Some(attributes) => attributes,
@@ -35414,7 +35477,7 @@ impl AncestorCompound {
             }
         };
         self.any_of.iter().filter(|alts| alts.undecidable()).all(|alts| {
-            alts.compounds.iter().any(|a| a.matches(tag, classes, id))
+            alts.compounds.iter().any(|a| a.matches_carried(tag, classes, id, carried))
                 || alts.complex.iter().any(|p| {
                     SelectorMatcher.selector_matches_prepared(p, tag, attributes, chain, &[], SiblingContext::SOLE)
                 })

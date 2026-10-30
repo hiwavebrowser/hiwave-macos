@@ -118,6 +118,58 @@ fn a_live_request_runs_and_is_recorded_without_the_page_polling_it() {
 }
 
 #[test]
+fn the_slot_ticket_is_taken_on_the_page_thread_before_any_worker_runs() {
+    // T8: `start_live` reserves (budget, shape, origin queue place) on the
+    // page thread. A request over the page's budget is refused and recorded
+    // before `start_live` returns: the failure is there at once, with no
+    // wait, and the page side is already answered. On T7a's head the
+    // refusal ran in the task, on a `rustkit-net` thread.
+    use std::future::Future as _;
+    let mut rig = rig();
+    rig.policy = Arc::new(FetchPolicy::with_limits(
+        Url::parse(&format!("http://127.0.0.1:{}/", rig.port)).unwrap(),
+        None,
+        rustkit_net::policy::FetchLimits { max_total_requests: 1, ..Default::default() },
+    ));
+    let first = rig.start(1, "/hello", 0);
+    let mut second = rig.start(2, "/hello", 0);
+    let failed: Vec<u64> = rig
+        .records()
+        .iter()
+        .filter_map(|r| match r.event {
+            InspectorEvent::Failure { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![2], "the over-budget request is refused on the page thread: {:?}", rig.records());
+    let waker = std::task::Waker::noop();
+    let polled = second.as_mut().poll(&mut std::task::Context::from_waker(waker));
+    assert!(matches!(polled, std::task::Poll::Ready((2, NetDelivery::Error(_)))), "answered at once");
+    let (_, outcome) = rig.rt.block_on(first);
+    assert!(matches!(outcome, NetDelivery::Response { status: 200, .. }), "{outcome:?}");
+}
+
+#[test]
+fn answers_that_arrive_while_the_page_is_blocked_are_delivered_in_start_order() {
+    // T7 test 8 (carried to T8): three fetches answered in reverse (300,
+    // 100, 0 ms) while the page is blocked for 500 ms; the page's next turn
+    // takes all three, in the order the page started them, not the order
+    // their bytes arrived on the `rustkit-net` workers.
+    let rig = rig();
+    let mut in_flight: Vec<LiveRequest> =
+        vec![rig.start(1, "/a?delay=300", 0), rig.start(2, "/b?delay=100", 0), rig.start(3, "/c?delay=0", 0)];
+    assert!(
+        rig.wait_for(Duration::from_secs(5), |rig| rig.terminals().iter().filter(|(_, n)| *n == 1).count() == 3),
+        "not all three answered while the page was blocked: {:?}",
+        rig.terminals()
+    );
+    let done = rig.rt.block_on(crate::script_net::settle_live(&mut in_flight, Duration::from_millis(50)));
+    let ids: Vec<u64> = done.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![1, 2, 3], "one turn delivers every ready answer in start order");
+    assert!(in_flight.is_empty());
+}
+
+#[test]
 fn abort_against_completion_leaves_exactly_one_terminal_record_per_request() {
     // T7 test 4: dropping the page side races the task finishing. Either
     // way there is one response or one cancel, never both, never none.
@@ -244,6 +296,18 @@ fn the_kill_switch_and_an_unlistened_view_keep_requests_working() {
     let (_, outcome) = quiet.rt.block_on(quiet.start(2, "/hello", 0));
     assert!(matches!(outcome, NetDelivery::Response { status: 200, .. }), "{outcome:?}");
     assert!(quiet.records().is_empty(), "{:?}", quiet.records());
+}
+
+#[test]
+fn the_worker_count_is_one_to_eight_and_two_by_default() {
+    // T8: `HIWAVE_NET_WORKERS`; `1` is T7a's single thread, for the A/B.
+    use crate::script_net::net_workers_switch;
+    for (value, n) in [(None, 2), (Some(""), 2), (Some("1"), 1), (Some("2"), 2), (Some(" 4 "), 4), (Some("8"), 8)] {
+        assert_eq!(net_workers_switch(value), n, "{value:?}");
+    }
+    for bad in ["0", "9", "-1", "two"] {
+        assert_eq!(net_workers_switch(Some(bad)), 2, "{bad}");
+    }
 }
 
 #[test]

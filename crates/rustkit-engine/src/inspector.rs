@@ -791,6 +791,32 @@ impl Inspector {
         (snapshot, state.doc)
     }
 
+    /// The current document's network records (request, response, failure)
+    /// and that document, read under one lock. Clones only those, not the
+    /// whole ring (up to 2048 records, mostly console) as
+    /// [`snapshot_and_doc`](Self::snapshot_and_doc) does (T8).
+    pub fn network_for_current_doc(&self) -> (InspectorSnapshot, u32) {
+        let state = self.state();
+        let doc = state.doc;
+        let snapshot = InspectorSnapshot {
+            records: state
+                .records
+                .iter()
+                .filter(|r| {
+                    r.doc == doc
+                        && matches!(
+                            r.event,
+                            InspectorEvent::Request { .. } | InspectorEvent::Response { .. } | InspectorEvent::Failure { .. }
+                        )
+                })
+                .cloned()
+                .collect(),
+            next_seq: state.next_seq,
+            dropped: state.dropped,
+        };
+        (snapshot, doc)
+    }
+
     /// The current page's unsupported members, in the order first seen.
     pub fn unsupported_apis(&self) -> Vec<UnsupportedApiCount> {
         self.state().unsupported.clone()
@@ -1718,6 +1744,12 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
                 // The parser's path: `\` already reads as `/` for a special
                 // scheme, and tabs and newlines are gone.
                 let path = drop_path_params(clean.path());
+                // A host-less path that now starts with `//` (`foo:/;x/a@b`)
+                // would serialise as an authority (`foo://a@b`); url 2.5.7's
+                // `set_path` adds no `/.`, so it is written here (T8).
+                if clean.host().is_none() && path.starts_with("//") {
+                    return format!("{}:/.{path}", clean.scheme());
+                }
                 clean.set_path(&path);
             }
             clean.to_string()

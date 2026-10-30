@@ -130,6 +130,59 @@ fn each_combinator_inside_is_where_and_not_reads_the_chain_and_the_siblings() {
     );
 }
 
+/// Left of a combinator, an `:is()` that has a complex member is decided
+/// against the ancestor's chain (`complex_alternatives_hold`), and so are
+/// its compound members. Those were read by tag, classes and id only, so a
+/// compound member that is only an attribute selector or a `:not()` matched
+/// every ancestor (Castor A1 audit of #822): the theme toggle
+/// `:is([data-theme="dark"], .dark *) > .child` painted the dark theme
+/// under `data-theme="light"`.
+const THEMES: &str = r#"<!doctype html>
+<html><head><style>
+nav { display: none; }
+:is([data-theme="dark"], .dark *) > .k { display: block; }
+:is([data-theme="dark"], .dark *) .d { display: block; }
+:is(:not(.light), .dark *) > .n { display: block; }
+:is(:is([data-x]), .dark *) > .q { display: block; }
+</style></head><body>
+<div data-theme="light" class="light">
+  <nav class="k">k-light</nav><div><nav class="d">d-light</nav></div><nav class="n">n-light</nav><nav class="q">q-light</nav>
+</div>
+<div data-theme="dark" data-x>
+  <nav class="k">k-dark</nav><div><nav class="d">d-dark</nav></div><nav class="n">n-dark</nav><nav class="q">q-dark</nav>
+</div>
+<div class="dark"><div class="light">
+  <nav class="k">k-under-dark</nav><nav class="n">n-under-dark</nav>
+</div></div>
+</body></html>"#;
+
+#[test]
+fn a_compound_member_beside_a_complex_one_reads_attributes_and_not() {
+    // `d-dark`: the descendant combinator reaches `[data-theme="dark"]` past
+    // the inner div. `n-dark`: the parent is not `.light`. `*-under-dark`:
+    // the `.dark *` member holds for the `.light` parent.
+    assert_eq!(shown(THEMES).join(" "), "k-dark d-dark n-dark q-dark k-under-dark n-under-dark");
+}
+
+#[test]
+fn a_theme_attribute_flipped_by_script_restyles_the_is_member() {
+    let page = r#"<!doctype html>
+<html><head><style>
+nav { display: none; }
+:is([data-theme="dark"], .dark *) > .k { display: block; }
+</style></head><body>
+<div id="t" data-theme="light"><nav class="k">k</nav></div>
+</body></html>"#;
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
+    engine.load_html(view, page).expect("load_html");
+    assert_eq!(shown_in_view(&engine, view), "");
+    engine.execute_script(view, "document.getElementById('t').dataset.theme = 'dark'").expect("dark");
+    assert_eq!(shown_in_view(&engine, view), "k", "data-theme=dark on the parent shows it");
+    engine.execute_script(view, "document.getElementById('t').dataset.theme = 'light'").expect("light");
+    assert_eq!(shown_in_view(&engine, view), "", "and light hides it again");
+}
+
 #[test]
 fn tailwind_dark_variant_follows_the_dark_class_on_html_through_restyles() {
     // Tailwind v4 as served: `.dark\:bg-black:is(.dark *)`, the escape as
