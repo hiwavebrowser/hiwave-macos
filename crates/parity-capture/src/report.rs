@@ -1660,6 +1660,22 @@ mod tests {
         assert_eq!(r5(&[nav, second]).len(), 1);
     }
 
+    /// yahoo at 8f0488c6: a script on s.yimg.com wraps `console.error`, so
+    /// every call is placed in the wrapper. The own-site frame under it names
+    /// the logger. A consent script's string under the same wrapper stays out.
+    #[test]
+    fn a_console_error_wrapper_does_not_hide_the_own_site_script_under_it() {
+        let nav = json!({"t_ms": 0.0, "type": "navigation_start", "url": "https://www.x.test/"});
+        let wrapper = json!({"url": "https://s.y.test/rum.js", "line": 1, "column": 2});
+        let own = "    at w (https://s.y.test/rum.js:1:2)\n    at f (https://www.x.test/layout.js:3:9)\n    at https://www.x.test/app.js:1:1";
+        assert_eq!(
+            r5(&[nav.clone(), logged_string(5.0, wrapper.clone(), json!(own))]),
+            vec!["R5 the page's own script: logged string in https://www.x.test/layout.js:3:9; at t=0.0 s; 0 fetch/XHR to www.x.test before, 0 after"]
+        );
+        let consent = "    at w (https://s.y.test/rum.js:1:2)\n    at c (https://consent.z.test/cmp.js:8:8)";
+        assert_eq!(r5(&[nav, logged_string(5.0, wrapper, json!(consent))]), Vec::<String>::new());
+    }
+
     /// R5 prints three lines. A chatty logger must not push a real error off.
     #[test]
     fn own_site_strings_do_not_push_an_own_site_error_off_the_list() {
