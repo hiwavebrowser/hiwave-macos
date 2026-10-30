@@ -30,7 +30,7 @@ const MIN_EMPTY_PAINTED: u64 = 8;
 /// This many overlapping boxes, or boxes past the right edge, in a band fire
 /// R12; fewer are a stray badge.
 const MIN_MISPLACED: u64 = 3;
-/// A box lying over this share of the smaller of it and a sibling overlaps it.
+/// A box lying over this share of the smaller of it and another overlaps it.
 const OVERLAP_SHARE: f64 = 0.5;
 /// A layout this close to the capture's end means the page was still moving.
 const SETTLED_MS: f64 = 2000.0;
@@ -94,8 +94,8 @@ pub struct Band {
     /// nothing: no text, no element children, no `url()` image. Skeleton rows
     /// look like this; so does an empty ad slot.
     pub empty_painted: u64,
-    /// In-flow boxes starting in the band that lie over an earlier sibling by
-    /// more than half of the smaller box.
+    /// In-flow text leaves and images starting in the band that lie over an
+    /// earlier one, anywhere in the tree, by more than half of the smaller box.
     pub overlapping: u64,
     /// In-flow boxes starting in the band whose right edge passes the
     /// viewport, outermost only.
@@ -233,8 +233,11 @@ fn parent_of(path: &str) -> Option<&str> {
     path.rsplit_once(" > ").map(|(parent, _)| parent)
 }
 
-/// Fill each band's `overlapping` and `past_right` from the layout rects. The
-/// later sibling is the one counted: it is the one on top.
+/// Fill each band's `overlapping` and `past_right` from the layout rects.
+/// Overlap is between content leaves anywhere in the tree, not siblings: on
+/// yahoo no two siblings overlap, its columns' content runs out of their boxes
+/// and over each other. A sibling test read 0 there and fired on wikipedia. The
+/// later leaf in document order is the one counted: it is the one on top.
 fn count_misplaced(elements: &[&Value], viewport_width: f64, scroll_y: f64, bands: &mut [Band]) {
     let out_of_flow: Vec<&str> = elements
         .iter()
@@ -243,21 +246,29 @@ fn count_misplaced(elements: &[&Value], viewport_width: f64, scroll_y: f64, band
         .collect();
     let past_right = |e: &Value| rect(e).is_some_and(|(x, _, w, _)| x + w > viewport_width + 1.0);
     let by_path: std::collections::HashMap<&str, &Value> = elements.iter().map(|e| (structural(e), *e)).collect();
-    let mut earlier: std::collections::HashMap<&str, Vec<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
+    let mut earlier: Vec<(&str, (f64, f64, f64, f64))> = Vec::new();
     for element in elements {
         let path = structural(element);
         if !paints_in_flow(element) || out_of_flow.iter().any(|o| is_within(path, o)) {
             continue;
         }
         let Some(me) = rect(element).filter(|r| r.2 > 0.0 && r.3 > 0.0) else { continue };
+        let leaf = is_image(element)
+            || (element["tree"]["text_length"].as_u64().unwrap_or(0) > 0 && element["tree"]["child_count"].as_u64() == Some(0));
+        let over = leaf
+            && earlier.iter().any(|(other, o)| {
+                let w = (me.0 + me.2).min(o.0 + o.2) - me.0.max(o.0);
+                let h = (me.1 + me.3).min(o.1 + o.3) - me.1.max(o.1);
+                w > 0.0
+                    && h > 0.0
+                    && w * h > OVERLAP_SHARE * (me.2 * me.3).min(o.2 * o.3)
+                    && !is_within(path, other)
+                    && !is_within(other, path)
+            });
+        if leaf {
+            earlier.push((path, me));
+        }
         let parent = parent_of(path).unwrap_or("");
-        let siblings = earlier.entry(parent).or_default();
-        let over = siblings.iter().any(|o| {
-            let w = (me.0 + me.2).min(o.0 + o.2) - me.0.max(o.0);
-            let h = (me.1 + me.3).min(o.1 + o.3) - me.1.max(o.1);
-            w > 0.0 && h > 0.0 && w * h > OVERLAP_SHARE * (me.2 * me.3).min(o.2 * o.3)
-        });
-        siblings.push(me);
         let top = me.1 + scroll_y;
         let Some(band) = bands.iter_mut().find(|b| top >= b.top && top < b.bottom) else { continue };
         band.overlapping += u64::from(over);
