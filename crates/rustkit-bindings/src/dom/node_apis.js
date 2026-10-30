@@ -29,7 +29,8 @@
     }
 
     // ---- Namespaces (DOM §4.9): an element's namespaceURI is the one it
-    // was created in; parsed and createElement elements are HTML.
+    // was created in; createElement elements are HTML, parsed ones as the
+    // parser placed them.
     getter(Element.prototype, 'namespaceURI', function () {
         var s = I.slotOf(this); return NS(s.gen, 'of', s.id);
     });

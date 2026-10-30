@@ -741,7 +741,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
-                .parse_fragment_in(html, tag_name, is_in_html_content(&node))
+                .parse_fragment_in(html, tag_name, is_in_html_content(&node), node.holds_svg_content())
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -1091,9 +1091,9 @@ fn is_html_element(node: &Node) -> bool {
         if namespace.is_empty() || namespace == "http://www.w3.org/1999/xhtml")
 }
 
-/// Is `node` an HTML element for the fragment parser? The tree builder gives
-/// every parsed element the HTML namespace, so an element inside `<svg>` or
-/// `<math>` (and not under a `foreignObject`) is foreign by its ancestors.
+/// Is `node` an HTML element for the fragment parser? The parser gives an
+/// element in `<math>` the HTML namespace, so one there (and not under a
+/// `foreignObject`) is foreign by its ancestors.
 fn is_in_html_content(node: &Node) -> bool {
     if !is_html_element(node) {
         return false;
@@ -2573,7 +2573,9 @@ const WRAPPERS_JS: &str = r#"
         // The fragment parses in the context of the element it lands in
         // (<html> parses as <body>), through a detached holder of that name.
         var ctx = spot[0].localName === 'html' ? 'body' : spot[0].localName;
-        var holder = create('element', ctx, 'insertAdjacentHTML');
+        var holder = spot[0].namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(spot[0].namespaceURI, ctx)
+            : create('element', ctx, 'insertAdjacentHTML');
         holder.innerHTML = String(html);
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
             spot[0].insertBefore(n, spot[1]);
