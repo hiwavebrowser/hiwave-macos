@@ -537,9 +537,11 @@ fn site_of_error(key: &str) -> Option<String> {
 }
 
 /// The error name in a console message: the shape `<TypeError message len=46>`
-/// or the kept text `TypeError: ...`.
+/// or the kept text `TypeError: ...`. The error need not be the first
+/// argument: `console.error("text", err)` is `<string len=4> <TypeError ...>`.
 fn error_name(message: &str) -> &str {
-    let name = message.trim_start_matches('<');
+    let shaped = message.find(" message len=").and_then(|end| message[..end].rfind('<').map(|start| &message[start..]));
+    let name = shaped.unwrap_or(message).trim_start_matches('<');
     let end = name.find([' ', ':', '>']).unwrap_or(name.len());
     if end == 0 { "error" } else { &name[..end] }
 }
