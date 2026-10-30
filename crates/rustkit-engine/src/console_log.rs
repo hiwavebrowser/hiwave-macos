@@ -498,6 +498,33 @@ mod tests {
         }
     }
 
+    /// CA1 item 5: test threads ran with one process-wide alias map, so a
+    /// label another test recorded (`inserted#1` from a different page) won
+    /// the reverse lookup and a parallel run read its URL.
+    #[test]
+    fn a_label_recorded_on_another_test_thread_does_not_resolve_here() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90001", "https://mine.example/a.js");
+        std::thread::spawn(|| {
+            force_for_test(Some(true));
+            alias("inserted#90001", "https://theirs.example/b.js");
+            force_for_test(None);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(resolve("inserted#90001"), "https://mine.example/a.js");
+    }
+
+    #[test]
+    fn forcing_the_switch_starts_with_no_labels() {
+        let _reset = Reset;
+        force_for_test(Some(true));
+        alias("inserted#90002", "https://old.example/a.js");
+        force_for_test(Some(true));
+        assert_eq!(resolve("inserted#90002"), "inserted#90002");
+    }
+
     #[test]
     fn a_line_is_written_only_while_the_switch_is_forced_on() {
         let _reset = Reset;
