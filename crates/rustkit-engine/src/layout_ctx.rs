@@ -127,6 +127,7 @@ impl LayoutCtx {
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
             ("boxless_styles", lay.boxless_styles.try_borrow_mut().is_ok()),
+            ("pseudo_styles", lay.pseudo_styles.try_borrow_mut().is_ok()),
         ];
         free.into_iter().find(|(_, free)| !free).map(|(name, _)| name)
     }
@@ -210,6 +211,10 @@ pub(crate) struct ViewLayout {
     /// on #786). A full build replaces the map; a restyle keeps the
     /// entries it does not walk.
     pub(crate) boxless_styles: RefCell<HashMap<usize, String>>,
+    /// The cascaded `::before`/`::after` styles of this view's elements, by
+    /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
+    /// like `boxless_styles`.
+    pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
 }
 
 #[cfg(test)]

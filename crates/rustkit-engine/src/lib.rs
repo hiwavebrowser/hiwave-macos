@@ -401,6 +401,8 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
+mod computed_pseudo_tests;
+#[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
 mod author_svg_stroke_tests;
@@ -8762,7 +8764,10 @@ impl layout_ctx::LayoutCtx {
         // (`display: contents`, the root). A restyle keeps the ones it does
         // not walk.
         if RESTYLE_BUILD.with(|build| build.borrow().is_none()) {
-            self.with_building_lay(|lay| lay.boxless_styles.borrow_mut().clear());
+            self.with_building_lay(|lay| {
+                lay.boxless_styles.borrow_mut().clear();
+                lay.pseudo_styles.borrow_mut().clear();
+            });
         }
         let parse_started = cascade_timing_enabled().then(std::time::Instant::now);
 
@@ -10219,7 +10224,7 @@ impl layout_ctx::LayoutCtx {
                 }
 
                 // Check for ::before pseudo-element
-                if let Some(before_box) = memoized_pseudo_style(node.id, Pseudo::Before, || {
+                let before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -10230,7 +10235,9 @@ impl layout_ctx::LayoutCtx {
                         "::before",
                         Some(&layout_box.style),
                     )
-                })
+                });
+                self.note_pseudo_style(node.id.raw(), "::before", before_style.as_ref());
+                if let Some(before_box) = before_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
                 {
@@ -10459,7 +10466,7 @@ impl layout_ctx::LayoutCtx {
                 drop(host_scope);
 
                 // Check for ::after pseudo-element
-                if let Some(after_box) = memoized_pseudo_style(node.id, Pseudo::After, || {
+                let after_style = memoized_pseudo_style(node.id, Pseudo::After, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -10470,7 +10477,9 @@ impl layout_ctx::LayoutCtx {
                         "::after",
                         Some(&layout_box.style),
                     )
-                })
+                });
+                self.note_pseudo_style(node.id.raw(), "::after", after_style.as_ref());
+                if let Some(after_box) = after_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
                 {
@@ -13778,6 +13787,13 @@ impl layout_ctx::LayoutCtx {
                     // written, so an icon font's `"\f007"` was five
                     // characters of the fallback font.
                     style.content = Some(text);
+                } else if v.contains('(')
+                    || matches!(v, "open-quote" | "close-quote" | "no-open-quote" | "no-close-quote")
+                {
+                    // Valid, and generating nothing here (a limit of
+                    // `content_string`): it still replaces a string from a
+                    // lower-precedence rule, which used to paint.
+                    style.content = None;
                 }
             }
             // ==================== Background clip (for gradient text) ====================
@@ -18834,7 +18850,12 @@ impl Engine {
             Some(rustkit_bindings::ForcedGeometry {
                 source: Box::new(move || {
                     let _snapshot_time = time_stage(Stage::Snapshot);
-                    geometry_with_root(&snapshot_of, root_element, &styled.boxless_styles.borrow())
+                    geometry_with_root(
+                        &snapshot_of,
+                        root_element,
+                        &styled.boxless_styles.borrow(),
+                        &styled.pseudo_styles.borrow(),
+                    )
                 }),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
                 max_scroll,
@@ -21885,7 +21906,12 @@ fn publish_geometry(
         };
         let _snapshot_time = time_stage(Stage::Snapshot);
         let started = std::time::Instant::now();
-        let snapshot = geometry_with_root(&layout, root_element, &lay.boxless_styles.borrow());
+        let snapshot = geometry_with_root(
+            &layout,
+            root_element,
+            &lay.boxless_styles.borrow(),
+            &lay.pseudo_styles.borrow(),
+        );
         debug!(
             elements = snapshot.0.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -21914,11 +21940,13 @@ fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> ru
 /// `geometry_snapshot`, with the document element reported as the root box
 /// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
 /// display: contents, the root) added. A node that also produced a box
-/// keeps that box's style.
+/// keeps that box's style. `pseudos` (`ViewLayout::pseudo_styles`) join their
+/// element's lines, each row's name prefixed `::before ` or `::after `.
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
     boxless: &HashMap<usize, String>,
+    pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
@@ -21927,7 +21955,34 @@ fn geometry_with_root(
     for (node, lines) in boxless {
         snapshot.1.entry(*node).or_insert_with(|| lines.clone());
     }
+    for ((node, pseudo), style) in pseudos {
+        if let Some(lines) = snapshot.1.get_mut(node) {
+            for row in pseudo_style_lines(style).lines() {
+                lines.push_str(&format!("\n{pseudo} {row}"));
+            }
+        }
+    }
     snapshot
+}
+
+/// `computed_style_lines` for a pseudo-element's cascaded style. No box's
+/// used values are read: `width`/`height` are the declared lengths, and the
+/// rest of the box model reads 0.
+fn pseudo_style_lines(style: &ComputedStyle) -> String {
+    let declared = |l: &rustkit_css::Length| match l {
+        rustkit_css::Length::Px(p) => css_px(*p),
+        _ => "auto".to_string(),
+    };
+    let (width, height) = (declared(&style.width), declared(&style.height));
+    computed_style_lines(&LayoutBox::new(BoxType::Inline, style.clone()))
+        .lines()
+        .map(|row| match row.split_once('\t') {
+            Some(("width", _)) => format!("width\t{width}"),
+            Some(("height", _)) => format!("height\t{height}"),
+            _ => row.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl layout_ctx::LayoutCtx {
@@ -21943,6 +21998,25 @@ impl layout_ctx::LayoutCtx {
         self.with_building_lay(|lay| {
             let lines = computed_style_lines(box_);
             lay.boxless_styles.borrow_mut().insert(node, lines);
+        });
+    }
+
+    /// Remember the cascaded `::before`/`::after` style of `node` for
+    /// `getComputedStyle(el, pseudo)`, in the map of the view being built. A
+    /// `display: none` pseudo has no box to read it from, and that is the
+    /// usual shape of the breakpoint idiom. `None` drops what a restyle left.
+    fn note_pseudo_style(&self, node: usize, pseudo: &'static str, style: Option<&ComputedStyle>) {
+        self.with_building_lay(|lay| {
+            let mut styles = lay.pseudo_styles.borrow_mut();
+            match style {
+                Some(style) => {
+                    styles.insert((node, pseudo), style.clone());
+                }
+                None if !styles.is_empty() => {
+                    styles.remove(&(node, pseudo));
+                }
+                None => {}
+            }
         });
     }
 }
