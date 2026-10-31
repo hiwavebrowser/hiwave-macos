@@ -8,8 +8,8 @@
 #   ./scripts/wpt_sync.sh --check    # verify every manifest path exists locally; no network, no writes
 #   ./scripts/wpt_sync.sh --dry-run  # print what would be fetched, touch nothing
 #
-# First fetched 2026-10-31 (T14): the git steps below ran one by one on the macOS seat, whose allowlist
-# refuses this script as a whole; see trench/wpt/README.md.
+# First fetched 2026-10-31 (T14). The macOS lane seat's allowlist refuses this script as a whole, so it
+# runs the git steps by hand there; see trench/wpt/README.md.
 
 set -euo pipefail
 
