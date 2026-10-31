@@ -3854,3 +3854,43 @@ TOP20 28/60   loads 15  readable 7  looks-right 6   (scorable 27/57)
 SCORABLE 31/69 on 23 sites
 trench/realsite/runs/20261031T0908Z-quiet-dev61a478fa
 ```
+
+## 2026-10-31 13:22 — daily QUIET board (quiet), develop 546d6196
+
+**27/60 (loads 15, readable 6, looks-right 6; scorable 26/57) · full list 31/78 (loads 17, readable 7, looks-right 7; scorable 30/69)** (load at start: { 8.61 8.84 8.37 })
+
+```
+google     PASS fail  79.4% PASS   5.9% (cc   2.7%)  2/3  
+youtube    PASS fail   0.0% fail  40.1% (cc   0.0%)  1/3  
+facebook   PASS fail  58.7% PASS  12.9% (cc   0.0%)  2/3  
+instagram  fail fail   0.0% fail    -   (cc   8.1%)  0/3  blank frame (1.11% non-background)
+wikipedia  PASS PASS  96.6% PASS  14.5% (cc   0.0%)  3/3  
+lyft       PASS PASS 100.0% fail  30.0% (cc   0.0%)  2/3  
+reddit     fail fail   0.0% unst    -   (cc  31.1%)  0/3  blank frame (1.30% non-background)
+x          PASS PASS  95.3% PASS  13.7% (cc   0.0%)  3/3  
+linkedin   PASS fail    -   fail    -   (cc    -  )  1/3  
+yahoo      PASS fail  31.2% unst  41.2% (cc  21.3%)  1/3  
+bing       PASS fail  12.5% fail  71.2% (cc  10.0%)  1/3  
+walmart    PASS fail  61.7% fail  18.2% (cc   0.0%)  1/3  
+microsoft  fail fail   0.0% fail    -   (cc   0.0%)  0/3  blank frame (0.96% non-background)
+apple      PASS PASS  92.6% unst  33.4% (cc  19.3%)  2/3  
+netflix    PASS PASS 100.0% PASS  10.5% (cc   0.0%)  3/3  
+github     PASS fail  40.6% PASS   7.2% (cc   0.1%)  2/3  
+shopify    PASS PASS  93.8% unst  86.7% (cc  80.5%)  2/3  
+squarespace fail fail   0.0% fail    -   (cc   4.4%)  0/3  blank frame (1.16% non-background)
+cnn        fail fail   0.0% fail    -   (cc   0.0%)  0/3  capture exceeded 30000 ms
+weather    PASS fail  32.8% unst  34.3% (cc  24.2%)  1/3  
+chrono24   fail fail   0.0% fail    -   (cc   0.0%)  0/3  blocked:cloudflare (HTTP 403) — Failed to load URL: Navigati
+cargurus   fail fail   0.0% fail    -   (cc   0.1%)  0/3  capture exceeded 30000 ms
+autotrader PASS fail  61.5% fail  48.0% (cc  10.6%)  1/3  
+cars       fail fail   0.0% fail    -   (cc   0.5%)  0/3  blocked:cloudflare (HTTP 403) — Failed to load URL: Navigati
+bringatrailer fail fail   0.0% fail    -   (cc  11.6%)  0/3  capture exceeded 30000 ms
+simonwillison PASS PASS 100.0% PASS  11.8% (cc   0.0%)  3/3  
+------------------------------------------------------------------------------
+POINTS 31/78   loads 17  readable 7  looks-right 7   unstable: reddit, yahoo, apple, shopify, weather   oracle failed: linkedin
+BLOCKED chrono24 (cloudflare/403), cars (cloudflare/403)
+ORACLE BLOCKED linkedin (top-level document HTTP 403)
+TOP20 27/60   loads 15  readable 6  looks-right 6   (scorable 26/57)
+SCORABLE 30/69 on 23 sites
+trench/realsite/runs/20261031T1706Z-quiet-dev546d6196
+```
