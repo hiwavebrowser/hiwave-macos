@@ -407,6 +407,8 @@ mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
+mod display_inherit_apply_tests;
+#[cfg(test)]
 mod author_svg_stroke_tests;
 #[cfg(test)]
 mod pseudo_display_none_tests;
@@ -508,9 +510,13 @@ mod element_scroll_tests;
 mod transform_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
+<<<<<<< HEAD
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
+=======
+#[cfg(test)]
+>>>>>>> 506c0ac9 (test: portable pins for relative offsets, display inherit, flex shorthand)
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
