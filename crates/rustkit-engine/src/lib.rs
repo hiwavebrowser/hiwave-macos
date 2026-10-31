@@ -8994,7 +8994,7 @@ impl layout_ctx::LayoutCtx {
         if let (Some(html), Some(style)) = (document.document_element(), html_style.as_ref()) {
             let mut root = LayoutBox::new(BoxType::Block, style.clone());
             root.node_id = Some(html.id.raw());
-            self.note_boxless_style(&root);
+            self.note_boxless_style(&root, None);
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
@@ -9643,8 +9643,14 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
 
-                // Check for display: none
+                // Check for display: none. The element generates no box
+                // (and nothing under it is styled), but it is styled:
+                // `getComputedStyle` reads `none` with the rest of its
+                // cascaded values, as in Chrome.
                 if style.display == rustkit_css::Display::None {
+                    let mut styled = LayoutBox::new(BoxType::Block, style);
+                    styled.node_id = Some(node.id.raw());
+                    self.note_boxless_style(&styled, parent_style);
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
@@ -10420,7 +10426,7 @@ impl layout_ctx::LayoutCtx {
                     // is still noted: the element is styled, only unboxed.
                     let shown = !closed_details || details_summary == Some(child_index);
                     if child_box.style.display == rustkit_css::Display::Contents {
-                        self.note_boxless_style(&child_box);
+                        self.note_boxless_style(&child_box, Some(&layout_box.style));
                         if !shown {
                             continue;
                         }
@@ -10462,19 +10468,29 @@ impl layout_ctx::LayoutCtx {
 
                     if should_include && shown {
                         Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
-                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
-                        // An inline box with nothing in the flow is dropped,
-                        // and so was everything in it. What it positions out
-                        // of the flow stays: a badge in an otherwise empty
-                        // link still paints, at the link's place, and the
-                        // line hears nothing of it (#689 review, round 3).
-                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
-                            matches!(
-                                grandchild.position,
-                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
-                            )
-                        }) {
-                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                    } else {
+                        // A box the tree drops (an empty block with nothing
+                        // visible about it, an empty inline, hidden
+                        // `<details>` content) is still a styled element:
+                        // `getComputedStyle` reads its computed style, not
+                        // `none` (GCS1 lane, 2026-10-30: an empty `<div>`
+                        // read `display: none`).
+                        self.note_boxless_style(&child_box, Some(&layout_box.style));
+                        if shown && matches!(child_box.box_type, BoxType::Inline) {
+                            // An inline box with nothing in the flow is
+                            // dropped, and so was everything in it. What it
+                            // positions out of the flow stays: a badge in an
+                            // otherwise empty link still paints, at the
+                            // link's place, and the line hears nothing of it
+                            // (#689 review, round 3).
+                            for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                                matches!(
+                                    grandchild.position,
+                                    rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                                )
+                            }) {
+                                Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                            }
                         }
                     }
                 }
@@ -21980,21 +21996,28 @@ fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> ru
 
 /// `geometry_snapshot`, with the document element reported as the root box
 /// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
-/// display: contents, the root) added. A node that also produced a box
-/// keeps that box's style. `pseudos` (`ViewLayout::pseudo_styles`) join their
-/// element's lines, each row's name prefixed `::before ` or `::after `.
+/// display: contents or none, dropped empty boxes, the root) added. A node
+/// that also produced a box keeps that box's style. `pseudos`
+/// (`ViewLayout::pseudo_styles`) join their element's lines, each row's
+/// name prefixed `::before ` or `::after `.
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
-    boxless: &HashMap<usize, String>,
+    boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
     }
-    for (node, lines) in boxless {
-        snapshot.1.entry(*node).or_insert_with(|| lines.clone());
+    for (node, style) in boxless {
+        snapshot.1.entry(*node).or_insert_with(|| {
+            let mut lines = computed_style_lines(&style.box_);
+            if style.own_vars {
+                lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            }
+            lines
+        });
     }
     for ((node, pseudo), style) in pseudos {
         if let Some(lines) = snapshot.1.get_mut(node) {
@@ -22028,17 +22051,26 @@ fn pseudo_style_lines(style: &ComputedStyle) -> String {
 
 impl layout_ctx::LayoutCtx {
     /// Remember `box_`'s computed style for an element the box tree will
-    /// not keep (`display: contents`, the root), in the map of the view
-    /// being built (`ViewLayout::boxless_styles`). A later real box for the
-    /// same node wins in `geometry_with_root`. An ad-hoc build with no view
-    /// has no script to read it, and notes nothing.
-    fn note_boxless_style(&self, box_: &LayoutBox) {
+    /// not keep (`display: contents` or `none`, a dropped empty box, the
+    /// root), in the map of the view being built
+    /// (`ViewLayout::boxless_styles`), so `getComputedStyle` reads the
+    /// style and not `none`. `parent` is the parent element's style, for
+    /// the custom-property rows (`None` publishes the set). A later real
+    /// box for the same node wins in `geometry_with_root`. An ad-hoc build
+    /// with no view has no script to read it, and notes nothing.
+    fn note_boxless_style(&self, box_: &LayoutBox, parent: Option<&ComputedStyle>) {
         let Some(node) = box_.node_id else {
             return;
         };
         self.with_building_lay(|lay| {
-            let lines = computed_style_lines(box_);
-            lay.boxless_styles.borrow_mut().insert(node, lines);
+            let own_vars = parent.map_or(true, |p| {
+                !Arc::ptr_eq(&p.custom_properties, &box_.style.custom_properties)
+            });
+            let mut noted = LayoutBox::new(BoxType::Block, box_.style.clone());
+            noted.node_id = Some(node);
+            lay.boxless_styles
+                .borrow_mut()
+                .insert(node, layout_ctx::BoxlessStyle { box_: noted, own_vars });
         });
     }
 
