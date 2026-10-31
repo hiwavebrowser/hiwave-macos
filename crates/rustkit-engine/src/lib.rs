@@ -4025,53 +4025,36 @@ impl Engine {
     }
 
     /// Navigate to a fragment of the current document (HTML §7.4.2.3.3,
-    /// §7.4.6.4): scroll to the element whose id it names (the top of the
-    /// page for an empty fragment or `top`; nowhere when nothing matches),
-    /// make `target` the URL and tell script, which fires `hashchange`.
+    /// §7.4.6.4): make `target` the URL and tell script, which scrolls to
+    /// what it names (web_scroll.js) and fires `hashchange`.
     fn navigate_to_fragment(&mut self, id: EngineViewId, target: Url) {
-        let fragment = String::from_utf8_lossy(&percent_decode(target.fragment().unwrap_or_default())).into_owned();
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        let element = (!fragment.is_empty())
-            .then(|| view.document.as_ref()?.get_element_by_id(&fragment))
-            .flatten();
-        let top = match element {
-            Some(el) => view.layout.as_ref().and_then(|l| Self::box_top(l, el.id.raw())),
-            None => (fragment.is_empty() || fragment.eq_ignore_ascii_case("top")).then_some(0.0),
-        };
-        let before = view.scroll_offset;
-        if let Some(top) = top {
-            view.scroll_offset.1 = top.max(0.0).min(view.max_scroll_offset.1);
-        }
-        let scrolled = view.scroll_offset != before;
-        // Script reads the new offset from here on, `hashchange` included.
-        if let (true, Some(bindings)) = (scrolled, view.bindings.as_ref()) {
-            bindings.set_scroll_state(view.scroll_offset, view.max_scroll_offset);
-        }
-        debug!(?id, %target, offset = ?view.scroll_offset, "Navigated to a fragment");
+        debug!(?id, %target, "Navigating to a fragment");
         let script = format!("__rustkit_fragment_navigation({:?})", target.as_str());
         view.url = Some(target);
         if let Err(e) = self.execute_script(id, &script) {
             debug!(?id, ?e, "hashchange listener threw");
         }
-        // The page hears the scroll, and its observers report.
-        if scrolled {
-            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.notify_scrolled();
+    }
+
+    /// A page loaded with a fragment opens at what it names, unless the page
+    /// or the user has already moved the window.
+    fn scroll_to_loaded_fragment(&mut self, id: EngineViewId) {
+        let due = self.views.get(&id).is_some_and(|view| {
+            view.scroll_offset == (0.0, 0.0) && view.url.as_ref().is_some_and(|url| url.fragment().is_some())
+        });
+        if due {
+            if let Err(e) = self.execute_script(id, "__rustkit_scroll_to_location_fragment()") {
+                debug!(?id, ?e, "scroll to the loaded fragment threw");
             }
-            if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll)) {
-                debug!(?id, ?e, "relayout after a fragment scroll failed");
-            }
-        }
-        // The scroll is a translate at render time; nothing was laid out.
-        if let Err(e) = self.render(id) {
-            debug!(?id, ?e, "Render after a fragment navigation failed");
         }
     }
 
     /// The top border edge of the first box `node` generated, in document
     /// coordinates.
+    #[cfg(test)]
     fn box_top(b: &LayoutBox, node: usize) -> Option<f32> {
         if b.node_id == Some(node) {
             return Some(b.dimensions.border_box().y);
@@ -4590,6 +4573,7 @@ impl Engine {
             debug!(?id, nav_id, "Yielded load was cancelled as it finished");
             return Ok(());
         }
+        self.scroll_to_loaded_fragment(id);
         let view = self
             .views
             .get_mut(&id)
@@ -7398,6 +7382,7 @@ impl Engine {
             debug!(?id, %url, "Navigation cancelled as it finished");
             return Ok(());
         }
+        self.scroll_to_loaded_fragment(id);
 
         // Finish navigation
         let view = self
@@ -22405,9 +22390,15 @@ fn geometry_snapshot(
                 });
             }
         }
-        let extent = Some(match content {
-            Some(c) => (bx.min(c.0), by.min(c.1), (bx + bw).max(c.2), (by + bh).max(c.3)),
-            None => (bx, by, bx + bw, by + bh),
+        let extent = Some(if b.clips_its_content() {
+            let (mut right, mut bottom) = (bx + bw, by + bh);
+            b.reach_as_overflow(&mut right, &mut bottom);
+            (bx, by, right, bottom)
+        } else {
+            match content {
+                Some(c) => (bx.min(c.0), by.min(c.1), (bx + bw).max(c.2), (by + bh).max(c.3)),
+                None => (bx, by, bx + bw, by + bh),
+            }
         });
         if let Some(node) = b.node_id {
             let pb = b.dimensions.padding_box();
@@ -22417,7 +22408,12 @@ fn geometry_snapshot(
                 finite_f32(pb.width),
                 finite_f32(pb.height),
             );
-            let (right, bottom) = content.map_or((px + pw, py + ph), |e| (e.2, e.3));
+            let (right, bottom) = if scrolls {
+                let (x, y) = b.element_scroll_max();
+                (px + pw + x, py + ph + y)
+            } else {
+                content.map_or((px + pw, py + ph), |e| (e.2, e.3))
+            };
             // The computed value, not the layout box's: a relative or sticky
             // box is laid out as static, but it is still positioned (it is
             // an offsetParent).

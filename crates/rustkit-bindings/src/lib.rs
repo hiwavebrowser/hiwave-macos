@@ -1731,7 +1731,7 @@ impl DomBindings {
             window.location.port = {:?};
             window.location.pathname = {:?};
             window.location.search = {:?};
-            window.location.hash = {:?};
+            if (window.__rustkit_location_hash_sync) window.__rustkit_location_hash_sync({:?});
             window.location.origin = {:?};
             document.URL = {:?};
             if (window.__rustkit_history_reset) window.__rustkit_history_reset();
