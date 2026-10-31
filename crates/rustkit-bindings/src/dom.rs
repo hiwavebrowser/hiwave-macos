@@ -2761,7 +2761,8 @@ const WRAPPERS_JS: &str = r#"
             var p = raw.split(' ');
             return { x: finite(p[0]), y: finite(p[1]) };
         },
-        write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); }
+        write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); },
+        byId: function (id) { return wrap(id); }
     };
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);

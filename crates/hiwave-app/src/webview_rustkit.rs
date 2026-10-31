@@ -748,6 +748,16 @@ impl RustKitView {
         .unwrap_or(false)
     }
 
+    /// A wheel over a point of the content view: the box under it may take it.
+    /// Like `scroll_by` on the page thread: true, and the commit shows it.
+    pub fn scroll_at(&self, x: f32, y: f32, delta_x: f32, delta_y: f32) -> bool {
+        if self.content.is_some() {
+            self.submit(PageCmd::Input(PageInput::ScrollAt { x, y, dx: delta_x, dy: delta_y }));
+            return true;
+        }
+        self.scroll_by(delta_x, delta_y)
+    }
+
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
         self.cancel_load();
