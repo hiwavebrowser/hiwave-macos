@@ -150,20 +150,35 @@ fn nothing_to_move_reports_no_change() {
     assert!(!engine.scroll_at(view, 700.0, 500.0, 0.0, 50.0).expect("wheel"), "the window is at the top");
 }
 
-// The gesture hold. Chromium holds a real trackpad gesture on one target, but
-// its discrete CDP wheels chain at once, so the oracle cannot show this: these
-// pin the engine's own rule.
+// The gesture hold. A run of wheels stays on what the first one moved, but
+// only while that can still take the wheel: Chromium 143 hands a wheel on the
+// moment its box is at its end, with no pause (`c2b_latch_probe.mjs` on the
+// hub: `box-then-again` box=50 win=500), and a box coming under the pointer
+// does not catch a page's run (`window-then-box-under` box=0 win=200).
 
-/// A flick that reaches the box's end does not run on into the page.
+/// A run that reaches the box's end hands the next step on at once.
 #[test]
-fn a_gesture_stays_on_its_box_past_its_end() {
+fn a_gesture_hands_on_when_its_box_is_at_its_end() {
     let (mut engine, view) = loaded();
     engine.scroll_at(view, 20.0, 20.0, 0.0, -500.0).expect("wheel");
-    assert!(!engine.scroll_at(view, 20.0, 20.0, 0.0, -50.0).expect("wheel"), "held at the end");
-    assert_eq!(state(&mut engine, view), "in=0,200 out=0,0 hid=0,0 x=0,0 win=0,0");
+    assert!(engine.scroll_at(view, 20.0, 20.0, 0.0, -50.0).expect("wheel"), "handed on to the outer box");
+    assert_eq!(state(&mut engine, view), "in=0,200 out=0,50 hid=0,0 x=0,0 win=0,0");
     std::thread::sleep(NEW_GESTURE);
     engine.scroll_at(view, 20.0, 20.0, 0.0, -50.0).expect("wheel");
-    assert_eq!(state(&mut engine, view), "in=0,200 out=0,50 hid=0,0 x=0,0 win=0,0", "a new gesture hands on");
+    assert_eq!(state(&mut engine, view), "in=0,200 out=0,100 hid=0,0 x=0,0 win=0,0", "a new gesture routes the same");
+}
+
+/// A held box that can still move on one axis keeps the whole step; only
+/// when no axis can move does the run hand on.
+#[test]
+fn a_held_box_keeps_a_diagonal_step_while_one_axis_can_move() {
+    let (mut engine, view) = loaded();
+    engine.scroll_at(view, 620.0, 20.0, 280.0, -50.0).expect("wheel");
+    assert_eq!(state(&mut engine, view), "in=0,0 out=0,0 hid=0,0 x=280,0 win=0,0");
+    assert!(engine.scroll_at(view, 620.0, 20.0, 50.0, -50.0).expect("wheel"), "the box still moves across");
+    assert_eq!(state(&mut engine, view), "in=0,0 out=0,0 hid=0,0 x=300,0 win=0,0", "the down half goes nowhere");
+    assert!(engine.scroll_at(view, 620.0, 20.0, 50.0, -50.0).expect("wheel"), "handed on to the window");
+    assert_eq!(state(&mut engine, view), "in=0,0 out=0,0 hid=0,0 x=300,0 win=0,50", "at its end on both axes it hands on");
 }
 
 /// A flick scrolling the page is not caught by a box that comes under the pointer.
