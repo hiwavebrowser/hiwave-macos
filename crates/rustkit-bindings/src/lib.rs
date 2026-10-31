@@ -122,7 +122,8 @@ mod web_scroll;
 mod web_url;
 
 pub use dom::{
-    BoxGeometry, ControlWrites, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn,
+    BoxGeometry, ControlWrites, ElementScrolls, ForcedGeometry, ForcedLayout, GeometrySource, HitTester,
+    SelectorMatchFn, SharedElementScrolls,
 };
 pub mod events;
 
@@ -1611,6 +1612,11 @@ impl DomBindings {
         host.computed.clear();
         host.geometry_source = Some(source);
         host.renew_forced_budget();
+    }
+
+    /// Keep element scroll offsets in the view's table.
+    pub fn share_element_scrolls(&self, scrolls: SharedElementScrolls) {
+        self.dom_host.borrow_mut().element_scrolls = scrolls;
     }
 
     /// How a read of geometry after a script write in the same task lays

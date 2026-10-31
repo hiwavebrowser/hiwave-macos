@@ -972,12 +972,8 @@ impl<'a> Builder<'a> {
             notes.push("containing block and clip ancestry are computed on untransformed boxes".into());
         }
         // body's and html's overflow scroll the viewport, which is applied.
-        let scrolls_element = ctx.scroller.and_then(|sc| sc.node_id).is_some_and(|raw| {
-            let tag = self.src.document.get_node(rustkit_dom::NodeId::new(raw)).and_then(|n| element_parts(&n).map(|(t, _)| t));
-            tag.is_some_and(|t| t != "body" && t != "html")
-        });
-        if scrolls_element {
-            notes.push("inside a scroll container: the engine does not apply element scroll offsets, so this is the unscrolled position".into());
+        if ctx.scroller.is_some_and(|sc| sc.element_scroll.get() != (0.0, 0.0)) {
+            notes.push("inside a scrolled container: this is the position before its element scroll".into());
         }
         let viewport_border = to_viewport(border, scroll);
         let (vw, vh) = (self.src.viewport.0 as f32, self.src.viewport.1 as f32);
