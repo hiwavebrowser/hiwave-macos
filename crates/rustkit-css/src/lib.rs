@@ -2812,7 +2812,8 @@ pub struct ComputedStyle {
     pub columns_declared: bool,
     /// An author `display: contents` (with `display` set to
     /// `Display::Contents`): the element generates no box, and `@container`
-    /// treats it as having no size. Not inherited.
+    /// treats it as having no size. Not inherited by the cascade, but
+    /// `display: inherit` copies it along with the keyword.
     pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)

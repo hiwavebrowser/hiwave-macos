@@ -12259,6 +12259,7 @@ impl Engine {
                     parent.display
                 };
                 style.webkit_box = parent.webkit_box;
+                style.display_modifier = parent.display_modifier;
                 style.display_contents_declared = parent.display_contents_declared;
             }
             _ => return false,
