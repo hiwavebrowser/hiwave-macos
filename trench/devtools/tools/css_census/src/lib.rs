@@ -47,19 +47,19 @@ pub fn load_spec(json: &str) -> Result<Vec<PropSpec>, String> {
     }
 }
 
-const SVG_IMAGE: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='50'%3E%3Crect width='50' height='50' fill='%23c33'/%3E%3Crect x='50' width='50' height='50' fill='%2339c'/%3E%3C/svg%3E";
+const SVG_IMAGE: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='50'%3E%3Crect width='30' height='50' fill='%23c33'/%3E%3Crect x='30' width='70' height='50' fill='%2339c'/%3E%3C/svg%3E";
 
 /// `(name, css, body)`. `#p` is the element under test. Solid boxes, so a probe
 /// is exact; text is large block capitals, so a probe lands inside a stem.
 const CONTEXTS: &[(&str, &str, &str)] = &[
     (
         "box",
-        "#w{width:300px;height:200px;background:#eee}#p{width:120px;height:80px;background:#c33}#k{width:40px;height:40px;background:#39c}#after{width:60px;height:20px;background:#3a3}",
+        "#w{width:300px;height:200px;background:#bbb}#p{width:120px;height:80px;background:#c33}#k{margin-left:40px;width:40px;height:40px;background:#39c}#after{width:60px;height:20px;background:#3a3}",
         "<div id=w><div id=p><div id=k></div></div><div id=after></div></div>",
     ),
     (
         "bg",
-        "#w{width:300px;height:200px}#p{width:160px;height:100px;padding:10px;border:10px dashed #888;background-image:linear-gradient(90deg,#c00 50%,#00c 50%);background-size:40px 40px}",
+        "#w{width:300px;height:200px}#p{width:160px;height:100px;padding:10px;border:10px dashed #888;background-image:linear-gradient(135deg,#c00 50%,#00c 50%);background-size:40px 40px}",
         "<div id=w><div id=p></div></div>",
     ),
     (
@@ -448,16 +448,34 @@ fn rects_match(a: &PageRead, b: &PageRead) -> bool {
     })
 }
 
-/// The off-probe allowance for an effect: the control's own disagreement, plus
-/// a tenth of what the declaration changed in Chrome (at least 2 probes).
+/// Every pixel that changed, between two frames of the same engine: no
+/// antialiasing to forgive there, so a two-row underline counts in full.
+pub fn changed_pixels(a: &Frame, b: &Frame) -> usize {
+    if (a.width, a.height) != (b.width, b.height) {
+        return a.width * a.height;
+    }
+    a.rgb
+        .chunks_exact(3)
+        .zip(b.rgb.chunks_exact(3))
+        .filter(|(x, y)| (0..3).any(|c| (x[c] as i32 - y[c] as i32).abs() > PROBE_TOLERANCE))
+        .count()
+}
+
+/// Three questions. Did the declaration change anything in Chrome? Does the
+/// engine's frame agree with Chrome's, allowing the controls' own disagreement
+/// plus a tenth of the change (at least 2 probes)? And did the engine change at
+/// least half as many pixels? The last one catches what the probes forgive: a
+/// thin line the engine never drew.
 fn effect_of(value: (&PageRead, &Frame), control: (&PageRead, &Frame), engine: (&PageRead, &Frame), engine_control: &Frame) -> Effect {
-    let signal = probe_diff(value.1, control.1);
-    if signal < 3 && rects_match(value.0, control.0) {
+    let changed = changed_pixels(value.1, control.1);
+    if changed < 3 && rects_match(value.0, control.0) {
         return Effect::Unexercised;
     }
     let floor = probe_diff(control.1, engine_control);
     let off = probe_diff(value.1, engine.1);
-    if rects_match(value.0, engine.0) && off <= floor + (signal / 10).max(2) {
+    let allowed = floor + (probe_diff(value.1, control.1) / 10).max(2);
+    let engine_changed = changed_pixels(engine.1, engine_control);
+    if rects_match(value.0, engine.0) && off <= allowed && engine_changed * 2 >= changed {
         Effect::Match
     } else {
         Effect::Mismatch
@@ -526,12 +544,15 @@ impl Class {
     }
 }
 
-/// A property is its worst value. A matching effect is proof the declaration
-/// works, so it stands even when `getComputedStyle` does not read the value;
-/// that gap shows in the value's own columns.
+/// A property is its worst measured value. A matching effect is proof the
+/// declaration works, so it stands even when `getComputedStyle` does not read
+/// the value; that gap shows in the value's own columns. A value that changed
+/// nothing in Chrome has nothing to say while a sibling was measured.
 pub fn class_of(values: &[Verdict]) -> Class {
+    let measured = values.iter().any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch));
     values
         .iter()
+        .filter(|v| !(measured && v.effect == Effect::Unexercised))
         .map(|v| match (v.parse, v.computed, v.effect) {
             (_, _, Effect::Match) => Class::Effect_,
             (true, true, _) => Class::Computed,
@@ -755,7 +776,12 @@ fn why(r: &Row) -> String {
             } else {
                 format!(", reads {} (Chrome {})", code(&v.engine_computed), code(&v.chrome_computed))
             };
-            format!("{}: {}{read}", code(&v.value), v.effect.label())
+            let miss = match v.effect {
+                Effect::Mismatch if !v.geometry_ok => format!(" (geometry, {} probes)", v.probes_off),
+                Effect::Mismatch => format!(" ({} probes)", v.probes_off),
+                _ => String::new(),
+            };
+            format!("{}: {}{miss}{read}", code(&v.value), v.effect.label())
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -853,6 +879,7 @@ pub fn render_json(meta: &Meta, rows: &[Row]) -> Value {
                 "chrome_computed": v.chrome_computed,
                 "engine_computed": v.engine_computed,
                 "probes_off": v.probes_off,
+                "geometry_ok": v.geometry_ok,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })

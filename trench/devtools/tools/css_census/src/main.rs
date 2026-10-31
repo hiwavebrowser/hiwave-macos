@@ -257,7 +257,12 @@ fn run() -> Result<(), String> {
     let date = sh(Command::new("date").arg("+%F"))?;
     let meta = Meta {
         date: date.clone(),
-        develop_sha: sh(Command::new("git").current_dir(&root).args(["rev-parse", "--short=8", "HEAD"]))?,
+        // The engine under test: where this branch left develop.
+        develop_sha: sh(Command::new("git").current_dir(&root).args(["merge-base", "HEAD", "origin/develop"]))
+            .or_else(|_| sh(Command::new("git").current_dir(&root).args(["rev-parse", "HEAD"])))?
+            .chars()
+            .take(8)
+            .collect(),
         oracle: ORACLE.into(),
         sites_loaded: top.loaded,
         contexts_off: off_by_context.into_iter().filter(|(_, n)| *n > 0).collect(),
