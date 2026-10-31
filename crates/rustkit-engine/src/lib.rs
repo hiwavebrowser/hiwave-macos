@@ -499,6 +499,8 @@ mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod display_inherit_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
@@ -12244,6 +12246,22 @@ impl Engine {
             "border-right-color" => style.border_right_color = parent.border_right_color,
             "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
             "border-left-color" => style.border_left_color = parent.border_left_color,
+            // apple's nav: `display: inherit` wrappers under a `contents`
+            // item. The legacy `-webkit-box` and the declared-contents flag
+            // that `@container` reads come along with the keyword.
+            "display" => {
+                // A `contents` box hands its children a parent style whose
+                // `display` is the grandparent's, for blockification; the
+                // declared flag still says what the parent computed to.
+                style.display = if parent.display_contents_declared {
+                    rustkit_css::Display::Contents
+                } else {
+                    parent.display
+                };
+                style.webkit_box = parent.webkit_box;
+                style.display_modifier = parent.display_modifier;
+                style.display_contents_declared = parent.display_contents_declared;
+            }
             _ => return false,
         }
         true
