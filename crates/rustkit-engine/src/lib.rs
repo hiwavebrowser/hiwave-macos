@@ -30364,16 +30364,26 @@ mod node_identity_tests {
             id,
             "window.scrolls = []; window.addEventListener('scroll', function () { scrolls.push(window.scrollY); });",
         );
+        // `scroll` comes from a timer, as for any scroll script asks for.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let settle = |engine: &mut Engine| {
+            for _ in 0..5 {
+                rt.block_on(engine.pump_live(id, 16));
+            }
+        };
         click_row(&mut engine, id, 0);
+        settle(&mut engine);
         assert_eq!(
             js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"),
             js_string("2240 | 2240"),
-            "script reads the new offset and hears `scroll`"
+            "script reads the new offset and hears one `scroll`"
         );
         // A fragment with no target moves nothing, so no `scroll`.
         engine.execute_script(id, "window.scrollTo(0, 0)").unwrap();
+        settle(&mut engine);
         js(&mut engine, id, "scrolls.length = 0");
         click_row(&mut engine, id, 1);
+        settle(&mut engine);
         assert_eq!(js(&mut engine, id, "window.scrollY + ' | ' + scrolls.join()"), js_string("0 | "));
     }
 
