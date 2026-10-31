@@ -811,7 +811,7 @@ fn layout_flex_container_at(
                             child.style.position,
                             rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
                         ) {
-                            child.layout(&cb);
+                            child.layout_with_definite_height(&cb, cb.content.height);
                         }
                     }
                     item.layout_box.reanchor_absolute_children();

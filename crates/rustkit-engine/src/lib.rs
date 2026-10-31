@@ -417,6 +417,8 @@ mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod flex_abspos_static_position_tests;
 #[cfg(test)]
+mod relative_offset_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
@@ -8547,12 +8549,14 @@ impl Engine {
         } else {
             match style.position {
                 rustkit_css::Position::Static => Position::Static,
-                // Relative: geometry-only for now. Entering the positioned
+                // Relative: laid out as Static. Entering the positioned
                 // paint path (z-reorder, stacking hoist) wrecks pages whose
                 // relative boxes are mere z-index anchors (about's cards)
-                // until the stacking pipeline matures. Offsets still apply
-                // via the Relative arm when we re-enable; today Relative
-                // boxes with no offsets are visually identical to Static.
+                // until the stacking pipeline matures. The offsets are not
+                // lost: layout reads `style.position` and shifts the box
+                // after its static position is final
+                // (`LayoutBox::apply_relative_offsets`), the paint order
+                // and the display-list builder read the style the same way.
                 rustkit_css::Position::Relative => Position::Static,
                 rustkit_css::Position::Absolute => Position::Absolute,
                 rustkit_css::Position::Fixed => Position::Fixed,
@@ -43767,19 +43771,18 @@ mod scroll_extent_tests {
     // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
     // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
 
-    /// Transforms do not move a box in the layout tree, and the offsets of
-    /// a relative box are not applied (`positioning_of`), so neither box
-    /// extends the page yet. `html` has no box of its own, so with
-    /// `html { height: 100% }` the body's bottom margin still counts (16
-    /// where Chrome has 8).
-    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Transforms do not move a box in the layout tree, so a translated
+    /// box does not extend the page yet (a relative box's offsets do, since
+    /// Z C13: `LayoutBox::apply_relative_offsets`). `html` has no box of
+    /// its own, so with `html { height: 100% }` the body's bottom margin
+    /// still counts (16 where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "html-body-overflow-x-hidden"];
     /// Chrome's wheel does not scroll a viewport whose overflow is hidden
     /// (script still does). The engine's wheel is not locked yet.
     /// And a body that scrolls takes the wheel itself: the 8px of its
     /// margin are left to the viewport, which only script moves.
     const WHEEL_GAPS: &[&str] = &[
         "translate-down",
-        "relative-top",
         "body-overflow-hidden",
         "html-overflow-hidden",
         "html-body-overflow-x-hidden",
