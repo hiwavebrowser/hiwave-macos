@@ -5,15 +5,17 @@
 // The window's scroll offset is the engine's (view.scroll_offset): reads
 // answer from the position it last published, and a scroll writes through to
 // the host, which clamps it to the document and hands it to the engine when
-// script settles. Element scroll offsets are not rendered (the engine has no
-// per-element scrolling): they are stored and clamped to the element's
-// scroll size, so code that sets then reads them sees consistent numbers.
-// `behavior` is ignored (always instant). A scroll fires one `scroll` event
-// on the document (it bubbles to the window), from a timer, not synchronously.
+// script settles. An element's offset lives in the view's table, clamped to
+// its scroll size, in whole pixels: rects read it at once, and the engine
+// paints it when script settles. `behavior` is ignored (always instant). A
+// window scroll fires one `scroll` event on the document (it bubbles to the
+// window), an element's fires one at the element (it does not bubble); both
+// from a timer, not synchronously.
 (function (g) {
-    var read = g.__rustkit_scroll_state, to = g.__rustkit_scroll_to;
+    var read = g.__rustkit_scroll_state, to = g.__rustkit_scroll_to, table = g.__rustkit_element_scroll;
     delete g.__rustkit_scroll_state;
     delete g.__rustkit_scroll_to;
+    delete g.__rustkit_element_scroll;
     if (typeof read !== 'function' || typeof to !== 'function') return;
     var document = g.document;
     if (!document || !g.Element) return;
@@ -77,18 +79,26 @@
 
     // ---- elements
     var E = g.Element.prototype;
-    var offsets = new WeakMap();
     function isRoot(el) { return el === document.documentElement; }
-    function own(el) {
-        var o = offsets.get(el);
-        if (!o) { o = { x: 0, y: 0 }; offsets.set(el, o); }
-        return o;
+    function own(el) { return table.read(el) || { x: 0, y: 0 }; }
+    function clamp(v, max) { return Math.min(Math.max(0, Math.round(v)), Math.max(0, max)); }
+    var eventsDue = new WeakSet();
+    function elementScrolled(el) {
+        if (eventsDue.has(el) || typeof g.setTimeout !== 'function' || typeof g.Event !== 'function') return;
+        eventsDue.add(el);
+        g.setTimeout(function () {
+            eventsDue.delete(el);
+            try { el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
+        }, 0);
     }
-    function clamp(v, max) { return Math.min(Math.max(0, v), Math.max(0, max)); }
     function setOwn(el, x, y) {
-        var o = own(el);
-        if (!isNaN(x)) o.x = clamp(x, el.scrollWidth - el.clientWidth);
-        if (!isNaN(y)) o.y = clamp(y, el.scrollHeight - el.clientHeight);
+        var o = table.read(el);
+        if (!o) return;
+        var nx = isNaN(x) ? o.x : clamp(x, el.scrollWidth - el.clientWidth);
+        var ny = isNaN(y) ? o.y : clamp(y, el.scrollHeight - el.clientHeight);
+        if (nx === o.x && ny === o.y) return;
+        table.write(el, nx, ny);
+        elementScrolled(el);
     }
     function accessor(name, axis) {
         Object.defineProperty(E, name, {

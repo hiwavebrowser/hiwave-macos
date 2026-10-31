@@ -193,6 +193,8 @@ pub(crate) struct ViewLayout {
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     pub(crate) checked_states: RefCell<HashMap<usize, bool>>,
+    /// Where script scrolled this view's elements (shared with the bindings).
+    pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.
     pub(crate) sheet_cache: RefCell<crate::SheetCache>,
     /// The rule index this view was last built with: its `reads` say

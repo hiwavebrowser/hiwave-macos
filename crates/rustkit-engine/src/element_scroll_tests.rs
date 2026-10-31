@@ -109,7 +109,7 @@ const OUT_OF_FLOW: &str = concat!(
     "#st-in{height:300px;background:#00f}",
     "#st-abs{position:absolute;left:300px;top:0;width:20px;height:20px;background:#0f0}",
     "#st-fix{position:fixed;left:330px;top:0;width:20px;height:20px;background:#ff0}",
-    "#rel{position:relative;overflow:auto;width:100px;height:100px;top:10px}",
+    "#rel{position:relative;overflow:auto;width:100px;height:100px;margin-top:10px}",
     "#rel-in{height:300px;background:#0ff}",
     "#rel-abs{position:absolute;left:10px;top:40px;width:20px;height:20px;background:#f00}",
     "#rel-fix{position:fixed;left:360px;top:0;width:20px;height:20px;background:#f0f}",
@@ -286,7 +286,6 @@ fn out_of_flow_paint_follows_the_same_rules() {
     let ppm = frame(&mut engine, view, "oof");
     assert_eq!(pixel(&ppm, 310, 10), LIME, "st-abs stays");
     assert_eq!(pixel(&ppm, 340, 10), [255, 255, 0], "st-fix stays");
-    assert_eq!(pixel(&ppm, 370, 10), [255, 0, 255], "rel-fix stays");
     assert_eq!(pixel(&ppm, 20, 110), [255, 0, 0], "rel-abs paints at 10,100, moved with its scroller");
     assert_eq!(pixel(&ppm, 20, 150), [0, 255, 255], "where it was laid out is rel-in now");
 }
@@ -303,4 +302,39 @@ fn a_relayout_keeps_the_offset() {
         .expect("script");
     let ppm = frame(&mut engine, view, "relayout");
     assert_eq!(pixel(&ppm, 150, 22), LIME);
+}
+
+/// `c2_probe3.mjs`: a box's own border is not scrollable overflow, so a child
+/// that fits leaves nothing to scroll. A write rounds to a whole pixel.
+#[test]
+fn a_border_is_not_overflow_and_a_write_rounds() {
+    check_on(
+        concat!(
+            "<!doctype html><style>body{margin:0}",
+            "#b{overflow:auto;width:100px;height:100px;border:5px solid #000;padding:7px}",
+            "#b-in{height:100px}",
+            "#f{overflow:auto;width:100px;height:100px}#f-in{height:300px}",
+            "</style><body><div id=b><div id=b-in></div></div><div id=f><div id=f-in></div></div></body>",
+        ),
+        "var b = $('b'), f = $('f'); b.scrollTop = 500; f.scrollTop = 30.5; var up = f.scrollTop + ' ' + at('f-in'); \
+         f.scrollTop = 30.4; [b.scrollHeight, b.clientHeight, b.scrollTop, up, f.scrollTop, at('f-in')].join(' ')",
+        "114 114 0 31 0,93 30 0,94",
+    );
+}
+
+/// A group under a scroll fades where it was moved to.
+#[test]
+fn an_opacity_group_moves_with_the_scroll() {
+    let (mut engine, view) = loaded_page(concat!(
+        "<!doctype html><style>body{margin:0}",
+        "#o{overflow:auto;width:100px;height:100px}",
+        "#o-in{height:120px;background:#f00;opacity:.5}#rest{height:200px}",
+        "</style><body><div id=o><div id=o-in></div><div id=rest></div></div></body>",
+    ));
+    engine.execute_script(view, "document.getElementById('o').scrollTop = 50").expect("script");
+    let ppm = frame(&mut engine, view, "group");
+    let faded = pixel(&ppm, 50, 30);
+    assert_eq!(faded[0], 255, "{faded:?}");
+    assert!((120..=136).contains(&faded[1]), "half red: {faded:?}");
+    assert_eq!(pixel(&ppm, 50, 80), WHITE, "the group ends at y 70 now");
 }

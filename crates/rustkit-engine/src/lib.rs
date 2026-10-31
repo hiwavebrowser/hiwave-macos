@@ -1078,6 +1078,7 @@ impl ViewState {
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
+        self.lay.element_scrolls.borrow_mut().clear();
         self.lay.focused_node.set(None);
         self.hovered_node = None;
         self.lay.hover_chain.borrow_mut().clear();
@@ -7901,6 +7902,11 @@ impl Engine {
             }
         }
         debug_layout_box(&root_box, 0);
+
+        // Element scroll offsets carry over to the new boxes, clamped to them.
+        if let Some(view) = self.views.get(&id) {
+            stamp_element_scrolls(&root_box, &view.lay.element_scrolls);
+        }
 
         // Generate display list
         let display_list = self.display_list_for(id, &root_box);
@@ -18709,20 +18715,41 @@ impl Engine {
         Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
         let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
+        let element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
         if dirty == DomDirty::Clean {
+            if element_scrolled {
+                self.relist_after_element_scroll(id);
+            }
             // A scroll alone moves what is painted, not the layout.
-            if scrolled {
+            if scrolled || element_scrolled {
                 self.render(id)?;
             }
-            return Ok(scrolled);
+            return Ok(scrolled || element_scrolled);
         }
         debug!(?id, ?dirty, "Script wrote to the DOM; relayout");
         let writes = bindings.take_script_mutations();
         view.relayout_pending.note_script(trigger, writes);
         self.relayout(id).map(|_| true)
+    }
+
+    /// An element scroll moves what is painted, not the layout, but it is
+    /// inside the list: the list is built again over the same boxes.
+    fn relist_after_element_scroll(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(layout) = view.layout.clone() else {
+            return;
+        };
+        stamp_element_scrolls(&layout, &view.lay.element_scrolls);
+        let display_list = self.display_list_for(id, &layout);
+        if let Some(view) = self.views.get_mut(&id) {
+            view.display_list = Some(Arc::new(display_list));
+            view.frame_generation += 1;
+        }
     }
 
     /// What a script scroll is clamped to when script settles. After DOM
@@ -18868,6 +18895,7 @@ impl Engine {
                 bounds,
             );
             drop(memo_aside);
+            stamp_element_scrolls(&built, &lay.element_scrolls);
             let root_element = document.document_element().map(|e| e.id.raw());
             // As the engine's relayout sets `max_scroll_offset`.
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
@@ -18889,7 +18917,7 @@ impl Engine {
                         &styled.pseudo_styles.borrow(),
                     )
                 }),
-                hit_tester: Some(layout_hit_tester(move || Some(built.clone()))),
+                hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
                 max_scroll,
             })
         }))
@@ -18903,17 +18931,22 @@ impl Engine {
         let dirty = bindings.take_dirty();
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
+        let mut element_scrolled = false;
         if let Some(view) = self.views.get_mut(&id) {
             Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
             Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
+            element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
                 view.pending_dirty = Some(view.dirty_set(&log));
             }
         }
         if dirty == DomDirty::Clean {
+            if element_scrolled {
+                self.relist_after_element_scroll(id);
+            }
             return;
         }
         let started = std::time::Instant::now();
@@ -21988,9 +22021,10 @@ fn publish_geometry(
     root_element: Option<usize>,
     lay: Rc<layout_ctx::ViewLayout>,
 ) {
+    bindings.share_element_scrolls(lay.element_scrolls.clone());
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
-    bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade())));
+    bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
     bindings.set_geometry_source(Box::new(move || {
         let Some(layout) = layout.upgrade() else {
             return Default::default();
@@ -22012,10 +22046,55 @@ fn publish_geometry(
     }));
 }
 
-/// `elementFromPoint` over the tree `layout` gives.
-fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> rustkit_bindings::HitTester {
+/// Copy the view's element scroll offsets onto the scrollers of a layout tree,
+/// clamping each to what its box can scroll now. Costs nothing on a page where
+/// script scrolled no element.
+fn stamp_element_scrolls(root: &LayoutBox, scrolls: &rustkit_bindings::SharedElementScrolls) {
+    fn reach(b: &LayoutBox, right: &mut f32, bottom: &mut f32) {
+        let border = b.dimensions.border_box();
+        *right = right.max(border.x + border.width);
+        *bottom = bottom.max(border.y + border.height);
+        for child in &b.children {
+            reach(child, right, bottom);
+        }
+    }
+    fn walk(b: &LayoutBox, offsets: &mut HashMap<usize, (f32, f32)>) {
+        if b.is_element_scroller() {
+            if let Some(offset) = b.node_id.and_then(|node| offsets.get_mut(&node)) {
+                let padding = b.dimensions.padding_box();
+                let (mut right, mut bottom) = (padding.x + padding.width, padding.y + padding.height);
+                for child in &b.children {
+                    reach(child, &mut right, &mut bottom);
+                }
+                offset.0 = offset.0.min(right - padding.x - padding.width).max(0.0);
+                offset.1 = offset.1.min(bottom - padding.y - padding.height).max(0.0);
+                b.element_scroll.set(*offset);
+            }
+        }
+        for child in &b.children {
+            walk(child, offsets);
+        }
+    }
+    let mut scrolls = scrolls.borrow_mut();
+    if !scrolls.offsets.is_empty() {
+        walk(root, &mut scrolls.offsets);
+    }
+}
+
+/// `elementFromPoint` over the tree `layout` gives, with the offsets script
+/// has written by then: it answers before the engine's next paint.
+fn layout_hit_tester(
+    layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static,
+    scrolls: rustkit_bindings::SharedElementScrolls,
+) -> rustkit_bindings::HitTester {
+    let stamped = Cell::new(0u64);
     std::rc::Rc::new(move |x, y, scroll| {
         let layout = layout()?;
+        let generation = scrolls.borrow().generation;
+        if stamped.get() != generation {
+            stamp_element_scrolls(&layout, &scrolls);
+            stamped.set(generation);
+        }
         let hit = layout.hit_test_scrolled(x, y, scroll);
         if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
             return Some(id);
@@ -22133,18 +22212,31 @@ impl layout_ctx::LayoutCtx {
 /// block split around anonymous boxes) reports the union of its boxes.
 /// `scroll_*` is the extent of the box's descendants from its padding edge.
 /// Transforms are not applied (`getBoundingClientRect` of a transformed
-/// element reports its untransformed box for now).
+/// element reports its untransformed box for now). Nor are element scrolls:
+/// each box names the scroller that moves it, and a read adds them up, so a
+/// scroll does not cost a new snapshot.
 fn geometry_snapshot(
     root: &LayoutBox,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     /// `parent_vars` is the custom-property set of the nearest element
     /// ancestor's box (anonymous boxes between do not count): an element
     /// whose set is another `Arc` publishes it with its style rows.
+    ///
+    /// `scrollers` is the nearest scroller moving each kind of box under this
+    /// one. An absolute box is in the scrolling box of its containing block,
+    /// and a fixed box in none, unless a transform holds it.
+    #[derive(Clone, Copy)]
+    struct Scrollers {
+        flow: Option<usize>,
+        absolute: Option<usize>,
+        fixed: Option<usize>,
+    }
     fn walk(
         b: &LayoutBox,
         out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
         styles: &mut HashMap<usize, String>,
         parent_vars: Option<&Arc<rustkit_css::CustomProperties>>,
+        scrollers: Scrollers,
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
@@ -22154,18 +22246,38 @@ fn geometry_snapshot(
             finite_f32(bb.width),
             finite_f32(bb.height),
         );
-        let mut extent = Some((bx, by, bx + bw, by + bh));
+        let scroller = match b.position {
+            Position::Absolute => scrollers.absolute,
+            Position::Fixed => scrollers.fixed,
+            _ => scrollers.flow,
+        };
+        let scrolls = b.is_element_scroller();
+        let inner = if scrolls { b.node_id } else { scroller };
+        let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
+        let transformed = !b.style.effective_transform().is_identity();
+        let under = Scrollers {
+            flow: inner,
+            absolute: if positioned { inner } else { scrollers.absolute },
+            fixed: if transformed { inner } else { scrollers.fixed },
+        };
+        // What the children reach, without this box's own border: that is
+        // not scrollable overflow.
+        let mut content: Option<(f32, f32, f32, f32)> = None;
         let own_vars = b.node_id.is_some()
             && parent_vars.is_none_or(|p| !Arc::ptr_eq(p, &b.style.custom_properties));
         let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
         for child in &b.children {
-            if let Some(c) = walk(child, out, styles, child_vars) {
-                extent = Some(match extent {
+            if let Some(c) = walk(child, out, styles, child_vars, under) {
+                content = Some(match content {
                     Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
                     None => c,
                 });
             }
         }
+        let extent = Some(match content {
+            Some(c) => (bx.min(c.0), by.min(c.1), (bx + bw).max(c.2), (by + bh).max(c.3)),
+            None => (bx, by, bx + bw, by + bh),
+        });
         if let Some(node) = b.node_id {
             let pb = b.dimensions.padding_box();
             let (px, py, pw, ph) = (
@@ -22174,7 +22286,7 @@ fn geometry_snapshot(
                 finite_f32(pb.width),
                 finite_f32(pb.height),
             );
-            let (right, bottom) = extent.map_or((px + pw, py + ph), |e| (e.2, e.3));
+            let (right, bottom) = content.map_or((px + pw, py + ph), |e| (e.2, e.3));
             // The computed value, not the layout box's: a relative or sticky
             // box is laid out as static, but it is still positioned (it is
             // an offsetParent).
@@ -22195,6 +22307,8 @@ fn geometry_snapshot(
                 scroll_width: finite_f32((right - px).max(pw)),
                 scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
+                scroller,
+                scrolls,
             };
             styles.entry(node).or_insert_with(|| {
                 let mut lines = computed_style_lines(b);
@@ -22224,7 +22338,8 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    walk(root, &mut out, &mut styles, None);
+    let none = Scrollers { flow: None, absolute: None, fixed: None };
+    walk(root, &mut out, &mut styles, None, none);
     (out, styles)
 }
 
@@ -22292,6 +22407,8 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         scroll_width: pb.width,
         scroll_height: (bottom - pb.y).max(pb.height),
         position: 0,
+        scroller: None,
+        scrolls: false,
     }
 }
 

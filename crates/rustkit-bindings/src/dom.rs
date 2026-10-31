@@ -55,7 +55,38 @@ pub struct BoxGeometry {
     pub scroll_height: f32,
     /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
     pub position: u8,
+    /// The nearest element scroller whose scroll moves this box (`x`, `y` are
+    /// where layout put it, before any of them). Follow it up to add them up.
+    pub scroller: Option<usize>,
+    /// Whether this box is an element scroller itself.
+    pub scrolls: bool,
 }
+
+/// The offsets script scrolled a view's elements to, by raw NodeId: one table
+/// the bindings and the engine share. Script writes it and reads it back at
+/// once; the engine applies it when script settles (paint) and on a hit test.
+/// It outlives the boxes: an element that goes `display: none` has its offset
+/// back when it returns.
+#[derive(Debug, Default)]
+pub struct ElementScrolls {
+    pub offsets: HashMap<usize, (f32, f32)>,
+    /// Bumped by each write, so a layout tree knows it is behind.
+    pub generation: u64,
+    /// Whether a write has not been painted yet.
+    pub unpainted: bool,
+}
+
+impl ElementScrolls {
+    /// A new document: node ids restart.
+    pub fn clear(&mut self) {
+        self.offsets.clear();
+        self.generation += 1;
+        self.unpainted = false;
+    }
+}
+
+/// What `DomBindings::share_element_scrolls` takes.
+pub type SharedElementScrolls = Rc<std::cell::RefCell<ElementScrolls>>;
 
 /// Builds the geometry and computed-style maps of the layout it was made
 /// for (`DomBindings::set_geometry_source`).
@@ -134,6 +165,8 @@ pub(crate) struct DomHost {
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
+    /// The view's element scroll offsets (web_scroll.js).
+    pub(crate) element_scrolls: SharedElementScrolls,
     /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
     /// a forced layout moves its maximum.
     pub(crate) scroll_state: crate::web_scroll::SharedScroll,
@@ -183,6 +216,24 @@ impl DomHost {
             (self.geometry, self.computed) = source();
             self.geometry_builds += 1;
         }
+    }
+
+    /// What the element scrollers above a box have moved it by.
+    fn element_scroll_over(&self, geometry: &BoxGeometry) -> (f32, f32) {
+        let scrolls = self.element_scrolls.borrow();
+        let (mut x, mut y) = (0.0, 0.0);
+        if scrolls.offsets.is_empty() {
+            return (x, y);
+        }
+        let mut at = geometry.scroller;
+        while let Some(scroller) = at {
+            if let Some((dx, dy)) = scrolls.offsets.get(&scroller) {
+                x += dx;
+                y += dy;
+            }
+            at = self.geometry.get(&scroller).and_then(|g| g.scroller);
+        }
+        (x, y)
     }
 
     /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
@@ -1446,7 +1497,7 @@ pub(crate) fn install(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
-            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
+            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom" | "scroll")) {
                 DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
@@ -1463,17 +1514,49 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
+                        // Rects are where the scrollers put the box; the
+                        // last two are where layout did (`offsetTop`).
+                        let (dx, dy) = host.element_scroll_over(g);
                         JsValue::String(format!(
-                            "{} {} {} {} {} {} {} {} {} {} {}",
-                            n(g.x), n(g.y), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
-                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position
+                            "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            n(g.x - dx), n(g.y - dy), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
+                            n(g.x), n(g.y)
                         ))
                     }
                     None => JsValue::String(String::new()),
                 },
+                // "x y" of an element that can scroll now, else "".
+                (Some(node), Some("scroll")) => {
+                    let raw = node.id.raw();
+                    if host.geometry.get(&raw).is_some_and(|g| g.scrolls) {
+                        let scrolls = host.element_scrolls.borrow();
+                        let (x, y) = scrolls.offsets.get(&raw).copied().unwrap_or((0.0, 0.0));
+                        JsValue::String(format!("{x} {y}"))
+                    } else {
+                        JsValue::String(String::new())
+                    }
+                }
                 (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
+        }),
+    )?;
+
+    // scroll_element(gen, id, x, y): store where script scrolled an element.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_scroll_element",
+        4,
+        Box::new(move |args| {
+            let host = h.borrow();
+            if let (Some(node), Some(x), Some(y)) = (host.node(args), number_arg(args, 2), number_arg(args, 3)) {
+                let mut scrolls = host.element_scrolls.borrow_mut();
+                scrolls.offsets.insert(node.id.raw(), (x, y));
+                scrolls.generation += 1;
+                scrolls.unpainted = true;
+            }
+            JsValue::Undefined
         }),
     )?;
 
@@ -1728,10 +1811,11 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted
+        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        scrollElement: __rustkit_dom_scroll_element
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted', 'scroll_element'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2666,8 +2750,19 @@ const WRAPPERS_JS: &str = r#"
         var p = raw.split(' ');
         var n = [];
         for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
-        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10] };
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12] };
     }
+    // What web_scroll.js scrolls an element with; it takes this and deletes
+    // it. read: null when the element cannot scroll now.
+    g.__rustkit_element_scroll = {
+        read: function (el) {
+            var raw = info(el, 'scroll');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { x: finite(p[0]), y: finite(p[1]) };
+        },
+        write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); }
+    };
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
         return finite(typeof v === 'number' ? v : 0);
@@ -2725,9 +2820,9 @@ const WRAPPERS_JS: &str = r#"
         var base = 0;
         if (parent && parent !== document.body) {
             var pb = geom(parent);
-            if (pb) base = axis === 'x' ? pb.x + pb.bl : pb.y + pb.bt;
+            if (pb) base = axis === 'x' ? pb.lx + pb.bl : pb.ly + pb.bt;
         }
-        return round((axis === 'x' ? b.x : b.y) - base);
+        return round((axis === 'x' ? b.lx : b.ly) - base);
     }
     getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
     getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });

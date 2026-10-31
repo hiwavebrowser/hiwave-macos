@@ -1647,6 +1647,12 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
+    /// when it is an element scroller. Set through a shared tree by the
+    /// engine, from its per-view table, when script scrolls. Layout never
+    /// reads it: the boxes under a scroller stay where layout put them, and
+    /// the painter, the hit test and the geometry snapshot apply the offset.
+    pub element_scroll: std::cell::Cell<(f32, f32)>,
 }
 
 impl LayoutBox {
@@ -1678,7 +1684,29 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            element_scroll: std::cell::Cell::new((0.0, 0.0)),
         }
+    }
+
+    /// Whether script can scroll this box: an element whose `overflow` is
+    /// `hidden`, `scroll` or `auto` on either axis. `clip` does not make a
+    /// scroller. `body` and `html` are left out: their overflow scrolls the
+    /// viewport (a `body` that scrolls on its own, under an `html` that
+    /// clips, does not take an offset yet).
+    pub fn is_element_scroller(&self) -> bool {
+        use rustkit_css::Overflow;
+        let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+        (scrolls(self.style.overflow_x) || scrolls(self.style.overflow_y))
+            && self.node_id.is_some()
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::LineBreak)
+            && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
+    }
+
+    /// Whether this box is the containing block of the absolute boxes inside
+    /// it, as the painter reads it: `position: relative` is laid out as
+    /// static, so the computed style says too.
+    fn holds_absolute_boxes(&self) -> bool {
+        self.position != Position::Static || self.style.position != rustkit_css::Position::Static
     }
 
     /// Create a new layout box with positioning.
@@ -7028,7 +7056,7 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, 0, false)
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false)
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -7078,7 +7106,7 @@ impl LayoutBox {
                 .iter()
                 .find(|a| a.position == Position::Fixed)
                 .map_or(at.z_index, |outer| outer.z_index);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, true) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -7100,7 +7128,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true);
         match top {
             Some((z_index, hit)) if z_index >= 0 => Some(hit),
             Some((_, hit)) => page().or(Some(hit)),
@@ -7209,7 +7237,7 @@ impl LayoutBox {
         for child in &self.children {
             let fixed = child.position == Position::Fixed;
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, true) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true) {
                     hit.viewport_fixed = true;
                     hits.push((outer_z.unwrap_or(child.z_index), hit));
                 }
@@ -7247,8 +7275,17 @@ impl LayoutBox {
 
     /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
-    /// those with the viewport point).
-    fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
+    /// those with the viewport point). `escaped` is what static scrollers
+    /// since the nearest containing block of absolute boxes added to the
+    /// point: an absolute box under them is not in their scrolling box.
+    fn hit_test_internal(
+        &self,
+        x: f32,
+        y: f32,
+        escaped: (f32, f32),
+        depth: u32,
+        skip_held_fixed: bool,
+    ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
         // (`PushTransform`): the point is taken back to where they are
         // laid out. A box squashed flat (`scale(0)`) is drawn nowhere.
@@ -7268,11 +7305,25 @@ impl LayoutBox {
         // Check children in reverse paint order (topmost first)
         let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
         let paint_order = self.get_paint_order();
+        // What this box's own scroll adds to the point, for its children.
+        let scroll = self.element_scroll.get();
+        let (inner_x, inner_y) = (x + scroll.0, y + scroll.1);
+        let inner_escaped = if self.holds_absolute_boxes() {
+            (0.0, 0.0)
+        } else {
+            (escaped.0 + scroll.0, escaped.1 + scroll.1)
+        };
         for child in paint_order.iter().rev() {
             if skip_held_fixed && child.position == Position::Fixed {
                 continue;
             }
-            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1, skip_held_fixed) {
+            let out_of_flow = matches!(child.position, Position::Absolute | Position::Fixed);
+            let (child_x, child_y, child_escaped) = if out_of_flow {
+                (inner_x - inner_escaped.0, inner_y - inner_escaped.1, (0.0, 0.0))
+            } else {
+                (inner_x, inner_y, inner_escaped)
+            };
+            if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
                 return Some(result);
@@ -7388,8 +7439,9 @@ impl LayoutBox {
         });
 
         // Check all children
+        let scroll = self.element_scroll.get();
         for child in &self.children {
-            child.hit_test_all_internal(x, y, depth + 1, results);
+            child.hit_test_all_internal(x + scroll.0, y + scroll.1, depth + 1, results);
         }
     }
 }
@@ -8749,8 +8801,13 @@ pub struct DisplayList {
     /// absolutely positioned box whose containing block is ABOVE a static
     /// clipper is not clipped by it (css-overflow-3 §3.1 — the classic
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
-    /// exactly these clips before painting and re-pushes them after.
-    escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// exactly these clips before painting and re-pushes them after. The
+    /// third field is the box's element scroll, a translate pushed just inside
+    /// the clip: the same box's scroll is escaped with its clip.
+    escapable_clips: Vec<(Rect, BorderRadius, (f32, f32))>,
+    /// The sum of the element scroll translates open at the box being
+    /// painted. A fixed box takes it back: no element scroll moves it.
+    open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
     /// How many ancestors of the box being painted have a `transform`. A
@@ -8861,6 +8918,7 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
@@ -8882,6 +8940,7 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
@@ -8957,7 +9016,8 @@ impl DisplayList {
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
             if escapes {
-                for _ in &outer {
+                for &(_, _, scroll) in outer.iter().rev() {
+                    self.close_element_scroll(scroll);
                     self.commands.push(DisplayCommand::PopClip);
                 }
             }
@@ -8976,6 +9036,16 @@ impl DisplayList {
         if viewport_fixed {
             self.in_viewport_fixed = true;
             self.commands.push(DisplayCommand::PushViewportFixed);
+        }
+        // A fixed box under a positioned scroller is still inside that
+        // scroller's translate: undo it, for this box's subtree.
+        let held_from_element_scroll = (layout_box.position == Position::Fixed
+            && self.transformed_ancestors == 0
+            && self.open_element_scroll != (0.0, 0.0))
+            .then_some(self.open_element_scroll);
+        if let Some((x, y)) = held_from_element_scroll {
+            self.commands.push(Self::translate(x, y));
+            self.open_element_scroll = (0.0, 0.0);
         }
 
         // Check if this creates a new stacking context
@@ -9073,7 +9143,12 @@ impl DisplayList {
         // absolutely positioned descendant whose containing block is above a
         // static clipper: that one escapes via `escapable_clips` when it is
         // rendered (see the top of this function).
+        //
+        // An element scroller's scroll is a translate just inside its clip:
+        // the clip stays with the box and everything under it moves, as the
+        // page's own scroll is one translate around the list.
         let overflow_clip = self.overflow_clip(layout_box);
+        let element_scroll = layout_box.element_scroll.get();
         if let Some((rect, radius)) = overflow_clip {
             if radius.is_zero() {
                 self.commands.push(DisplayCommand::PushClip(rect));
@@ -9081,8 +9156,9 @@ impl DisplayList {
                 self.commands
                     .push(DisplayCommand::PushClipRounded { rect, radius });
             }
+            self.open_scroll_of(element_scroll);
             if !positioned {
-                self.escapable_clips.push((rect, radius));
+                self.escapable_clips.push((rect, radius, element_scroll));
             }
         }
         self.depth += 1;
@@ -9148,6 +9224,7 @@ impl DisplayList {
 
         self.depth -= 1;
         if overflow_clip.is_some() {
+            self.close_element_scroll(element_scroll);
             self.commands.push(DisplayCommand::PopClip);
             if !positioned {
                 self.escapable_clips.pop();
@@ -9178,6 +9255,11 @@ impl DisplayList {
             self.commands.push(DisplayCommand::PopStackingContext);
         }
 
+        if let Some(open) = held_from_element_scroll {
+            self.commands.push(DisplayCommand::PopTransform);
+            self.open_element_scroll = open;
+        }
+
         if viewport_fixed {
             self.commands.push(DisplayCommand::PopViewportFixed);
             self.in_viewport_fixed = false;
@@ -9188,16 +9270,42 @@ impl DisplayList {
         // exactly as before.
         if let Some(outer) = outer_escapable {
             if escapes {
-                for &(rect, radius) in &outer {
+                for &(rect, radius, scroll) in &outer {
                     if radius.is_zero() {
                         self.commands.push(DisplayCommand::PushClip(rect));
                     } else {
                         self.commands
                             .push(DisplayCommand::PushClipRounded { rect, radius });
                     }
+                    self.open_scroll_of(scroll);
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    fn translate(x: f32, y: f32) -> DisplayCommand {
+        DisplayCommand::PushTransform {
+            matrix: [1.0, 0.0, 0.0, 1.0, x, y],
+            origin: (0.0, 0.0),
+        }
+    }
+
+    /// Open the translate of an element scroll, if it scrolled.
+    fn open_scroll_of(&mut self, scroll: (f32, f32)) {
+        if scroll != (0.0, 0.0) {
+            self.commands.push(Self::translate(-scroll.0, -scroll.1));
+            self.open_element_scroll.0 += scroll.0;
+            self.open_element_scroll.1 += scroll.1;
+        }
+    }
+
+    /// Close what `open_scroll_of` opened.
+    fn close_element_scroll(&mut self, scroll: (f32, f32)) {
+        if scroll != (0.0, 0.0) {
+            self.commands.push(DisplayCommand::PopTransform);
+            self.open_element_scroll.0 -= scroll.0;
+            self.open_element_scroll.1 -= scroll.1;
         }
     }
 
