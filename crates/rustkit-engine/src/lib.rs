@@ -43771,19 +43771,18 @@ mod scroll_extent_tests {
     // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
     // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
 
-    /// Transforms do not move a box in the layout tree, and the offsets of
-    /// a relative box are not applied (`positioning_of`), so neither box
-    /// extends the page yet. `html` has no box of its own, so with
-    /// `html { height: 100% }` the body's bottom margin still counts (16
-    /// where Chrome has 8).
-    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Transforms do not move a box in the layout tree, so a translated
+    /// box does not extend the page yet (a relative box's offsets do, since
+    /// Z C13: `LayoutBox::shift_relative_children`). `html` has no box of
+    /// its own, so with `html { height: 100% }` the body's bottom margin
+    /// still counts (16 where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "html-body-overflow-x-hidden"];
     /// Chrome's wheel does not scroll a viewport whose overflow is hidden
     /// (script still does). The engine's wheel is not locked yet.
     /// And a body that scrolls takes the wheel itself: the 8px of its
     /// margin are left to the viewport, which only script moves.
     const WHEEL_GAPS: &[&str] = &[
         "translate-down",
-        "relative-top",
         "body-overflow-hidden",
         "html-overflow-hidden",
         "html-body-overflow-x-hidden",
