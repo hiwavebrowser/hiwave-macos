@@ -25,7 +25,7 @@ use url::Url;
 use crate::nav_cancel::NavCanceller;
 use crate::page_protocol::{adopt, coalesce};
 use crate::devtools_service::{
-    ask_console as devtools_ask_console, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
+    ask_console as devtools_ask_console, ask_network as devtools_ask_network, watch as devtools_watch, DevtoolsCount, DevtoolsCounters,
 };
 use crate::inspector::Inspector;
 use crate::{DevtoolsAnswer, DevtoolsQuery, EngineBuilder, EngineViewId, PageCmd, PageEvent, PageInput};
@@ -344,6 +344,9 @@ impl ContentThread {
     pub fn devtools_ask(&self, query: DevtoolsQuery) -> oneshot::Receiver<DevtoolsAnswer> {
         if let (DevtoolsQuery::Console { since }, Some(Ok(boot))) = (&query, self.boot()) {
             return devtools_ask_console(boot.inspector, *since, Some(boot.devtools_counters));
+        }
+        if let (DevtoolsQuery::Network, Some(Ok(boot))) = (&query, self.boot()) {
+            return devtools_ask_network(boot.inspector);
         }
         // An open panel is woken when the view records, not on a clock (T6b).
         if let (DevtoolsQuery::Attach(on), Some(Ok(boot))) = (&query, self.boot()) {
@@ -1049,6 +1052,104 @@ mod tests {
     }
 
     #[test]
+    fn a_205_navigation_leaves_the_page_as_it_is_and_reports_no_failure() {
+        // #730 follow-up (e) / #780: HTML aborts 204 *and* 205 the same way.
+        // Only 204 was pinned; a wrong status match would wipe the shown
+        // document or report Failed on Reset Content.
+        let port = serve_empty("HTTP/1.1 205 Reset Content");
+        let page = page();
+        let shown = "data:text/html,<p id=t>shown</p>";
+        let first = page.navigate(Url::parse(shown).unwrap());
+        wait_complete(&page, first);
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/ping")).unwrap());
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 0, "a 205 was reported as a failure: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the window was never told the 205 navigation ended: {events:?}"
+        );
+        let mut text = page.eval("document.getElementById('t') ? document.getElementById('t').textContent : 'replaced'");
+        let text = wait_recv(&mut text, Duration::from_secs(5)).expect("eval reply").expect("eval");
+        assert!(text.contains("shown"), "the 205 replaced the document on screen: {text}");
+    }
+
+    /// Content-thread Stop cancels the in-flight load first (`signal_stop`),
+    /// so the page reports `Failed { "cancelled" }` — not `"stopped"` (that
+    /// string is for `Engine::stop` on a yielded load_tail). The shown
+    /// document must stay and the held navigation must not Complete.
+    #[test]
+    fn stop_during_a_held_navigation_fails_as_cancelled_and_keeps_the_shown_page() {
+        let (port, release, seen) = serve(|path, release_flag| {
+            if path == "/slow" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire)
+                    && start.elapsed() < Duration::from_secs(8)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return (200, "text/html", b"<p id=t>slow</p>".to_vec());
+            }
+            (200, "text/html", b"<p id=t>shown</p>".to_vec())
+        });
+        let page = page();
+        let first = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        wait_complete(&page, first);
+
+        let nav_id = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/slow")).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| p == "/slow"),
+            "the held navigation never reached the server"
+        );
+
+        page.stop();
+        release.store(true, Ordering::Release);
+
+        let events = events_for(&page, nav_id, Duration::from_secs(3));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PageEvent::LoadState {
+                    state: LoadState::Failed { error },
+                    ..
+                } if error == "cancelled"
+            )),
+            "content-thread Stop must fail the held load as cancelled: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the held navigation must not complete after Stop: {events:?}"
+        );
+        let mut text = page.eval(
+            "document.getElementById('t') ? document.getElementById('t').textContent : 'gone'",
+        );
+        let text = wait_recv(&mut text, Duration::from_secs(5))
+            .expect("eval reply")
+            .expect("eval");
+        assert!(
+            text.contains("shown"),
+            "Stop must leave the previous document on screen: {text}"
+        );
+    }
+
+    #[test]
     fn a_failed_navigation_is_reported_failed_once() {
         // #730 follow-up (e): an empty error response failed in the engine
         // (one Failed) and again in end_uncommitted_nav (a second).
@@ -1663,6 +1764,336 @@ mod tests {
         assert!((canvas[1] - 34.0 / 255.0).abs() < 0.02, "{canvas:?}");
         assert!((canvas[2] - 51.0 / 255.0).abs() < 0.02, "{canvas:?}");
         assert!((canvas[3] - 1.0).abs() < 0.02, "{canvas:?}");
+    }
+
+    /// The panel's network read, through the routing the window uses.
+    fn read_network(page: &ContentThread, budget: Duration) -> Option<crate::DevtoolsNetwork> {
+        let mut rx = page.devtools_ask(crate::DevtoolsQuery::Network);
+        match wait_recv(&mut rx, budget) {
+            Some(crate::DevtoolsAnswer::Network(network)) => Some(network),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_fetch_response_is_recorded_while_the_page_thread_is_blocked() {
+        // T7 acceptance (T7-design.md test 1): a fetch started before a
+        // host-side block gets its response record while the page is still
+        // blocked, read through the devtools service. On develop the request
+        // is polled only by the page thread, so nothing is read or recorded
+        // until the block ends.
+        let (port, _release, _seen) = serve(|path, _release| {
+            if path.starts_with("/slow") {
+                std::thread::sleep(Duration::from_millis(200));
+                return (200, "text/plain", b"ok".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(
+            loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })),
+            "the page never finished loading"
+        );
+        let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(crate::DevtoolsAnswer::Done));
+        let mut started = page.eval("fetch('/slow?token=SECRET'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let slow = |network: &crate::DevtoolsNetwork| {
+            network.requests.iter().find(|r| r.url.ends_with("/slow")).cloned()
+        };
+        // The request record is made at request start, on the page.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (start_doc, request) = loop {
+            let network = read_network(&page, Duration::from_secs(1)).expect("no network answer");
+            if let Some(request) = slow(&network) {
+                break (network.doc, request);
+            }
+            assert!(Instant::now() < deadline, "the fetch never started: {network:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(request.state, "pending", "the fetch ended before the block: {request:?}");
+        assert!(!request.url.contains("SECRET"), "{request:?}");
+
+        page.enqueue(PageCmd::Block(1_500));
+        let mut behind = page.eval("1");
+        let blocked_at = Instant::now();
+        let mut answered = None;
+        while blocked_at.elapsed() < Duration::from_millis(1_200) {
+            let network = read_network(&page, Duration::from_millis(500)).expect("no network answer while blocked");
+            if let Some(r) = slow(&network).filter(|r| r.state != "pending") {
+                answered = Some((network.doc, r));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            matches!(behind.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the page was not in its block when the record was read"
+        );
+        let (doc, response) = answered.expect("no response record while the page thread was blocked");
+        assert_eq!(response.state, "response", "{response:?}");
+        assert_eq!(response.status, Some(200));
+        assert_eq!(doc, start_doc, "the record is not in the document the fetch started in");
+        assert!(wait_recv(&mut behind, Duration::from_secs(5)).is_some());
+    }
+
+    /// A server whose `/hang` answers only when released (or after 10 s),
+    /// and a loaded page from it with the panel attached.
+    fn hanging_page() -> (ContentThread, u16, Arc<AtomicBool>) {
+        let (port, release, _seen) = serve(|path, release| {
+            if path.starts_with("/hang") {
+                let until = Instant::now() + Duration::from_secs(10);
+                while !release.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return (200, "text/plain", b"late".to_vec());
+            }
+            (200, "text/html", b"<p id=\"t\">ready</p>".to_vec())
+        });
+        let page = page();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })));
+        let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+        assert_eq!(wait_recv(&mut attached, Duration::from_secs(5)), Some(crate::DevtoolsAnswer::Done));
+        let mut started = page.eval("fetch('/hang'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !read_network(&page, Duration::from_secs(1))
+            .is_some_and(|n| n.requests.iter().any(|r| r.url.ends_with("/hang")))
+        {
+            assert!(Instant::now() < deadline, "the fetch never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (page, port, release)
+    }
+
+    #[test]
+    fn a_navigation_mid_flight_records_one_cancel_in_the_old_document() {
+        // T7 test 2: the task is aborted; its guard records the cancel in
+        // the document the request started in, never a response, and the
+        // new document's list does not show it.
+        let (page, port, release) = hanging_page();
+        let old_doc = read_network(&page, Duration::from_secs(1)).unwrap().doc;
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/next.html")).unwrap());
+        let loaded = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        });
+        assert!(loaded.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. })));
+        let inspector = page.devtools_inspector().unwrap();
+        let hang_id = |records: &[crate::InspectorRecord]| {
+            records.iter().find_map(|r| match &r.event {
+                crate::InspectorEvent::Request { id, url, .. } if url.ends_with("/hang") => Some(*id),
+                _ => None,
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let terminals = loop {
+            let records = inspector.snapshot_since(0).records;
+            let id = hang_id(&records).expect("the request record is gone");
+            let terminals: Vec<_> = records
+                .into_iter()
+                .filter(|r| {
+                    matches!(&r.event, crate::InspectorEvent::Response { id: i, .. } | crate::InspectorEvent::Failure { id: i, .. } if *i == id)
+                })
+                .collect();
+            if !terminals.is_empty() || Instant::now() >= deadline {
+                break terminals;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Let the server answer now: an aborted task writes nothing more.
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(terminals.len(), 1, "not exactly one terminal record: {terminals:?}");
+        assert!(
+            matches!(&terminals[0].event, crate::InspectorEvent::Failure { stage: crate::inspector::FailureStage::Cancelled, .. }),
+            "{terminals:?}"
+        );
+        assert_eq!(terminals[0].doc, old_doc, "the cancel is not in the document the request started in");
+        let records = inspector.snapshot_since(0).records;
+        let id = hang_id(&records).unwrap();
+        let after = records
+            .iter()
+            .filter(|r| matches!(&r.event, crate::InspectorEvent::Response { id: i, .. } | crate::InspectorEvent::Failure { id: i, .. } if *i == id))
+            .count();
+        assert_eq!(after, 1, "a record was written after the cancel");
+        let network = read_network(&page, Duration::from_secs(1)).unwrap();
+        assert_ne!(network.doc, old_doc);
+        assert!(!network.requests.iter().any(|r| r.url.ends_with("/hang")), "the old page's request is listed: {network:?}");
+    }
+
+    #[test]
+    fn a_navigation_mid_flight_closes_the_stream_the_server_sees() {
+        // T7 test 2, the server's side (Prometheus nit, carried to T8): the
+        // aborted task drops its connection, so the server reads EOF within
+        // the T7a C4 bound (about 1 s) of the navigation.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hang_seen = Arc::new(AtomicBool::new(false));
+        let closed: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let (seen_for_server, closed_for_server) = (Arc::clone(&hang_seen), Arc::clone(&closed));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (hang_seen, closed) = (Arc::clone(&seen_for_server), Arc::clone(&closed_for_server));
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&request).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    if path.starts_with("/hang") {
+                        hang_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
+                        let until = Instant::now() + Duration::from_secs(10);
+                        while Instant::now() < until {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                        if Instant::now() < until {
+                            *closed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                        }
+                        return;
+                    }
+                    let body = b"<p id=\"t\">ready</p>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                });
+            }
+        });
+        let page = page();
+        let complete = |events: &[PageEvent]| {
+            events.iter().any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+        };
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        assert!(complete(&poll_until(&page, Duration::from_secs(8), complete)));
+        let mut started = page.eval("fetch('/hang'); 'started'");
+        assert!(wait_recv(&mut started, Duration::from_secs(5)).unwrap().unwrap().contains("started"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !hang_seen.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the fetch never reached the server");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let navigated = Instant::now();
+        let _nav = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/next.html")).unwrap());
+        let deadline = navigated + Duration::from_secs(3);
+        let closed_at = loop {
+            if let Some(at) = *closed.lock().unwrap_or_else(|e| e.into_inner()) {
+                break Some(at);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let closed_at = closed_at.expect("the server never saw the stream close after the navigation");
+        let after = closed_at.saturating_duration_since(navigated);
+        assert!(after < Duration::from_secs(1), "the stream closed {after:?} after the navigation");
+    }
+
+    #[test]
+    fn a_closed_view_frees_its_inspector_with_a_request_out() {
+        // T7 test 3 (S5): the task holds the view's Inspector only until its
+        // abort is processed. C4: within about a second of the close.
+        let (page, _port, release) = hanging_page();
+        let held = close_to_dead_inspector(page);
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(held < Duration::from_secs(1), "the closed view's Inspector was still held {held:?} after the close");
+    }
+
+    /// Drop `page` and time until its Inspector's last strong ref is gone
+    /// (gives up at 5 s).
+    fn close_to_dead_inspector(page: ContentThread) -> Duration {
+        let weak = Arc::downgrade(&page.devtools_inspector().unwrap());
+        let closed = Instant::now();
+        drop(page);
+        while weak.upgrade().is_some() && closed.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        closed.elapsed()
+    }
+
+    #[test]
+    #[ignore = "receipt: C4 close latency over 10 runs, idle"]
+    fn close_latency_receipt() {
+        // T7a R1 delta (Atlas 6): the "beside a busy rustkit-net" figure is
+        // dropped; nothing showed a body still in flight at the close.
+        let mut idle = Vec::new();
+        for _ in 0..10 {
+            let (page, _port, release) = hanging_page();
+            idle.push(close_to_dead_inspector(page));
+            release.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        idle.sort();
+        eprintln!(
+            "C4 close->dead Weak idle: p50 {:.1} ms, max {:.1} ms, n {}",
+            idle[idle.len() / 2].as_secs_f64() * 1e3,
+            idle[idle.len() - 1].as_secs_f64() * 1e3,
+            idle.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "receipt: two heavy live pages loading at once in one process; run with HIWAVE_NET_RUNTIME on and =0"]
+    fn two_heavy_tabs_receipt() {
+        // T7a D1: both views' script requests share the one rustkit-net
+        // thread. Wall clock from navigate to load complete, each view, and
+        // the script request records each made.
+        let sites = ["https://www.cnn.com/", "https://www.yahoo.com/"];
+        let started = Instant::now();
+        let pages: Vec<_> = sites
+            .iter()
+            .map(|url| {
+                let page = page();
+                let mut attached = page.devtools_ask(crate::DevtoolsQuery::Attach(true));
+                let _ = wait_recv(&mut attached, Duration::from_secs(5));
+                let _nav = page.navigate(Url::parse(url).unwrap());
+                page
+            })
+            .collect();
+        let mut done: Vec<Option<Duration>> = vec![None; pages.len()];
+        while done.iter().any(Option::is_none) && started.elapsed() < Duration::from_secs(90) {
+            for (i, page) in pages.iter().enumerate() {
+                if done[i].is_none()
+                    && page
+                        .poll()
+                        .iter()
+                        .any(|event| matches!(event, PageEvent::LoadState { state: LoadState::Complete, .. }))
+                {
+                    done[i] = Some(started.elapsed());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let arm = std::env::var("HIWAVE_NET_RUNTIME").unwrap_or_else(|_| "on".into());
+        for ((url, page), at) in sites.iter().zip(&pages).zip(&done) {
+            let requests = read_network(page, Duration::from_secs(2)).map_or(0, |n| n.requests.len());
+            eprintln!(
+                "two tabs HIWAVE_NET_RUNTIME={arm}: {url} load complete {} ({requests} network records listed)",
+                at.map_or("not in 90 s".to_string(), |d| format!("{:.1} s", d.as_secs_f64()))
+            );
+        }
     }
 
     /// A plain `fetch` queued while a response is delivered, in the same

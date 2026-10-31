@@ -27,6 +27,18 @@ pub struct StylesheetAst {
     /// Layer order is the order names are FIRST declared (CSS Cascade 5
     /// §6.4.3), and a statement can declare a layer before any rule is in it.
     pub layer_statements: Vec<LayerStatementAst>,
+    /// What each `@keyframes` says about `opacity`, in source order.
+    pub keyframes: Vec<KeyframesAst>,
+}
+
+/// The `opacity` an `@keyframes` rule sets at its two ends, `None` where that
+/// keyframe does not set it. The engine runs no animations, so this is all it
+/// keeps of the rule (see `ComputedStyle::settle_animation_opacity`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframesAst {
+    pub name: String,
+    pub first: Option<f32>,
+    pub last: Option<f32>,
 }
 
 /// A layer name declared at a point in the sheet.
@@ -72,9 +84,11 @@ enum AtBlock {
     /// Its body is declarations (`@font-face`, `@page`): kept as one rule
     /// whose selector is the at-rule prelude, as before.
     Declarations,
-    /// Nothing that styles an element in the static frame (`@keyframes`,
-    /// an `@container` with no condition, an `@supports` that is false,
-    /// unknown at-rules): skipped whole.
+    /// `@keyframes`, by name: only its `opacity` at each end is kept.
+    Keyframes(String),
+    /// Nothing that styles an element in the static frame (an `@container`
+    /// with no condition, an `@supports` that is false, unknown at-rules):
+    /// skipped whole.
     Skip,
 }
 
@@ -94,8 +108,51 @@ fn at_block_kind(prelude: &str) -> AtBlock {
         "font-face" | "page" | "property" | "counter-style" | "font-palette-values" => {
             AtBlock::Declarations
         }
+        "keyframes" | "-webkit-keyframes" => {
+            AtBlock::Keyframes(condition.trim_matches(|c| c == '"' || c == '\'').to_string())
+        }
         _ => AtBlock::Skip,
     }
+}
+
+/// The `opacity` at each end of an `@keyframes` body. `None` when an end sets
+/// a value this cannot read (`var()`): the rule is then as good as absent, and
+/// the box keeps painting at full opacity rather than be hidden on a guess.
+fn keyframes_opacity(name: String, body: &str) -> Option<KeyframesAst> {
+    let mut frames = KeyframesAst { name, first: None, last: None };
+    if frames.name.is_empty() {
+        return None;
+    }
+    for frame in parse_stylesheet(body).ok()?.rules {
+        // Keyframe declarations with `!important` are invalid and ignored.
+        let Some(value) = frame
+            .declarations
+            .iter()
+            .rev()
+            .find(|d| d.property.eq_ignore_ascii_case("opacity") && !d.important)
+        else {
+            continue;
+        };
+        let value = value.value.trim();
+        let opacity = match value.strip_suffix('%') {
+            Some(percent) => percent.parse::<f32>().map(|p| p / 100.0),
+            None => value.parse::<f32>(),
+        };
+        for at in frame.selector.split(',').map(|s| s.trim().to_ascii_lowercase()) {
+            let offset = match at.as_str() {
+                "from" => Some(0.0),
+                "to" => Some(100.0),
+                other => other.strip_suffix('%').and_then(|p| p.parse::<f32>().ok()),
+            };
+            let end = match offset {
+                Some(o) if o == 0.0 => &mut frames.first,
+                Some(o) if o == 100.0 => &mut frames.last,
+                _ => continue,
+            };
+            *end = Some(opacity.as_ref().ok()?.clamp(0.0, 1.0));
+        }
+    }
+    Some(frames)
 }
 
 /// Decide an `@supports` condition (CSS Conditional 3 §6.1, with
@@ -478,6 +535,11 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
                             AtBlock::Rules(media) => (media, None, None),
                             AtBlock::Container(c) => (None, Some(c), None),
                             AtBlock::Layer(name) => (None, None, Some(name)),
+                            AtBlock::Keyframes(name) => {
+                                out.keyframes.extend(keyframes_opacity(name, &body));
+                                current_selector.clear();
+                                continue;
+                            }
                             _ => {
                                 current_selector.clear();
                                 continue;
@@ -669,6 +731,9 @@ fn merge_block(
     layer: Option<String>,
 ) {
     let base = out.rules.len();
+    // An `@keyframes` is carried whatever `@media` it sits in: only a box that
+    // names it reads it, and a wrong width costs less than a lost rule.
+    out.keyframes.extend(inner.keyframes);
     if let Some(name) = &layer {
         // The block declares its layer where it opens, even when it is empty.
         out.layer_statements.push(LayerStatementAst {
@@ -1320,5 +1385,54 @@ mod tests {
         assert_eq!(ast.rules.len(), 2);
         assert_eq!(ast.rules[0].declarations[0].value, "hsl(0, 100%, 50%)");
         assert_eq!(ast.rules[1].declarations[0].value, "hsl(120, 100%, 50%)");
+    }
+
+    /// #833 RD3: `@keyframes` opacity ends are what settle paints from. The
+    /// engine companion is headless-gated, so default Linux CI never sees it;
+    /// pin the parser contract here.
+    #[test]
+    fn keyframes_keep_opacity_at_each_end() {
+        let frames = |css: &str| parse_stylesheet(css).expect("parse").keyframes;
+        assert_eq!(
+            frames("@keyframes fade { from { opacity: 0 } to { opacity: 1 } }"),
+            vec![KeyframesAst {
+                name: "fade".into(),
+                first: Some(0.0),
+                last: Some(1.0),
+            }]
+        );
+        assert_eq!(
+            frames("@keyframes p { 0% { opacity: 20% } 100% { opacity: .5 } }"),
+            vec![KeyframesAst {
+                name: "p".into(),
+                first: Some(0.2),
+                last: Some(0.5),
+            }]
+        );
+        // `!important` in a keyframe is invalid and ignored; an end that
+        // only had that declaration stays unset.
+        assert_eq!(
+            frames("@keyframes i { from { opacity: 0 !important } to { opacity: 1 } }"),
+            vec![KeyframesAst {
+                name: "i".into(),
+                first: None,
+                last: Some(1.0),
+            }]
+        );
+        // `var()` cannot be read: the `?` on the parse drops the whole
+        // `@keyframes` (as good as absent), so settle leaves the box at
+        // full opacity rather than guess.
+        assert!(
+            frames("@keyframes v { from { opacity: var(--o) } to { opacity: var(--o) } }").is_empty(),
+            "unreadable opacity must drop the rule"
+        );
+        assert_eq!(
+            frames("@-webkit-keyframes w { to { opacity: .25 } }"),
+            vec![KeyframesAst {
+                name: "w".into(),
+                first: None,
+                last: Some(0.25),
+            }]
+        );
     }
 }

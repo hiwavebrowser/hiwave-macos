@@ -779,6 +779,44 @@ impl Inspector {
         }
     }
 
+    /// The buffered records from `since` on, and the document the next
+    /// record belongs to (the current one), read under one lock (T7 C5).
+    pub fn snapshot_and_doc(&self, since: u64) -> (InspectorSnapshot, u32) {
+        let state = self.state();
+        let snapshot = InspectorSnapshot {
+            records: state.records.iter().filter(|r| r.seq >= since).cloned().collect(),
+            next_seq: state.next_seq,
+            dropped: state.dropped,
+        };
+        (snapshot, state.doc)
+    }
+
+    /// The current document's network records (request, response, failure)
+    /// and that document, read under one lock. Clones only those, not the
+    /// whole ring (up to 2048 records, mostly console) as
+    /// [`snapshot_and_doc`](Self::snapshot_and_doc) does (T8).
+    pub fn network_for_current_doc(&self) -> (InspectorSnapshot, u32) {
+        let state = self.state();
+        let doc = state.doc;
+        let snapshot = InspectorSnapshot {
+            records: state
+                .records
+                .iter()
+                .filter(|r| {
+                    r.doc == doc
+                        && matches!(
+                            r.event,
+                            InspectorEvent::Request { .. } | InspectorEvent::Response { .. } | InspectorEvent::Failure { .. }
+                        )
+                })
+                .cloned()
+                .collect(),
+            next_seq: state.next_seq,
+            dropped: state.dropped,
+        };
+        (snapshot, doc)
+    }
+
     /// The current page's unsupported members, in the order first seen.
     pub fn unsupported_apis(&self) -> Vec<UnsupportedApiCount> {
         self.state().unsupported.clone()
@@ -1682,12 +1720,15 @@ pub fn cap(text: &str, max: usize) -> (String, bool) {
 
 /// `url` with its credentials always removed, and its query, fragment and
 /// `;` path parameters (`;jsessionid=`) unless `keep_query`. A `data:` URL
-/// is reduced to `data:<mime>,…` (a common MIME type only); any other URL
-/// that cannot have a host (`about:`, `blob:`) keeps its scheme and, for
-/// `blob:`, its origin.
+/// is reduced to `data:<mime>,…` (a common MIME type only); a `javascript:`
+/// URL is always reduced to its scheme, with or without an authority
+/// (`javascript://h/alert(1)` is a base URL to the parser; R1 M1); any
+/// other URL that cannot have a host (`about:`, `blob:`) keeps its scheme
+/// and, for `blob:`, its origin.
 pub fn scrub_url(url: &Url, keep_query: bool) -> String {
     match url.scheme() {
         "data" => format!("data:{},…", data_mime(&url.as_str()[5..])),
+        "javascript" => "javascript:".to_string(),
         "blob" => match Url::parse(url.path()) {
             Ok(inner) => format!("blob:{}", inner.origin().ascii_serialization()),
             Err(_) => "blob:".to_string(),
@@ -1703,6 +1744,12 @@ pub fn scrub_url(url: &Url, keep_query: bool) -> String {
                 // The parser's path: `\` already reads as `/` for a special
                 // scheme, and tabs and newlines are gone.
                 let path = drop_path_params(clean.path());
+                // A host-less path that now starts with `//` (`foo:/;x/a@b`)
+                // would serialise as an authority (`foo://a@b`); url 2.5.7's
+                // `set_path` adds no `/.`, so it is written here (T8).
+                if clean.host().is_none() && path.starts_with("//") {
+                    return format!("{}:/.{path}", clean.scheme());
+                }
                 clean.set_path(&path);
             }
             clean.to_string()
@@ -1743,7 +1790,7 @@ fn data_mime(rest: &str) -> &'static str {
 /// a servlet puts the session cookie there when cookies are off. Each one
 /// runs from `;` (or `%3B`, to record less) to the end of its segment. The
 /// same rule as the diagnostics half's `report_url`.
-fn drop_path_params(path: &str) -> String {
+pub(crate) fn drop_path_params(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
     while !rest.is_empty() {

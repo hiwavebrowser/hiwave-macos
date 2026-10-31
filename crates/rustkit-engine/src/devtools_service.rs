@@ -90,10 +90,12 @@ fn counters_logged() -> bool {
     })
 }
 
-/// A console read for the service.
+/// A console (or network) read for the service.
 struct ConsoleRead {
     inspector: Arc<Inspector>,
     since: u64,
+    /// The current document's requests instead of console lines (T7).
+    network: bool,
     reply: oneshot::Sender<DevtoolsAnswer>,
     /// Wake the window's loop when the answer has something new, as the
     /// content thread's page did. Counted here, not on the page.
@@ -189,7 +191,8 @@ impl Service {
             };
             for read in reads {
                 let inspector = Arc::downgrade(&read.inspector);
-                let next_seq = answer(read);
+                // A network read leaves the console's read mark alone.
+                let Some(next_seq) = answer(read) else { continue };
                 let mut inbox = self.inbox();
                 if let Some(watch) = inbox.watches.iter_mut().find(|w| Weak::ptr_eq(&w.inspector, &inspector)) {
                     watch.read_to = watch.read_to.max(next_seq);
@@ -299,8 +302,19 @@ pub fn watch(inspector: &Arc<Inspector>, counters: &Arc<DevtoolsCounters>, on: b
     inspector.set_watched(watched);
 }
 
-/// Answer `read`; returns the `next_seq` it answered up to.
-fn answer(read: ConsoleRead) -> u64 {
+/// Answer `read`; returns the `next_seq` a console read answered up to.
+fn answer(read: ConsoleRead) -> Option<u64> {
+    if read.network {
+        let (snapshot, doc) = read.inspector.network_for_current_doc();
+        let mut network = crate::devtools_network(&snapshot, doc);
+        // The second guard, as for console lines.
+        for request in &mut network.requests {
+            request.url = read.inspector.url_text(&request.url);
+            request.failure = request.failure.as_deref().map(|f| read.inspector.scrub_text(f));
+        }
+        let _ = read.reply.send(DevtoolsAnswer::Network(network));
+        return None;
+    }
     let mut console = devtools_console_entries(&read.inspector.snapshot_since(read.since));
     console.page_crashed = read.inspector.page_crashed();
     console.held = read.inspector.console_held();
@@ -313,7 +327,7 @@ fn answer(read: ConsoleRead) -> u64 {
         counters.window_wake();
         crate::script_net::poke_live_turn();
     }
-    next_seq
+    Some(next_seq)
 }
 
 /// The second guard (T6 R1 condition 7). Redaction happens when a record is
@@ -338,12 +352,31 @@ pub fn ask_console(
     wake_window: Option<Arc<DevtoolsCounters>>,
 ) -> oneshot::Receiver<DevtoolsAnswer> {
     let (reply, rx) = oneshot::channel();
-    let read = ConsoleRead {
+    submit(ConsoleRead {
         inspector,
         since,
+        network: false,
         reply,
         wake_window,
-    };
+    });
+    rx
+}
+
+/// The current document's requests `inspector` recorded, answered on the
+/// devtools thread: served while the page thread is blocked (T7).
+pub fn ask_network(inspector: Arc<Inspector>) -> oneshot::Receiver<DevtoolsAnswer> {
+    let (reply, rx) = oneshot::channel();
+    submit(ConsoleRead {
+        inspector,
+        since: 0,
+        network: true,
+        reply,
+        wake_window: None,
+    });
+    rx
+}
+
+fn submit(read: ConsoleRead) {
     let service = service();
     let mut inbox = service.inbox();
     if service.start(&mut inbox) {
@@ -353,7 +386,6 @@ pub fn ask_console(
         drop(inbox);
         answer_unserved(read);
     }
-    rx
 }
 
 /// No devtools thread could be started. The caller is the window (or the
@@ -361,6 +393,10 @@ pub fn ask_console(
 /// gets an empty answer and a log line instead.
 fn answer_unserved(read: ConsoleRead) {
     tracing::warn!(target: "devtools", "devtools thread did not start; console read answered empty");
+    if read.network {
+        let _ = read.reply.send(DevtoolsAnswer::Network(crate::DevtoolsNetwork::default()));
+        return;
+    }
     let console = crate::DevtoolsConsole {
         next_seq: read.since,
         ..Default::default()
@@ -424,6 +460,53 @@ mod tests {
             inspector.watermark()
         );
         watch(&inspector, &counters, false);
+    }
+
+    /// T8: the network read clones only the current document's network
+    /// records, and answers exactly what the whole-ring read answered: two
+    /// documents, a full ring of console lines around their requests, a
+    /// response, a failure, one left open. Prints the read's time on the full
+    /// ring both ways (the lock is held for the clone).
+    #[test]
+    fn the_network_read_clones_only_the_current_documents_requests() {
+        use crate::inspector::{FailureStage, ResourceType};
+        let inspector = tab();
+        let url = |p: &str| url::Url::parse(&format!("https://a.test/{p}?q=SECRET")).unwrap();
+        let old = inspector.begin_request(&url("old"), "GET", ResourceType::Fetch, Some("fetch")).unwrap();
+        old.response(200, Some("text/plain"), None, Some(1), false);
+        inspector.navigation_started(Some(&url("next")));
+        let console = TAB_RING_CAPACITY - 160;
+        let mut open = Vec::new();
+        for i in 0..150 {
+            for _ in 0..console / 150 {
+                inspector.console(ConsoleLevel::Log, "line", None);
+            }
+            let g = inspector.begin_request(&url(&format!("r{i}")), "GET", ResourceType::Fetch, Some("fetch")).unwrap();
+            match i % 3 {
+                0 => g.response(200, Some("text/plain"), None, Some(1), false),
+                1 => g.fail(FailureStage::Connect, "refused"),
+                _ => open.push(g),
+            }
+        }
+        let started = Instant::now();
+        let (whole, doc) = inspector.snapshot_and_doc(0);
+        let before = crate::devtools_network(&whole, doc);
+        let whole_took = started.elapsed();
+        let started = Instant::now();
+        let (network, now_doc) = inspector.network_for_current_doc();
+        let after = crate::devtools_network(&network, now_doc);
+        let network_took = started.elapsed();
+        eprintln!(
+            "T8 network read on a ring of {} records: whole ring {} cloned in {whole_took:?}, current doc's network {} cloned in {network_took:?}",
+            whole.records.len(),
+            whole.records.len(),
+            network.records.len()
+        );
+        assert_eq!(after, before);
+        assert_eq!(after.requests.len(), 150, "the old document's request is not listed");
+        assert!(network.records.len() < whole.records.len() / 4, "{} of {}", network.records.len(), whole.records.len());
+        assert!(network.records.iter().all(|r| r.doc == now_doc));
+        drop(open);
     }
 
     /// T6 R1 condition 3: twenty tabs with an open panel each, full rings,
@@ -538,7 +621,7 @@ mod tests {
         let inspector = tab();
         inspector.console(ConsoleLevel::Log, "a", None);
         let (reply, mut rx) = oneshot::channel();
-        answer_unserved(ConsoleRead { inspector, since: 7, reply, wake_window: None });
+        answer_unserved(ConsoleRead { inspector, since: 7, network: false, reply, wake_window: None });
         match rx.try_recv() {
             Ok(DevtoolsAnswer::Console(console)) => {
                 assert!(console.entries.is_empty(), "{:?}", console.entries);

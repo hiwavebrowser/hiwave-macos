@@ -208,6 +208,32 @@ impl CancelToken {
     }
 }
 
+type OriginAcquire = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError>> + Send>,
+>;
+
+enum OriginSlot {
+    Held(Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError>),
+    Queued(OriginAcquire),
+}
+
+/// A request's place in its origin's slot queue, taken by
+/// [`FetchPolicy::reserve`]. `Send`, so the request can run on another
+/// thread; dropping it gives the place up.
+pub struct Reservation {
+    origin: OriginSlot,
+}
+
+impl Reservation {
+    async fn origin_slot(self) -> Result<tokio::sync::OwnedSemaphorePermit, Denial> {
+        match self.origin {
+            OriginSlot::Held(permit) => permit,
+            OriginSlot::Queued(acquire) => acquire.await,
+        }
+        .map_err(|_| Denial::BudgetExhausted)
+    }
+}
+
 /// How long one request waited for its in-flight slots (the per-origin and
 /// per-page caps queue a request; they never refuse it). The policy stamps
 /// when the request starts waiting and when it has both slots; a watcher
@@ -552,11 +578,36 @@ impl FetchPolicy {
         req: ScriptRequest,
         wait: Option<&SlotWait>,
     ) -> Result<ScriptResponse, Denial> {
+        let reservation = self.reserve(&req, wait)?;
+        self.run_reserved(loader, req, reservation, wait).await
+    }
+
+    /// The part of a request whose outcome depends on the order requests
+    /// start in, done now, synchronously: the total budget, the shape check,
+    /// the `queued` stamp, and a place in the origin's slot queue (T8, the
+    /// slot ticket). A caller that runs the request on another thread calls
+    /// this where the request starts, so per-origin slots go in start order
+    /// whatever the worker count; [`execute_reserved`](Self::execute_reserved)
+    /// runs the rest.
+    ///
+    /// The contract is per origin: same-origin requests get their origin
+    /// slot in `reserve` order. The page slot is not reserved (a request
+    /// queued on a busy origin must not hold one, see below), so across
+    /// origins the page-slot order is the order grants land in, as before.
+    ///
+    /// The place is taken by polling the origin semaphore's acquire once,
+    /// with a no-op waker and outside the task budget: tokio's semaphore
+    /// queues waiters FIFO from their first poll, and the task's first poll
+    /// of the same future installs its own waker (or finds the permit
+    /// already assigned). Dropping the [`Reservation`] (abort, navigation,
+    /// view close) leaves the queue or returns the permit; the budget count
+    /// is not refunded, as when a running request is dropped.
+    pub fn reserve(&self, req: &ScriptRequest, wait: Option<&SlotWait>) -> Result<Reservation, Denial> {
         if self.total.fetch_add(1, Ordering::SeqCst) >= self.limits.max_total_requests {
             self.total.fetch_sub(1, Ordering::SeqCst);
             return Err(Denial::BudgetExhausted);
         }
-        self.validate_shape(&req)?;
+        self.validate_shape(req)?;
 
         // Origin slot first, then page slot: every task takes them in the same
         // order (no deadlock), and a queued request holds only its own
@@ -572,7 +623,40 @@ impl FetchPolicy {
         if let Some(w) = wait {
             w.queued();
         }
-        let _origin_slot = origin_sem.acquire_owned().await.map_err(|_| Denial::BudgetExhausted)?;
+        let mut acquire: OriginAcquire = Box::pin(tokio::task::unconstrained(origin_sem.acquire_owned()));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let origin = match acquire.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(permit) => OriginSlot::Held(permit),
+            std::task::Poll::Pending => OriginSlot::Queued(acquire),
+        };
+        Ok(Reservation { origin })
+    }
+
+    /// Run a request whose place [`reserve`](Self::reserve) took, raced
+    /// against the page's cancel like [`execute_waited`](Self::execute_waited).
+    pub async fn execute_reserved(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        reservation: Reservation,
+        wait: Option<&SlotWait>,
+    ) -> Result<ScriptResponse, Denial> {
+        let mut page = self.cancel.subscribe();
+        tokio::select! {
+            biased;
+            _ = async { let _ = page.wait_for(|c| *c).await; } => Err(Denial::Cancelled),
+            r = self.run_reserved(loader, req, reservation, wait) => r,
+        }
+    }
+
+    async fn run_reserved(
+        &self,
+        loader: &ResourceLoader,
+        req: ScriptRequest,
+        reservation: Reservation,
+        wait: Option<&SlotWait>,
+    ) -> Result<ScriptResponse, Denial> {
+        let _origin_slot = reservation.origin_slot().await?;
         let _page_slot = self
             .page_slots
             .clone()
@@ -1635,6 +1719,143 @@ mod tests {
         assert!(!second.is_waiting());
         assert!(first.waited().unwrap() < Duration::from_millis(100), "{:?}", first.waited());
         assert!(second.waited().unwrap() >= Duration::from_millis(150), "{:?}", second.waited());
+    }
+
+    // ---- T8 slot ticket: the origin queue place is taken in `reserve` -------
+
+    /// G2: same-origin requests reserved A..D get the origin slot in that
+    /// order even when their tasks first run in the reverse order, on a
+    /// multi-thread runtime. With the place taken at the task's first poll
+    /// (the T7a behaviour) this reads D, C, B, A.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_origin_slots_go_in_reserve_order_not_first_poll_order() {
+        let s = serve_with(Duration::from_millis(60), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let paths = ["/a", "/b", "/c", "/d"];
+        let reserved: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let req = ScriptRequest::get(s.url(path));
+                let r = p.reserve(&req, None).expect("reserved");
+                (req, r)
+            })
+            .collect();
+        let mut tasks = Vec::new();
+        for (req, r) in reserved.into_iter().rev() {
+            let (p, l) = (p.clone(), l.clone());
+            tasks.push(tokio::spawn(async move { p.execute_reserved(&l, req, r, None).await }));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        for t in tasks {
+            t.await.unwrap().expect("served");
+        }
+        let order: Vec<String> = s.seen().into_iter().map(|seen| seen.path).collect();
+        assert_eq!(order, paths, "origin slots must follow reserve order");
+    }
+
+    /// L2 (#827 R1): the slot contract is per origin only. Two origins share
+    /// one page slot and their reservations interleave; tasks first run in
+    /// the reverse order on a multi-thread runtime. Each origin is still
+    /// served in its own reserve order and nothing starves. The order across
+    /// origins is the order page-slot grants land in, which this does not
+    /// pin (the `reserve` docs).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_origins_competing_for_the_page_slot_keep_per_origin_order() {
+        let ok = |_: &Seen| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok");
+        let (s1, s2) = (serve_with(Duration::from_millis(40), ok).await, serve_with(Duration::from_millis(40), ok).await);
+        let limits = FetchLimits { max_in_flight_per_origin: 1, max_in_flight_per_page: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s1.port, s2.port],
+        ));
+        let l = Arc::new(loader());
+        let paths = ["/a", "/b", "/c", "/d"];
+        let mut reserved = Vec::new();
+        for path in paths {
+            for s in [&s1, &s2] {
+                let req = ScriptRequest::get(s.url(path));
+                let r = p.reserve(&req, None).expect("reserved");
+                reserved.push((req, r));
+            }
+        }
+        let mut tasks = Vec::new();
+        for (req, r) in reserved.into_iter().rev() {
+            let (p, l) = (p.clone(), l.clone());
+            tasks.push(tokio::spawn(async move { p.execute_reserved(&l, req, r, None).await }));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let all = async {
+            for t in tasks {
+                t.await.unwrap().expect("served");
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), all).await.expect("an origin starved behind the other");
+        for (name, s) in [("first", &s1), ("second", &s2)] {
+            let order: Vec<String> = s.seen().into_iter().map(|seen| seen.path).collect();
+            assert_eq!(order, paths, "{name} origin left its reserve order");
+            assert_eq!(s.peak.load(Ordering::SeqCst), 1, "{name} origin over its slot");
+        }
+    }
+
+    /// G3: a reservation dropped while queued (a navigation) gives its place
+    /// up; the request behind it is served, nothing waits forever.
+    #[tokio::test]
+    async fn a_dropped_reservation_frees_its_place_in_the_origin_queue() {
+        let s = serve_with(Duration::from_millis(50), |_| resp(200, &[("Access-Control-Allow-Origin", "*")], b"ok")).await;
+        let limits = FetchLimits { max_in_flight_per_origin: 1, ..FetchLimits::default() };
+        let p = Arc::new(allow_ports(
+            FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits),
+            &[s.port],
+        ));
+        let l = Arc::new(loader());
+        let (ra, rb, rc) = (ScriptRequest::get(s.url("/a")), ScriptRequest::get(s.url("/b")), ScriptRequest::get(s.url("/c")));
+        let a = p.reserve(&ra, None).unwrap();
+        let b = p.reserve(&rb, None).unwrap();
+        let c = p.reserve(&rc, None).unwrap();
+        drop(b);
+        let ta = tokio::spawn({
+            let (p, l) = (p.clone(), l.clone());
+            async move { p.execute_reserved(&l, ra, a, None).await }
+        });
+        let tc = tokio::spawn({
+            let (p, l) = (p.clone(), l.clone());
+            async move { p.execute_reserved(&l, rc, c, None).await }
+        });
+        let both = async { (ta.await, tc.await) };
+        let (a, c) = tokio::time::timeout(Duration::from_secs(5), both).await.expect("queue stuck behind a dropped place");
+        a.unwrap().expect("a");
+        c.unwrap().expect("c");
+        let order: Vec<String> = s.seen().into_iter().map(|seen| seen.path).collect();
+        assert_eq!(order, ["/a", "/c"]);
+    }
+
+    /// G4: a budget or shape refusal comes from `reserve`, synchronously,
+    /// with the denial the running request gave before.
+    #[test]
+    fn reserve_refuses_over_budget_and_bad_shape_at_once() {
+        let limits = FetchLimits { max_total_requests: 1, ..FetchLimits::default() };
+        let p = FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits.clone());
+        let mut bad = ScriptRequest::get(Url::parse("http://page.test/x").unwrap());
+        bad.method = Method::from_bytes(b"TRACE").unwrap();
+        assert!(matches!(p.reserve(&bad, None), Err(Denial::BadRequest(_))));
+        let p = FetchPolicy::with_limits(Url::parse("http://page.test/").unwrap(), None, limits);
+        let ok = ScriptRequest::get(Url::parse("http://page.test/x").unwrap());
+        let wait = SlotWait::new();
+        let first = p.reserve(&ok, Some(&wait)).expect("first is in budget");
+        assert!(wait.waited().is_some(), "queued is stamped by reserve");
+        assert!(matches!(p.reserve(&ok, None), Err(Denial::BudgetExhausted)));
+        drop(first);
+    }
+
+    #[test]
+    fn a_reservation_is_send() {
+        fn assert_send<T: Send + 'static>() {}
+        assert_send::<Reservation>();
     }
 
     // ---- cancellation (Z2-C5): navigating away must close the sockets ---------

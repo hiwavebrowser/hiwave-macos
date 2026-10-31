@@ -53,6 +53,8 @@ mod flex_item_min_height_tests;
 mod fit_content_width_tests;
 #[cfg(test)]
 mod min_max_height_unit_tests;
+#[cfg(test)]
+mod abspos_image_reanchor_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
@@ -4207,6 +4209,40 @@ impl LayoutBox {
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
             self.calculate_block_height(Some(containing_block.content.height));
         }
+        // A replaced box is sized by `layout_image_in`, not by
+        // `calculate_block_height`, and on the flow path that ran with no
+        // definite percent base (the stand-in's height is the parent's
+        // cursor: `None`, or a stale cursor): `height: 100%` was `auto` and
+        // the image took its natural ratio. This is the one place that holds
+        // the real containing block, so the replaced sizing is re-run
+        // against it: width against the padding-box width, height against
+        // its height, decorations and `aspect-ratio` / min / max along with
+        // them. The static position is kept (`layout_image_in` places the
+        // box at the cursor it is handed); the offsets below move it.
+        if let BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } = self.box_type
+        {
+            let cb = Dimensions {
+                content: Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y,
+                    containing_block.content.width,
+                    0.0,
+                ),
+                ..Default::default()
+            };
+            self.layout_image_in(
+                natural_width,
+                natural_height,
+                &cb,
+                Some(containing_block.content.height),
+            );
+            self.dimensions.content.x = origin_x;
+            self.dimensions.content.y = origin_y;
+        }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -4279,6 +4315,27 @@ impl LayoutBox {
         for child in &mut self.children {
             child.reanchor_absolute(&cb);
         }
+        // A flex container's out-of-flow children take their static
+        // position as the sole flex item (Flexbox 1 §4.1). Step 13 placed
+        // them with their pre-pass size, or never ran (only out-of-flow
+        // children, so no lines); this box is final now, so place them
+        // again in its final content box with their final size.
+        if self.style.display.is_flex()
+            && self.children.iter().any(|c| {
+                matches!(
+                    c.style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                )
+            })
+        {
+            let content = self.dimensions.content;
+            let (main, cross) = if self.style.flex_direction.is_row() {
+                (content.width, content.height)
+            } else {
+                (content.height, content.width)
+            };
+            crate::flex::place_static_position_children(self, &cb, content, main, cross);
+        }
     }
 
     /// Apply absolute positioning offsets.
@@ -4288,6 +4345,11 @@ impl LayoutBox {
         let has_right = offsets.right.is_some();
         let has_top = offsets.top.is_some();
         let has_bottom = offsets.bottom.is_some();
+        // CSS 2.1 §10.3.8 / §10.6.5: an absolutely positioned REPLACED box
+        // with `width: auto` or `height: auto` keeps its intrinsic size; both
+        // offsets set is over-constrained and the end-side one is ignored.
+        // Only a non-replaced box stretches between its two offsets.
+        let replaced_image = matches!(self.box_type, BoxType::Image { .. });
 
         // Handle horizontal positioning
         if has_left && has_right {
@@ -4296,7 +4358,7 @@ impl LayoutBox {
             let right = offsets.right.unwrap();
 
             // Calculate stretched width if width is auto
-            if matches!(self.style.width, Length::Auto) {
+            if matches!(self.style.width, Length::Auto) && !replaced_image {
                 let available_width = containing_block.content.width
                     - left
                     - right
@@ -4338,8 +4400,12 @@ impl LayoutBox {
             // Calculate stretched height if height is auto. The subtraction
             // lives in `inset_definite_content_height` so the flex container
             // path resolves the identical number.
-            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
-                self.dimensions.content.height = available_height;
+            if !replaced_image {
+                if let Some(available_height) =
+                    self.inset_definite_content_height(containing_block)
+                {
+                    self.dimensions.content.height = available_height;
+                }
             }
 
             // Position from top
@@ -6757,16 +6823,72 @@ impl LayoutBox {
         }
     }
 
+    /// The z-index this box paints at among its siblings when it is
+    /// positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` for a box
+    /// that paints in normal flow.
+    ///
+    /// The engine transfers `position: relative` as `Position::Static`
+    /// (its geometry path is not ready), so
+    /// `self.position` alone put a relative box in normal flow, under an
+    /// earlier absolute sibling and with its `z-index` ignored: railway.com's
+    /// `relative z-10` hero text painted under its `absolute inset-0` image
+    /// (hand test 10-27, R2). Read the computed style for those. A text run
+    /// copies its parent's style and an anonymous box is not an element, so
+    /// only element boxes count. `sticky` is left in normal flow: it is
+    /// still laid out as static and scrolls with the page, so painting it
+    /// positioned would lay it over a fixed bar it never reaches in Chrome
+    /// (`render_no_clone_tests::fixed_sticky_images_and_iframes_draw_the_same_under_scroll`).
+    pub fn paint_z(&self) -> Option<i32> {
+        if self.position != Position::Static {
+            return Some(self.z_index);
+        }
+        let element = !matches!(
+            self.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        let relative = self.style.position == rustkit_css::Position::Relative;
+        (element && relative).then_some(self.style.z_index)
+    }
+
+    /// The z-index `child` paints at among this box's children when it
+    /// paints positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` when
+    /// it paints in normal flow. Asks `child.paint_z()` first (positioned and
+    /// `relative` boxes), then the flex/grid item rule below.
+    ///
+    /// A flex or grid item whose `z-index` is not `auto` paints as if it
+    /// were `position: relative`, even when it is static (CSS Flexbox §4.3,
+    /// CSS Grid §9.5). netflix.com's hero text and email form are a
+    /// `static; z-index: 3` flex item after an absolute poster-collage
+    /// layer; in normal flow they painted under it (hand test 10-27, N1b).
+    /// The engine keeps `z-index: auto` as 0, so an item with an explicit
+    /// `z-index: 0` stays in normal flow here. Only element boxes count: a
+    /// text run copies its parent's style and an anonymous box is no item.
+    pub fn child_paint_z(&self, child: &LayoutBox) -> Option<i32> {
+        if let Some(z) = child.paint_z() {
+            return Some(z);
+        }
+        let item = matches!(
+            self.style.display,
+            rustkit_css::Display::Flex
+                | rustkit_css::Display::InlineFlex
+                | rustkit_css::Display::Grid
+                | rustkit_css::Display::InlineGrid
+        ) && !matches!(
+            child.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        (item && child.style.z_index != 0).then_some(child.style.z_index)
+    }
+
     /// Get children sorted by z-index for painting.
     pub fn get_paint_order(&self) -> Vec<&LayoutBox> {
         let mut normal_flow: Vec<&LayoutBox> = Vec::new();
         let mut positioned: Vec<(&LayoutBox, i32)> = Vec::new();
 
         for child in &self.children {
-            if child.position == Position::Static {
-                normal_flow.push(child);
-            } else {
-                positioned.push((child, child.z_index));
+            match self.child_paint_z(child) {
+                None => normal_flow.push(child),
+                Some(z) => positioned.push((child, z)),
             }
         }
 
@@ -8867,8 +8989,8 @@ impl DisplayList {
             *layer += 1;
             let child_layer = *layer;
 
-            if child.position != Position::Static {
-                if child.z_index < 0 {
+            if let Some(z) = layout_box.child_paint_z(child) {
+                if z < 0 {
                     negative_z.push((child, child_layer));
                 } else {
                     positive_z.push((child, child_layer));
@@ -8882,8 +9004,10 @@ impl DisplayList {
         }
 
         // Sort by z-index, then by layer for stability
+        // Floats ride in `positive_z` at 0, as before.
+        let z_of = |b: &LayoutBox| layout_box.child_paint_z(b).unwrap_or(0);
         negative_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8891,7 +9015,7 @@ impl DisplayList {
             }
         });
         positive_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8978,14 +9102,15 @@ impl DisplayList {
         if matches!(layout_box.box_type, BoxType::Text(_)) {
             return 1.0;
         }
-        // Keyframe animations are parsed and not run. The fade-in idiom
-        // (`opacity: 0; animation: appear 1s forwards`) would leave its
-        // content invisible for good, so a box that names an animation is
-        // not faded, as no box was before opacity was painted. Remove when
-        // the engine runs animations.
+        // Keyframe animations are parsed and not run, so a box that names one
+        // paints the frame it settles on. The fade-in idiom (`opacity: 0;
+        // animation: appear 1s forwards`) would otherwise be invisible for
+        // good, and an animation that could not be settled is not faded, as
+        // no box was before opacity was painted. Remove when the engine runs
+        // animations.
         let animation = layout_box.style.animation_name.trim();
         if !animation.is_empty() && !animation.eq_ignore_ascii_case("none") {
-            return 1.0;
+            return layout_box.style.animation_settled_opacity.unwrap_or(1.0);
         }
         let opacity = layout_box.style.opacity;
         if opacity.is_nan() {

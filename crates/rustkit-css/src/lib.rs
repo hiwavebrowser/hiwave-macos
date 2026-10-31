@@ -1112,9 +1112,8 @@ pub enum Display {
     TableColumn,
     TableColumnGroup,
     /// `contents`: the element generates no box; its children take its
-    /// place. Only the UA style of `<slot>` sets it (author `display:
-    /// contents` is still unsupported, see `parse_display`), and the
-    /// engine's box-tree build removes such boxes, so layout never sees one.
+    /// place (CSS Display 3). Author `display: contents` and the UA style
+    /// of `<slot>` both set it, and the box-tree build removes such boxes.
     Contents,
 }
 
@@ -1155,6 +1154,30 @@ impl Display {
             self,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::InlineTable
         )
+    }
+
+    /// CSS Display 3 §2.7: the block-level equivalent of this display.
+    ///
+    /// `inline` / `inline-block` become `block`, the inline-level inner
+    /// displays become their block-level forms, and a table-internal
+    /// display becomes `block`. `none` and `contents` generate no box, so
+    /// they are left alone (there is nothing to blockify).
+    pub fn blockified(self) -> Self {
+        match self {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
+            Display::InlineTable => Display::Table,
+            Display::TableRow
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableCell
+            | Display::TableCaption
+            | Display::TableColumn
+            | Display::TableColumnGroup => Display::Block,
+            other => other,
+        }
     }
 
     /// `table` or `inline-table`: the box that runs table layout.
@@ -2678,6 +2701,9 @@ pub struct ComputedStyle {
     pub animation_direction: AnimationDirection,
     pub animation_fill_mode: AnimationFillMode,
     pub animation_play_state: AnimationPlayState,
+    /// The `opacity` the box's animation settles on, when its `@keyframes`
+    /// are known (see [`Self::settle_animation_opacity`]).
+    pub animation_settled_opacity: Option<f32>,
 
     // Box sizing
     pub box_sizing: BoxSizing,
@@ -2719,9 +2745,9 @@ pub struct ComputedStyle {
     /// does not split into columns for them yet, but `@container` treats a
     /// child's width as unknown. Not inherited.
     pub columns_declared: bool,
-    /// An author `display: contents`, which layout does not honour yet
-    /// (only `<slot>` gets `Display::Contents`): the box is still laid out,
-    /// but `@container` treats it as having no size. Not inherited.
+    /// An author `display: contents` (with `display` set to
+    /// `Display::Contents`): the element generates no box, and `@container`
+    /// treats it as having no size. Not inherited.
     pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
@@ -3103,6 +3129,66 @@ pub struct Stylesheet {
     pub rules: Vec<Rule>,
     /// The cascade layer names the sheet declares, in declaration order.
     pub layer_statements: Vec<LayerStatement>,
+    /// What each `@keyframes` of the sheet says about `opacity`.
+    pub keyframes: Vec<rustkit_cssparser::KeyframesAst>,
+}
+
+impl ComputedStyle {
+    /// The one frame painted for a box whose animation sets `opacity`, the
+    /// engine running no animations: the frame the animation settles on.
+    ///
+    /// A finite animation with a forward fill holds the keyframe it ends on;
+    /// one without ends on the box's own value (`.page { animation: in .5s }`
+    /// must not stay on its 0% frame). An infinite one never settles and
+    /// paints its first keyframe. An end that sets no `opacity` is the box's
+    /// own, as a keyframe it does not name would be.
+    ///
+    /// Left `None` for what cannot be settled (no `@keyframes` of that name,
+    /// several animations): layout then paints at full opacity, as it did for
+    /// every animated box, so a rule that was not carried never hides a page.
+    pub fn settle_animation_opacity(&mut self, sheets: &[Stylesheet]) {
+        self.animation_settled_opacity = None;
+        let name = self.animation_name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("none") || name.contains(',') {
+            return;
+        }
+        let Some(frames) = sheets
+            .iter()
+            .rev()
+            .flat_map(|sheet| sheet.keyframes.iter().rev())
+            .find(|frames| frames.name == name)
+        else {
+            return;
+        };
+        let reversed = matches!(
+            self.animation_direction,
+            AnimationDirection::Reverse | AnimationDirection::AlternateReverse
+        );
+        let alternates = matches!(
+            self.animation_direction,
+            AnimationDirection::Alternate | AnimationDirection::AlternateReverse
+        );
+        let start = if reversed { frames.last } else { frames.first };
+        let end = if reversed { frames.first } else { frames.last };
+        let holds = matches!(
+            self.animation_fill_mode,
+            AnimationFillMode::Forwards | AnimationFillMode::Both
+        );
+        let frame = match self.animation_iteration_count {
+            AnimationIterationCount::Infinite => start,
+            AnimationIterationCount::One if holds => end,
+            // An even number of alternating runs comes back to where it began.
+            AnimationIterationCount::Count(n) if holds => {
+                if alternates && (n.ceil() as u32) % 2 == 0 {
+                    start
+                } else {
+                    end
+                }
+            }
+            _ => None,
+        };
+        self.animation_settled_opacity = Some(frame.unwrap_or(self.opacity));
+    }
 }
 
 impl Stylesheet {
@@ -3154,6 +3240,7 @@ impl Stylesheet {
         Ok(Stylesheet {
             rules,
             layer_statements,
+            keyframes: ast.keyframes,
         })
     }
 
@@ -3172,7 +3259,7 @@ pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
 pub mod media;
-pub use media::media_query_list_matches;
+pub use media::{media_query_list_matches, media_query_list_serialize};
 
 pub mod content;
 pub mod selector_escape;
@@ -3893,7 +3980,7 @@ pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
 /// (its new formatting context only matters for floats and margin collapse);
 /// `list-item` lays out as its outer display, with no marker. The CSS 2.1
 /// table keywords (and `block table` / `inline table`) map to the table
-/// variants. `contents` and `ruby` stay unsupported (`None`).
+/// variants. `ruby` stays unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -3905,6 +3992,7 @@ pub fn parse_display(value: &str) -> Option<Display> {
         "grid" => return Some(Display::Grid),
         "inline-grid" => return Some(Display::InlineGrid),
         "none" => return Some(Display::None),
+        "contents" => return Some(Display::Contents),
         "table" => return Some(Display::Table),
         "inline-table" => return Some(Display::InlineTable),
         "table-row-group" => return Some(Display::TableRowGroup),
@@ -4000,8 +4088,8 @@ mod tests {
             // Legacy keywords are unchanged.
             ("inline-block", Some(Display::InlineBlock)),
             ("none", Some(Display::None)),
-            // Unsupported or invalid: still ignored.
-            ("contents", None),
+            ("contents", Some(Display::Contents)),
+            // Invalid: still ignored.
             ("block block", None),
             ("flex list-item", None),
             ("block wobble", None),
@@ -4056,6 +4144,22 @@ mod tests {
             s.apply_line_clamp_display();
             assert_eq!(s.display, Display::Inline);
         }
+    }
+
+    #[test]
+    fn display_blockifies_inline_level_and_table_internal_values() {
+        assert_eq!(Display::Inline.blockified(), Display::Block);
+        assert_eq!(Display::InlineBlock.blockified(), Display::Block);
+        assert_eq!(Display::InlineFlex.blockified(), Display::Flex);
+        assert_eq!(Display::InlineGrid.blockified(), Display::Grid);
+        assert_eq!(Display::InlineTable.blockified(), Display::Table);
+        assert_eq!(Display::TableCell.blockified(), Display::Block);
+        assert_eq!(Display::TableRow.blockified(), Display::Block);
+        assert_eq!(Display::TableCaption.blockified(), Display::Block);
+        assert_eq!(Display::Contents.blockified(), Display::Contents);
+        assert_eq!(Display::None.blockified(), Display::None);
+        assert_eq!(Display::Block.blockified(), Display::Block);
+        assert_eq!(Display::Flex.blockified(), Display::Flex);
     }
 
     #[test]
@@ -4698,6 +4802,151 @@ mod custom_properties_collapse_tests {
             assert!(cur.depth < CustomProperties::MAX_LAYERS, "layer {i}: depth {}", cur.depth);
             assert_eq!(cur.to_map(), flat, "layer {i}");
         }
+    }
+}
+
+/// #833 RD3: which opacity frame a finished animation paints. The engine
+/// companion is headless-only; this pure settle pin runs on every
+/// `cargo test -p rustkit-css --lib`.
+#[cfg(test)]
+mod settle_animation_opacity_tests {
+    use super::*;
+    use rustkit_cssparser::KeyframesAst;
+
+    #[test]
+    fn settle_animation_opacity_picks_the_frame_the_fill_holds() {
+        let sheets = |first: Option<f32>, last: Option<f32>| -> [Stylesheet; 1] {
+            [Stylesheet {
+                keyframes: vec![KeyframesAst {
+                    name: "x".into(),
+                    first,
+                    last,
+                }],
+                ..Default::default()
+            }]
+        };
+        let settle = |fill: AnimationFillMode,
+                      direction: AnimationDirection,
+                      count: AnimationIterationCount,
+                      opacity: f32,
+                      frames: &[Stylesheet]| {
+            let mut style = ComputedStyle::new();
+            style.opacity = opacity;
+            style.animation_name = "x".into();
+            style.animation_fill_mode = fill;
+            style.animation_direction = direction;
+            style.animation_iteration_count = count;
+            style.settle_animation_opacity(frames);
+            style.animation_settled_opacity
+        };
+
+        let fade = sheets(Some(0.0), Some(1.0));
+        assert_eq!(
+            settle(
+                AnimationFillMode::None,
+                AnimationDirection::Normal,
+                AnimationIterationCount::Infinite,
+                0.75,
+                &fade
+            ),
+            Some(0.0),
+            "infinite paints the first keyframe"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.0,
+                &fade
+            ),
+            Some(1.0),
+            "forwards holds the last"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Both,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.0,
+                &fade
+            ),
+            Some(1.0),
+            "both holds the last"
+        );
+        // No forward fill: settle on the box's own value (fade-in idiom).
+        assert_eq!(
+            settle(
+                AnimationFillMode::None,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.5,
+                &fade
+            ),
+            Some(0.5)
+        );
+        // Alternate + ceil even/odd (incl. fractional longhand counts).
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Alternate,
+                AnimationIterationCount::Count(2.0),
+                1.0,
+                &fade
+            ),
+            Some(0.0),
+            "2 alternate runs land on start"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Alternate,
+                AnimationIterationCount::Count(2.5),
+                1.0,
+                &fade
+            ),
+            Some(1.0),
+            "2.5 alternate runs ceil to odd → end"
+        );
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::AlternateReverse,
+                AnimationIterationCount::Count(2.0),
+                1.0,
+                &fade
+            ),
+            Some(1.0),
+            "alternate-reverse start is last; even lands there"
+        );
+
+        // Unsettleable: field stays None so layout paints at full opacity.
+        let mut multi = ComputedStyle::new();
+        multi.opacity = 0.0;
+        multi.animation_name = "a, b".into();
+        multi.animation_fill_mode = AnimationFillMode::Forwards;
+        multi.settle_animation_opacity(&fade);
+        assert_eq!(multi.animation_settled_opacity, None);
+
+        let mut missing = ComputedStyle::new();
+        missing.opacity = 0.0;
+        missing.animation_name = "nosuch".into();
+        missing.animation_fill_mode = AnimationFillMode::Forwards;
+        missing.settle_animation_opacity(&fade);
+        assert_eq!(missing.animation_settled_opacity, None);
+
+        // End sets no opacity → hold the box's own.
+        let no_end = sheets(Some(0.2), None);
+        assert_eq!(
+            settle(
+                AnimationFillMode::Forwards,
+                AnimationDirection::Normal,
+                AnimationIterationCount::One,
+                0.75,
+                &no_end
+            ),
+            Some(0.75)
+        );
     }
 }
 

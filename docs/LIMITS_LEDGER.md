@@ -67,7 +67,7 @@ implemented" or "not yet". Nothing here was inferred from the code.
 | CSSOM | Editing any rule rewrites the style element's whole text and comments between rules are lost. | #492 | Preserve comments on rule rewrites. | yes |
 | CSSOM | CSS.supports checks values only for display and position; any balanced value is accepted for other properties. | #492 | Per-property value validation in CSS.supports. | yes |
 | CSSOM | sheet.media is a plain object, not a live MediaList. | #492 | A live MediaList. | yes |
-| CSSOM | link rel=stylesheet reflection, getComputedStyle, matchMedia evaluation and DOMMatrix remain missing. | #492 | Partly retired: getComputedStyle by #501, DOMMatrix by #513. Still open in the 2026-10-05 census: `link` `.sheet`, `matchMedia` width evaluation. | yes |
+| CSSOM | link rel=stylesheet reflection, getComputedStyle, matchMedia evaluation and DOMMatrix remain missing. | #492 | Partly retired: getComputedStyle by #501, DOMMatrix by #513. `matchMedia` evaluation retired by #818 (window.matchMedia shares the `@media` evaluator; `change` after a resize). Still open in the 2026-10-05 census: `link` `.sheet`. | yes |
 | CSSOM | getComputedStyle is not provided by this slice. | #494 | Retired by #501 (getComputedStyle reads the cascade). | yes |
 | CSSOM | getComputedStyle values come from the last layout plus inline overrides, so a class-toggled rule change shows only after the next layout. | #501 | Slice 1b (layout on a dirty read). | yes |
 | CSSOM | Computed display uses the engine's own 8 values, so li and table read block. | #501 | Model list-item and table display values. | yes |
