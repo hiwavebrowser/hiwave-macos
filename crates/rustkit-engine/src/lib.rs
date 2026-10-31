@@ -13328,8 +13328,12 @@ impl layout_ctx::LayoutCtx {
                 };
             }
             "z-index" => {
-                if let Ok(z) = value.parse::<i32>() {
+                if let Ok(z) = value.trim().parse::<i32>() {
                     style.z_index = z;
+                    style.z_index_declared = true;
+                } else if value.trim().eq_ignore_ascii_case("auto") {
+                    style.z_index = 0;
+                    style.z_index_declared = false;
                 }
             }
             "text-decoration" | "text-decoration-line" => {
@@ -22331,8 +22335,8 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
         ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
         ("box-sizing", css_keyword(&format!("{:?}", s.box_sizing))),
-        // The computed style keeps `auto` as 0, so an explicit `z-index: 0` reads `auto`.
-        ("z-index", if s.z_index == 0 { "auto".into() } else { s.z_index.to_string() }),
+        // `auto` and `0` are both 0 to layout; the declared flag tells them apart.
+        ("z-index", if s.z_index_declared { s.z_index.to_string() } else { "auto".into() }),
         ("width", width),
         ("height", height),
         ("margin-top", css_px(d.margin.top)),

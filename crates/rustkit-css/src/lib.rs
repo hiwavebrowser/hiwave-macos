@@ -2736,6 +2736,10 @@ pub struct ComputedStyle {
     pub bottom: Option<Length>,
     pub left: Option<Length>,
     pub z_index: i32,
+    /// Whether `z_index` was declared as an integer: `z-index: 0` and
+    /// `z-index: auto` both leave `z_index` at 0, and only the computed
+    /// style reads them apart (`0` / `auto`).
+    pub z_index_declared: bool,
 
     // Transforms
     pub transform: TransformList,
