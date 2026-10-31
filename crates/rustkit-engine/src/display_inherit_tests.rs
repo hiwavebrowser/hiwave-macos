@@ -57,3 +57,60 @@ fn display_inherit_follows_the_chain_and_keeps_block_under_block() {
          r:flex,0,40 u:flex,0,40 t:flex,0,40 e:block,0,40 f:block,50,40\")"
     );
 }
+
+// A `display: contents` box hands its children a parent style whose `display`
+// is the grandparent's, so that they blockify against the box they really sit
+// in (#786). `inherit` must still read `contents`. Expected strings below are
+// Chromium 143.0.7499.4 on the same pages.
+
+/// apple's nav: flex list > contents item > two `inherit` wrappers > items.
+/// All three wrappers compute `contents`, so the items are flex items of the
+/// list. With the grandparent's `flex` the wrapper was one flex item holding
+/// all three in its own row.
+#[test]
+fn display_inherit_under_contents_reads_contents_and_items_join_the_flex_list() {
+    let (mut engine, view) = loaded(concat!(
+        "<!doctype html><style>body{margin:0}",
+        " #l{display:flex;width:300px;justify-content:space-between}",
+        " #m{display:contents} .i{display:inherit} #a,#b,#c{width:50px;height:20px}</style>",
+        "<body><div id=l><div id=m><div id=f class=i><div id=g class=i>",
+        "<div id=a>a</div><div id=b>b</div><div id=c>c</div></div></div></div></div></body>",
+    ));
+    assert_eq!(
+        engine.execute_script(view, PLACES).expect("script"),
+        "String(\"l:flex,0,0 m:contents,0,0 f:contents,0,0 g:contents,0,0 \
+         a:block,0,0 b:block,125,0 c:block,250,0\")"
+    );
+}
+
+/// The same under a block grandparent: the wrapper is `contents`, not `block`.
+#[test]
+fn display_inherit_under_contents_in_a_block_parent_reads_contents() {
+    let (mut engine, view) = loaded(concat!(
+        "<!doctype html><style>body{margin:0} #l{display:block;width:300px}",
+        " #m{display:contents} .i{display:inherit} #a,#b{width:50px;height:20px}</style>",
+        "<body><div id=l><div id=m><div id=f class=i>",
+        "<div id=a>a</div><div id=b>b</div></div></div></div></body>",
+    ));
+    assert_eq!(
+        engine.execute_script(view, PLACES).expect("script"),
+        "String(\"l:block,0,0 m:contents,0,0 f:contents,0,0 a:block,0,0 b:block,0,20\")"
+    );
+}
+
+/// A child that names its own `display` below the `inherit` wrapper is its own
+/// box: the flag stops at the first element that does not inherit it.
+#[test]
+fn a_block_child_of_an_inheriting_contents_wrapper_stays_a_block_flex_item() {
+    let (mut engine, view) = loaded(concat!(
+        "<!doctype html><style>body{margin:0} #l{display:flex;width:300px}",
+        " #m{display:contents} #f{display:inherit} #g{display:block}",
+        " #a,#b{width:50px;height:20px}</style>",
+        "<body><div id=l><div id=m><div id=f><div id=g>",
+        "<div id=a>a</div><div id=b>b</div></div></div></div></div></body>",
+    ));
+    assert_eq!(
+        engine.execute_script(view, PLACES).expect("script"),
+        "String(\"l:flex,0,0 m:contents,0,0 f:contents,0,0 g:block,0,0 a:block,0,0 b:block,0,20\")"
+    );
+}
