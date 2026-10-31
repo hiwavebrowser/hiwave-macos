@@ -3153,9 +3153,13 @@ impl Engine {
 
     /// Scroll by a wheel over a VIEWPORT point: the innermost scroller under
     /// the point that can move that way takes all of it, and the window takes
-    /// it when none can. A run of wheels stays on what the first one moved
-    /// (`WHEEL_GESTURE_HOLD`), so a flick does not run on past a box's end
-    /// and a box coming under the pointer does not catch a page's flick.
+    /// it when none can. A run of wheels (steps under `WHEEL_GESTURE_HOLD`
+    /// apart) stays on what the first one moved while that can still take
+    /// the wheel, so a box coming under the pointer does not catch a page's
+    /// flick. The moment the held target cannot move for a step, on any
+    /// axis, the step is routed as if there were no hold and what it moves
+    /// becomes the held target: a box at its end hands on at once, as
+    /// Chromium does.
     ///
     /// Returns true if an offset changed. The frame is presented here, as in
     /// `scroll_view`.
@@ -3169,13 +3173,9 @@ impl Engine {
     ) -> Result<bool, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
-        let held_target = held.map(|g| g.target).filter(|target| match target {
-            WheelTarget::Window => true,
-            WheelTarget::Element(node) => view
-                .layout
-                .as_deref()
-                .is_some_and(|layout| box_of_node(layout, *node).is_some()),
-        });
+        let held_target = held
+            .map(|g| g.target)
+            .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
         let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
         let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
         let (changed, rest) = match target {
@@ -3188,25 +3188,36 @@ impl Engine {
         Ok(changed)
     }
 
-    /// What a new wheel over a point moves.
+    /// What a new wheel over a point moves: the innermost scroller under the
+    /// point that can take it, else the window.
     fn wheel_target_at(view: &ViewState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> WheelTarget {
-        let (Some(layout), Some(hit)) = (view.layout.as_deref(), Self::hit_at(view, x, y)) else {
+        let Some(hit) = Self::hit_at(view, x, y) else {
             return WheelTarget::Window;
         };
-        for &node in &hit.scrollers {
-            let Some(b) = box_of_node(layout, node) else {
-                continue;
-            };
-            let (across, down) = b.wheel_axes();
-            let (max_x, max_y) = b.element_scroll_max();
-            let (at_x, at_y) = b.element_scroll.get();
-            let moves_x = across && ((delta_x > 0.0 && at_x < max_x) || (delta_x < 0.0 && at_x > 0.0));
-            let moves_y = down && ((delta_y < 0.0 && at_y < max_y) || (delta_y > 0.0 && at_y > 0.0));
-            if moves_x || moves_y {
-                return WheelTarget::Element(node);
+        hit.scrollers
+            .iter()
+            .map(|&node| WheelTarget::Element(node))
+            .find(|&target| Self::wheel_moves(view, target, delta_x, delta_y))
+            .unwrap_or(WheelTarget::Window)
+    }
+
+    /// Whether a wheel of this delta moves the target on at least one axis.
+    /// A box that is gone from the layout moves on none.
+    fn wheel_moves(view: &ViewState, target: WheelTarget, delta_x: f32, delta_y: f32) -> bool {
+        let (across, down, (max_x, max_y), (at_x, at_y)) = match target {
+            WheelTarget::Window => (true, true, view.max_scroll_offset, view.scroll_offset),
+            WheelTarget::Element(node) => {
+                let Some(b) = view.layout.as_deref().and_then(|layout| box_of_node(layout, node)) else {
+                    return false;
+                };
+                let (across, down) = b.wheel_axes();
+                (across, down, b.element_scroll_max(), b.element_scroll.get())
             }
-        }
-        WheelTarget::Window
+        };
+        // Same signs as `scroll_view` and `wheel_element`.
+        let moves_x = across && ((delta_x > 0.0 && at_x < max_x) || (delta_x < 0.0 && at_x > 0.0));
+        let moves_y = down && ((delta_y < 0.0 && at_y < max_y) || (delta_y > 0.0 && at_y > 0.0));
+        moves_x || moves_y
     }
 
     /// Move a scroller by a wheel, in whole pixels, and paint it. `rest` is
