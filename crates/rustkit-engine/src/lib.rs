@@ -497,6 +497,8 @@ mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod element_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
