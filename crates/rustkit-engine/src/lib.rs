@@ -417,6 +417,8 @@ mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod flex_abspos_static_position_tests;
 #[cfg(test)]
+mod relative_offset_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
