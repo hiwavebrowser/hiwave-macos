@@ -2831,7 +2831,9 @@ const WRAPPERS_JS: &str = r#"
             return vars && Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : '';
         }
         var own = {
-            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
+            // A custom property name is case-sensitive (Primer's
+            // `--fgColor-*`): only a standard property is kebab-cased.
+            getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
             getPropertyPriority: function () { return ''; },
             item: function (i) { return names[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
@@ -2846,7 +2848,7 @@ const WRAPPERS_JS: &str = r#"
             get: function (t, p, r) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
                 if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
-                var n = kebab(p.indexOf('--') === 0 ? p : p);
+                var n = p.indexOf('--') === 0 ? p : kebab(p);
                 return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : customValue(n));
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
