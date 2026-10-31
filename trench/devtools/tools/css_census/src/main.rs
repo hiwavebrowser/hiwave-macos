@@ -196,7 +196,9 @@ fn run() -> Result<(), String> {
     for (i, p) in spec.iter().enumerate() {
         let chrome_control = chrome_capture(&work, &stem(i, None));
         let rust_control = engine_capture(&work, &stem(i, None));
-        if let (Some(a), Some(b)) = (&chrome_control.frame, &rust_control.frame) {
+        // A plain control only: a `base` declaration can miss on its own, and
+        // that is that row's business, not the context's.
+        if let (Some(a), Some(b), true) = (&chrome_control.frame, &rust_control.frame, p.base.is_empty()) {
             let off = off_by_context.entry(p.context.clone()).or_default();
             *off = (*off).max(probe_diff(a, b));
         }
@@ -232,6 +234,7 @@ fn run() -> Result<(), String> {
                 chrome_computed: read(&m.chrome_value),
                 engine_computed: read(&m.rust_value),
                 probes_off: off,
+                geometry_ok: geometry_matches(&m),
             });
             verdicts.push(verdict);
         }

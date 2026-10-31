@@ -232,6 +232,35 @@ fn control_noise_is_credited_but_cannot_hide_the_signal() {
 }
 
 #[test]
+fn a_thin_line_chrome_paints_is_seen_though_a_probe_forgives_it() {
+    // An underline: two rows, inside the probe's 3x3 forgiveness.
+    let mut m = measured("underline", "underline");
+    paint(m.chrome_value.frame.as_mut().unwrap(), 4, 20, 60, 22, [0, 0, 0]);
+    assert_eq!(judge(&m).effect, Effect::Mismatch, "the engine drew no line");
+    paint(m.rust_value.frame.as_mut().unwrap(), 4, 20, 60, 22, [0, 0, 0]);
+    assert_eq!(judge(&m).effect, Effect::Match, "the engine drew it too");
+}
+
+#[test]
+fn a_value_with_nothing_to_show_does_not_cap_its_measured_siblings() {
+    let good = verdict(true, true, Effect::Match);
+    let idle = verdict(true, true, Effect::Unexercised);
+    assert_eq!(class_of(&[good.clone(), idle.clone()]), Class::Effect_);
+    // Still the worst of what was measured.
+    assert_eq!(class_of(&[verdict(true, true, Effect::Mismatch), good, idle]), Class::Computed);
+}
+
+#[test]
+fn a_row_says_whether_geometry_or_pixels_missed() {
+    let mut r = row("translate", None, 0, Class::Computed, true);
+    r.values[0].geometry_ok = false;
+    assert!(render_markdown(&meta(), &[r.clone()]).contains("geometry"));
+    r.values[0].geometry_ok = true;
+    r.values[0].probes_off = 40;
+    assert!(render_markdown(&meta(), &[r]).contains("40 probes"));
+}
+
+#[test]
 fn a_nonvisual_property_has_no_effect_verdict() {
     let mut m = measured("pointer", "pointer");
     m.nonvisual = true;
@@ -406,6 +435,7 @@ fn row(name: &str, sites: Option<usize>, corpus: usize, class: Class, red: bool)
             chrome_computed: "12px".into(),
             engine_computed: String::new(),
             probes_off: 0,
+            geometry_ok: true,
         }],
     }
 }

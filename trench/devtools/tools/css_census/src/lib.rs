@@ -221,6 +221,10 @@ pub fn fixture_html(p: &PropSpec, value: Option<&str>) -> String {
             format!("#p{{{}}}#p{pseudo}{{{decl}}}", p.base),
             format!("document.getElementById(\"p\"),{}", json!(pseudo)),
         ),
+        // No `;` before a lone declaration: the engine drops the declaration
+        // after a leading `;` (see the T13 receipt), and that would read as
+        // every property being unsupported.
+        None if p.base.is_empty() => (format!("#p{{{decl}}}"), "document.getElementById(\"p\")".to_string()),
         None => (
             format!("#p{{{};{decl}}}", p.base),
             "document.getElementById(\"p\")".to_string(),
@@ -426,6 +430,13 @@ fn numeric_close(a: &str, b: &str) -> bool {
         Some((s[..end].parse().ok()?, &s[end..]))
     }
     matches!((split(a), split(b)), (Some((x, u)), Some((y, v))) if u == v && (x - y).abs() <= 0.05)
+}
+
+pub fn geometry_matches(m: &Measure) -> bool {
+    match (&m.chrome_value.read, &m.rust_value.read) {
+        (Some(a), Some(b)) => rects_match(a, b),
+        _ => false,
+    }
 }
 
 /// One px either way, on every element Chrome reports.
@@ -674,6 +685,7 @@ pub struct ValueRow {
     pub chrome_computed: String,
     pub engine_computed: String,
     pub probes_off: usize,
+    pub geometry_ok: bool,
 }
 
 #[derive(Debug, Clone)]
