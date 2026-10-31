@@ -2731,15 +2731,31 @@ const WRAPPERS_JS: &str = r#"
     }
     getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
     getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });
-    // getComputedStyle. The engine publishes each laid-out element's computed
-    // style (`set_computed_styles`); a read answers from the last layout,
-    // with the element's own inline declarations laid over it so that
-    // `el.style.display = 'none'` is seen at once. An element with no box
-    // after a layout is not rendered (display:none, or <head>, <script>,
-    // <style>, ...): its display reads 'none'. Before any layout everything
-    // reads as the empty string.
+    // getComputedStyle. The engine publishes each styled element's computed
+    // style (`set_computed_styles`), with or without a box; a read answers
+    // from the last layout, with the element's own inline declarations laid
+    // over it so that `el.style.display = 'none'` is seen at once. An
+    // element with no published style after a layout was not styled (a
+    // descendant of display:none, or <head>, <script>, <style>, ...): its
+    // display reads 'none'. Before any layout everything reads as the empty
+    // string. Custom properties come as `custom` rows on the nearest
+    // element (self or ancestor) whose set is its own; `customVars` walks up.
     var COMPUTED_NAMES = {};
     function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
+    function customVars(el) {
+        for (var e = el; e; e = e.parentElement) {
+            var raw = info(e, 'computed');
+            if (!raw || raw.indexOf('\ncustom\t') < 0) continue;
+            var vars = {};
+            raw.split('\n').forEach(function (line) {
+                if (line.indexOf('custom\t') !== 0) return;
+                var rest = line.slice(7), j = rest.indexOf('\t');
+                if (j > 0) vars[rest.slice(0, j)] = rest.slice(j + 1);
+            });
+            return vars;
+        }
+        return null;
+    }
     function computedMap(el, pseudo) {
         var raw = info(el, 'computed');
         var m = {}, own = null, prefix = pseudo ? pseudo + ' ' : null;
@@ -2748,6 +2764,7 @@ const WRAPPERS_JS: &str = r#"
                 var i = line.indexOf('\t');
                 if (i <= 0) return;
                 var name = line.slice(0, i);
+                if (name === 'custom') return;
                 // The element's rows, then its pseudo-elements' (`::before name`).
                 if (name.charAt(0) !== ':') m[name] = line.slice(i + 1);
                 else if (prefix && name.indexOf(prefix) === 0) {
@@ -2807,8 +2824,14 @@ const WRAPPERS_JS: &str = r#"
         var names = Object.keys(m).sort();
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
+        // A custom property not set inline: the cascaded (inherited) value.
+        function customValue(n) {
+            if (pseudo === null || n.indexOf('--') !== 0) return '';
+            var vars = customVars(el);
+            return vars && Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : '';
+        }
         var own = {
-            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : ''; },
+            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
             getPropertyPriority: function () { return ''; },
             item: function (i) { return names[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
@@ -2824,7 +2847,7 @@ const WRAPPERS_JS: &str = r#"
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
                 if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
                 var n = kebab(p.indexOf('--') === 0 ? p : p);
-                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : '');
+                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : customValue(n));
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
         });

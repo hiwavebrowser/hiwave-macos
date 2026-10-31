@@ -22071,10 +22071,14 @@ impl layout_ctx::LayoutCtx {
 fn geometry_snapshot(
     root: &LayoutBox,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    /// `parent_vars` is the custom-property set of the nearest element
+    /// ancestor's box (anonymous boxes between do not count): an element
+    /// whose set is another `Arc` publishes it with its style rows.
     fn walk(
         b: &LayoutBox,
         out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
         styles: &mut HashMap<usize, String>,
+        parent_vars: Option<&Arc<rustkit_css::CustomProperties>>,
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
@@ -22085,8 +22089,11 @@ fn geometry_snapshot(
             finite_f32(bb.height),
         );
         let mut extent = Some((bx, by, bx + bw, by + bh));
+        let own_vars = b.node_id.is_some()
+            && parent_vars.map_or(true, |p| !Arc::ptr_eq(p, &b.style.custom_properties));
+        let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
         for child in &b.children {
-            if let Some(c) = walk(child, out, styles) {
+            if let Some(c) = walk(child, out, styles, child_vars) {
                 extent = Some(match extent {
                     Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
                     None => c,
@@ -22123,7 +22130,13 @@ fn geometry_snapshot(
                 scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
             };
-            styles.entry(node).or_insert_with(|| computed_style_lines(b));
+            styles.entry(node).or_insert_with(|| {
+                let mut lines = computed_style_lines(b);
+                if own_vars {
+                    lines.push_str(&custom_property_lines(&b.style.custom_properties));
+                }
+                lines
+            });
             out.entry(node)
                 .and_modify(|g| {
                     // A second box of the same element: union.
@@ -22145,8 +22158,27 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    walk(root, &mut out, &mut styles);
+    walk(root, &mut out, &mut styles, None);
     (out, styles)
+}
+
+/// The custom properties in effect on an element, as rows after its
+/// `computed_style_lines`: a `custom\t` marker (the set is published here,
+/// even when empty) then one `custom\t--name\tvalue` row each. An element
+/// publishes its set only when it is not its parent's (the `Arc` is
+/// shared down the tree until an element declares a `--*`), so a read of
+/// `getPropertyValue('--x')` walks up to the nearest publishing ancestor
+/// (`computedMap` in rustkit-bindings). A newline or tab in a value would
+/// split the row, and becomes a space.
+fn custom_property_lines(vars: &rustkit_css::CustomProperties) -> String {
+    let mut out = String::from("\ncustom\t");
+    for (name, value) in vars.to_map() {
+        out.push_str("\ncustom\t");
+        out.push_str(&name);
+        out.push('\t');
+        out.extend(value.chars().map(|c| if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c }));
+    }
+    out
 }
 
 /// The view's document element, by raw NodeId.
