@@ -12227,7 +12227,14 @@ impl Engine {
             // item. The legacy `-webkit-box` and the declared-contents flag
             // that `@container` reads come along with the keyword.
             "display" => {
-                style.display = parent.display;
+                // A `contents` box hands its children a parent style whose
+                // `display` is the grandparent's, for blockification; the
+                // declared flag still says what the parent computed to.
+                style.display = if parent.display_contents_declared {
+                    rustkit_css::Display::Contents
+                } else {
+                    parent.display
+                };
                 style.webkit_box = parent.webkit_box;
                 style.display_contents_declared = parent.display_contents_declared;
             }
