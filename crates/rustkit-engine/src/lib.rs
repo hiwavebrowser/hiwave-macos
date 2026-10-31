@@ -505,6 +505,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod wheel_routing_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
@@ -3141,6 +3143,18 @@ impl Engine {
         self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
 
         Ok(true)
+    }
+
+    /// Scroll by a wheel over a VIEWPORT point.
+    pub fn scroll_at(
+        &mut self,
+        id: EngineViewId,
+        _x: f32,
+        _y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Result<bool, EngineError> {
+        self.scroll_view(id, delta_x, delta_y)
     }
 
     /// Hit-test a click in VIEWPORT coordinates and return the link URL it
