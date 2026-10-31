@@ -60,7 +60,7 @@ const STATE: &str = "function state() { \
     return ['in', 'out', 'hid', 'clip', 'rel', 'big-s', 's', 'f'].map(function (i) { \
         var e = document.getElementById(i); \
         return e && (e.scrollLeft || e.scrollTop) ? i + '=' + e.scrollLeft + ',' + e.scrollTop : ''; \
-    }).filter(Boolean).join(' ') + ' win=' + scrollX + ',' + scrollY; } \
+    }).filter(Boolean).concat('win=' + scrollX + ',' + scrollY).join(' '); } \
     var $ = function (i) { return document.getElementById(i); };";
 
 fn serve(page: &str, path: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
