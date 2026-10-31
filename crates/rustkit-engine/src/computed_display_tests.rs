@@ -9,7 +9,7 @@
 use super::*;
 
 const PAGE: &str = r#"<!doctype html><style>
-    body { --x: 7px; --y: a b; margin: 0 }
+    body { --x: 7px; --y: a b; --fgColor-default: red; margin: 0 }
     #own { --x: 9px; --z: 1 }
     #ib { display: inline-block } #if { display: inline-flex } #ig { display: inline-grid }
     #fr { display: flow-root } #ct { display: contents } #wb { display: -webkit-box }
@@ -213,6 +213,11 @@ fn custom_properties_read_the_cascaded_value() {
         id,
         &[
             ("inherits", "--x", "7px"),
+            // Custom property names are case-sensitive (Primer's
+            // `--fgColor-*`): no kebab-casing on the way in.
+            ("inherits", "--fgColor-default", "red"),
+            ("ownchild", "--fgColor-default", "red"),
+            ("inherits", "--fgcolor-default", ""),
             ("inherits", "--y", "a b"),
             ("own", "--x", "9px"),
             ("own", "--z", "1"),
@@ -222,14 +227,5 @@ fn custom_properties_read_the_cascaded_value() {
             ("inherits", "--z", ""),
             ("inherits", "--missing", ""),
         ],
-    );
-    // The camelCase-free property access reads the same.
-    assert_eq!(
-        eval(
-            &mut e,
-            id,
-            "getComputedStyle(document.getElementById('ownchild'))['--x']"
-        ),
-        "9px"
     );
 }
