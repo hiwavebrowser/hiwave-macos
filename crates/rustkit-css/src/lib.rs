@@ -1117,7 +1117,49 @@ pub enum Display {
     Contents,
 }
 
+/// What `getComputedStyle(el).display` says beyond the layout enum. The
+/// enum folds `list-item` into `Block`/`Inline` and `flow-root` into `Block`
+/// (that is how they lay out), so the authored keyword is kept beside it for
+/// CSSOM. It only applies with `Block` or `Inline` (an `li` set to
+/// `display: none` or `flex` reads that).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayModifier {
+    #[default]
+    None,
+    /// `list-item` / `block flow list-item` (reads `list-item`), or
+    /// `inline list-item`.
+    ListItem,
+    /// `flow-root` / `block flow-root` (reads `flow-root`).
+    FlowRoot,
+}
+
 impl Display {
+    /// The keyword CSSOM serialises this value as (`table-cell`,
+    /// `inline-flex`, ...), without any [`DisplayModifier`].
+    pub fn css_keyword(self) -> &'static str {
+        match self {
+            Display::Block => "block",
+            Display::Inline => "inline",
+            Display::InlineBlock => "inline-block",
+            Display::Flex => "flex",
+            Display::InlineFlex => "inline-flex",
+            Display::Grid => "grid",
+            Display::InlineGrid => "inline-grid",
+            Display::None => "none",
+            Display::Table => "table",
+            Display::InlineTable => "inline-table",
+            Display::TableRowGroup => "table-row-group",
+            Display::TableHeaderGroup => "table-header-group",
+            Display::TableFooterGroup => "table-footer-group",
+            Display::TableRow => "table-row",
+            Display::TableCell => "table-cell",
+            Display::TableCaption => "table-caption",
+            Display::TableColumn => "table-column",
+            Display::TableColumnGroup => "table-column-group",
+            Display::Contents => "contents",
+        }
+    }
+
     /// Check if this is a flex container.
     pub fn is_flex(self) -> bool {
         matches!(self, Display::Flex | Display::InlineFlex)
@@ -2514,6 +2556,22 @@ impl std::fmt::Debug for CustomProperties {
 }
 
 impl ComputedStyle {
+    /// `display` as `getComputedStyle` serialises it: the layout enum's
+    /// keyword, with the modifier the enum folds (`list-item`,
+    /// `inline list-item`, `flow-root`) and the legacy `-webkit-box` /
+    /// `-webkit-inline-box` put back.
+    pub fn display_keyword(&self) -> &'static str {
+        if let Some(inline) = self.webkit_box {
+            return if inline { "-webkit-inline-box" } else { "-webkit-box" };
+        }
+        match (self.display, self.display_modifier) {
+            (Display::Block, DisplayModifier::ListItem) => "list-item",
+            (Display::Inline, DisplayModifier::ListItem) => "inline list-item",
+            (Display::Block, DisplayModifier::FlowRoot) => "flow-root",
+            (display, _) => display.css_keyword(),
+        }
+    }
+
     /// Take from `from` the properties that change what is painted and
     /// nothing else: no box is sized, placed, created or dropped by them,
     /// and no stacking context comes or goes. The list is deliberately
@@ -2581,6 +2639,9 @@ impl ComputedStyle {
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
+    /// The authored `display` keyword `display` folds (`list-item`,
+    /// `flow-root`), for `getComputedStyle` ([`ComputedStyle::display_keyword`]).
+    pub display_modifier: DisplayModifier,
     pub position: Position,
     pub float: Float,
     pub clear: Clear,
@@ -2675,6 +2736,10 @@ pub struct ComputedStyle {
     pub bottom: Option<Length>,
     pub left: Option<Length>,
     pub z_index: i32,
+    /// Whether `z_index` was declared as an integer: `z-index: 0` and
+    /// `z-index: auto` both leave `z_index` at 0, and only the computed
+    /// style reads them apart (`0` / `auto`).
+    pub z_index_declared: bool,
 
     // Transforms
     pub transform: TransformList,
@@ -2747,7 +2812,8 @@ pub struct ComputedStyle {
     pub columns_declared: bool,
     /// An author `display: contents` (with `display` set to
     /// `Display::Contents`): the element generates no box, and `@container`
-    /// treats it as having no size. Not inherited.
+    /// treats it as having no size. Not inherited by the cascade, but
+    /// `display: inherit` copies it along with the keyword.
     pub display_contents_declared: bool,
 
     // Box shadows (multiple shadows supported)
@@ -3982,28 +4048,37 @@ pub fn parse_webkit_line_clamp(value: &str) -> Option<Option<u32>> {
 /// table keywords (and `block table` / `inline table`) map to the table
 /// variants. `ruby` stays unsupported (`None`).
 pub fn parse_display(value: &str) -> Option<Display> {
+    parse_display_modifier(value).map(|(display, _)| display)
+}
+
+/// [`parse_display`], with the authored keyword the layout enum folds
+/// (`list-item`, `flow-root`) returned beside it for `getComputedStyle`.
+pub fn parse_display_modifier(value: &str) -> Option<(Display, DisplayModifier)> {
     let value = value.trim().to_lowercase();
-    match value.as_str() {
-        "block" => return Some(Display::Block),
-        "inline" => return Some(Display::Inline),
-        "inline-block" => return Some(Display::InlineBlock),
-        "flex" => return Some(Display::Flex),
-        "inline-flex" => return Some(Display::InlineFlex),
-        "grid" => return Some(Display::Grid),
-        "inline-grid" => return Some(Display::InlineGrid),
-        "none" => return Some(Display::None),
-        "contents" => return Some(Display::Contents),
-        "table" => return Some(Display::Table),
-        "inline-table" => return Some(Display::InlineTable),
-        "table-row-group" => return Some(Display::TableRowGroup),
-        "table-header-group" => return Some(Display::TableHeaderGroup),
-        "table-footer-group" => return Some(Display::TableFooterGroup),
-        "table-row" => return Some(Display::TableRow),
-        "table-cell" => return Some(Display::TableCell),
-        "table-caption" => return Some(Display::TableCaption),
-        "table-column" => return Some(Display::TableColumn),
-        "table-column-group" => return Some(Display::TableColumnGroup),
-        _ => {}
+    let simple = match value.as_str() {
+        "block" => Some(Display::Block),
+        "inline" => Some(Display::Inline),
+        "inline-block" => Some(Display::InlineBlock),
+        "flex" => Some(Display::Flex),
+        "inline-flex" => Some(Display::InlineFlex),
+        "grid" => Some(Display::Grid),
+        "inline-grid" => Some(Display::InlineGrid),
+        "none" => Some(Display::None),
+        "contents" => Some(Display::Contents),
+        "table" => Some(Display::Table),
+        "inline-table" => Some(Display::InlineTable),
+        "table-row-group" => Some(Display::TableRowGroup),
+        "table-header-group" => Some(Display::TableHeaderGroup),
+        "table-footer-group" => Some(Display::TableFooterGroup),
+        "table-row" => Some(Display::TableRow),
+        "table-cell" => Some(Display::TableCell),
+        "table-caption" => Some(Display::TableCaption),
+        "table-column" => Some(Display::TableColumn),
+        "table-column-group" => Some(Display::TableColumnGroup),
+        _ => None,
+    };
+    if let Some(display) = simple {
+        return Some((display, DisplayModifier::None));
     }
     let (mut outer, mut inner, mut list_item) = (None, None, false);
     for token in value.split_whitespace() {
@@ -4022,7 +4097,7 @@ pub fn parse_display(value: &str) -> Option<Display> {
         return None;
     }
     let inline = outer == Some("inline");
-    Some(match (inline, inner.unwrap_or("flow")) {
+    let display = match (inline, inner.unwrap_or("flow")) {
         (false, "flex") => Display::Flex,
         (true, "flex") => Display::InlineFlex,
         (false, "grid") => Display::Grid,
@@ -4032,7 +4107,17 @@ pub fn parse_display(value: &str) -> Option<Display> {
         (true, "flow-root") => Display::InlineBlock,
         (true, _) => Display::Inline,
         (false, _) => Display::Block,
-    })
+    };
+    // `inline flow-root` is `inline-block`, which the enum keeps. `block
+    // flow-root` and `list-item` fold into `Block`/`Inline`.
+    let modifier = if list_item {
+        DisplayModifier::ListItem
+    } else if display == Display::Block && inner == Some("flow-root") {
+        DisplayModifier::FlowRoot
+    } else {
+        DisplayModifier::None
+    };
+    Some((display, modifier))
 }
 
 #[cfg(test)]
@@ -4098,6 +4183,51 @@ mod tests {
         for (value, want) in cases {
             assert_eq!(parse_display(value), *want, "display: {value:?}");
         }
+    }
+
+    /// Z-plan C3: the keyword `getComputedStyle` reads for a `display` the
+    /// layout enum folds (Chromium 143's serialisation).
+    #[test]
+    fn display_keyword_puts_back_what_the_layout_enum_folds() {
+        let cases: &[(&str, &str)] = &[
+            ("list-item", "list-item"),
+            ("block flow list-item", "list-item"),
+            ("inline list-item", "inline list-item"),
+            ("flow-root", "flow-root"),
+            ("block flow-root", "flow-root"),
+            ("inline flow-root", "inline-block"),
+            ("inline-block", "inline-block"),
+            ("block flow", "block"),
+            ("inline flex", "inline-flex"),
+            ("table-cell", "table-cell"),
+            ("table-header-group", "table-header-group"),
+            ("contents", "contents"),
+            ("none", "none"),
+        ];
+        for (value, want) in cases {
+            let (display, modifier) = parse_display_modifier(value).expect(value);
+            let style = ComputedStyle {
+                display,
+                display_modifier: modifier,
+                ..Default::default()
+            };
+            assert_eq!(style.display_keyword(), *want, "display: {value:?}");
+        }
+        // The modifier only applies with the outer display it was parsed
+        // with: an `li` that became flex or none reads that.
+        for display in [Display::Flex, Display::None, Display::TableCell] {
+            let style = ComputedStyle {
+                display,
+                display_modifier: DisplayModifier::ListItem,
+                ..Default::default()
+            };
+            assert_eq!(style.display_keyword(), display.css_keyword());
+        }
+        let webkit = ComputedStyle {
+            webkit_box: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(webkit.display_keyword(), "-webkit-box");
     }
 
     #[test]

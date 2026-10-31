@@ -270,7 +270,7 @@ use rustkit_css::background::{
     parse_background_origin, parse_background_position,
     parse_background_repeat, parse_background_size, split_top_level_whitespace,
 };
-use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
+use rustkit_css::{css_ident, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -381,6 +381,8 @@ mod script_module_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
+mod computed_display_tests;
+#[cfg(all(test, feature = "headless"))]
 mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
@@ -414,6 +416,8 @@ mod positioned_paint_order_tests;
 mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod flex_abspos_static_position_tests;
+#[cfg(test)]
+mod relative_offset_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -497,7 +501,11 @@ mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod display_inherit_tests;
+#[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -8543,12 +8551,14 @@ impl Engine {
         } else {
             match style.position {
                 rustkit_css::Position::Static => Position::Static,
-                // Relative: geometry-only for now. Entering the positioned
+                // Relative: laid out as Static. Entering the positioned
                 // paint path (z-reorder, stacking hoist) wrecks pages whose
                 // relative boxes are mere z-index anchors (about's cards)
-                // until the stacking pipeline matures. Offsets still apply
-                // via the Relative arm when we re-enable; today Relative
-                // boxes with no offsets are visually identical to Static.
+                // until the stacking pipeline matures. The offsets are not
+                // lost: layout reads `style.position` and shifts the box
+                // after its static position is final
+                // (`LayoutBox::apply_relative_offsets`), the paint order
+                // and the display-list builder read the style the same way.
                 rustkit_css::Position::Relative => Position::Static,
                 rustkit_css::Position::Absolute => Position::Absolute,
                 rustkit_css::Position::Fixed => Position::Fixed,
@@ -8994,7 +9004,7 @@ impl layout_ctx::LayoutCtx {
         if let (Some(html), Some(style)) = (document.document_element(), html_style.as_ref()) {
             let mut root = LayoutBox::new(BoxType::Block, style.clone());
             root.node_id = Some(html.id.raw());
-            self.note_boxless_style(&root);
+            self.note_boxless_style(&root, None);
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
@@ -9643,8 +9653,14 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
 
-                // Check for display: none
+                // Check for display: none. The element generates no box
+                // (and nothing under it is styled), but it is styled:
+                // `getComputedStyle` reads `none` with the rest of its
+                // cascaded values, as in Chrome.
                 if style.display == rustkit_css::Display::None {
+                    let mut styled = LayoutBox::new(BoxType::Block, style);
+                    styled.node_id = Some(node.id.raw());
+                    self.note_boxless_style(&styled, parent_style);
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
 
@@ -10420,7 +10436,7 @@ impl layout_ctx::LayoutCtx {
                     // is still noted: the element is styled, only unboxed.
                     let shown = !closed_details || details_summary == Some(child_index);
                     if child_box.style.display == rustkit_css::Display::Contents {
-                        self.note_boxless_style(&child_box);
+                        self.note_boxless_style(&child_box, Some(&layout_box.style));
                         if !shown {
                             continue;
                         }
@@ -10462,19 +10478,29 @@ impl layout_ctx::LayoutCtx {
 
                     if should_include && shown {
                         Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
-                    } else if shown && matches!(child_box.box_type, BoxType::Inline) {
-                        // An inline box with nothing in the flow is dropped,
-                        // and so was everything in it. What it positions out
-                        // of the flow stays: a badge in an otherwise empty
-                        // link still paints, at the link's place, and the
-                        // line hears nothing of it (#689 review, round 3).
-                        for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
-                            matches!(
-                                grandchild.position,
-                                rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
-                            )
-                        }) {
-                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                    } else {
+                        // A box the tree drops (an empty block with nothing
+                        // visible about it, an empty inline, hidden
+                        // `<details>` content) is still a styled element:
+                        // `getComputedStyle` reads its computed style, not
+                        // `none` (GCS1 lane, 2026-10-30: an empty `<div>`
+                        // read `display: none`).
+                        self.note_boxless_style(&child_box, Some(&layout_box.style));
+                        if shown && matches!(child_box.box_type, BoxType::Inline) {
+                            // An inline box with nothing in the flow is
+                            // dropped, and so was everything in it. What it
+                            // positions out of the flow stays: a badge in an
+                            // otherwise empty link still paints, at the
+                            // link's place, and the line hears nothing of it
+                            // (#689 review, round 3).
+                            for out_of_flow in child_box.children.into_iter().filter(|grandchild| {
+                                matches!(
+                                    grandchild.position,
+                                    rustkit_layout::Position::Absolute | rustkit_layout::Position::Fixed
+                                )
+                            }) {
+                                Engine::push_child_hoisting_line_breaks(&mut layout_box.children, out_of_flow);
+                            }
                         }
                     }
                 }
@@ -11342,7 +11368,10 @@ impl layout_ctx::LayoutCtx {
                 style.padding_left = rustkit_css::Length::Px(40.0);
             }
             "li" => {
-                style.display = rustkit_css::Display::Block; // list-item
+                // `list-item`: lays out as a block (no marker yet); the
+                // computed style reads `list-item`.
+                style.display = rustkit_css::Display::Block;
+                style.display_modifier = rustkit_css::DisplayModifier::ListItem;
             }
             "dl" => {
                 style.display = rustkit_css::Display::Block;
@@ -12223,6 +12252,22 @@ impl Engine {
             "border-right-color" => style.border_right_color = parent.border_right_color,
             "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
             "border-left-color" => style.border_left_color = parent.border_left_color,
+            // apple's nav: `display: inherit` wrappers under a `contents`
+            // item. The legacy `-webkit-box` and the declared-contents flag
+            // that `@container` reads come along with the keyword.
+            "display" => {
+                // A `contents` box hands its children a parent style whose
+                // `display` is the grandparent's, for blockification; the
+                // declared flag still says what the parent computed to.
+                style.display = if parent.display_contents_declared {
+                    rustkit_css::Display::Contents
+                } else {
+                    parent.display
+                };
+                style.webkit_box = parent.webkit_box;
+                style.display_modifier = parent.display_modifier;
+                style.display_contents_declared = parent.display_contents_declared;
+            }
             _ => return false,
         }
         true
@@ -12711,13 +12756,16 @@ impl layout_ctx::LayoutCtx {
             "display" => {
                 if value.trim().eq_ignore_ascii_case("contents") {
                     style.display = rustkit_css::Display::Contents;
+                    style.display_modifier = rustkit_css::DisplayModifier::None;
                     style.webkit_box = None;
                     style.display_contents_declared = true;
                 } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);
+                    style.display_modifier = rustkit_css::DisplayModifier::None;
                     style.display_contents_declared = false;
-                } else if let Some(display) = parse_display(value) {
+                } else if let Some((display, modifier)) = rustkit_css::parse_display_modifier(value) {
                     style.display = display;
+                    style.display_modifier = modifier;
                     style.webkit_box = None;
                     style.display_contents_declared = false;
                 }
@@ -12771,69 +12819,12 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "flex" => {
-                // Shorthand: flex: <grow> [<shrink>] [<basis>].
-                //
-                // Two rules the naive positional read got wrong (hiwave-windows
-                // #66): `flex: <number>` sets basis to 0, not auto — that is
-                // what makes `flex: 1` divide the container instead of sizing
-                // to content — and CSS allows `flex: <grow> <basis>`, so a
-                // second value that does NOT parse as a bare number is the
-                // basis, not a shrink of 200.
-                // Split outside parentheses: `calc(50% - 10px)` is one basis,
-                // not three junk tokens.
-                let parts: Vec<&str> = split_top_level_whitespace(value);
-                // Validate before setting anything: `flex: 1 junk` is
-                // invalid and dropped whole (css-syntax-3 §8). It set the
-                // grow and reset the basis to auto from the junk.
-                let numbers = parts.iter().filter(|p| p.parse::<f32>().is_ok()).count();
-                let bases = parts
-                    .iter()
-                    .filter(|p| p.parse::<f32>().is_err())
-                    .filter(|p| is_flex_basis_value(p))
-                    .count();
-                // At most two numbers (grow, shrink). A third is a basis
-                // only when it is a unitless `0` (`flex: 1 1 0`); `1 2 3`
-                // is invalid.
-                let (numbers, bases) = if numbers == 3 && parts[2].parse::<f32>() == Ok(0.0) {
-                    (2, bases + 1)
-                } else {
-                    (numbers, bases)
-                };
-                if numbers > 2 {
-                    return;
-                }
-                if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
-                {
-                    return;
-                }
-                if let Some(first) = parts.first() {
-                    if let Ok(grow) = first.parse::<f32>() {
-                        style.flex_grow = grow;
-                        if parts.len() == 1 {
-                            style.flex_shrink = 1.0;
-                            // The basis left out is `0%`, not `0px`
-                            // (css-flexbox-1 §7.1.1): the same in a row or
-                            // a definite column, and `content` in an
-                            // auto-height column, where a percentage has
-                            // nothing to resolve against.
-                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
-                        }
-                    }
-                }
-                if parts.len() >= 2 {
-                    match parts[1].parse::<f32>() {
-                        Ok(shrink) => {
-                            style.flex_shrink = shrink;
-                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
-                        }
-                        Err(_) => {
-                            style.flex_shrink = 1.0;
-                            style.flex_basis = parse_flex_basis(parts[1]);
-                        }
-                    }
-                }
-                if parts.len() >= 3 {
-                    style.flex_basis = parse_flex_basis(parts[2]);
+                // Invalid is dropped whole (css-syntax-3 §8): `flex: 1 junk`
+                // keeps the earlier declaration.
+                if let Some((grow, shrink, basis)) = parse_flex_shorthand(value) {
+                    style.flex_grow = grow;
+                    style.flex_shrink = shrink;
+                    style.flex_basis = basis;
                 }
             }
             "flex-direction" => {
@@ -13322,8 +13313,12 @@ impl layout_ctx::LayoutCtx {
                 };
             }
             "z-index" => {
-                if let Ok(z) = value.parse::<i32>() {
+                if let Ok(z) = value.trim().parse::<i32>() {
                     style.z_index = z;
+                    style.z_index_declared = true;
+                } else if value.trim().eq_ignore_ascii_case("auto") {
+                    style.z_index = 0;
+                    style.z_index_declared = false;
                 }
             }
             "text-decoration" | "text-decoration-line" => {
@@ -13852,6 +13847,12 @@ impl layout_ctx::LayoutCtx {
             _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
                 style.mask.reset(property)
             }
+            // `flex: initial` / `unset`: 0 1 auto.
+            "flex" => {
+                style.flex_grow = 0.0;
+                style.flex_shrink = 1.0;
+                style.flex_basis = rustkit_css::FlexBasis::Auto;
+            }
             // Not inherited, so `unset` lands here too: the initial value is
             // `auto`, no ratio.
             "aspect-ratio" => style.aspect_ratio = None,
@@ -13883,6 +13884,7 @@ impl layout_ctx::LayoutCtx {
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => {
                 style.display = rustkit_css::Display::Block;
+                style.display_modifier = rustkit_css::DisplayModifier::None;
                 style.webkit_box = None;
             }
             "opacity" => style.opacity = 1.0,
@@ -20927,6 +20929,65 @@ fn is_flex_basis_value(token: &str) -> bool {
         || parse_length(token).is_some()
 }
 
+/// `flex: none | [ <grow> <shrink>? || <basis> ]` (css-flexbox-1 §7.1.1).
+///
+/// The two factors sit next to each other and the basis goes either side of
+/// them, so `10px 2 3` is valid and `2 10px 3` is not. Two rules the naive
+/// positional read got wrong (hiwave-windows #66): `flex: <number>` sets the
+/// basis to `0%`, which is what makes `flex: 1` divide the container instead
+/// of sizing to content (the same in a row or a definite column, `content`
+/// in an auto-height column, where a percentage has nothing to resolve
+/// against); and a second value that is not a bare number is the basis, not
+/// a shrink of 200.
+fn parse_flex_shorthand(value: &str) -> Option<(f32, f32, rustkit_css::FlexBasis)> {
+    use rustkit_css::FlexBasis;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some((0.0, 0.0, FlexBasis::Auto));
+    }
+    // Split outside parentheses: `calc(50% - 10px)` is one basis, not three
+    // junk tokens.
+    let parts = split_top_level_whitespace(value);
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let mut factors: Vec<f32> = Vec::new();
+    let mut basis = None;
+    let mut basis_after_factor = false;
+    for part in parts {
+        match part.parse::<f32>() {
+            Ok(n) if !n.is_finite() || n < 0.0 => return None,
+            // A third bare number is a basis only when it is a unitless `0`
+            // (`flex: 1 1 0`); `1 2 3` is invalid.
+            Ok(n) if factors.len() == 2 => {
+                if n != 0.0 || basis.is_some() {
+                    return None;
+                }
+                basis = Some(parse_flex_basis(part));
+            }
+            // A basis has come between the two factors: `2 10px 3`.
+            Ok(_) if basis_after_factor => return None,
+            Ok(n) => factors.push(n),
+            Err(_) => {
+                if basis.is_some() || part.starts_with('-') || !is_flex_basis_value(part) {
+                    return None;
+                }
+                basis_after_factor = !factors.is_empty();
+                basis = Some(parse_flex_basis(part));
+            }
+        }
+    }
+    match (factors.as_slice(), basis) {
+        // A lone basis: `flex: 10px`, `flex: auto`.
+        ([], Some(basis)) => Some((1.0, 1.0, basis)),
+        ([grow], basis) => Some((*grow, 1.0, basis.unwrap_or(FlexBasis::Percent(0.0)))),
+        ([grow, shrink], basis) => {
+            Some((*grow, *shrink, basis.unwrap_or(FlexBasis::Percent(0.0))))
+        }
+        _ => None,
+    }
+}
+
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     let v = value.trim();
     if v.eq_ignore_ascii_case("auto") {
@@ -21969,21 +22030,28 @@ fn layout_hit_tester(layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static) -> ru
 
 /// `geometry_snapshot`, with the document element reported as the root box
 /// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
-/// display: contents, the root) added. A node that also produced a box
-/// keeps that box's style. `pseudos` (`ViewLayout::pseudo_styles`) join their
-/// element's lines, each row's name prefixed `::before ` or `::after `.
+/// display: contents or none, dropped empty boxes, the root) added. A node
+/// that also produced a box keeps that box's style. `pseudos`
+/// (`ViewLayout::pseudo_styles`) join their element's lines, each row's
+/// name prefixed `::before ` or `::after `.
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
-    boxless: &HashMap<usize, String>,
+    boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
     }
-    for (node, lines) in boxless {
-        snapshot.1.entry(*node).or_insert_with(|| lines.clone());
+    for (node, style) in boxless {
+        snapshot.1.entry(*node).or_insert_with(|| {
+            let mut lines = computed_style_lines(&style.box_);
+            if style.own_vars {
+                lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            }
+            lines
+        });
     }
     for ((node, pseudo), style) in pseudos {
         if let Some(lines) = snapshot.1.get_mut(node) {
@@ -22017,17 +22085,26 @@ fn pseudo_style_lines(style: &ComputedStyle) -> String {
 
 impl layout_ctx::LayoutCtx {
     /// Remember `box_`'s computed style for an element the box tree will
-    /// not keep (`display: contents`, the root), in the map of the view
-    /// being built (`ViewLayout::boxless_styles`). A later real box for the
-    /// same node wins in `geometry_with_root`. An ad-hoc build with no view
-    /// has no script to read it, and notes nothing.
-    fn note_boxless_style(&self, box_: &LayoutBox) {
+    /// not keep (`display: contents` or `none`, a dropped empty box, the
+    /// root), in the map of the view being built
+    /// (`ViewLayout::boxless_styles`), so `getComputedStyle` reads the
+    /// style and not `none`. `parent` is the parent element's style, for
+    /// the custom-property rows (`None` publishes the set). A later real
+    /// box for the same node wins in `geometry_with_root`. An ad-hoc build
+    /// with no view has no script to read it, and notes nothing.
+    fn note_boxless_style(&self, box_: &LayoutBox, parent: Option<&ComputedStyle>) {
         let Some(node) = box_.node_id else {
             return;
         };
         self.with_building_lay(|lay| {
-            let lines = computed_style_lines(box_);
-            lay.boxless_styles.borrow_mut().insert(node, lines);
+            let own_vars = parent.is_none_or(|p| {
+                !Arc::ptr_eq(&p.custom_properties, &box_.style.custom_properties)
+            });
+            let mut noted = LayoutBox::new(BoxType::Block, box_.style.clone());
+            noted.node_id = Some(node);
+            lay.boxless_styles
+                .borrow_mut()
+                .insert(node, layout_ctx::BoxlessStyle { box_: noted, own_vars });
         });
     }
 
@@ -22060,10 +22137,14 @@ impl layout_ctx::LayoutCtx {
 fn geometry_snapshot(
     root: &LayoutBox,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    /// `parent_vars` is the custom-property set of the nearest element
+    /// ancestor's box (anonymous boxes between do not count): an element
+    /// whose set is another `Arc` publishes it with its style rows.
     fn walk(
         b: &LayoutBox,
         out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
         styles: &mut HashMap<usize, String>,
+        parent_vars: Option<&Arc<rustkit_css::CustomProperties>>,
     ) -> Option<(f32, f32, f32, f32)> {
         // The bounding rect (left, top, right, bottom) of this box and everything under it.
         let bb = b.dimensions.border_box();
@@ -22074,8 +22155,11 @@ fn geometry_snapshot(
             finite_f32(bb.height),
         );
         let mut extent = Some((bx, by, bx + bw, by + bh));
+        let own_vars = b.node_id.is_some()
+            && parent_vars.is_none_or(|p| !Arc::ptr_eq(p, &b.style.custom_properties));
+        let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
         for child in &b.children {
-            if let Some(c) = walk(child, out, styles) {
+            if let Some(c) = walk(child, out, styles, child_vars) {
                 extent = Some(match extent {
                     Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
                     None => c,
@@ -22112,7 +22196,13 @@ fn geometry_snapshot(
                 scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
             };
-            styles.entry(node).or_insert_with(|| computed_style_lines(b));
+            styles.entry(node).or_insert_with(|| {
+                let mut lines = computed_style_lines(b);
+                if own_vars {
+                    lines.push_str(&custom_property_lines(&b.style.custom_properties));
+                }
+                lines
+            });
             out.entry(node)
                 .and_modify(|g| {
                     // A second box of the same element: union.
@@ -22134,8 +22224,27 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    walk(root, &mut out, &mut styles);
+    walk(root, &mut out, &mut styles, None);
     (out, styles)
+}
+
+/// The custom properties in effect on an element, as rows after its
+/// `computed_style_lines`: a `custom\t` marker (the set is published here,
+/// even when empty) then one `custom\t--name\tvalue` row each. An element
+/// publishes its set only when it is not its parent's (the `Arc` is
+/// shared down the tree until an element declares a `--*`), so a read of
+/// `getPropertyValue('--x')` walks up to the nearest publishing ancestor
+/// (`computedMap` in rustkit-bindings). A newline or tab in a value would
+/// split the row, and becomes a space.
+fn custom_property_lines(vars: &rustkit_css::CustomProperties) -> String {
+    let mut out = String::from("\ncustom\t");
+    for (name, value) in vars.to_map() {
+        out.push_str("\ncustom\t");
+        out.push_str(&name);
+        out.push('\t');
+        out.extend(value.chars().map(|c| if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c }));
+    }
+    out
 }
 
 /// The view's document element, by raw NodeId.
@@ -22315,7 +22424,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
     ];
     let rows: Vec<(&str, String)> = vec![
-        ("display", css_keyword(&format!("{:?}", s.display))),
+        ("display", s.display_keyword().to_string()),
         ("position", css_keyword(&format!("{:?}", s.position))),
         ("float", css_keyword(&format!("{:?}", s.float))),
         ("visibility", css_keyword(&format!("{:?}", s.visibility))),
@@ -22324,8 +22433,8 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("overflow-x", css_keyword(&format!("{:?}", s.overflow_x))),
         ("overflow-y", css_keyword(&format!("{:?}", s.overflow_y))),
         ("box-sizing", css_keyword(&format!("{:?}", s.box_sizing))),
-        // The computed style keeps `auto` as 0, so an explicit `z-index: 0` reads `auto`.
-        ("z-index", if s.z_index == 0 { "auto".into() } else { s.z_index.to_string() }),
+        // `auto` and `0` are both 0 to layout; the declared flag tells them apart.
+        ("z-index", if s.z_index_declared { s.z_index.to_string() } else { "auto".into() }),
         ("width", width),
         ("height", height),
         ("margin-top", css_px(d.margin.top)),
@@ -43664,19 +43773,18 @@ mod scroll_extent_tests {
     // scroll_extent_log.mjs: `chrome_script_y` is where window.scrollTo to a
     // very large y ends, `chrome_wheel_y` where a very large wheel turn ends.
 
-    /// Transforms do not move a box in the layout tree, and the offsets of
-    /// a relative box are not applied (`positioning_of`), so neither box
-    /// extends the page yet. `html` has no box of its own, so with
-    /// `html { height: 100% }` the body's bottom margin still counts (16
-    /// where Chrome has 8).
-    const SCRIPT_GAPS: &[&str] = &["translate-down", "relative-top", "html-body-overflow-x-hidden"];
+    /// Transforms do not move a box in the layout tree, so a translated
+    /// box does not extend the page yet (a relative box's offsets do, since
+    /// Z C13: `LayoutBox::apply_relative_offsets`). `html` has no box of
+    /// its own, so with `html { height: 100% }` the body's bottom margin
+    /// still counts (16 where Chrome has 8).
+    const SCRIPT_GAPS: &[&str] = &["translate-down", "html-body-overflow-x-hidden"];
     /// Chrome's wheel does not scroll a viewport whose overflow is hidden
     /// (script still does). The engine's wheel is not locked yet.
     /// And a body that scrolls takes the wheel itself: the 8px of its
     /// margin are left to the viewport, which only script moves.
     const WHEEL_GAPS: &[&str] = &[
         "translate-down",
-        "relative-top",
         "body-overflow-hidden",
         "html-overflow-hidden",
         "html-body-overflow-x-hidden",

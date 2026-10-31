@@ -2241,7 +2241,8 @@ pub fn layout_grid_container(
                                 ),
                                 ..Default::default()
                             };
-                            grandchild.layout(&item_cb);
+                            grandchild
+                                .layout_with_definite_height(&item_cb, item_cb.content.height);
                             // `item_cb` is this grandchild's REAL containing
                             // block, which `layout` above cannot know: the
                             // generic path has to assume it may have been
@@ -2447,7 +2448,6 @@ pub fn layout_grid_container(
                     seam_margins.reset();
                     seam_margins.add_margin(grandchild.dimensions.margin.bottom);
                 }
-
                 // Record the item's real flowed content height for Phase 9.5.
                 // current_y now stops at the last border-box bottom; the last
                 // child's bottom margin is pending in the context. Resolve it

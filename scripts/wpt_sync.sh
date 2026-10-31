@@ -8,9 +8,8 @@
 #   ./scripts/wpt_sync.sh --check    # verify every manifest path exists locally; no network, no writes
 #   ./scripts/wpt_sync.sh --dry-run  # print what would be fetched, touch nothing
 #
-# NOT YET RUN ON ANY SEAT. The macOS trench seat's Bash allowlist has no git clone / curl, so this
-# ships un-exercised (trench/wpt/README.md, known gap 1). Treat the first real run as W0b's first task
-# and expect to fix something here.
+# First fetched 2026-10-31 (T14): the git steps below ran one by one on the macOS seat, whose allowlist
+# refuses this script as a whole; see trench/wpt/README.md.
 
 set -euo pipefail
 
@@ -83,7 +82,8 @@ fi
 # --no-cone takes literal path patterns, which is exactly the manifest's shape.
 printf "%s\n" "$PATHS" | git -C "$DEST" sparse-checkout set --no-cone --stdin
 
-git -C "$DEST" fetch --depth 1 origin "$PIN"
+# Blobs on demand: the checkout pulls the listed files, not the ~500k-file tree.
+git -C "$DEST" fetch --depth 1 --filter=blob:none origin "$PIN"
 git -C "$DEST" checkout -q FETCH_HEAD
 
 # Sync is not done until every listed path is on disk — a partial checkout that reports success is the
