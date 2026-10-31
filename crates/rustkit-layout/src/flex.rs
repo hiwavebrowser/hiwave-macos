@@ -811,7 +811,7 @@ fn layout_flex_container_at(
                             child.style.position,
                             rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
                         ) {
-                            child.layout(&cb);
+                            child.layout_with_definite_height(&cb, cb.content.height);
                         }
                     }
                     item.layout_box.reanchor_absolute_children();
@@ -1519,12 +1519,6 @@ fn layout_flex_container_at(
 
         place_static_position_children(container, container_box, content, used_inner_main, used_inner_cross);
     }
-
-    // The items are placed: apply their `position: relative` offsets. The
-    // container's height is the percentage basis only when it is definite.
-    let definite_height = (!matches!(container.style.height, Length::Auto))
-        .then_some(container.dimensions.content.height);
-    container.shift_relative_children(definite_height);
 }
 
 /// Step 13's placement of the out-of-flow children whose insets are auto on

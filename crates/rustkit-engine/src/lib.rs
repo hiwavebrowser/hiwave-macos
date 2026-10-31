@@ -8555,7 +8555,7 @@ impl Engine {
                 // until the stacking pipeline matures. The offsets are not
                 // lost: layout reads `style.position` and shifts the box
                 // after its static position is final
-                // (`LayoutBox::shift_relative_children`), the paint order
+                // (`LayoutBox::apply_relative_offsets`), the paint order
                 // and the display-list builder read the style the same way.
                 rustkit_css::Position::Relative => Position::Static,
                 rustkit_css::Position::Absolute => Position::Absolute,
@@ -43773,7 +43773,7 @@ mod scroll_extent_tests {
 
     /// Transforms do not move a box in the layout tree, so a translated
     /// box does not extend the page yet (a relative box's offsets do, since
-    /// Z C13: `LayoutBox::shift_relative_children`). `html` has no box of
+    /// Z C13: `LayoutBox::apply_relative_offsets`). `html` has no box of
     /// its own, so with `html { height: 100% }` the body's bottom margin
     /// still counts (16 where Chrome has 8).
     const SCRIPT_GAPS: &[&str] = &["translate-down", "html-body-overflow-x-hidden"];

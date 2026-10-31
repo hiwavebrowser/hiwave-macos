@@ -1986,8 +1986,13 @@ impl LayoutBox {
     }
 
     /// Perform layout within the given containing block.
+    /// Lay out this box as the root of a tree, then apply every `position:
+    /// relative` offset in it (`apply_relative_offsets`). Layout's own
+    /// callers lay out a child with `layout_with_definite_height`, which is
+    /// the same thing without the pass, so the pass runs once per tree.
     pub fn layout(&mut self, containing_block: &Dimensions) {
         self.layout_with_definite_height(containing_block, containing_block.content.height);
+        self.apply_relative_offsets(containing_block);
     }
 
     /// Perform layout with an explicit definite height for percentage resolution.
@@ -2163,7 +2168,7 @@ impl LayoutBox {
             cb.content.width = available_width; // Pass parent's available width
             cb.content.height = 0.0;
 
-            child.layout(&cb);
+            child.layout_with_definite_height(&cb, cb.content.height);
 
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
@@ -3626,6 +3631,10 @@ impl LayoutBox {
     }
 
     /// Perform layout with margin collapse context.
+    /// The root entry the engine uses (an initial block formatting context
+    /// whose sibling margins collapse); like `layout`, it ends with
+    /// `apply_relative_offsets`. Layout's own callers use
+    /// `layout_with_collapse_in`, which does not.
     pub fn layout_with_collapse(
         &mut self,
         containing_block: &Dimensions,
@@ -3633,6 +3642,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
     ) {
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
+        self.apply_relative_offsets(containing_block);
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -4073,47 +4083,36 @@ impl LayoutBox {
         (dx, dy)
     }
 
-    /// Move this box's `position: relative` children by their offsets, once
-    /// their static positions are final: the box and its whole subtree
-    /// move (an absolutely positioned descendant's containing block moves
-    /// with it) and nothing else does, so the flow its siblings were laid
-    /// out in is untouched (CSS 2.1 section 9.4.3).
+    /// Apply every `position: relative` offset in this tree, once the whole
+    /// layout is final (CSS 2.1 section 9.4.3): a relative box and its
+    /// subtree move by `relative_shift` (an absolutely positioned
+    /// descendant's containing block moves with it) and nothing else
+    /// moves, so the flow its siblings were laid out in is untouched.
     ///
-    /// Runs at the tail of every pass that places this box's children:
-    /// block and inline flow (`layout_block_children` and its collapsing
-    /// twin), the flex container and the grid container. A pass that
-    /// places a child again writes its static position back first, so a
-    /// shift is never applied twice. The engine transfers `position:
-    /// relative` as `Position::Static` (its positioned paint path is not
-    /// ready for relative boxes), so the computed style is what says
-    /// "relative", as the paint order and the display-list builder read
-    /// it; a box whose layout position is itself `Relative` took its
-    /// offsets in `apply_position_offsets` and is left alone here.
+    /// This is a pass after layout, not a step inside it, because layout
+    /// measures: a flex or grid container reads its items' extents, a line
+    /// box reads its members, and a shift applied inside a pass was read
+    /// back as content (a Top 10 row's titles re-wrapped at the width of
+    /// the shifted rank numbers). After the root has laid out nothing
+    /// measures again, so the offsets are only ever paint and geometry.
+    /// `layout` (the root entry) runs it; layout's own callers lay out a
+    /// child with `layout_with_definite_height`, which does not.
     ///
-    /// `definite_height` is this box's content height when it is definite
-    /// (the percentage basis handed to the children), `None` when it is
-    /// `auto`, in which case a percentage `top`/`bottom` is `auto`. The
-    /// width basis is the content width, final before the children flow.
-    /// Inline children are walked too: a relative `span` inside a `span`
-    /// is placed by this block's line layout and shares its containing
-    /// block.
-    pub(crate) fn shift_relative_children(&mut self, definite_height: Option<f32>) {
-        let cb = Dimensions {
-            content: Rect::new(
-                self.dimensions.content.x,
-                self.dimensions.content.y,
-                self.dimensions.content.width,
-                definite_height.unwrap_or(0.0),
-            ),
-            ..Default::default()
-        };
-        let definite = definite_height.is_some();
-        for child in &mut self.children {
-            Self::shift_relative_box(child, &cb, definite);
-        }
+    /// The engine transfers `position: relative` as `Position::Static` (its
+    /// positioned paint path is not ready for relative boxes), so the
+    /// computed style is what says "relative", as the paint order and the
+    /// display-list builder read it; a box whose layout position is itself
+    /// `Relative` took its offsets in `apply_position_offsets` and is left
+    /// alone here. A percentage resolves against the containing block: the
+    /// parent's content box, or for a child of an inline box the inline's
+    /// own containing block. A percentage `top`/`bottom` is `auto` when the
+    /// child's percentage heights are (`percent_height_is_auto`, marked by
+    /// the parent at layout), as Chrome resolves it.
+    pub fn apply_relative_offsets(&mut self, containing_block: &Dimensions) {
+        Self::shift_relative_subtree(self, containing_block);
     }
 
-    fn shift_relative_box(b: &mut LayoutBox, cb: &Dimensions, height_definite: bool) {
+    fn shift_relative_subtree(b: &mut LayoutBox, containing_block: &Dimensions) {
         if b.position == Position::Static
             && b.style.position == rustkit_css::Position::Relative
             && !matches!(
@@ -4121,15 +4120,40 @@ impl LayoutBox {
                 BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
             )
         {
-            let (dx, dy) = b.relative_shift(cb, height_definite);
+            let (dx, dy) = b.relative_shift(containing_block, !b.percent_height_is_auto);
             if dx != 0.0 || dy != 0.0 {
-                crate::flex::translate_subtree(b, dx, dy);
+                Self::shift_subtree(b, dx, dy);
             }
         }
-        if matches!(b.box_type, BoxType::Inline) {
-            for child in &mut b.children {
-                Self::shift_relative_box(child, cb, height_definite);
+        let inner = if matches!(
+            b.box_type,
+            BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak
+        ) {
+            containing_block.clone()
+        } else {
+            b.dimensions.clone()
+        };
+        for child in &mut b.children {
+            Self::shift_relative_subtree(child, &inner);
+        }
+    }
+
+    /// `flex::translate_subtree` that also carries a sticky box's recorded
+    /// origin, so `reset_sticky_positions` puts it back where the offset
+    /// left it, not at its static position.
+    fn shift_subtree(b: &mut LayoutBox, dx: f32, dy: f32) {
+        b.dimensions.content.x += dx;
+        b.dimensions.content.y += dy;
+        if let Some(sticky) = b.sticky_state.as_mut() {
+            sticky.original_rect.x += dx;
+            sticky.original_rect.y += dy;
+            if let Some(stuck) = sticky.stuck_rect.as_mut() {
+                stuck.x += dx;
+                stuck.y += dy;
             }
+        }
+        for child in &mut b.children {
+            Self::shift_subtree(child, dx, dy);
         }
     }
 
@@ -4153,8 +4177,8 @@ impl LayoutBox {
             Position::Relative => {
                 // Offset from normal flow position. The engine never builds
                 // this arm (it transfers `position: relative` as `Static`
-                // and the parent applies the shift in
-                // `shift_relative_children`); layout's own callers do.
+                // and `apply_relative_offsets` shifts the box after the
+                // tree is laid out); layout's own callers do.
                 let (dx, dy) =
                     self.relative_shift(containing_block, containing_block.content.height > 0.0);
                 self.dimensions.content.x += dx;
@@ -4939,7 +4963,7 @@ impl LayoutBox {
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
-                child.layout(&cb);
+                child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
 
@@ -5461,8 +5485,6 @@ impl LayoutBox {
             self.context_floats =
                 Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
         }
-        // Every child is at its static position: apply the relative offsets.
-        self.shift_relative_children(definite_height);
     }
 
     /// IFC Slice C (CSS2 §10.8 subset): align line members VERTICALLY about
@@ -5948,7 +5970,7 @@ impl LayoutBox {
                 // in-flow sibling (an abspos box between two blocks must not
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
-                child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
+                child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
             }
 
@@ -6504,8 +6526,6 @@ impl LayoutBox {
             self.context_floats =
                 Some(floats.translated(self.dimensions.content.x, self.dimensions.content.y));
         }
-        // Every child is at its static position: apply the relative offsets.
-        self.shift_relative_children(definite_height);
     }
 
     /// CSS 2.1 §10.5: the content height a percentage-height CHILD of this
