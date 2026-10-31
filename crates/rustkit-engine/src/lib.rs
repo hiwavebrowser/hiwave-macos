@@ -8549,12 +8549,14 @@ impl Engine {
         } else {
             match style.position {
                 rustkit_css::Position::Static => Position::Static,
-                // Relative: geometry-only for now. Entering the positioned
+                // Relative: laid out as Static. Entering the positioned
                 // paint path (z-reorder, stacking hoist) wrecks pages whose
                 // relative boxes are mere z-index anchors (about's cards)
-                // until the stacking pipeline matures. Offsets still apply
-                // via the Relative arm when we re-enable; today Relative
-                // boxes with no offsets are visually identical to Static.
+                // until the stacking pipeline matures. The offsets are not
+                // lost: layout reads `style.position` and shifts the box
+                // after its static position is final
+                // (`LayoutBox::shift_relative_children`), the paint order
+                // and the display-list builder read the style the same way.
                 rustkit_css::Position::Relative => Position::Static,
                 rustkit_css::Position::Absolute => Position::Absolute,
                 rustkit_css::Position::Fixed => Position::Fixed,

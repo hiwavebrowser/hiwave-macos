@@ -2447,6 +2447,10 @@ pub fn layout_grid_container(
                     seam_margins.reset();
                     seam_margins.add_margin(grandchild.dimensions.margin.bottom);
                 }
+                // The re-flow above wrote every grandchild's static
+                // position: apply the `position: relative` offsets now, after
+                // the cursor has read the unshifted extents.
+                child.shift_relative_children(Some(grid_item_height));
 
                 // Record the item's real flowed content height for Phase 9.5.
                 // current_y now stops at the last border-box bottom; the last
@@ -3189,6 +3193,12 @@ pub fn layout_grid_container(
             }
         }
     }
+
+    // The items are placed: apply their `position: relative` offsets. The
+    // container's height is the percentage basis only when it is definite.
+    let definite_height =
+        (!matches!(container.style.height, rustkit_css::Length::Auto)).then_some(container_height);
+    container.shift_relative_children(definite_height);
 
     // Phase 9.9: every item's box is final; anchor the absolutely positioned
     // children of a positioned item to it.
