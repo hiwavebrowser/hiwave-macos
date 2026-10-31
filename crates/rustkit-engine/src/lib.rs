@@ -499,6 +499,8 @@ mod shadow_tree_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_sizing_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod flex_shorthand_tests;
+#[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
@@ -12793,69 +12795,12 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "flex" => {
-                // Shorthand: flex: <grow> [<shrink>] [<basis>].
-                //
-                // Two rules the naive positional read got wrong (hiwave-windows
-                // #66): `flex: <number>` sets basis to 0, not auto — that is
-                // what makes `flex: 1` divide the container instead of sizing
-                // to content — and CSS allows `flex: <grow> <basis>`, so a
-                // second value that does NOT parse as a bare number is the
-                // basis, not a shrink of 200.
-                // Split outside parentheses: `calc(50% - 10px)` is one basis,
-                // not three junk tokens.
-                let parts: Vec<&str> = split_top_level_whitespace(value);
-                // Validate before setting anything: `flex: 1 junk` is
-                // invalid and dropped whole (css-syntax-3 §8). It set the
-                // grow and reset the basis to auto from the junk.
-                let numbers = parts.iter().filter(|p| p.parse::<f32>().is_ok()).count();
-                let bases = parts
-                    .iter()
-                    .filter(|p| p.parse::<f32>().is_err())
-                    .filter(|p| is_flex_basis_value(p))
-                    .count();
-                // At most two numbers (grow, shrink). A third is a basis
-                // only when it is a unitless `0` (`flex: 1 1 0`); `1 2 3`
-                // is invalid.
-                let (numbers, bases) = if numbers == 3 && parts[2].parse::<f32>() == Ok(0.0) {
-                    (2, bases + 1)
-                } else {
-                    (numbers, bases)
-                };
-                if numbers > 2 {
-                    return;
-                }
-                if parts.is_empty() || parts.len() > 3 || bases > 1 || numbers + bases != parts.len()
-                {
-                    return;
-                }
-                if let Some(first) = parts.first() {
-                    if let Ok(grow) = first.parse::<f32>() {
-                        style.flex_grow = grow;
-                        if parts.len() == 1 {
-                            style.flex_shrink = 1.0;
-                            // The basis left out is `0%`, not `0px`
-                            // (css-flexbox-1 §7.1.1): the same in a row or
-                            // a definite column, and `content` in an
-                            // auto-height column, where a percentage has
-                            // nothing to resolve against.
-                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
-                        }
-                    }
-                }
-                if parts.len() >= 2 {
-                    match parts[1].parse::<f32>() {
-                        Ok(shrink) => {
-                            style.flex_shrink = shrink;
-                            style.flex_basis = rustkit_css::FlexBasis::Percent(0.0);
-                        }
-                        Err(_) => {
-                            style.flex_shrink = 1.0;
-                            style.flex_basis = parse_flex_basis(parts[1]);
-                        }
-                    }
-                }
-                if parts.len() >= 3 {
-                    style.flex_basis = parse_flex_basis(parts[2]);
+                // Invalid is dropped whole (css-syntax-3 §8): `flex: 1 junk`
+                // keeps the earlier declaration.
+                if let Some((grow, shrink, basis)) = parse_flex_shorthand(value) {
+                    style.flex_grow = grow;
+                    style.flex_shrink = shrink;
+                    style.flex_basis = basis;
                 }
             }
             "flex-direction" => {
@@ -13877,6 +13822,12 @@ impl layout_ctx::LayoutCtx {
             }
             _ if rustkit_css::mask::canonical_mask_property(property).is_some() => {
                 style.mask.reset(property)
+            }
+            // `flex: initial` / `unset`: 0 1 auto.
+            "flex" => {
+                style.flex_grow = 0.0;
+                style.flex_shrink = 1.0;
+                style.flex_basis = rustkit_css::FlexBasis::Auto;
             }
             // Not inherited, so `unset` lands here too: the initial value is
             // `auto`, no ratio.
@@ -20952,6 +20903,65 @@ fn is_flex_basis_value(token: &str) -> bool {
             .iter()
             .any(|f| lower.starts_with(f)))
         || parse_length(token).is_some()
+}
+
+/// `flex: none | [ <grow> <shrink>? || <basis> ]` (css-flexbox-1 §7.1.1).
+///
+/// The two factors sit next to each other and the basis goes either side of
+/// them, so `10px 2 3` is valid and `2 10px 3` is not. Two rules the naive
+/// positional read got wrong (hiwave-windows #66): `flex: <number>` sets the
+/// basis to `0%`, which is what makes `flex: 1` divide the container instead
+/// of sizing to content (the same in a row or a definite column, `content`
+/// in an auto-height column, where a percentage has nothing to resolve
+/// against); and a second value that is not a bare number is the basis, not
+/// a shrink of 200.
+fn parse_flex_shorthand(value: &str) -> Option<(f32, f32, rustkit_css::FlexBasis)> {
+    use rustkit_css::FlexBasis;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some((0.0, 0.0, FlexBasis::Auto));
+    }
+    // Split outside parentheses: `calc(50% - 10px)` is one basis, not three
+    // junk tokens.
+    let parts = split_top_level_whitespace(value);
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let mut factors: Vec<f32> = Vec::new();
+    let mut basis = None;
+    let mut basis_after_factor = false;
+    for part in parts {
+        match part.parse::<f32>() {
+            Ok(n) if !n.is_finite() || n < 0.0 => return None,
+            // A third bare number is a basis only when it is a unitless `0`
+            // (`flex: 1 1 0`); `1 2 3` is invalid.
+            Ok(n) if factors.len() == 2 => {
+                if n != 0.0 || basis.is_some() {
+                    return None;
+                }
+                basis = Some(parse_flex_basis(part));
+            }
+            // A basis has come between the two factors: `2 10px 3`.
+            Ok(_) if basis_after_factor => return None,
+            Ok(n) => factors.push(n),
+            Err(_) => {
+                if basis.is_some() || part.starts_with('-') || !is_flex_basis_value(part) {
+                    return None;
+                }
+                basis_after_factor = !factors.is_empty();
+                basis = Some(parse_flex_basis(part));
+            }
+        }
+    }
+    match (factors.as_slice(), basis) {
+        // A lone basis: `flex: 10px`, `flex: auto`.
+        ([], Some(basis)) => Some((1.0, 1.0, basis)),
+        ([grow], basis) => Some((*grow, 1.0, basis.unwrap_or(FlexBasis::Percent(0.0)))),
+        ([grow, shrink], basis) => {
+            Some((*grow, *shrink, basis.unwrap_or(FlexBasis::Percent(0.0))))
+        }
+        _ => None,
+    }
 }
 
 fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
