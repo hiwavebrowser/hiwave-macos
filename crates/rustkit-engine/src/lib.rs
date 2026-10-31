@@ -270,7 +270,7 @@ use rustkit_css::background::{
     parse_background_origin, parse_background_position,
     parse_background_repeat, parse_background_size, split_top_level_whitespace,
 };
-use rustkit_css::{css_ident, parse_display, ComputedStyle, CustomProperties, Rule, Stylesheet};
+use rustkit_css::{css_ident, ComputedStyle, CustomProperties, Rule, Stylesheet};
 use rustkit_dom::{Document, Node, NodeType};
 use rustkit_image::ImageManager;
 use rustkit_js::JsRuntime;
@@ -11342,7 +11342,10 @@ impl layout_ctx::LayoutCtx {
                 style.padding_left = rustkit_css::Length::Px(40.0);
             }
             "li" => {
-                style.display = rustkit_css::Display::Block; // list-item
+                // `list-item`: lays out as a block (no marker yet); the
+                // computed style reads `list-item`.
+                style.display = rustkit_css::Display::Block;
+                style.display_modifier = rustkit_css::DisplayModifier::ListItem;
             }
             "dl" => {
                 style.display = rustkit_css::Display::Block;
@@ -12711,13 +12714,16 @@ impl layout_ctx::LayoutCtx {
             "display" => {
                 if value.trim().eq_ignore_ascii_case("contents") {
                     style.display = rustkit_css::Display::Contents;
+                    style.display_modifier = rustkit_css::DisplayModifier::None;
                     style.webkit_box = None;
                     style.display_contents_declared = true;
                 } else if let Some(inline) = rustkit_css::parse_webkit_box_display(value) {
                     style.webkit_box = Some(inline);
+                    style.display_modifier = rustkit_css::DisplayModifier::None;
                     style.display_contents_declared = false;
-                } else if let Some(display) = parse_display(value) {
+                } else if let Some((display, modifier)) = rustkit_css::parse_display_modifier(value) {
                     style.display = display;
+                    style.display_modifier = modifier;
                     style.webkit_box = None;
                     style.display_contents_declared = false;
                 }
@@ -13883,6 +13889,7 @@ impl layout_ctx::LayoutCtx {
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => {
                 style.display = rustkit_css::Display::Block;
+                style.display_modifier = rustkit_css::DisplayModifier::None;
                 style.webkit_box = None;
             }
             "opacity" => style.opacity = 1.0,
@@ -22315,7 +22322,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
     ];
     let rows: Vec<(&str, String)> = vec![
-        ("display", css_keyword(&format!("{:?}", s.display))),
+        ("display", s.display_keyword().to_string()),
         ("position", css_keyword(&format!("{:?}", s.position))),
         ("float", css_keyword(&format!("{:?}", s.float))),
         ("visibility", css_keyword(&format!("{:?}", s.visibility))),
