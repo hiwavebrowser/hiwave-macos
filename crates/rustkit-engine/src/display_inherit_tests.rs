@@ -114,3 +114,23 @@ fn a_block_child_of_an_inheriting_contents_wrapper_stays_a_block_flex_item() {
         "String(\"l:flex,0,0 m:contents,0,0 f:contents,0,0 g:block,0,0 a:block,0,0 b:block,0,20\")"
     );
 }
+
+/// The keyword's modifier comes along too (R1 on #817, after #840): a
+/// wrapper inheriting from a list item reads `list-item`, one inheriting
+/// from a `flow-root` box reads `flow-root`, and a list item that inherits
+/// from a block parent reads `block`. Chrome: `l:list-item,40,0 m:list-item,40,0
+/// f:flow-root,0,20 g:flow-root,0,20 h:block,0,40 i:block,0,40`.
+#[test]
+fn display_inherit_copies_the_display_modifier() {
+    let (mut engine, view) = loaded(concat!(
+        "<!doctype html><style>body{margin:0} ul{margin:0;padding:0 0 0 40px} li{height:20px}",
+        " .i{display:inherit} #f{display:flow-root} #h{display:block} div{height:20px}</style>",
+        "<body><ul><li id=l><div id=m class=i></div></li></ul>",
+        "<div id=f><div id=g class=i></div></div>",
+        "<div id=h><li id=i class=i></li></div></body>",
+    ));
+    assert_eq!(
+        engine.execute_script(view, PLACES).expect("script"),
+        "String(\"l:list-item,40,0 m:list-item,40,0 f:flow-root,0,20 g:flow-root,0,20 h:block,0,40 i:block,0,40\")"
+    );
+}
