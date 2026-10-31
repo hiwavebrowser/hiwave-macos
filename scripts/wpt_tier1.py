@@ -18,11 +18,18 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
   the worst possible reason (the engine rendered neither document), which is
   the empty-capture-scores-100 lie wearing a reftest costume. Blank -> ERROR.
 - A reftest that cannot reach the state it asserts about is not scored.
-  reftest-wait / script-driven tests never reach that state without a script
-  host, so their frames measure "no JS", not the behaviour under test — and
-  upstream WPT reports TIMEOUT for them, not FAIL. They are SKIP, with the
-  reason recorded. (Added 2026-08-06 night 20: three of the seed's six fails
-  were this.)
+  The capture path does not watch for reftest-wait's completion signal, so its
+  frame may precede the state under test — and upstream WPT reports TIMEOUT
+  there, not FAIL. Those are SKIP, with the reason recorded. (Added 2026-08-06
+  night 20: three of the seed's six fails were this.) A page with plain inline
+  scripts is scored, with script on (--run-inline-scripts, #799).
+- A page whose local stylesheet, image or font is not on disk is an ERROR, no
+  pixels compared. The sparse sync takes only listed paths, and both sides
+  rendering without the same sheet can agree for the wrong reason (T14:
+  css-flexbox/support/flexbox.css).
+- `status` is the exact rule below. The campaign's rule (pixelmatch 0.1,
+  15%) is reported beside it in `campaign_diff_pct`, and never decides a
+  status: at 15% a page with a wrong line break still passes.
 - Root-absolute references (/fonts/ahem.css) are staged to resolve against the
   WPT root, because wptserve serves / from there and file:// does not. A
   reftest whose declared font silently fails to load is not measuring its own
@@ -50,20 +57,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from parity_lib import analyze_frame_blankness  # noqa: E402
+from parity_lib import THRESHOLDS, analyze_frame_blankness  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "trench" / "wpt" / "MANIFEST.json"
 WPT_ROOT = REPO_ROOT / "third_party" / "wpt"
-CAPTURE_BIN = REPO_ROOT / "target" / "release" / "parity-capture"
+CAPTURE_BIN = REPO_ROOT / "target" / "parity" / "parity-capture"
 LAST_RUN_PATH = REPO_ROOT / "trench" / "wpt" / "last-run.json"
 NEGATIVE_CONTROL_DIR = REPO_ROOT / "trench" / "wpt" / "negative-control"
+ORACLE_DIR = REPO_ROOT / "tools" / "parity_oracle"
 
 # The single threshold knob. WPT reftest semantics are "renders identically",
 # so W0b starts at exact RGB match. If antialiasing noise ever forces a
 # tolerance, it gets raised HERE, documented in last-run.json, with Pete's
 # sign-off — never borrowed from the campaign's t15.
 WPT_MAX_DIFF_PCT = 0.0
+CAMPAIGN_PIXELMATCH_THRESHOLD = 0.1  # compare_baseline.mjs, wpt_pair_diff.mjs
 
 REL_MATCH_RE = re.compile(
     r"<link\b[^>]*\brel\s*=\s*[\"']?match[\"']?[^>]*>", re.IGNORECASE
@@ -75,6 +84,12 @@ HREF_RE = re.compile(r"\bhref\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 # load nothing. Staged copies live NEXT TO the originals so relative references
 # keep working and the fixtures on disk stay verbatim.
 STAGED_SUFFIX = ".__staged"
+LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+REL_STYLESHEET_RE = re.compile(r"\brel\s*=\s*[\"']?[^\"'>]*\bstylesheet\b", re.IGNORECASE)
+SRC_RE = re.compile(r"\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+CSS_REF_RE = re.compile(
+    r"@import\s+[\"']([^\"']+)[\"']|url\(\s*[\"']?([^\"')]+?)[\"']?\s*\)", re.IGNORECASE
+)
 ROOT_ABS_ATTR_RE = re.compile(r"((?:href|src)\s*=\s*[\"'])(/(?!/)[^\"']*)([\"'])", re.IGNORECASE)
 ROOT_ABS_URL_RE = re.compile(r"(url\(\s*[\"']?)(/(?!/)[^\"')]*)([\"']?\s*\))", re.IGNORECASE)
 
@@ -171,20 +186,69 @@ def stage_html(src: Path) -> Path:
     return staged
 
 
+def _is_local(url: str) -> bool:
+    return not (re.match(r"[a-z][a-z0-9+.-]*:", url, re.IGNORECASE) or url.startswith(("//", "#")))
+
+
+def _local_target(url: str, base_dir: Path, wpt_root: Path) -> Path:
+    path = url.split("#")[0].split("?")[0]
+    return wpt_root / path.lstrip("/") if path.startswith("/") else base_dir / path
+
+
+def missing_resources(html_file: Path, wpt_root: Path):
+    """Local subresources of a page that are not on disk, in the order found.
+
+    Only what the page loads: <link rel=stylesheet>, src=, @import and url(),
+    following linked sheets. <link rel=help|author|match> are not resources.
+    """
+    missing = []
+
+    def note(url, base_dir):
+        if not _is_local(url):
+            return None
+        target = _local_target(url, base_dir, wpt_root)
+        if target.is_file():
+            return target
+        if url not in missing:
+            missing.append(url)
+        return None
+
+    def scan_css(css, base_dir, seen):
+        for m in CSS_REF_RE.finditer(css):
+            url = m.group(1) or m.group(2)
+            target = note(url, base_dir)
+            if target and target.suffix.lower() == ".css" and target not in seen:
+                seen.add(target)
+                scan_css(target.read_text(errors="replace"), target.parent, seen)
+
+    html = html_file.read_text(errors="replace")
+    seen = set()
+    for link in LINK_RE.finditer(html):
+        tag = link.group(0)
+        href = HREF_RE.search(tag)
+        if href and REL_STYLESHEET_RE.search(tag):
+            target = note(href.group(1), html_file.parent)
+            if target and target not in seen:
+                seen.add(target)
+                scan_css(target.read_text(errors="replace"), target.parent, seen)
+    for m in SRC_RE.finditer(html):
+        note(m.group(1), html_file.parent)
+    scan_css(LINK_RE.sub("", html), html_file.parent, seen)
+    return missing
+
+
 def unrunnable_reason(test_src: str, ref_src: str):
     """Why this reftest cannot probe its own assertion in the capture path.
 
-    These are not engine verdicts. A reftest-wait test never reaches the state
-    it asserts about without a script host, so comparing its frames measures
-    "no JS", not the line-box behaviour under test — upstream WPT would report
-    TIMEOUT here, not FAIL. Scoring them as FAIL charges the renderer for the
-    harness's missing capability, which is the decorative-instrument class this
-    campaign keeps finding (forensics 2026-07-24).
+    These are not engine verdicts. The capture path takes its frame after load
+    and does not watch for reftest-wait's completion signal, so comparing those
+    frames may measure the wrong moment — upstream WPT would report TIMEOUT
+    here, not FAIL. Scoring them as FAIL charges the renderer for the harness's
+    missing capability, which is the decorative-instrument class this campaign
+    keeps finding (forensics 2026-07-24).
     """
     if "reftest-wait" in test_src or "reftest-wait" in ref_src:
-        return "reftest-wait: needs a scripted completion signal (no script host in parity-capture)"
-    if "<script" in test_src.lower() or "<script" in ref_src.lower():
-        return "needs JS to reach the asserted state (no script host in parity-capture)"
+        return "reftest-wait: the capture path does not watch for the completion signal"
     if re.search(r"name\s*=\s*[\"']fuzzy[\"']", test_src, re.IGNORECASE):
         return "fuzzy annotation: tolerance matching not implemented"
     return None
@@ -202,8 +266,9 @@ def webfont_dependent(test_src: str, ref_src: str) -> bool:
     return False
 
 
-def capture(html_file: Path, out_ppm: Path, viewport):
-    """Render through the engine. Returns None on success, reason on failure."""
+def capture_args(html_file: Path, out_ppm: Path, viewport):
+    """The parity-capture call. Script stays off unless the page has one, and
+    with it on a script that throws fails the capture (an ERROR, not a frame)."""
     cmd = [
         str(CAPTURE_BIN),
         "--html-file", str(html_file),
@@ -211,6 +276,14 @@ def capture(html_file: Path, out_ppm: Path, viewport):
         "--height", str(viewport["height"]),
         "--dump-frame", str(out_ppm),
     ]
+    if "<script" in html_file.read_text(errors="replace").lower():
+        cmd.append("--run-inline-scripts")
+    return cmd
+
+
+def capture(html_file: Path, out_ppm: Path, viewport):
+    """Render through the engine. Returns None on success, reason on failure."""
+    cmd = capture_args(html_file, out_ppm, viewport)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
@@ -221,6 +294,56 @@ def capture(html_file: Path, out_ppm: Path, viewport):
     if not out_ppm.exists() or out_ppm.stat().st_size == 0:
         return "capture produced no frame"
     return None
+
+
+def campaign_diff(test_ppm: Path, ref_ppm: Path):
+    """The campaign's pixelmatch on this pair; None when node or its modules
+    cannot run it. Reported beside the status, never used to set it."""
+    try:
+        proc = subprocess.run(
+            ["node", "wpt_pair_diff.mjs", str(test_ppm), str(ref_ppm)],
+            cwd=ORACLE_DIR, capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            return None
+        diff_pct = json.loads(proc.stdout)["diff_pct"]
+        return round(diff_pct, 4) if isinstance(diff_pct, (int, float)) else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
+        return None
+
+
+def campaign_counts(cases):
+    """Scored cases against the campaign threshold; an unmeasured one is neither."""
+    limit = THRESHOLDS["default"]
+    scored = [c for c in cases if c["status"] in ("PASS", "FAIL")]
+    measured = [c["campaign_diff_pct"] for c in scored if c["campaign_diff_pct"] is not None]
+    return {
+        "within": sum(1 for d in measured if d <= limit),
+        "over": sum(1 for d in measured if d > limit),
+        "not_measured": len(scored) - len(measured),
+    }
+
+
+def oracle_record():
+    """What decided each case: the reftest's own reference, no Chrome involved."""
+    return {
+        "kind": "reftest: test frame vs reference frame, both through parity-capture",
+        "status_rule": {"name": "exact RGB match", "max_diff_pct": WPT_MAX_DIFF_PCT},
+        "campaign_rule": {
+            "name": "pixelmatch, reported only, never sets a status",
+            "pixelmatch_threshold": CAMPAIGN_PIXELMATCH_THRESHOLD,
+            "threshold_pct": THRESHOLDS["default"],
+        },
+    }
+
+
+def develop_sha_at(cwd: Path):
+    """The develop commit this head is on; None without origin/develop, never HEAD."""
+    proc = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/develop"],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
 
 
 def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bool = True):
@@ -268,6 +391,7 @@ def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bo
         "reason": None,
         "diff_pct": round(diff_pct, 4),
         "diff_pixels": diff_pixels,
+        "campaign_diff_pct": campaign_diff(test_ppm, ref_ppm),
     }
 
 
@@ -312,7 +436,7 @@ def main():
 
     if not CAPTURE_BIN.exists():
         print(f"parity-capture not built: {CAPTURE_BIN}\n"
-              f"run: cargo build --release -p parity-capture", file=sys.stderr)
+              f"run: cargo build --profile parity -p parity-capture", file=sys.stderr)
         return 1
 
     # n24 lesson (2026-08-12): this runner once scored a stale binary as a
@@ -329,7 +453,7 @@ def main():
                     newest_src, newest_path = m, f
         if CAPTURE_BIN.stat().st_mtime < newest_src:
             print(f"parity-capture is STALE: {newest_path} is newer than the binary.\n"
-                  f"run: cargo build --release -p parity-capture\n"
+                  f"run: cargo build --profile parity -p parity-capture\n"
                   f"(or pass --allow-stale to record a knowingly-suspect run)",
                   file=sys.stderr)
             return 1
@@ -359,6 +483,7 @@ def main():
             "reason": None,
             "diff_pct": None,
             "diff_pixels": None,
+            "campaign_diff_pct": None,
             "rel_match": None,
             "blocked_by": None,
             "maps_to": entry.get("maps_to"),
@@ -396,8 +521,15 @@ def main():
                     test_src = test_file.read_text(errors="replace")
                     ref_src = ref_file.read_text(errors="replace")
                     unrunnable = unrunnable_reason(test_src, ref_src)
+                    absent = missing_resources(test_file, WPT_ROOT) + missing_resources(ref_file, WPT_ROOT)
                     if unrunnable:
                         case.update(status="SKIP", reason=unrunnable)
+                    elif absent:
+                        case.update(
+                            status="ERROR",
+                            reason=f"local resources not on disk {sorted(set(absent))} — "
+                                   f"add them to MANIFEST.support_paths; pixels not compared",
+                        )
                     else:
                         if webfont_dependent(test_src, ref_src):
                             case["blocked_by"] = WEBFONT_GAP
@@ -430,6 +562,9 @@ def main():
         "schema": 1,
         "wpt_pin": manifest["wpt_pin"],
         "hiwave_git_sha": hiwave_sha,
+        "develop_sha": develop_sha_at(REPO_ROOT),
+        "oracle": oracle_record(),
+        "capture_binary": CAPTURE_BIN.relative_to(REPO_ROOT).as_posix(),
         "runner": "scripts/wpt_tier1.py",
         "viewport": viewport,
         "wpt_max_diff_pct": WPT_MAX_DIFF_PCT,
@@ -440,6 +575,7 @@ def main():
         "skip": counts["SKIP"],
         "error": counts["ERROR"],
         "rate": rate,
+        "campaign_rule_counts": campaign_counts(cases),
         "attribution": {
             "_comment": "Fails grouped by a named engine capability gap. Attribution only — these cases stay in the denominator. A gap here is a lane, not an excuse.",
             "blocked_fails": {
@@ -480,6 +616,9 @@ def main():
           f"(pass {counts['PASS']} / fail {counts['FAIL']} / "
           f"skip {counts['SKIP']} / error {counts['ERROR']}, n={len(cases)}) "
           f"@ pin {manifest['wpt_pin'][:12]}")
+    held = last_run["campaign_rule_counts"]
+    print(f"  campaign rule, reported only: {held['within']} within "
+          f"{THRESHOLDS['default']}%, {held['over']} over, {held['not_measured']} not measured")
     for gap, ids in last_run["attribution"]["blocked_fails"].items():
         print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
     suspect = last_run["attribution"]["suspect_passes"]["ids"]

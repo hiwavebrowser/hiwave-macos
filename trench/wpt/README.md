@@ -1,7 +1,7 @@
-# WPT Tier-1 — Phase 0.5, unit W0a
+# WPT Tier-1 — Phase 0.5, units W0a + W0b
 
 **What this is:** the checked-in list of Web Platform Tests HiWave measures itself against, pinned to a
-frozen WPT SHA. Nothing here reports a pass-rate yet.
+frozen WPT SHA, and the runner that scores them through the real engine.
 
 **Why it exists:** the campaign metric (pixel parity vs pinned Chrome 148) is *pinned-Chrome* parity — it
 tops out at "matches Chrome, bugs included". As of 2026-07-29 it is **26/26 @ t15, avg 6.7 on committed
@@ -16,13 +16,27 @@ campaign boundary, both seats in lockstep — the same rule as the CfT-148 pin.
 existing capture/pixel path — do not build a second engine host).
 **Roadmap:** `LINE_BOX_WPT_ROADMAP.md` · **seed source:** `WPT_TIER1_SUBSET.md` (both on the hub).
 
+## Run it
+
+```
+scripts/wpt_sync.sh
+cargo build --profile parity -p parity-capture
+python3 scripts/wpt_tier1.py
+```
+
+No Chrome is involved: a case passes when its test frame and reference frame match exactly. `status` uses
+that rule alone. The campaign's rule (pixelmatch 0.1, 15%) is reported beside it as `campaign_diff_pct` and
+`campaign_rule_counts`, and never sets a status; it needs `tools/parity_oracle/node_modules` and reads
+`not_measured` without them.
+
 ## Layout
 
 | Artifact | Role |
 |---|---|
-| `MANIFEST.json` | **Source of truth.** 14 test ids, their paths, buckets, and which line-box/IFC slice each one funds. |
+| `MANIFEST.json` | **Source of truth.** 30 test ids, their paths, buckets, support files, and which slice each one funds. |
 | `scripts/wpt_sync.sh` | Materialises *only* the manifest paths into `third_party/wpt/` (gitignored). The manifest drives the checkout, never the reverse. |
-| `last-run.json` | **Does not exist yet** — W0b writes it. Until it does, HiWave has **no** WPT pass-rate. |
+| `scripts/wpt_tier1.py` | The runner. Aborts if the negative control does not go red. |
+| `last-run.json` | Written by the runner (gitignored): counts, per-case rows, `develop_sha`, `oracle`. |
 
 ## The honesty note that gates this whole lane
 
@@ -34,24 +48,21 @@ when no `.expected` file is present. The January work order `.ai/work_orders/wpt
 **Nothing from `rustkit-test` may be reported as conformance.** That note is now also in the crate's own
 module docs, where someone reading the code will hit it.
 
-## Known gaps (W0a ships with these open, deliberately)
+## Status words
 
-1. **`wpt_sync.sh`'s network path has never been run.** `--dry-run` and `--check` were both exercised (28
-   files = 14 tests + 14 refs; `--check` correctly fails with 28/28 missing on an empty tree). The actual
-   sparse-checkout was not: this seat's Bash allowlist has no `git clone`, `git ls-remote`, or `curl`.
-   Expect to fix something in that branch on its first real run.
-2. **Seed is 14, not the pin's 25–32.** Only test/ref pairs whose **both** files appear verbatim in a pinned
-   directory listing were admitted. 1A landed 5 of a targeted 15–18 (`css/css-text/white-space/` at this pin
-   is entirely `break-spaces`, whose refs live outside the directory) and 1C landed 2 of 4–6. Growing the
-   seed is a W0b task with the tree actually checked out — not a guess made from listings.
-3. **Test→ref bindings are unverified.** WPT's authority is each test's `<link rel=match>`. The runner must
-   read it and treat disagreement with `MANIFEST.json` as an *instrument error*, not a render diff.
-4. **No CI gate.** Per the pin §5 and Pete's standing rule, WPT must not gate PR merges until a floor is
-   deliberately locked. W0a adds no workflow at all.
+- **ERROR** is the instrument: a capture failed, a frame was blank, `rel=match` disagrees with the manifest,
+  or a page's local resource is not on disk. No pixels compared. Add a missing file to
+  `MANIFEST.support_paths`.
+- **SKIP** is a case the path cannot probe: `reftest-wait` (the frame is taken after load and nothing watches
+  for the completion signal) and `fuzzy` annotations.
+- An inline script without a wait is scored, with `--run-inline-scripts`.
 
-## What "done" looks like next (W0b)
+## Known gaps
 
-Render test and ref through the **same** `parity-capture` headless path the campaign uses, pixel-diff with the
-existing oracle, and write `last-run.json` with `{pin, n, pass, fail, skip, rate, git_sha}`. Skip — with a
-reason — for missing refs, unsupported `@supports`, or JS dependence; a skip is not a fail. **An all-green
-first run means the harness is lying**, same as the "13/13" smoke runner did (lie #6).
+1. **On the macOS seat `wpt_sync.sh` has only run step by step.** The allowlist refuses the script as a
+   whole, so T14 ran its git commands by hand in a fresh checkout. Its `--stdin` path list has not run.
+2. **Seed is 30.** Grow it only when a campaign dig would have been clearer with a WPT id.
+3. **No CI gate.** Per the pin §5 and Pete's standing rule, WPT must not gate PR merges until a floor is
+   deliberately locked.
+
+**An all-green run means the harness is lying**, same as the "13/13" smoke runner did (lie #6).
