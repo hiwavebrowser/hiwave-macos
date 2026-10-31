@@ -261,12 +261,12 @@ fn the_computed_read_is_compared_with_numeric_slack_but_never_blank() {
 
 #[test]
 fn parse_is_the_arm_or_any_change_the_engine_made() {
-    let mut m = measured("x", "");
+    let mut m = measured("x", "control");
     m.arm = false;
     assert!(!judge(&m).parse, "no arm and no change");
     m.rust_value.read.as_mut().unwrap().computed = "y".into();
     assert!(judge(&m).parse, "the computed read moved");
-    let mut m = measured("x", "");
+    let mut m = measured("x", "control");
     m.arm = false;
     paint(m.rust_value.frame.as_mut().unwrap(), 8, 8, 32, 32, [200, 0, 0]);
     assert!(judge(&m).parse, "the pixels moved");
@@ -447,10 +447,11 @@ fn the_report_counts_every_class_and_names_the_red_list() {
     assert!(md.contains("| computed | 1 |"), "{md}");
     assert!(md.contains("| unsupported | 1 |"), "{md}");
     let red = md.find("## Red list").expect("a red list");
+    let end = md.find("## Paints right").expect("the next section");
     let all = md.find("## All properties").expect("the whole table");
-    assert!(red < all);
-    assert!(md[red..all].contains("`float`") && md[red..all].contains("`zoom`"));
-    assert!(!md[red..all].contains("`width`"), "green is not on the red list");
+    assert!(red < end && end < all);
+    assert!(md[red..end].contains("`float`") && md[red..end].contains("`zoom`"));
+    assert!(!md[red..end].contains("`width`"), "green is not on the red list");
 }
 
 #[test]
