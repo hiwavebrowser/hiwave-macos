@@ -1,9 +1,9 @@
 {
   "counts": {
-    "computed": 9,
-    "effect": 130,
-    "parse": 51,
-    "unsupported": 154
+    "computed": 8,
+    "effect": 127,
+    "parse": 65,
+    "unsupported": 144
   },
   "meta": {
     "contexts_off": [
@@ -85,7 +85,7 @@
       ]
     ],
     "date": "2026-10-31",
-    "develop_sha": "1de44430",
+    "develop_sha": "546d6196",
     "oracle": "143.0.7499.4",
     "sites_loaded": 67,
     "viewport": [
@@ -95,21 +95,21 @@
   },
   "properties": [
     {
-      "class": "computed",
+      "class": "effect",
       "context": "box",
       "corpus": 97,
       "name": "position",
-      "red": true,
+      "red": false,
       "sites": 61,
       "values": [
         {
           "chrome_computed": "relative",
           "computed": true,
-          "effect": "mismatch",
+          "effect": "match",
           "engine_computed": "relative",
-          "geometry_ok": false,
+          "geometry_ok": true,
           "parse": true,
-          "probes_off": 170,
+          "probes_off": 0,
           "value": "relative"
         },
         {
@@ -315,7 +315,7 @@
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "-webkit-mask-image",
@@ -328,14 +328,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 510,
           "value": "linear-gradient(#000,transparent)"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask",
@@ -348,14 +348,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 510,
           "value": "linear-gradient(#000,transparent)"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-image",
@@ -368,7 +368,7 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 510,
           "value": "linear-gradient(#000,transparent)"
         }
@@ -1895,17 +1895,17 @@
       ]
     },
     {
-      "class": "effect",
+      "class": "parse",
       "context": "bg",
       "corpus": 12,
       "name": "background-position",
-      "red": false,
+      "red": true,
       "sites": null,
       "values": [
         {
           "chrome_computed": "20px 10px",
           "computed": false,
-          "effect": "match",
+          "effect": "unproven",
           "engine_computed": "",
           "geometry_ok": true,
           "parse": true,
@@ -1915,7 +1915,7 @@
         {
           "chrome_computed": "50% 50%",
           "computed": false,
-          "effect": "match",
+          "effect": "unproven",
           "engine_computed": "",
           "geometry_ok": true,
           "parse": true,
@@ -1925,17 +1925,17 @@
       ]
     },
     {
-      "class": "effect",
+      "class": "parse",
       "context": "bg",
       "corpus": 12,
       "name": "background-size",
-      "red": false,
+      "red": true,
       "sites": null,
       "values": [
         {
           "chrome_computed": "30px 30px",
           "computed": false,
-          "effect": "match",
+          "effect": "unproven",
           "engine_computed": "",
           "geometry_ok": true,
           "parse": true,
@@ -2145,17 +2145,17 @@
       ]
     },
     {
-      "class": "effect",
+      "class": "parse",
       "context": "bg",
       "corpus": 5,
       "name": "background-clip",
-      "red": false,
+      "red": true,
       "sites": null,
       "values": [
         {
           "chrome_computed": "content-box",
           "computed": false,
-          "effect": "match",
+          "effect": "unproven",
           "engine_computed": "",
           "geometry_ok": true,
           "parse": true,
@@ -2235,11 +2235,11 @@
       ]
     },
     {
-      "class": "effect",
+      "class": "parse",
       "context": "bg",
       "corpus": 4,
       "name": "background-repeat",
-      "red": false,
+      "red": true,
       "sites": null,
       "values": [
         {
@@ -2255,7 +2255,7 @@
         {
           "chrome_computed": "repeat-x",
           "computed": false,
-          "effect": "match",
+          "effect": "unproven",
           "engine_computed": "",
           "geometry_ok": true,
           "parse": true,
@@ -5755,7 +5755,7 @@
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-clip",
@@ -5768,14 +5768,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 275,
           "value": "content-box"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-composite",
@@ -5788,14 +5788,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 540,
           "value": "exclude"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-mode",
@@ -5808,14 +5808,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 510,
           "value": "luminance"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-origin",
@@ -5828,14 +5828,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 706,
           "value": "content-box"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-position",
@@ -5848,14 +5848,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 431,
           "value": "20px 10px"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-repeat",
@@ -5868,14 +5868,14 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 431,
           "value": "no-repeat"
         }
       ]
     },
     {
-      "class": "unsupported",
+      "class": "parse",
       "context": "box",
       "corpus": 0,
       "name": "mask-size",
@@ -5888,7 +5888,7 @@
           "effect": "mismatch",
           "engine_computed": "",
           "geometry_ok": true,
-          "parse": false,
+          "parse": true,
           "probes_off": 431,
           "value": "50px 50px"
         }
@@ -7686,7 +7686,6 @@
     }
   ],
   "red": [
-    "position",
     "z-index",
     "object-fit",
     "transform",
@@ -7715,8 +7714,12 @@
     "text-transform",
     "outline",
     "text-decoration",
+    "background-position",
+    "background-size",
     "user-select",
     "-webkit-text-fill-color",
+    "background-clip",
+    "background-repeat",
     "grid",
     "scrollbar-color",
     "scrollbar-width",
