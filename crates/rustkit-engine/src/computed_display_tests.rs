@@ -33,7 +33,9 @@ const PAGE: &str = r#"<!doctype html><style>
 
 fn loaded() -> (Engine, EngineViewId) {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-    let id = engine.create_headless_view(Bounds::new(0, 0, 1280, 800)).expect("headless view");
+    let id = engine
+        .create_headless_view(Bounds::new(0, 0, 1280, 800))
+        .expect("headless view");
     engine.load_html(id, PAGE).expect("load_html");
     (engine, id)
 }
@@ -52,7 +54,9 @@ fn read(engine: &mut Engine, id: EngineViewId, element: &str, property: &str) ->
     eval(
         engine,
         id,
-        &format!("getComputedStyle(document.getElementById('{element}')).getPropertyValue('{property}')"),
+        &format!(
+            "getComputedStyle(document.getElementById('{element}')).getPropertyValue('{property}')"
+        ),
     )
 }
 
@@ -63,10 +67,18 @@ fn assert_reads(engine: &mut Engine, id: EngineViewId, cases: &[(&str, &str, &st
     for (element, property, chrome) in cases {
         let got = read(engine, id, element, property);
         if got != *chrome {
-            wrong.push(format!("#{element} {property}: chrome {chrome:?}, engine {got:?}"));
+            wrong.push(format!(
+                "#{element} {property}: chrome {chrome:?}, engine {got:?}"
+            ));
         }
     }
-    assert!(wrong.is_empty(), "{} of {} reads differ from Chrome:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{} of {} reads differ from Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
 }
 
 #[test]
@@ -144,7 +156,14 @@ fn a_dropped_empty_block_reads_its_used_width() {
 #[test]
 fn a_display_none_element_reads_none_with_its_cascaded_style() {
     let (mut e, id) = loaded();
-    assert_reads(&mut e, id, &[("hidden", "display", "none"), ("hidden", "color", "rgb(1, 2, 3)")]);
+    assert_reads(
+        &mut e,
+        id,
+        &[
+            ("hidden", "display", "none"),
+            ("hidden", "color", "rgb(1, 2, 3)"),
+        ],
+    );
 }
 
 /// LIMIT (LIMITS_LEDGER, #501): a descendant of a `display: none` subtree
@@ -156,7 +175,14 @@ fn a_display_none_element_reads_none_with_its_cascaded_style() {
 #[ignore = "nothing under a display: none element is styled (cascade follow-up)"]
 fn a_descendant_of_a_display_none_subtree_reads_its_own_display() {
     let (mut e, id) = loaded();
-    assert_reads(&mut e, id, &[("inhidden", "display", "inline"), ("inhidden", "color", "rgb(1, 2, 3)")]);
+    assert_reads(
+        &mut e,
+        id,
+        &[
+            ("inhidden", "display", "inline"),
+            ("inhidden", "color", "rgb(1, 2, 3)"),
+        ],
+    );
 }
 
 /// LIMITS_LEDGER (#501): `z-index: 0` read `auto`.
@@ -199,7 +225,11 @@ fn custom_properties_read_the_cascaded_value() {
     );
     // The camelCase-free property access reads the same.
     assert_eq!(
-        eval(&mut e, id, "getComputedStyle(document.getElementById('ownchild'))['--x']"),
+        eval(
+            &mut e,
+            id,
+            "getComputedStyle(document.getElementById('ownchild'))['--x']"
+        ),
         "9px"
     );
 }

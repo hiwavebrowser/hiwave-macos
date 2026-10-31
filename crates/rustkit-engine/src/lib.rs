@@ -22063,7 +22063,7 @@ impl layout_ctx::LayoutCtx {
             return;
         };
         self.with_building_lay(|lay| {
-            let own_vars = parent.map_or(true, |p| {
+            let own_vars = parent.is_none_or(|p| {
                 !Arc::ptr_eq(&p.custom_properties, &box_.style.custom_properties)
             });
             let mut noted = LayoutBox::new(BoxType::Block, box_.style.clone());
@@ -22122,7 +22122,7 @@ fn geometry_snapshot(
         );
         let mut extent = Some((bx, by, bx + bw, by + bh));
         let own_vars = b.node_id.is_some()
-            && parent_vars.map_or(true, |p| !Arc::ptr_eq(p, &b.style.custom_properties));
+            && parent_vars.is_none_or(|p| !Arc::ptr_eq(p, &b.style.custom_properties));
         let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
         for child in &b.children {
             if let Some(c) = walk(child, out, styles, child_vars) {
