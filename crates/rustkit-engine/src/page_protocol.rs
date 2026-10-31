@@ -248,6 +248,13 @@ pub enum PageInput {
         dy: f32,
         reply: oneshot::Sender<bool>,
     },
+    /// A wheel over a point of the view: the box under it may take it.
+    ScrollAt {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    },
     FormSubmit {
         reply: oneshot::Sender<Option<String>>,
     },
@@ -674,6 +681,12 @@ impl PageEndpoint {
                     }
                 };
                 let _ = reply.send(changed);
+                self.publish_commit();
+            }
+            PageInput::ScrollAt { x, y, dx, dy } => {
+                if let Err(e) = self.engine.scroll_at(view, x, y, dx, dy) {
+                    tracing::debug!(error = %e, "scroll_at failed");
+                }
                 self.publish_commit();
             }
             PageInput::FormSubmit { reply } => {

@@ -1672,6 +1672,13 @@ impl DomBindings {
         let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
     }
 
+    /// Tell the page the user scrolled an element: `scroll` fires at it.
+    pub fn notify_element_scrolled(&self, node: usize) {
+        let _ = self.evaluate(&format!(
+            "typeof __rkUserScrolledElement === 'function' && __rkUserScrolledElement({node})"
+        ));
+    }
+
     /// Publish the computed style of each laid-out element (raw NodeId to
     /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {

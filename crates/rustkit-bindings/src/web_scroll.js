@@ -174,6 +174,15 @@
         configurable: true, writable: true, enumerable: false
     });
 
+    // The same when the user scrolled an element: at once, at the element.
+    Object.defineProperty(g, '__rkUserScrolledElement', {
+        value: function (id) {
+            var el = table.byId(id);
+            try { if (el) el.dispatchEvent(new g.Event('scroll', { bubbles: false })); } catch (_) {}
+        },
+        configurable: true, writable: true, enumerable: false
+    });
+
     var D = g.Document && g.Document.prototype;
     if (D && D.scrollingElement === undefined) {
         Object.defineProperty(D, 'scrollingElement', {

@@ -2500,7 +2500,7 @@ fn main() {
                             if wheel_burst_started() {
                                 info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                             }
-                            if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                            if view.scroll_at(scroll.x as f32, scroll.y as f32, scroll.dx as f32, scroll.dy as f32) {
                                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
                             }
                             }

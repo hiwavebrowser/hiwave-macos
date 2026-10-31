@@ -505,6 +505,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod wheel_routing_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
@@ -857,6 +859,8 @@ struct PresentedFrame {
 const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct ViewState {
+    /// What the last wheel moved, while a run of wheels holds to it.
+    wheel_gesture: Option<WheelGesture>,
     id: EngineViewId,
     /// Counts the display lists this view has been given.
     frame_generation: u64,
@@ -1080,6 +1084,7 @@ impl ViewState {
         self.lay.checked_states.borrow_mut().clear();
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.focused_node.set(None);
+        self.wheel_gesture = None;
         self.hovered_node = None;
         self.lay.hover_chain.borrow_mut().clear();
         self.lay.active_chain.borrow_mut().clear();
@@ -2632,6 +2637,7 @@ impl Engine {
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
+            wheel_gesture: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -2729,6 +2735,7 @@ impl Engine {
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
+            wheel_gesture: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -2843,6 +2850,7 @@ impl Engine {
             decode_epoch: 0,
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
+            wheel_gesture: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -3141,6 +3149,120 @@ impl Engine {
         self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
 
         Ok(true)
+    }
+
+    /// Scroll by a wheel over a VIEWPORT point: the innermost scroller under
+    /// the point that can move that way takes all of it, and the window takes
+    /// it when none can. A run of wheels (steps under `WHEEL_GESTURE_HOLD`
+    /// apart) stays on what the first one moved while that can still take
+    /// the wheel, so a box coming under the pointer does not catch a page's
+    /// flick. The moment the held target cannot move for a step, on any
+    /// axis, the step is routed as if there were no hold and what it moves
+    /// becomes the held target: a box at its end hands on at once, as
+    /// Chromium does.
+    ///
+    /// Returns true if an offset changed. The frame is presented here, as in
+    /// `scroll_view`.
+    pub fn scroll_at(
+        &mut self,
+        id: EngineViewId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Result<bool, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
+        let held_target = held
+            .map(|g| g.target)
+            .filter(|&target| Self::wheel_moves(view, target, delta_x, delta_y));
+        let target = held_target.unwrap_or_else(|| Self::wheel_target_at(view, x, y, delta_x, delta_y));
+        let rest = held.filter(|g| g.target == target).map_or((0.0, 0.0), |g| g.rest);
+        let (changed, rest) = match target {
+            WheelTarget::Window => (self.scroll_view(id, delta_x, delta_y)?, (0.0, 0.0)),
+            WheelTarget::Element(node) => self.wheel_element(id, node, delta_x, delta_y, rest)?,
+        };
+        if let Some(view) = self.views.get_mut(&id) {
+            view.wheel_gesture = Some(WheelGesture { target, last: std::time::Instant::now(), rest });
+        }
+        Ok(changed)
+    }
+
+    /// What a new wheel over a point moves: the innermost scroller under the
+    /// point that can take it, else the window.
+    fn wheel_target_at(view: &ViewState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> WheelTarget {
+        let Some(hit) = Self::hit_at(view, x, y) else {
+            return WheelTarget::Window;
+        };
+        hit.scrollers
+            .iter()
+            .map(|&node| WheelTarget::Element(node))
+            .find(|&target| Self::wheel_moves(view, target, delta_x, delta_y))
+            .unwrap_or(WheelTarget::Window)
+    }
+
+    /// Whether a wheel of this delta moves the target on at least one axis.
+    /// A box that is gone from the layout moves on none.
+    fn wheel_moves(view: &ViewState, target: WheelTarget, delta_x: f32, delta_y: f32) -> bool {
+        let (across, down, (max_x, max_y), (at_x, at_y)) = match target {
+            WheelTarget::Window => (true, true, view.max_scroll_offset, view.scroll_offset),
+            WheelTarget::Element(node) => {
+                let Some(b) = view.layout.as_deref().and_then(|layout| box_of_node(layout, node)) else {
+                    return false;
+                };
+                let (across, down) = b.wheel_axes();
+                (across, down, b.element_scroll_max(), b.element_scroll.get())
+            }
+        };
+        // Same signs as `scroll_view` and `wheel_element`.
+        let moves_x = across && ((delta_x > 0.0 && at_x < max_x) || (delta_x < 0.0 && at_x > 0.0));
+        let moves_y = down && ((delta_y < 0.0 && at_y < max_y) || (delta_y > 0.0 && at_y > 0.0));
+        moves_x || moves_y
+    }
+
+    /// Move a scroller by a wheel, in whole pixels, and paint it. `rest` is
+    /// what the last step left over; returns what this one does.
+    fn wheel_element(
+        &mut self,
+        id: EngineViewId,
+        node: usize,
+        delta_x: f32,
+        delta_y: f32,
+        rest: (f32, f32),
+    ) -> Result<(bool, (f32, f32)), EngineError> {
+        let _hold = wgate::hold("scroll");
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let Some(b) = view.layout.as_deref().and_then(|layout| box_of_node(layout, node)) else {
+            return Ok((false, (0.0, 0.0)));
+        };
+        let (across, down) = b.wheel_axes();
+        let (max_x, max_y) = b.element_scroll_max();
+        let old = b.element_scroll.get();
+        // Same signs as `scroll_view`.
+        let exact = (
+            if across { (old.0 + rest.0 + delta_x).clamp(0.0, max_x) } else { old.0 },
+            if down { (old.1 + rest.1 - delta_y).clamp(0.0, max_y) } else { old.1 },
+        );
+        let new = (exact.0.round(), exact.1.round());
+        let rest = (exact.0 - new.0, exact.1 - new.1);
+        if new == old {
+            return Ok((false, rest));
+        }
+        {
+            let mut scrolls = view.lay.element_scrolls.borrow_mut();
+            scrolls.offsets.insert(node, new);
+            scrolls.generation += 1;
+        }
+        // As `scroll_view`: the frame first, then the page hears it.
+        self.relist_after_element_scroll(id);
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render at the new element scroll failed; the next wake draws it");
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.notify_element_scrolled(node);
+        }
+        self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
+        Ok((true, rest))
     }
 
     /// Hit-test a click in VIEWPORT coordinates and return the link URL it
@@ -22046,28 +22168,35 @@ fn publish_geometry(
     }));
 }
 
+/// How long after a wheel the next one still belongs to its gesture. macOS
+/// marks a real gesture's phases, but the input queue does not carry them; a
+/// flick's events, inertia included, come much closer together than this.
+const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WheelTarget {
+    Window,
+    Element(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WheelGesture {
+    target: WheelTarget,
+    last: std::time::Instant,
+    /// What rounding the last step to a whole pixel left over.
+    rest: (f32, f32),
+}
+
 /// Copy the view's element scroll offsets onto the scrollers of a layout tree,
 /// clamping each to what its box can scroll now. Costs nothing on a page where
 /// script scrolled no element.
 fn stamp_element_scrolls(root: &LayoutBox, scrolls: &rustkit_bindings::SharedElementScrolls) {
-    fn reach(b: &LayoutBox, right: &mut f32, bottom: &mut f32) {
-        let border = b.dimensions.border_box();
-        *right = right.max(border.x + border.width);
-        *bottom = bottom.max(border.y + border.height);
-        for child in &b.children {
-            reach(child, right, bottom);
-        }
-    }
     fn walk(b: &LayoutBox, offsets: &mut HashMap<usize, (f32, f32)>) {
         if b.is_element_scroller() {
             if let Some(offset) = b.node_id.and_then(|node| offsets.get_mut(&node)) {
-                let padding = b.dimensions.padding_box();
-                let (mut right, mut bottom) = (padding.x + padding.width, padding.y + padding.height);
-                for child in &b.children {
-                    reach(child, &mut right, &mut bottom);
-                }
-                offset.0 = offset.0.min(right - padding.x - padding.width).max(0.0);
-                offset.1 = offset.1.min(bottom - padding.y - padding.height).max(0.0);
+                let (max_x, max_y) = b.element_scroll_max();
+                offset.0 = offset.0.min(max_x).max(0.0);
+                offset.1 = offset.1.min(max_y).max(0.0);
                 b.element_scroll.set(*offset);
             }
         }

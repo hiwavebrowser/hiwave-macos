@@ -1702,6 +1702,65 @@ impl LayoutBox {
             && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
     }
 
+    /// How far this box's content can scroll on each axis: what its
+    /// descendants reach past its padding box.
+    pub fn element_scroll_max(&self) -> (f32, f32) {
+        fn reach(b: &LayoutBox, right: &mut f32, bottom: &mut f32) {
+            let border = b.dimensions.border_box();
+            *right = right.max(border.x + border.width);
+            *bottom = bottom.max(border.y + border.height);
+            for child in &b.children {
+                reach(child, right, bottom);
+            }
+        }
+        let padding = self.dimensions.padding_box();
+        let (mut right, mut bottom) = (padding.x + padding.width, padding.y + padding.height);
+        for child in &self.children {
+            reach(child, &mut right, &mut bottom);
+        }
+        (right - padding.x - padding.width, bottom - padding.y - padding.height)
+    }
+
+    /// Whether the wheel may move this scroller, on each axis. `hidden` scrolls
+    /// from script only. `visible` next to anything but `visible` or `clip`
+    /// computes to `auto`.
+    pub fn wheel_axes(&self) -> (bool, bool) {
+        use rustkit_css::Overflow;
+        let axis = |own: Overflow, other: Overflow| match own {
+            Overflow::Auto | Overflow::Scroll => true,
+            Overflow::Visible => !matches!(other, Overflow::Visible | Overflow::Clip),
+            _ => false,
+        };
+        (
+            axis(self.style.overflow_x, self.style.overflow_y),
+            axis(self.style.overflow_y, self.style.overflow_x),
+        )
+    }
+
+    /// A hit in `child` passing up through this box: name this box in the
+    /// hit's scroller chain, if it is one the child scrolls with.
+    fn note_scroller_of_hit(&self, child: &LayoutBox, hit: &mut HitTestResult) {
+        match child.position {
+            Position::Fixed => hit.scroller_gap = ScrollerGap::ToTransform,
+            Position::Absolute if hit.scroller_gap == ScrollerGap::None => {
+                hit.scroller_gap = ScrollerGap::ToContainingBlock;
+            }
+            _ => {}
+        }
+        match hit.scroller_gap {
+            ScrollerGap::ToContainingBlock if self.holds_absolute_boxes() => {
+                hit.scroller_gap = ScrollerGap::None;
+            }
+            ScrollerGap::ToTransform if self.transforms_descendants() => {
+                hit.scroller_gap = ScrollerGap::None;
+            }
+            _ => {}
+        }
+        if hit.scroller_gap == ScrollerGap::None && self.is_element_scroller() {
+            hit.scrollers.extend(self.node_id);
+        }
+    }
+
     /// Whether this box is the containing block of the absolute boxes inside
     /// it, as the painter reads it: `position: relative` is laid out as
     /// static, so the computed style says too.
@@ -7324,6 +7383,7 @@ impl LayoutBox {
                 (inner_x, inner_y, inner_escaped)
             };
             if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
+                self.note_scroller_of_hit(child, &mut result);
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
                 return Some(result);
@@ -7361,6 +7421,8 @@ impl LayoutBox {
             link_href: self.link_href.clone(),
             node_id: self.node_id,
             viewport_fixed: false,
+            scrollers: if self.is_element_scroller() { self.node_id.into_iter().collect() } else { Vec::new() },
+            scroller_gap: ScrollerGap::None,
         }
     }
 
@@ -7436,6 +7498,8 @@ impl LayoutBox {
             link_href: self.link_href.clone(),
             node_id: self.node_id,
             viewport_fixed: false,
+            scrollers: Vec::new(),
+            scroller_gap: ScrollerGap::None,
         });
 
         // Check all children
@@ -7462,9 +7526,24 @@ fn invert_affine(m: [f32; 6]) -> Option<[f32; 6]> {
     Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
+/// While a hit passes up the tree: which boxes above it do not scroll it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollerGap {
+    None,
+    /// An absolute box: up to its containing block.
+    ToContainingBlock,
+    /// A fixed box: up to a transform, or for good.
+    ToTransform,
+}
+
 /// Result of a hit test operation.
 #[derive(Debug, Clone)]
 pub struct HitTestResult {
+    /// The element scrollers whose scroll moves the hit box, innermost first,
+    /// the box itself first if it is one (`Engine::scroll_at`).
+    pub scrollers: Vec<usize>,
+    /// See `ScrollerGap`.
+    pub scroller_gap: ScrollerGap,
     /// The type of the hit box.
     pub box_type: BoxType,
     /// The border box of the hit element.
