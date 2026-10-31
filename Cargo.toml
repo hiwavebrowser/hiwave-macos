@@ -11,6 +11,7 @@ members = [
     "crates/hiwave-analytics",
     "crates/hiwave-app",
     "crates/parity-capture",
+    "trench/devtools/tools/css_census",
     "crates/hiwave-mcp",
     "crates/rustkit-common",
     "crates/rustkit-core",
