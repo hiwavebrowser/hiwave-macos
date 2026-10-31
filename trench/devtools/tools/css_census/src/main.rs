@@ -29,13 +29,20 @@ const SENTINELS: [&str; 3] = ["background-color", "width", "color"];
 fn sh(cmd: &mut Command) -> Result<String, String> {
     let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
     if !out.status.success() {
-        return Err(format!("{cmd:?}: {}\n{}", out.status, String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "{cmd:?}: {}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// A fixture's file stem: `<property index>-<value index>`, `c` for the control.
@@ -53,10 +60,21 @@ fn capture_engine(binary: &Path, work: &Path, id: &str) -> bool {
     let (w, h) = (VIEWPORT.0.to_string(), VIEWPORT.1.to_string());
     let attempt = || {
         Command::new(binary)
-            .arg("--html-file").arg(&html)
-            .args(["--width", &w, "--height", &h, "--timeout-ms", "20000", "--run-inline-scripts"])
-            .arg("--dump-frame").arg(&ppm)
-            .arg("--event-log").arg(&log)
+            .arg("--html-file")
+            .arg(&html)
+            .args([
+                "--width",
+                &w,
+                "--height",
+                &h,
+                "--timeout-ms",
+                "20000",
+                "--run-inline-scripts",
+            ])
+            .arg("--dump-frame")
+            .arg(&ppm)
+            .arg("--event-log")
+            .arg(&log)
             .arg("--event-log-console-text")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -71,16 +89,24 @@ fn capture_engine(binary: &Path, work: &Path, id: &str) -> bool {
 fn engine_capture(work: &Path, id: &str) -> Capture {
     let dir = work.join("rustkit");
     Capture {
-        read: fs::read_to_string(dir.join(format!("{id}.jsonl"))).ok().and_then(|l| read_from_event_log(&l)),
-        frame: fs::read(dir.join(format!("{id}.ppm"))).ok().and_then(|b| read_ppm(&b)),
+        read: fs::read_to_string(dir.join(format!("{id}.jsonl")))
+            .ok()
+            .and_then(|l| read_from_event_log(&l)),
+        frame: fs::read(dir.join(format!("{id}.ppm")))
+            .ok()
+            .and_then(|b| read_ppm(&b)),
     }
 }
 
 fn chrome_capture(work: &Path, id: &str) -> Capture {
     let dir = work.join("chrome");
     Capture {
-        read: fs::read_to_string(dir.join(format!("{id}.txt"))).ok().and_then(|l| parse_read(l.trim())),
-        frame: fs::read(dir.join(format!("{id}.png"))).ok().and_then(|b| read_png(&b)),
+        read: fs::read_to_string(dir.join(format!("{id}.txt")))
+            .ok()
+            .and_then(|l| parse_read(l.trim())),
+        frame: fs::read(dir.join(format!("{id}.png")))
+            .ok()
+            .and_then(|b| read_png(&b)),
     }
 }
 
@@ -89,7 +115,9 @@ fn corpus_text(root: &Path) -> String {
     for dir in ["websuite/cases", "crates/hiwave-app/src/ui"] {
         let mut stack = vec![root.join(dir)];
         while let Some(d) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&d) else { continue };
+            let Ok(entries) = fs::read_dir(&d) else {
+                continue;
+            };
             for e in entries.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -105,34 +133,56 @@ fn corpus_text(root: &Path) -> String {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../..").canonicalize().map_err(|e| e.to_string())?;
-    let target = std::env::var("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|_| root.join("target"));
-    let work = arg(&args, "--work").map(PathBuf::from).unwrap_or_else(|| target.join("css_census"));
-    let out = arg(&args, "--out").map(PathBuf::from).unwrap_or_else(|| root.join("docs/census"));
-    let only: Option<BTreeSet<String>> = arg(&args, "--only").map(|s| s.split(',').map(str::to_string).collect());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../..")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| root.join("target"));
+    let work = arg(&args, "--work")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("css_census"));
+    let out = arg(&args, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("docs/census"));
+    let only: Option<BTreeSet<String>> =
+        arg(&args, "--only").map(|s| s.split(',').map(str::to_string).collect());
 
     let binary = match arg(&args, "--parity-capture") {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!("building parity-capture");
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            sh(Command::new(cargo).current_dir(&root).args(["build", "--profile", "parity", "-p", "parity-capture"]))?;
+            sh(Command::new(cargo).current_dir(&root).args([
+                "build",
+                "--profile",
+                "parity",
+                "-p",
+                "parity-capture",
+            ]))?;
             target.join("parity/parity-capture")
         }
     };
     let oracle_dir = root.join("tools/parity_oracle");
     if !oracle_dir.join("node_modules/playwright").exists() {
         eprintln!("installing the oracle's node modules");
-        sh(Command::new("npm").current_dir(&oracle_dir).args(["ci", "--ignore-scripts"]))?;
+        sh(Command::new("npm")
+            .current_dir(&oracle_dir)
+            .args(["ci", "--ignore-scripts"]))?;
     }
 
     let spec_all = load_spec(include_str!("../properties.json"))?;
-    let spec: Vec<&PropSpec> = spec_all.iter().filter(|p| only.as_ref().is_none_or(|o| o.contains(&p.name))).collect();
+    let spec: Vec<&PropSpec> = spec_all
+        .iter()
+        .filter(|p| only.as_ref().is_none_or(|o| o.contains(&p.name)))
+        .collect();
     if spec.is_empty() {
         return Err("no properties selected".into());
     }
     let arms = check_arms(extract_arms(
-        &fs::read_to_string(root.join("crates/rustkit-engine/src/lib.rs")).map_err(|e| e.to_string())?,
+        &fs::read_to_string(root.join("crates/rustkit-engine/src/lib.rs"))
+            .map_err(|e| e.to_string())?,
     ))?;
 
     for dir in ["fixtures", "rustkit", "chrome"] {
@@ -143,11 +193,19 @@ fn run() -> Result<(), String> {
     let mut ids = Vec::new();
     for (i, p) in spec.iter().enumerate() {
         let control = stem(i, None);
-        fs::write(work.join("fixtures").join(format!("{control}.html")), fixture_html(p, None)).map_err(|e| e.to_string())?;
+        fs::write(
+            work.join("fixtures").join(format!("{control}.html")),
+            fixture_html(p, None),
+        )
+        .map_err(|e| e.to_string())?;
         ids.push(control);
         for (v, value) in p.values.iter().enumerate() {
             let id = stem(i, Some(v));
-            fs::write(work.join("fixtures").join(format!("{id}.html")), fixture_html(p, Some(value))).map_err(|e| e.to_string())?;
+            fs::write(
+                work.join("fixtures").join(format!("{id}.html")),
+                fixture_html(p, Some(value)),
+            )
+            .map_err(|e| e.to_string())?;
             ids.push(id);
         }
     }
@@ -184,7 +242,8 @@ fn run() -> Result<(), String> {
     eprintln!("engine captures done, {failed} failed");
 
     let census: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("docs/diagnostics/census-top100.json")).map_err(|e| e.to_string())?,
+        &fs::read_to_string(root.join("docs/diagnostics/census-top100.json"))
+            .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     let top = TopSites::from_census(&census);
@@ -198,7 +257,11 @@ fn run() -> Result<(), String> {
         let rust_control = engine_capture(&work, &stem(i, None));
         // A plain control only: a `base` declaration can miss on its own, and
         // that is that row's business, not the context's.
-        if let (Some(a), Some(b), true) = (&chrome_control.frame, &rust_control.frame, p.base.is_empty()) {
+        if let (Some(a), Some(b), true) = (
+            &chrome_control.frame,
+            &rust_control.frame,
+            p.base.is_empty(),
+        ) {
             let off = off_by_context.entry(p.context.clone()).or_default();
             *off = (*off).max(probe_diff(a, b));
         }
@@ -221,7 +284,12 @@ fn run() -> Result<(), String> {
                 return Err(format!("sentinel {}: the census cannot tell it from its control; instrument is blind or the engine lost it, read target frames", p.name));
             }
             let verdict = judge(&m);
-            let read = |c: &Capture| c.read.as_ref().map(|r| r.computed.clone()).unwrap_or_default();
+            let read = |c: &Capture| {
+                c.read
+                    .as_ref()
+                    .map(|r| r.computed.clone())
+                    .unwrap_or_default()
+            };
             let off = match (&m.chrome_value.frame, &m.rust_value.frame) {
                 (Some(a), Some(b)) => probe_diff(a, b),
                 _ => 0,
@@ -250,7 +318,10 @@ fn run() -> Result<(), String> {
         });
     }
     if !chrome_blanks.is_empty() {
-        return Err(format!("the oracle gave no answer on: {}", chrome_blanks.join("; ")));
+        return Err(format!(
+            "the oracle gave no answer on: {}",
+            chrome_blanks.join("; ")
+        ));
     }
     sort_rows(&mut rows);
 
@@ -258,11 +329,19 @@ fn run() -> Result<(), String> {
     let meta = Meta {
         date: date.clone(),
         // The engine under test: where this branch left develop.
-        develop_sha: sh(Command::new("git").current_dir(&root).args(["merge-base", "HEAD", "origin/develop"]))
-            .or_else(|_| sh(Command::new("git").current_dir(&root).args(["rev-parse", "HEAD"])))?
-            .chars()
-            .take(8)
-            .collect(),
+        develop_sha: sh(Command::new("git").current_dir(&root).args([
+            "merge-base",
+            "HEAD",
+            "origin/develop",
+        ]))
+        .or_else(|_| {
+            sh(Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"]))
+        })?
+        .chars()
+        .take(8)
+        .collect(),
         oracle: ORACLE.into(),
         sites_loaded: top.loaded,
         contexts_off: off_by_context.into_iter().filter(|(_, n)| *n > 0).collect(),
@@ -270,16 +349,23 @@ fn run() -> Result<(), String> {
     let tally = |c: Class| rows.iter().filter(|r| r.class == c).count();
     eprintln!(
         "effect {} computed {} parse {} unsupported {}; red {}",
-        tally(Class::Effect_), tally(Class::Computed), tally(Class::Parse), tally(Class::Unsupported),
+        tally(Class::Effect_),
+        tally(Class::Computed),
+        tally(Class::Parse),
+        tally(Class::Unsupported),
         rows.iter().filter(|r| r.red).count()
     );
     if only.is_some() {
-        println!("{}", serde_json::to_string_pretty(&render_json(&meta, &rows)).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&render_json(&meta, &rows)).unwrap()
+        );
         return Ok(());
     }
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let base = out.join(format!("CSS_PROPERTY_CENSUS_{date}"));
-    fs::write(base.with_extension("md"), render_markdown(&meta, &rows)).map_err(|e| e.to_string())?;
+    fs::write(base.with_extension("md"), render_markdown(&meta, &rows))
+        .map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&render_json(&meta, &rows)).unwrap() + "\n";
     fs::write(base.with_extension("json"), text).map_err(|e| e.to_string())?;
     println!("{}", base.with_extension("md").display());

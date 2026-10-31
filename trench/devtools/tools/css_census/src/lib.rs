@@ -224,7 +224,10 @@ pub fn fixture_html(p: &PropSpec, value: Option<&str>) -> String {
         // No `;` before a lone declaration: the engine drops the declaration
         // after a leading `;` (see the T13 receipt), and that would read as
         // every property being unsupported.
-        None if p.base.is_empty() => (format!("#p{{{decl}}}"), "document.getElementById(\"p\")".to_string()),
+        None if p.base.is_empty() => (
+            format!("#p{{{decl}}}"),
+            "document.getElementById(\"p\")".to_string(),
+        ),
         None => (
             format!("#p{{{};{decl}}}", p.base),
             "document.getElementById(\"p\")".to_string(),
@@ -261,7 +264,9 @@ pub fn parse_read(line: &str) -> Option<PageRead> {
 pub fn read_from_event_log(log: &str) -> Option<PageRead> {
     log.lines().find_map(|line| {
         let v: Value = serde_json::from_str(line).ok()?;
-        (v["type"] == "console").then(|| parse_read(v["message"].as_str()?)).flatten()
+        (v["type"] == "console")
+            .then(|| parse_read(v["message"].as_str()?))
+            .flatten()
     })
 }
 
@@ -318,7 +323,11 @@ pub fn read_png(bytes: &[u8]) -> Option<Frame> {
         .chunks_exact(channels)
         .flat_map(|px| [px[0], px[1], px[2]])
         .collect();
-    Some(Frame { width: info.width as usize, height: info.height as usize, rgb })
+    Some(Frame {
+        width: info.width as usize,
+        height: info.height as usize,
+        rgb,
+    })
 }
 
 /// Probe spacing, in CSS px: small enough that a 6 px border lands on a probe.
@@ -415,7 +424,12 @@ pub struct Verdict {
 /// both sides. An empty read proves nothing, even against an empty one.
 pub fn computed_matches(chrome: &str, engine: &str) -> bool {
     let tokens = |s: &str| -> Vec<String> {
-        s.replace(',', " , ").replace('(', " ( ").replace(')', " ) ").split_whitespace().map(str::to_string).collect()
+        s.replace(',', " , ")
+            .replace('(', " ( ")
+            .replace(')', " ) ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
     };
     let (a, b) = (tokens(chrome), tokens(engine));
     if a.is_empty() || a.len() != b.len() {
@@ -426,7 +440,9 @@ pub fn computed_matches(chrome: &str, engine: &str) -> bool {
 
 fn numeric_close(a: &str, b: &str) -> bool {
     fn split(s: &str) -> Option<(f64, &str)> {
-        let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).unwrap_or(s.len());
+        let end = s
+            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .unwrap_or(s.len());
         Some((s[..end].parse().ok()?, &s[end..]))
     }
     matches!((split(a), split(b)), (Some((x, u)), Some((y, v))) if u == v && (x - y).abs() <= 0.05)
@@ -442,9 +458,10 @@ pub fn geometry_matches(m: &Measure) -> bool {
 /// One px either way, on every element Chrome reports.
 fn rects_match(a: &PageRead, b: &PageRead) -> bool {
     a.rects.iter().all(|(id, ra)| {
-        b.rects.iter().find(|(other, _)| other == id).is_some_and(|(_, rb)| {
-            ra.iter().zip(rb).all(|(x, y)| (x - y).abs() <= 1.0)
-        })
+        b.rects
+            .iter()
+            .find(|(other, _)| other == id)
+            .is_some_and(|(_, rb)| ra.iter().zip(rb).all(|(x, y)| (x - y).abs() <= 1.0))
     })
 }
 
@@ -466,7 +483,12 @@ pub fn changed_pixels(a: &Frame, b: &Frame) -> usize {
 /// plus a tenth of the change (at least 2 probes)? And did the engine change at
 /// least half as many pixels? The last one catches what the probes forgive: a
 /// thin line the engine never drew.
-fn effect_of(value: (&PageRead, &Frame), control: (&PageRead, &Frame), engine: (&PageRead, &Frame), engine_control: &Frame) -> Effect {
+fn effect_of(
+    value: (&PageRead, &Frame),
+    control: (&PageRead, &Frame),
+    engine: (&PageRead, &Frame),
+    engine_control: &Frame,
+) -> Effect {
     let changed = changed_pixels(value.1, control.1);
     if changed < 3 && rects_match(value.0, control.0) {
         return Effect::Unexercised;
@@ -483,21 +505,49 @@ fn effect_of(value: (&PageRead, &Frame), control: (&PageRead, &Frame), engine: (
 }
 
 pub fn judge(m: &Measure) -> Verdict {
-    let engine_computed = m.rust_value.read.as_ref().map(|r| r.computed.as_str()).unwrap_or("");
-    let chrome_computed = m.chrome_value.read.as_ref().map(|r| r.computed.as_str()).unwrap_or("");
-    let chrome_control = m.chrome_control.read.as_ref().map(|r| r.computed.as_str()).unwrap_or("");
-    let computed = m.rust_value.read.is_some() && computed_matches(chrome_computed, engine_computed);
+    let engine_computed = m
+        .rust_value
+        .read
+        .as_ref()
+        .map(|r| r.computed.as_str())
+        .unwrap_or("");
+    let chrome_computed = m
+        .chrome_value
+        .read
+        .as_ref()
+        .map(|r| r.computed.as_str())
+        .unwrap_or("");
+    let chrome_control = m
+        .chrome_control
+        .read
+        .as_ref()
+        .map(|r| r.computed.as_str())
+        .unwrap_or("");
+    let computed =
+        m.rust_value.read.is_some() && computed_matches(chrome_computed, engine_computed);
 
     let engine_moved = match (&m.rust_value, &m.rust_control) {
         (
-            Capture { read: Some(rv), frame: Some(fv) },
-            Capture { read: Some(rc), frame: Some(fc) },
+            Capture {
+                read: Some(rv),
+                frame: Some(fv),
+            },
+            Capture {
+                read: Some(rc),
+                frame: Some(fc),
+            },
         ) => rv.computed != rc.computed || !rects_match(rv, rc) || probe_diff(fv, fc) > 0,
         _ => false,
     };
     let captures = (
-        m.chrome_value.read.as_ref().zip(m.chrome_value.frame.as_ref()),
-        m.chrome_control.read.as_ref().zip(m.chrome_control.frame.as_ref()),
+        m.chrome_value
+            .read
+            .as_ref()
+            .zip(m.chrome_value.frame.as_ref()),
+        m.chrome_control
+            .read
+            .as_ref()
+            .zip(m.chrome_control.frame.as_ref()),
         m.rust_value.read.as_ref().zip(m.rust_value.frame.as_ref()),
         m.rust_control.frame.as_ref(),
     );
@@ -549,7 +599,9 @@ impl Class {
 /// the value; that gap shows in the value's own columns. A value that changed
 /// nothing in Chrome has nothing to say while a sibling was measured.
 pub fn class_of(values: &[Verdict]) -> Class {
-    let measured = values.iter().any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch));
+    let measured = values
+        .iter()
+        .any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch));
     values
         .iter()
         .filter(|v| !(measured && v.effect == Effect::Unexercised))
@@ -599,10 +651,14 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
 pub fn extract_arms(src: &str) -> BTreeSet<String> {
     let mut arms = BTreeSet::new();
     for signature in ["fn apply_style_property", "fn logical_to_physical"] {
-        let Some(body) = fn_body(src, signature) else { continue };
+        let Some(body) = fn_body(src, signature) else {
+            continue;
+        };
         for line in body.lines() {
             let indent = line.len() - line.trim_start().len();
-            let Some((head, _)) = line.trim().split_once("=>") else { continue };
+            let Some((head, _)) = line.trim().split_once("=>") else {
+                continue;
+            };
             if !(8..=12).contains(&indent) || !head.trim_start().starts_with('"') {
                 continue;
             }
@@ -620,12 +676,26 @@ pub fn extract_arms(src: &str) -> BTreeSet<String> {
 /// A set without the spine, or far too small, means the reader lost the match
 /// statement. That is a refusal, never "everything is unsupported".
 pub fn check_arms(arms: BTreeSet<String>) -> Result<BTreeSet<String>, String> {
-    const REQUIRED: [&str; 7] = ["display", "width", "height", "position", "margin-top", "padding-top", "color"];
+    const REQUIRED: [&str; 7] = [
+        "display",
+        "width",
+        "height",
+        "position",
+        "margin-top",
+        "padding-top",
+        "color",
+    ];
     if let Some(missing) = REQUIRED.iter().find(|r| !arms.contains(**r)) {
-        return Err(format!("arm reader lost the match: no `{missing}` in {} arms", arms.len()));
+        return Err(format!(
+            "arm reader lost the match: no `{missing}` in {} arms",
+            arms.len()
+        ));
     }
     if arms.len() < 50 {
-        return Err(format!("arm reader lost the match: only {} arms", arms.len()));
+        return Err(format!(
+            "arm reader lost the match: only {} arms",
+            arms.len()
+        ));
     }
     Ok(arms)
 }
@@ -634,13 +704,25 @@ pub fn check_arms(arms: BTreeSet<String>) -> Result<BTreeSet<String>, String> {
 /// asked about these and no others; the rest are "not measured", not zero.
 fn census_paths(property: &str) -> &'static [&'static str] {
     match property {
-        "position" => &["/stacking/by_reason/position:relative", "/stacking/by_reason/position:absolute", "/stacking/by_reason/position:fixed", "/stacking/by_reason/position:sticky"],
-        "z-index" => &["/stacking/by_reason/positioned+z-index", "/stacking/by_reason/flex~1grid-item+z-index"],
+        "position" => &[
+            "/stacking/by_reason/position:relative",
+            "/stacking/by_reason/position:absolute",
+            "/stacking/by_reason/position:fixed",
+            "/stacking/by_reason/position:sticky",
+        ],
+        "z-index" => &[
+            "/stacking/by_reason/positioned+z-index",
+            "/stacking/by_reason/flex~1grid-item+z-index",
+        ],
         "opacity" => &["/stacking/by_reason/opacity<1"],
         "transform" => &["/stacking/by_reason/transform"],
         "clip-path" => &["/stacking/by_reason/clip-path"],
         "will-change" => &["/stacking/by_reason/will-change"],
-        "mask" | "mask-image" | "-webkit-mask-image" => &["/stacking/by_reason/mask", "/icons/mask_image_url/count", "/icons/mask_image_gradient/count"],
+        "mask" | "mask-image" | "-webkit-mask-image" => &[
+            "/stacking/by_reason/mask",
+            "/icons/mask_image_url/count",
+            "/icons/mask_image_gradient/count",
+        ],
         "filter" => &["/stacking/by_reason/filter"],
         "backdrop-filter" => &["/stacking/by_reason/backdrop-filter"],
         "mix-blend-mode" => &["/stacking/by_reason/mix-blend-mode"],
@@ -664,9 +746,17 @@ impl TopSites {
     pub fn from_census(census: &Value) -> TopSites {
         let sites: Vec<Value> = census["results"]
             .as_array()
-            .map(|all| all.iter().filter(|r| r["status"] == "OK").map(|r| r["data"].clone()).collect())
+            .map(|all| {
+                all.iter()
+                    .filter(|r| r["status"] == "OK")
+                    .map(|r| r["data"].clone())
+                    .collect()
+            })
             .unwrap_or_default();
-        TopSites { loaded: sites.len(), sites }
+        TopSites {
+            loaded: sites.len(),
+            sites,
+        }
     }
 
     /// Loaded sites using the property; `None` when the census never asked.
@@ -680,7 +770,12 @@ impl TopSites {
             Some(Value::Object(o)) => !o.is_empty(),
             _ => false,
         };
-        Some(self.sites.iter().filter(|site| paths.iter().any(|p| used(site.pointer(p)))).count())
+        Some(
+            self.sites
+                .iter()
+                .filter(|site| paths.iter().any(|p| used(site.pointer(p))))
+                .count(),
+        )
     }
 }
 
@@ -692,7 +787,8 @@ pub fn corpus_count(html: &str, property: &str) -> usize {
         .filter(|(at, _)| {
             let before = at.checked_sub(1).map(|i| bytes[i] as char);
             let after = html[at + property.len()..].trim_start();
-            after.starts_with(':') && !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            after.starts_with(':')
+                && !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         })
         .count()
 }
@@ -774,10 +870,16 @@ fn why(r: &Row) -> String {
             } else if v.engine_computed.is_empty() {
                 format!(", reads nothing (Chrome {})", code(&v.chrome_computed))
             } else {
-                format!(", reads {} (Chrome {})", code(&v.engine_computed), code(&v.chrome_computed))
+                format!(
+                    ", reads {} (Chrome {})",
+                    code(&v.engine_computed),
+                    code(&v.chrome_computed)
+                )
             };
             let miss = match v.effect {
-                Effect::Mismatch if !v.geometry_ok => format!(" (geometry, {} probes)", v.probes_off),
+                Effect::Mismatch if !v.geometry_ok => {
+                    format!(" (geometry, {} probes)", v.probes_off)
+                }
                 Effect::Mismatch => format!(" ({} probes)", v.probes_off),
                 _ => String::new(),
             };
@@ -799,7 +901,12 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     );
     md.push_str("A property is its worst value. **effect**: pixels and geometry match Chrome on a value that changed something in Chrome. **computed**: `getComputedStyle` reads Chrome's value. **parse**: the declaration reaches the cascade (an arm in `apply_style_property` or the logical map, or the page moved). **unsupported**: none of these.\n\n");
     md.push_str("| class | properties |\n|---|---:|\n");
-    for class in [Class::Effect_, Class::Computed, Class::Parse, Class::Unsupported] {
+    for class in [
+        Class::Effect_,
+        Class::Computed,
+        Class::Parse,
+        Class::Unsupported,
+    ] {
         md.push_str(&format!("| {} | {} |\n", class.label(), count(rows, class)));
     }
     let red: Vec<&Row> = rows.iter().filter(|r| r.red).collect();
@@ -823,9 +930,19 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     md.push_str(&format!("## Red list ({})\n\n", red.len()));
     md.push_str("| property | sites | corpus | class | why |\n|---|---:|---:|---|---|\n");
     for r in &red {
-        md.push_str(&format!("| {} | {} | {} | {} | {} |\n", code(&r.name), sites_cell(r), r.corpus, r.class.label(), why(r)));
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            code(&r.name),
+            sites_cell(r),
+            r.corpus,
+            r.class.label(),
+            why(r)
+        ));
     }
-    let not_read: Vec<&Row> = rows.iter().filter(|r| r.class == Class::Effect_ && r.values.iter().any(|v| !v.computed)).collect();
+    let not_read: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.class == Class::Effect_ && r.values.iter().any(|v| !v.computed))
+        .collect();
     md.push_str(&format!("\n## Paints right, reads wrong ({})\n\nScript on the page sees a different value from Chrome's, though the frame matches.\n\n", not_read.len()));
     for r in &not_read {
         md.push_str(&format!("- {}: {}\n", code(&r.name), why(r)));
