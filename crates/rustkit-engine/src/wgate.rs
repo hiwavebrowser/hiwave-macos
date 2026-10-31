@@ -26,10 +26,18 @@
 //!    (named `page`). Flag-off entries stay `Window thread hold`.
 //!    ```
 //!
-//!    `other_ms` is what no stage claims: script, timers, network
-//!    settling, the hit test. The presenter's three stages run inside
-//!    `render` and are its breakdown, so `other` is the hold less the
-//!    five relayout stages. A nested entry (a relayout inside a click)
+//!    Between the stages and `other_ms` the line names the script turns
+//!    (`script_ms`, `script_turns`, `script_longest_ms`, `script_stopped`:
+//!    those the watchdog stopped) and, on a load, what it waited for
+//!    (`parse_ms`, `style_ms`, `doc_fetch_ms`, `sheets_ms`, `fonts_ms`,
+//!    `images_ms`, `script_fetch_ms`, `script_net_ms`; [`HoldBucket`]).
+//!    One moment is charged once. A wait is wall clock, whatever else the
+//!    thread did between its polls.
+//!
+//!    `other_ms` is what none of those claims: the hit test, a live turn's
+//!    network settling. The presenter's three stages run inside `render`
+//!    and are its breakdown, so `other` is the hold less the five relayout
+//!    stages and the buckets. A nested entry (a relayout inside a click)
 //!    is counted by the outer one and reports nothing itself.
 //!
 //! 2. **Input to present.** The app notes each input event's arrival
@@ -84,10 +92,128 @@ const STAGES: usize = 8;
 /// The first five of [`HoldStage`]: the ones that add up to a hold.
 const RELAYOUT_STAGES: usize = 5;
 
+/// What else a hold spends its time on (dev-tools T12): the load's script
+/// turns and what it waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoldBucket {
+    /// A script turn: parsing, compiling and running the script or callback,
+    /// and its microtasks.
+    Script,
+    /// `Document::parse_html`.
+    Parse,
+    /// Parsing a fetched stylesheet.
+    Style,
+    /// The document's own fetch and body.
+    DocFetch,
+    /// External stylesheets (their fetches, less `Style`).
+    Sheets,
+    /// `@font-face` fetches.
+    Fonts,
+    /// Image fetches and decodes.
+    Images,
+    /// The page's scripts still arriving after the subresources were done.
+    ScriptFetch,
+    /// The script phase awaiting the network: fetch/XHR, imports and inserted
+    /// scripts, less the script turns those run.
+    ScriptNet,
+}
+
+const BUCKETS: usize = 9;
+
 /// Milliseconds a hold spent in each stage.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HoldMs {
     ms: [f64; STAGES],
+    buckets: [f64; BUCKETS],
+    script_turns: u32,
+    script_longest_ms: f64,
+    script_stopped: u32,
+}
+
+impl Default for HoldMs {
+    fn default() -> Self {
+        HOLD_MS_ZERO
+    }
+}
+
+const HOLD_MS_ZERO: HoldMs =
+    HoldMs { ms: [0.0; STAGES], buckets: [0.0; BUCKETS], script_turns: 0, script_longest_ms: 0.0, script_stopped: 0 };
+
+/// Charges the time since the last charge to the bucket in progress.
+fn charge() {
+    ACTIVE.with(|active| {
+        if let Some((bucket, since)) = active.get() {
+            let now = Instant::now();
+            HOLD_MS.with(|c| {
+                let mut hold = c.get();
+                hold.buckets[bucket as usize] += now.duration_since(since).as_secs_f64() * 1000.0;
+                c.set(hold);
+            });
+            active.set(Some((bucket, now)));
+        }
+    });
+}
+
+/// Times one [`HoldBucket`] until dropped. Buckets nest and one moment is
+/// charged once, to the innermost: it may be held across an `.await`, which
+/// is the point (a wait is a bucket), as long as what is polled in between
+/// holds no bucket of its own.
+pub(crate) struct BucketTimer {
+    around: Option<HoldBucket>,
+}
+
+pub(crate) fn bucket(bucket: HoldBucket) -> BucketTimer {
+    charge();
+    let around = ACTIVE.with(|active| active.replace(Some((bucket, Instant::now()))));
+    BucketTimer { around: around.map(|(bucket, _)| bucket) }
+}
+
+impl Drop for BucketTimer {
+    fn drop(&mut self) {
+        charge();
+        ACTIVE.with(|active| active.set(self.around.map(|bucket| (bucket, Instant::now()))));
+    }
+}
+
+/// One script turn until dropped. A turn inside a turn (a nested
+/// `with_script_js`, a timer run from a script) is part of the outer one.
+pub(crate) struct ScriptTurn {
+    timer: Option<BucketTimer>,
+    spent_before: f64,
+}
+
+pub(crate) fn script_turn() -> ScriptTurn {
+    let nested = ACTIVE.with(|active| matches!(active.get(), Some((HoldBucket::Script, _))));
+    if nested {
+        return ScriptTurn { timer: None, spent_before: 0.0 };
+    }
+    let timer = bucket(HoldBucket::Script);
+    let spent_before = HOLD_MS.with(|c| c.get().buckets[HoldBucket::Script as usize]);
+    ScriptTurn { timer: Some(timer), spent_before }
+}
+
+impl Drop for ScriptTurn {
+    fn drop(&mut self) {
+        // Dropping the timer charges the turn, less any relayout inside it.
+        if self.timer.take().is_some() {
+            HOLD_MS.with(|c| {
+                let mut hold = c.get();
+                let spent = hold.buckets[HoldBucket::Script as usize] - self.spent_before;
+                hold.script_turns += 1;
+                hold.script_longest_ms = hold.script_longest_ms.max(spent);
+                c.set(hold);
+            });
+        }
+    }
+}
+
+/// The turn in progress was stopped by the watchdog.
+pub(crate) fn script_stopped() {
+    HOLD_MS.with(|c| {
+        let mut hold = c.get();
+        hold.script_stopped += 1;
+        c.set(hold);
+    });
 }
 
 impl HoldMs {
@@ -102,14 +228,24 @@ impl HoldMs {
         self.ms[..RELAYOUT_STAGES].iter().sum()
     }
 
-    /// What no stage claims, of a hold that took `total_ms`.
+    /// What no stage or bucket claims, of a hold that took `total_ms`.
     pub fn other_ms(&self, total_ms: f64) -> f64 {
-        (total_ms - self.staged()).max(0.0)
+        (total_ms - self.staged() - self.buckets.iter().sum::<f64>()).max(0.0)
     }
 
     #[cfg(test)]
     fn of(&self, stage: HoldStage) -> f64 {
         self.ms[stage as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_bucket(&self, bucket: HoldBucket) -> f64 {
+        self.buckets[bucket as usize]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn turns(&self) -> (u32, f64, u32) {
+        (self.script_turns, self.script_longest_ms, self.script_stopped)
     }
 }
 
@@ -117,15 +253,39 @@ impl fmt::Display for HoldMs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1} acquire_ms={:.1} execute_ms={:.1} present_ms={:.1}",
-            self.ms[0], self.ms[1], self.ms[2], self.ms[3], self.ms[4], self.ms[5], self.ms[6], self.ms[7]
+            "build_ms={:.1} layout_ms={:.1} display_list_ms={:.1} snapshot_ms={:.1} render_ms={:.1} acquire_ms={:.1} execute_ms={:.1} present_ms={:.1} \
+             script_ms={:.1} script_turns={} script_longest_ms={:.1} script_stopped={} parse_ms={:.1} style_ms={:.1} doc_fetch_ms={:.1} \
+             sheets_ms={:.1} fonts_ms={:.1} images_ms={:.1} script_fetch_ms={:.1} script_net_ms={:.1}",
+            self.ms[0],
+            self.ms[1],
+            self.ms[2],
+            self.ms[3],
+            self.ms[4],
+            self.ms[5],
+            self.ms[6],
+            self.ms[7],
+            self.buckets[HoldBucket::Script as usize],
+            self.script_turns,
+            self.script_longest_ms,
+            self.script_stopped,
+            self.buckets[HoldBucket::Parse as usize],
+            self.buckets[HoldBucket::Style as usize],
+            self.buckets[HoldBucket::DocFetch as usize],
+            self.buckets[HoldBucket::Sheets as usize],
+            self.buckets[HoldBucket::Fonts as usize],
+            self.buckets[HoldBucket::Images as usize],
+            self.buckets[HoldBucket::ScriptFetch as usize],
+            self.buckets[HoldBucket::ScriptNet as usize],
         )
     }
 }
 
 thread_local! {
     /// The stage milliseconds of the hold in progress on this thread.
-    static HOLD_MS: Cell<HoldMs> = const { Cell::new(HoldMs { ms: [0.0; STAGES] }) };
+    static HOLD_MS: Cell<HoldMs> = const { Cell::new(HOLD_MS_ZERO) };
+    /// The bucket being timed on this thread, and since when its time was
+    /// last charged.
+    static ACTIVE: Cell<Option<(HoldBucket, Instant)>> = const { Cell::new(None) };
     /// How many [`WindowHold`] guards are open; only the outermost
     /// reports.
     static HOLD_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -135,6 +295,16 @@ thread_local! {
     /// The last outermost entry that closed, reported or not, for tests.
     #[cfg(test)]
     static LAST_ENTRY: Cell<Option<&'static str>> = const { Cell::new(None) };
+    /// The stages of the last outermost entry that closed, for tests.
+    #[cfg(test)]
+    static LAST_STAGES: Cell<HoldMs> = const { Cell::new(HOLD_MS_ZERO) };
+}
+
+/// The stages of the last outermost entry that closed on this thread, for
+/// tests.
+#[cfg(test)]
+pub(crate) fn last_stages() -> HoldMs {
+    LAST_STAGES.with(|c| c.get())
 }
 
 /// The last hold the outermost guard reported on this thread (entry,
@@ -161,9 +331,17 @@ pub(crate) fn clear_last() {
 /// Adds `ms` of `stage` to the hold in progress (called by the relayout
 /// stage timers and the presenter's).
 pub(crate) fn add(stage: HoldStage, ms: f64) {
+    charge();
+    let around = ACTIVE.with(|active| active.get()).map(|(bucket, _)| bucket);
     HOLD_MS.with(|c| {
         let mut hold = c.get();
         hold.add(stage, ms);
+        // A relayout stage ran inside the bucket in progress (a forced layout
+        // in a script turn). The presenter's are already inside `render`.
+        if let (Some(bucket), true) = (around, (stage as usize) < RELAYOUT_STAGES) {
+            let charged = &mut hold.buckets[bucket as usize];
+            *charged = (*charged - ms).max(0.0);
+        }
         c.set(hold);
     });
 }
@@ -205,6 +383,7 @@ pub(crate) fn hold(entry: &'static str) -> WindowHold {
         depth == 0
     });
     if outermost {
+        charge();
         HOLD_MS.with(|c| c.set(HoldMs::default()));
     }
     WindowHold {
@@ -221,9 +400,12 @@ impl Drop for WindowHold {
             return;
         }
         let total_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        charge();
         let stages = HOLD_MS.with(|c| c.replace(HoldMs::default()));
         #[cfg(test)]
         LAST_ENTRY.with(|c| c.set(Some(self.entry)));
+        #[cfg(test)]
+        LAST_STAGES.with(|c| c.set(stages));
         if let Some(line) = hold_line(hold_thread_name(), self.entry, total_ms, &stages) {
             #[cfg(test)]
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
@@ -346,7 +528,7 @@ mod tests {
         // they are not counted again: `other` is 612 - 300 - 40.
         assert_eq!(
             line,
-            "Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=300.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=40.0 acquire_ms=32.0 execute_ms=0.0 present_ms=0.0 other_ms=272.0"
+            "Window thread hold entry=live_turn ms=612 build_ms=0.0 layout_ms=300.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=40.0 acquire_ms=32.0 execute_ms=0.0 present_ms=0.0 script_ms=0.0 script_turns=0 script_longest_ms=0.0 script_stopped=0 parse_ms=0.0 style_ms=0.0 doc_fetch_ms=0.0 sheets_ms=0.0 fonts_ms=0.0 images_ms=0.0 script_fetch_ms=0.0 script_net_ms=0.0 other_ms=272.0"
         );
         // Without the layout: a 100 ms hold with a 40 ms render whose
         // acquire took 32 has 60 ms of `other`, not 28.
@@ -362,6 +544,121 @@ mod tests {
         assert_eq!(turn.other_ms(100.0), 40.0);
         // Nothing can push `other` below zero.
         assert_eq!(turn.other_ms(50.0), 0.0);
+    }
+
+    /// T12: `other_ms` was 88% of a 36.8 s microsoft load hold, because no
+    /// stage named script or the network. They are named; `other_ms` is what
+    /// is left, and it stays the line's last field.
+    #[test]
+    fn a_hold_names_its_buckets_and_other_is_what_is_left() {
+        let mut stages = HoldMs::default();
+        stages.add(HoldStage::Layout, 100.0);
+        stages.buckets[HoldBucket::Script as usize] = 200.0;
+        stages.script_turns = 3;
+        stages.script_longest_ms = 150.0;
+        stages.script_stopped = 1;
+        stages.buckets[HoldBucket::Parse as usize] = 10.0;
+        stages.buckets[HoldBucket::Style as usize] = 20.0;
+        stages.buckets[HoldBucket::DocFetch as usize] = 30.0;
+        stages.buckets[HoldBucket::Sheets as usize] = 40.0;
+        stages.buckets[HoldBucket::Fonts as usize] = 50.0;
+        stages.buckets[HoldBucket::Images as usize] = 60.0;
+        stages.buckets[HoldBucket::ScriptFetch as usize] = 70.0;
+        stages.buckets[HoldBucket::ScriptNet as usize] = 80.0;
+        let line = hold_line("Content", "load", 700.0, &stages).expect("reported");
+        assert_eq!(
+            line,
+            "Content thread hold entry=load ms=700 build_ms=0.0 layout_ms=100.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 acquire_ms=0.0 execute_ms=0.0 present_ms=0.0 script_ms=200.0 script_turns=3 script_longest_ms=150.0 script_stopped=1 parse_ms=10.0 style_ms=20.0 doc_fetch_ms=30.0 sheets_ms=40.0 fonts_ms=50.0 images_ms=60.0 script_fetch_ms=70.0 script_net_ms=80.0 other_ms=40.0"
+        );
+    }
+
+    fn sleep(ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    fn ms_since(started: Instant) -> f64 {
+        started.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// One moment is charged once: a nested bucket takes the time from the one
+    /// around it, which gets it back when the nested one ends. A sleep can
+    /// overrun on a loaded machine, so the upper bound is the wall clock.
+    #[test]
+    fn a_nested_bucket_takes_its_time_from_the_one_around_it() {
+        let started = Instant::now();
+        {
+            let _hold = hold("load");
+            let _outer = bucket(HoldBucket::Sheets);
+            sleep(20);
+            {
+                let _inner = bucket(HoldBucket::Style);
+                sleep(40);
+            }
+            sleep(20);
+        }
+        let wall = ms_since(started);
+        let stages = last_stages();
+        let (sheets, style) = (stages.in_bucket(HoldBucket::Sheets), stages.in_bucket(HoldBucket::Style));
+        assert!(sheets >= 39.0, "{stages}");
+        assert!(style >= 39.0, "{stages}");
+        assert!(sheets + style <= wall, "{wall}: {stages}");
+    }
+
+    /// A relayout inside a script turn (a forced layout) is `layout_ms`, not
+    /// script as well.
+    #[test]
+    fn a_relayout_stage_inside_a_bucket_is_not_counted_twice() {
+        let started = Instant::now();
+        {
+            let _hold = hold("load");
+            let _script = bucket(HoldBucket::Script);
+            let timed = Instant::now();
+            sleep(50);
+            add(HoldStage::Layout, ms_since(timed));
+            sleep(20);
+        }
+        let wall = ms_since(started);
+        let stages = last_stages();
+        assert!(stages.of(HoldStage::Layout) >= 50.0, "{stages}");
+        let script = stages.in_bucket(HoldBucket::Script);
+        assert!(script >= 19.0, "{stages}");
+        assert!(script + stages.of(HoldStage::Layout) <= wall, "{wall}: {stages}");
+        // The presenter's stages are a breakdown of `render`, which is what
+        // comes off. They take nothing away themselves.
+        {
+            let _hold = hold("load");
+            let _script = bucket(HoldBucket::Script);
+            sleep(30);
+            add(HoldStage::Acquire, 25.0);
+        }
+        let stages = last_stages();
+        assert!(stages.in_bucket(HoldBucket::Script) >= 29.0, "{stages}");
+    }
+
+    /// A turn is counted once however deep, by what it spent itself.
+    #[test]
+    fn script_turns_are_counted_with_the_longest_and_the_stopped() {
+        {
+            let _hold = hold("load");
+            {
+                let _turn = script_turn();
+                sleep(10);
+                let _nested = script_turn();
+                sleep(10);
+            }
+            {
+                let _turn = script_turn();
+                sleep(40);
+                script_stopped();
+            }
+        }
+        let stages = last_stages();
+        let (turns, longest, stopped) = stages.turns();
+        assert_eq!((turns, stopped), (2, 1), "{stages}");
+        let script = stages.in_bucket(HoldBucket::Script);
+        assert!(longest >= 39.0, "{stages}");
+        assert!(script >= 59.0, "{stages}");
+        assert!(longest <= script - 19.0, "the longest turn, not the sum: {stages}");
     }
 
     #[test]

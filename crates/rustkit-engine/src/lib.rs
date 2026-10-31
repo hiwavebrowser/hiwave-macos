@@ -1718,6 +1718,7 @@ fn script_js_stopped_ms() -> u64 {
 /// just runs. The watchdog, when interruption is on, is armed for this
 /// call and disarmed before it returns, including when `body` panics.
 fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bool) {
+    let _turn = wgate::script_turn();
     let (active, nested) = SCRIPT_JS.with(|js| (js.limit_us.get() > 0, js.depth.get() > 0));
     if !active || nested {
         return (body(), false);
@@ -1757,6 +1758,9 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
     let result = body();
     let stopped = armed.finish();
     let elapsed_us = started.elapsed().as_micros() as u64;
+    if stopped {
+        wgate::script_stopped();
+    }
     SCRIPT_JS.with(|js| {
         if stopped {
             js.stopped.set(true);
@@ -5671,6 +5675,7 @@ impl Engine {
                 inserted.abandon();
                 return true;
             }
+            let driving = wgate::bucket(wgate::HoldBucket::ScriptNet);
             let driven = nav_cancel::unless_cancelled(
                 watch,
                 script_net::drive_inserted_scripts(
@@ -5684,6 +5689,7 @@ impl Engine {
                 ),
             )
             .await;
+            drop(driving);
             let Some(found) = driven else {
                 inserted.abandon();
                 return true;
@@ -6056,6 +6062,7 @@ impl Engine {
                         Ok(Ok(handle)) => {
                             if let (Some(policy), Some(document)) = (&policy, &document_url) {
                                 let mut count = modules_fetched.get();
+                                let importing = wgate::bucket(wgate::HoldBucket::ScriptNet);
                                 let found = nav_cancel::unless_cancelled(
                                     watch,
                                     script_net::pump_modules(
@@ -6069,6 +6076,7 @@ impl Engine {
                                     ),
                                 )
                                 .await;
+                                drop(importing);
                                 let Some(found) = found else {
                                     // Cancelled while its imports were fetched:
                                     // the graph never runs.
@@ -6229,6 +6237,7 @@ impl Engine {
                         // prepared while the document is still loading are
                         // settled after DOMContentLoaded and before window
                         // load.
+                        let _settling = wgate::bucket(wgate::HoldBucket::ScriptNet);
                         let found = nav_cancel::unless_cancelled(
                             watch,
                             script_net::pump_all(
@@ -6761,6 +6770,7 @@ impl Engine {
             .inspector
             .begin_request(&url, "GET", ResourceType::Document, Some("navigation"))
             .map(|g| g.dropped_as(FailureStage::Cancelled, "navigation superseded"));
+        let doc_fetch = wgate::bucket(wgate::HoldBucket::DocFetch);
         let Some(fetched) = watch.unless_cancelled(self.loader.fetch(request)).await else {
             debug!(?id, %url, "Navigation cancelled during the document fetch");
             return Ok(());
@@ -6905,13 +6915,16 @@ impl Engine {
             (None, None) => String::new(),
         };
 
+        drop(doc_fetch);
         // Body fully read — still current?
         if self.nav_superseded(id, generation) {
             debug!(?id, %url, "Navigation abandoned after body read");
             return Ok(());
         }
+        let parsing = wgate::bucket(wgate::HoldBucket::Parse);
         let document =
             Document::parse_html(&html).map_err(|e| EngineError::RenderError(e.to_string()))?;
+        drop(parsing);
         let document = Rc::new(document);
         load_phase("parse");
         // A cancel that arrived during the parse: the parsed document never
@@ -7100,6 +7113,9 @@ impl Engine {
             }
         };
         // A cancel drops every fetch still out, the page's scripts too.
+        // The subresources' buckets take the time while they run; what is
+        // left is the page's scripts still arriving after them.
+        let script_fetching = wgate::bucket(wgate::HoldBucket::ScriptFetch);
         let Some(((subresources, _subresources_done), scripts)) = watch
             .unless_cancelled(Box::pin(async { futures::join!(subresources, scripts) }))
             .await
@@ -7107,6 +7123,7 @@ impl Engine {
             debug!(?id, %url, "Navigation cancelled during its subresources");
             return Ok(());
         };
+        drop(script_fetching);
         drop(style_memo);
         // This will trigger additional relayouts as resources arrive
         if let Err(e) = subresources {
@@ -7216,13 +7233,13 @@ impl Engine {
             }
             let added = match leaving || post_load_live {
                 true => Ok(0),
-                false => match watch
-                    .unless_cancelled(self.load_images_added_by_scripts(id))
-                    .await
-                {
-                    Some(added) => added,
-                    None => return Ok(()),
-                },
+                false => {
+                    let _images = wgate::bucket(wgate::HoldBucket::Images);
+                    match watch.unless_cancelled(self.load_images_added_by_scripts(id)).await {
+                        Some(added) => added,
+                        None => return Ok(()),
+                    }
+                }
             };
             match added {
                 Ok(0) => {}
@@ -14952,7 +14969,10 @@ impl Engine {
                                     }
                                 }
                                 match text {
-                                    Ok(css_text) => match Stylesheet::parse(&absolutize_css_urls(&css_text, &url)) {
+                                    Ok(css_text) => match {
+                                        let _style = wgate::bucket(wgate::HoldBucket::Style);
+                                        Stylesheet::parse(&absolutize_css_urls(&css_text, &url))
+                                    } {
                                         Ok(stylesheet) => {
                                             debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
                                             Some(stylesheet)
@@ -15378,11 +15398,13 @@ impl Engine {
         // Found by Athena on hiwave-windows (her #54 -> #59) and reported
         // across the fleet; this tree is the one she ported the shape FROM,
         // so it had the defect first.
+        let sheets = wgate::bucket(wgate::HoldBucket::Sheets);
         let Some(external_stylesheets) =
             nav_cancel::unless_cancelled(watch, self.load_external_stylesheets(id)).await
         else {
             return Ok(());
         };
+        drop(sheets);
         let external_stylesheets = external_stylesheets?;
         let count = external_stylesheets.len();
 
@@ -15412,12 +15434,14 @@ impl Engine {
 
         // Web fonts: faces declared in the external sheets that just arrived
         // (plus any inline data: faces not yet loaded), then the network ones.
+        let fonts = wgate::bucket(wgate::HoldBucket::Fonts);
         let local_fonts = self.load_local_web_fonts(id);
         let Some(remote_fonts) =
             nav_cancel::unless_cancelled(watch, self.load_remote_web_fonts(id)).await
         else {
             return Ok(());
         };
+        drop(fonts);
         let fonts_loaded = local_fonts + remote_fonts;
         if fonts_loaded > 0 {
             info!(count = fonts_loaded, "Loaded web fonts");
@@ -15451,10 +15475,12 @@ impl Engine {
         if nav_cancel::cancelled(watch) {
             return Ok(());
         }
+        let images = wgate::bucket(wgate::HoldBucket::Images);
         let Some(image_count) = nav_cancel::unless_cancelled(watch, self.load_images(id)).await
         else {
             return Ok(());
         };
+        drop(images);
         let image_count = image_count?;
         if image_count > 0 && !nav_cancel::cancelled(watch) {
             info!(count = image_count, "Loaded images");
@@ -18610,7 +18636,9 @@ impl Engine {
 
         // A script that threw may still have written to the DOM before it
         // did, so the flush runs either way.
+        let turn = wgate::script_turn();
         let result = bindings.evaluate(script);
+        drop(turn);
         self.flush_script_dom_writes(id, None)?;
         let result = result.map_err(|e| EngineError::JsError(e.to_string()))?;
 
