@@ -338,3 +338,29 @@ fn an_opacity_group_moves_with_the_scroll() {
     assert!((120..=136).contains(&faded[1]), "half red: {faded:?}");
     assert_eq!(pixel(&ppm, 50, 80), WHITE, "the group ends at y 70 now");
 }
+
+/// A page's own script scrolls a box while it loads (a chat log, a carousel),
+/// and the first frame shows it.
+#[test]
+fn a_script_in_the_load_scrolls_a_box() {
+    let page = concat!(
+        "<!doctype html><style>body{margin:0}#s{overflow:auto;width:200px;height:100px}",
+        "#a{height:50px;background:#f00}#b{height:300px;background:#0f0}</style>",
+        "<body><div id=s><div id=a></div><div id=b></div></div><script>",
+        "var s = document.getElementById('s'); s.scrollTop = 70;",
+        "window.r = s.scrollTop + ' ' + document.getElementById('b').getBoundingClientRect().y;",
+        "</script></body>",
+    );
+    let server = crate::script_net_tests::serve_routes(vec![("/", "text/html", page.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    let got = engine.execute_script(view, "window.r").expect("script");
+    assert_eq!(got, "String(\"70 -20\")");
+    let ppm = frame(&mut engine, view, "load");
+    assert_eq!(pixel(&ppm, 100, 2), LIME, "the first frame is scrolled");
+}
