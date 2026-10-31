@@ -396,6 +396,8 @@ pub enum Effect {
     NotVisual,
     /// A capture failed.
     NoCapture,
+    /// Stub.
+    Unproven,
 }
 
 impl Effect {
@@ -406,6 +408,7 @@ impl Effect {
             Effect::Unexercised => "unexercised",
             Effect::NotVisual => "not-visual",
             Effect::NoCapture => "no-capture",
+            Effect::Unproven => "unproven",
         }
     }
 }
@@ -415,9 +418,6 @@ pub struct Verdict {
     pub parse: bool,
     pub computed: bool,
     pub effect: Effect,
-    /// Chrome reads the same with and without the declaration, so a matching
-    /// read could be the initial value.
-    pub computed_read_vacuous: bool,
 }
 
 /// Whitespace-normalised, numbers within 0.05: a resolved width is a float on
@@ -517,12 +517,6 @@ pub fn judge(m: &Measure) -> Verdict {
         .as_ref()
         .map(|r| r.computed.as_str())
         .unwrap_or("");
-    let chrome_control = m
-        .chrome_control
-        .read
-        .as_ref()
-        .map(|r| r.computed.as_str())
-        .unwrap_or("");
     let computed =
         m.rust_value.read.is_some() && computed_matches(chrome_computed, engine_computed);
 
@@ -562,7 +556,6 @@ pub fn judge(m: &Measure) -> Verdict {
         parse: m.arm || engine_moved,
         computed,
         effect,
-        computed_read_vacuous: chrome_computed == chrome_control,
     }
 }
 
@@ -648,7 +641,7 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
 /// way `scripts/declaration_census.py` does: a line that is a `"name" | "name"
 /// =>` arm at the match's own indentation (8 to 12 columns). A deeper match on
 /// values is not an arm. The logical map's arms count too.
-pub fn extract_arms(src: &str) -> BTreeSet<String> {
+pub fn extract_arms(src: &str, _helpers: &str) -> BTreeSet<String> {
     let mut arms = BTreeSet::new();
     for signature in ["fn apply_style_property", "fn logical_to_physical"] {
         let Some(body) = fn_body(src, signature) else {
@@ -671,6 +664,10 @@ pub fn extract_arms(src: &str) -> BTreeSet<String> {
         }
     }
     arms
+}
+
+pub fn engine_sha(_merge_base: Option<&str>, head: &str) -> String {
+    head.chars().take(8).collect()
 }
 
 /// A set without the spine, or far too small, means the reader lost the match

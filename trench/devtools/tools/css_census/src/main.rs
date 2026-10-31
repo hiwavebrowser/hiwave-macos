@@ -183,6 +183,8 @@ fn run() -> Result<(), String> {
     let arms = check_arms(extract_arms(
         &fs::read_to_string(root.join("crates/rustkit-engine/src/lib.rs"))
             .map_err(|e| e.to_string())?,
+        &fs::read_to_string(root.join("crates/rustkit-css/src/mask.rs"))
+            .map_err(|e| e.to_string())?,
     ))?;
 
     for dir in ["fixtures", "rustkit", "chrome"] {

@@ -67,7 +67,7 @@ fn measured(chrome: &str, rust: &str) -> Measure {
 // ---- the checked-in list ----
 
 #[test]
-fn the_checked_in_list_is_about_250_distinct_properties_on_known_contexts() {
+fn the_checked_in_list_is_distinct_properties_on_known_contexts() {
     let spec = load_spec(include_str!("../properties.json")).expect("the list parses");
     let names: BTreeSet<&str> = spec.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names.len(), spec.len(), "a property is listed twice");
@@ -339,6 +339,92 @@ fn control_noise_is_credited_but_cannot_hide_the_signal() {
     );
 }
 
+/// A control off by far more than glyph noise, on a frame big enough to show it.
+fn off_control(noise: (usize, usize, usize, usize)) -> Measure {
+    let white = frame(400, 300, [255, 255, 255]);
+    let mut m = measured("12px", "12px");
+    m.chrome_value.frame = Some(white.clone());
+    m.chrome_control.frame = Some(white.clone());
+    m.rust_value.frame = Some(white.clone());
+    m.rust_control.frame = Some(white);
+    for f in [&mut m.rust_control, &mut m.rust_value] {
+        paint(
+            f.frame.as_mut().unwrap(),
+            noise.0,
+            noise.1,
+            noise.2,
+            noise.3,
+            [0, 0, 200],
+        );
+    }
+    for f in [&mut m.chrome_value, &mut m.rust_value] {
+        paint(f.frame.as_mut().unwrap(), 8, 8, 40, 40, [200, 0, 0]);
+    }
+    m
+}
+
+#[test]
+fn a_match_only_a_badly_off_control_allows_is_unproven() {
+    // 200x100 of noise: about 1200 probes. The value agrees with Chrome only
+    // where the control does, so this frame proves nothing about the value.
+    let m = off_control((100, 100, 300, 200));
+    assert_eq!(judge(&m).effect, Effect::Unproven);
+}
+
+#[test]
+fn glyph_sized_control_noise_still_passes() {
+    // 40x40: about 90 probes, the size of the text contexts' floors.
+    let m = off_control((100, 100, 140, 140));
+    assert_eq!(judge(&m).effect, Effect::Match);
+}
+
+#[test]
+fn off_past_the_whole_floor_is_a_mismatch_not_unproven() {
+    let mut m = off_control((100, 100, 300, 200));
+    // A second region only the value frame is off on, and bigger than the
+    // floor plus the allowance.
+    paint(
+        m.rust_value.frame.as_mut().unwrap(),
+        0,
+        204,
+        400,
+        300,
+        [0, 200, 0],
+    );
+    assert_eq!(judge(&m).effect, Effect::Mismatch);
+}
+
+#[test]
+fn an_unproven_value_is_measured_red_and_said_so() {
+    use Class::*;
+    let unproven = verdict(true, true, Effect::Unproven);
+    assert_eq!(class_of(std::slice::from_ref(&unproven)), Computed);
+    assert!(is_red(Computed, std::slice::from_ref(&unproven)));
+    assert_eq!(class_of(&[verdict(true, false, Effect::Unproven)]), Parse);
+    // Measured: an unexercised sibling has nothing to add.
+    assert_eq!(
+        class_of(&[
+            verdict(true, true, Effect::Match),
+            verdict(true, true, Effect::Unproven),
+            verdict(false, false, Effect::Unexercised),
+        ]),
+        Computed
+    );
+    let mut r = row("background-size", None, 0, Computed, true);
+    r.values[0].effect = Effect::Unproven;
+    r.values[0].computed = true;
+    r.values[0].probes_off = 915;
+    let md = render_markdown(&meta(), &[r]);
+    assert!(md.contains("unproven (control-limited, 915 probes)"), "{md}");
+}
+
+#[test]
+fn the_engine_sha_never_passes_head_off_as_develop() {
+    assert_eq!(engine_sha(Some("1234567890ab"), "ffffffffffff"), "12345678");
+    let head = engine_sha(None, "ffffffffffff");
+    assert!(head.contains("ffffffff") && head.contains("no origin/develop"), "{head}");
+}
+
 #[test]
 fn a_thin_line_chrome_paints_is_seen_though_a_probe_forgives_it() {
     // An underline: two rows, inside the probe's 3x3 forgiveness.
@@ -454,7 +540,6 @@ fn verdict(parse: bool, computed: bool, effect: Effect) -> Verdict {
         parse,
         computed,
         effect,
-        computed_read_vacuous: false,
     }
 }
 
@@ -563,7 +648,7 @@ impl X {
 
 #[test]
 fn arms_come_from_the_match_and_the_logical_map_only() {
-    let arms = extract_arms(ENGINE);
+    let arms = extract_arms(ENGINE, "");
     for name in [
         "display",
         "width",
@@ -584,14 +669,91 @@ fn arms_come_from_the_match_and_the_logical_map_only() {
 #[test]
 fn the_real_engine_yields_a_believable_arm_set() {
     let src = include_str!("../../../../../crates/rustkit-engine/src/lib.rs");
-    let arms = check_arms(extract_arms(src)).expect("a believable set");
+    let mask = include_str!("../../../../../crates/rustkit-css/src/mask.rs");
+    let arms = check_arms(extract_arms(src, mask)).expect("a believable set");
     assert!(arms.contains("margin-inline-start"));
+    // The guard arm, through the helper it calls.
+    for name in ["mask", "mask-image", "mask-composite", "-webkit-mask-image"] {
+        assert!(arms.contains(name), "{name}");
+    }
+    // A head that wraps onto a second line.
+    for name in ["border-top-style", "border-left-style"] {
+        assert!(arms.contains(name), "{name}");
+    }
 }
 
 #[test]
 fn an_implausible_arm_set_is_a_refusal_not_a_clean_board() {
     assert!(check_arms(BTreeSet::new()).is_err());
     assert!(check_arms(["color".to_string()].into_iter().collect()).is_err());
+}
+
+const GUARDED: &str = r#"
+impl X {
+    fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
+        match property {
+            "border-top-style" | "border-right-style"
+            | "border-left-style" => {
+                call(
+                    "not-an-arm",
+                    other,
+                );
+            }
+            "gap" if value.is_empty() => {}
+            _ if helpers::canonical_thing(property).is_some() => {}
+            _ if value.is_empty() => {}
+            _ => {}
+        }
+    }
+}
+"#;
+
+const HELPERS: &str = r#"
+pub fn canonical_thing(name: &str) -> Option<&'static str> {
+    let name = name.strip_prefix("-webkit-").unwrap_or(name);
+    Some(match name {
+        "thing" => "thing",
+        "thing-size" => "thing-size",
+        _ => return None,
+    })
+}
+"#;
+
+#[test]
+fn a_head_on_two_lines_is_read_whole() {
+    let arms = extract_arms(GUARDED, HELPERS);
+    for name in ["border-top-style", "border-right-style", "border-left-style"] {
+        assert!(arms.contains(name), "{name} in {arms:?}");
+    }
+    assert!(
+        !arms.contains("not-an-arm"),
+        "a string argument at arm depth is not a head: {arms:?}"
+    );
+}
+
+#[test]
+fn a_guard_arm_is_read_through_the_function_it_calls() {
+    let arms = extract_arms(GUARDED, HELPERS);
+    for name in ["thing", "thing-size", "-webkit-thing", "-webkit-thing-size"] {
+        assert!(arms.contains(name), "{name} in {arms:?}");
+    }
+    assert!(!arms.contains("-webkit-"), "{arms:?}");
+}
+
+#[test]
+fn a_named_arm_with_a_guard_counts() {
+    assert!(extract_arms(GUARDED, HELPERS).contains("gap"));
+}
+
+#[test]
+fn losing_the_guard_arm_is_a_refusal() {
+    let mut arms = check_arms(extract_arms(
+        include_str!("../../../../../crates/rustkit-engine/src/lib.rs"),
+        include_str!("../../../../../crates/rustkit-css/src/mask.rs"),
+    ))
+    .expect("a believable set");
+    arms.remove("mask-image");
+    assert!(check_arms(arms).is_err());
 }
 
 // ---- the order ----
