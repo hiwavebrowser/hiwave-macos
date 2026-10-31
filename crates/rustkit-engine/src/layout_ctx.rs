@@ -203,18 +203,31 @@ pub(crate) struct ViewLayout {
     /// viewport then takes html's, and a body with its own is a scroller
     /// that clips what it holds (see `scrollable_bottom`).
     pub(crate) html_clips: Cell<bool>,
-    /// Computed style lines (`computed_style_lines`) of this view's
-    /// elements that have no layout box: `display: contents` (hoisted out
-    /// of the tree) and the root, which is styled but not walked. Keyed by
-    /// raw NodeId, so per view like `edit_states`: ids restart in every
-    /// document, and a second view's build must not replace them (R1 M1
-    /// on #786). A full build replaces the map; a restyle keeps the
-    /// entries it does not walk.
-    pub(crate) boxless_styles: RefCell<HashMap<usize, String>>,
+    /// The computed styles of this view's elements that have no layout
+    /// box: `display: contents` (hoisted out of the tree), `display: none`,
+    /// an empty block or inline the box tree dropped, and the root, which
+    /// is styled but not walked. Serialised (`computed_style_lines`) on
+    /// the first script read, not at build time. Keyed by raw NodeId, so
+    /// per view like `edit_states`: ids restart in every document, and a
+    /// second view's build must not replace them (R1 M1 on #786). A full
+    /// build replaces the map; a restyle keeps the entries it does not
+    /// walk.
+    pub(crate) boxless_styles: RefCell<HashMap<usize, BoxlessStyle>>,
     /// The cascaded `::before`/`::after` styles of this view's elements, by
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+}
+
+/// What `getComputedStyle` reads for an element with no layout box
+/// (`ViewLayout::boxless_styles`).
+pub(crate) struct BoxlessStyle {
+    /// A box holding the element's computed style and no geometry; its
+    /// `node_id` is the element's.
+    pub(crate) box_: crate::LayoutBox,
+    /// Whether the element's custom-property set is its own rather than
+    /// its parent's (`Arc`), so the read publishes the set with it.
+    pub(crate) own_vars: bool,
 }
 
 #[cfg(test)]
