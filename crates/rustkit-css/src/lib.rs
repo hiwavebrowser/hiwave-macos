@@ -2888,6 +2888,12 @@ pub struct ComputedStyle {
     /// `none`. Paint reads the colour-matrix functions from it
     /// (`rustkit_layout::filter_color_matrix`). Not inherited.
     pub filter: String,
+    /// `will-change` names a property that makes a containing block for
+    /// fixed boxes. Only that is kept: nothing else reads it. Not inherited.
+    pub will_change_holds_fixed: bool,
+    /// `contain` has `paint` or `layout`, alone or through `strict` or
+    /// `content`: a containing block for fixed boxes. Not inherited.
+    pub contain_holds_fixed: bool,
 
     // Image/replaced element
     pub image_url: Option<String>,

@@ -13286,6 +13286,16 @@ impl layout_ctx::LayoutCtx {
                 let value = value.trim().to_ascii_lowercase();
                 style.filter = if value == "none" { String::new() } else { value };
             }
+            "will-change" => {
+                if let Some(holds) = will_change_holds_fixed(value) {
+                    style.will_change_holds_fixed = holds;
+                }
+            }
+            "contain" => {
+                if let Some(holds) = contain_holds_fixed(value) {
+                    style.contain_holds_fixed = holds;
+                }
+            }
             "object-fit" => {
                 // Layout and paint already honour every keyword; only this
                 // arm was missing, so every `object-fit: cover` painted as
@@ -14012,6 +14022,8 @@ impl layout_ctx::LayoutCtx {
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
             "filter" | "-webkit-filter" => style.filter.clear(),
+            "will-change" => style.will_change_holds_fixed = false,
+            "contain" => style.contain_holds_fixed = false,
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
                 style.object_position = (0.5, 0.5);
@@ -21249,6 +21261,57 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
 /// `translate: none | <length-percentage> [<length-percentage> <length>?]?`.
 /// `Some(None)` is `none`; `None` is invalid. The painter is 2D: with no
 /// perspective a z moves nothing on the page's plane.
+/// Whether a `will-change` value names a property that holds a fixed box.
+/// `None` is an invalid value, which leaves the earlier declaration in place.
+fn will_change_holds_fixed(value: &str) -> Option<bool> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "auto" {
+        return Some(false);
+    }
+    let mut holds = false;
+    for name in value.split(',').map(str::trim) {
+        if name.is_empty() || name.contains(char::is_whitespace) || name == "auto" {
+            return None;
+        }
+        holds |= matches!(
+            name,
+            "transform"
+                | "-webkit-transform"
+                | "translate"
+                | "scale"
+                | "rotate"
+                | "perspective"
+                | "filter"
+                | "backdrop-filter"
+                | "contain"
+                | "transform-style"
+        );
+    }
+    Some(holds)
+}
+
+/// Whether a `contain` value holds a fixed box. `None` is an invalid value:
+/// a keyword it does not know, or one given twice.
+fn contain_holds_fixed(value: &str) -> Option<bool> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "none" {
+        return Some(false);
+    }
+    if matches!(value.as_str(), "strict" | "content") {
+        return Some(true);
+    }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    for (i, word) in words.iter().enumerate() {
+        if !matches!(*word, "size" | "inline-size" | "layout" | "style" | "paint") || words[..i].contains(word) {
+            return None;
+        }
+    }
+    if words.is_empty() || (words.contains(&"size") && words.contains(&"inline-size")) {
+        return None;
+    }
+    Some(words.contains(&"paint") || words.contains(&"layout"))
+}
+
 fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") {
@@ -22403,10 +22466,11 @@ fn geometry_snapshot(
         flow: Option<usize>,
         absolute: Option<usize>,
         fixed: Option<usize>,
-        /// Under a fixed box the scroll does not move, and under a transform,
-        /// which holds a fixed box to the page. So does a filter. Chromium's
-        /// other such properties (`will-change`, `contain`, `perspective`,
-        /// `backdrop-filter`) are not parsed here.
+        /// Under a fixed box the scroll does not move, and under a containing
+        /// block for fixed boxes, which holds one to the page: a transform,
+        /// a filter, `will-change` or `contain`. Chromium's others
+        /// (`perspective`, `backdrop-filter`, `transform-style`,
+        /// `content-visibility`) are not read here.
         held: bool,
         holds_fixed: bool,
     }
@@ -22442,12 +22506,16 @@ fn geometry_snapshot(
         let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
+        let holds_fixed = transformed
+            || !b.style.filter.is_empty()
+            || b.style.will_change_holds_fixed
+            || b.style.contain_holds_fixed;
         let under = Scrollers {
             flow: inner,
-            absolute: if positioned || transformed { inner } else { scrollers.absolute },
-            fixed: if transformed { inner } else { scrollers.fixed },
+            absolute: if positioned || holds_fixed { inner } else { scrollers.absolute },
+            fixed: if holds_fixed { inner } else { scrollers.fixed },
             held,
-            holds_fixed: scrollers.holds_fixed || transformed || !b.style.filter.is_empty(),
+            holds_fixed: scrollers.holds_fixed || holds_fixed,
         };
         // What the children reach, without this box's own border: that is
         // not scrollable overflow.
