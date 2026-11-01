@@ -19,6 +19,8 @@ from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
+import wpt_coverage  # noqa: E402
+import wpt_import  # noqa: E402
 import wpt_tier1  # noqa: E402
 
 
@@ -118,6 +120,36 @@ class MissingResources(unittest.TestCase):
         page, root = self.page("<script src=gone.js></script>")
         self.assertEqual(wpt_tier1.missing_resources(page, root), ["gone.js"])
 
+    def test_src_inside_another_attributes_quotes_is_not_a_resource(self):
+        page, root = self.page("""<div title="src=gone.png"></div><p data-x='src="gone2.png"'></p>""")
+        self.assertEqual(wpt_tier1.missing_resources(page, root), [])
+
+    def test_a_close_angle_inside_quotes_does_not_end_the_tag(self):
+        page, root = self.page('<img alt="a>b" src=gone.png>')
+        self.assertEqual(wpt_tier1.missing_resources(page, root), ["gone.png"])
+
+    def test_a_close_angle_inside_quotes_does_not_end_a_link(self):
+        page, root = self.page('<link title="a>b" rel=stylesheet href=gone.css>')
+        self.assertEqual(wpt_tier1.missing_resources(page, root), ["gone.css"])
+
+    def test_page_text_is_not_a_resource(self):
+        page, root = self.page("<p>write url(gone.png) in your sheet</p>")
+        self.assertEqual(wpt_tier1.missing_resources(page, root), [])
+
+    def test_a_style_attribute_is_scanned(self):
+        page, root = self.page('<div style="background: url(gone.png)"></div>')
+        self.assertEqual(wpt_tier1.missing_resources(page, root), ["gone.png"])
+
+    def test_local_resources_lists_present_files_for_the_importer(self):
+        page, root = self.page(
+            '<link rel="stylesheet" href="support/x.css"><img src="here.png">',
+            files=["css/support/x.css", "css/here.png"],
+        )
+        (root / "css/support/x.css").write_text("a { background: url(y.png) }")
+        (root / "css/support/y.png").write_text("")
+        found = [t.relative_to(root).as_posix() for _, t in wpt_tier1.local_resources(page, root)]
+        self.assertEqual(sorted(found), ["css/here.png", "css/support/x.css", "css/support/y.png"])
+
 
 class Unquoted(unittest.TestCase):
     """The rest of the runner reads the same attributes the gate does."""
@@ -126,6 +158,12 @@ class Unquoted(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             page = pathlib.Path(td) / "t.html"
             page.write_text("<link rel=match href=t-ref.html>")
+            self.assertEqual(wpt_tier1.rel_match_hrefs(page), ["t-ref.html"])
+
+    def test_rel_match_with_a_close_angle_in_quotes(self):
+        with tempfile.TemporaryDirectory() as td:
+            page = pathlib.Path(td) / "t.html"
+            page.write_text('<link title="a>b" rel="match" href="t-ref.html"><link rel=mismatch href=no.html>')
             self.assertEqual(wpt_tier1.rel_match_hrefs(page), ["t-ref.html"])
 
     def test_root_absolute_unquoted_href_is_staged(self):
@@ -222,33 +260,102 @@ class GatePrecedence(unittest.TestCase):
         self.assertIsNone(wpt_tier1.gate("<p>x</p>", "<p>x</p>", []))
 
 
-class Unproven(unittest.TestCase):
-    MANIFEST = json.loads((REPO / "trench/wpt/MANIFEST.json").read_text())
+class Proof(unittest.TestCase):
+    """A PASS has to go red under a mutation, or it leaves the pass count."""
 
-    def test_the_eight_t14_probe_survivors_are_marked(self):
-        marked = {e["id"] for e in self.MANIFEST["entries"] if e.get("unproven")}
-        self.assertEqual(
-            marked,
-            {
-                "css-text/overflow-wrap/overflow-wrap-004",
-                "css-text/word-break/break-word-overflow-wrap-interactions",
-                "css-inline/br-font-size",
-                "css-inline/br-line-height",
-                "css-inline/empty-text-node-001",
-                "css-flexbox/align-self-015",
-                "css-flexbox/align-items-baseline-overflow-non-visible",
-                "css-text/word-break/break-boundary-2-chars-002",
-            },
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.dir = pathlib.Path(self.td.name)
+        self.page = self.dir / "t.html"
+        self.page.write_text('<style>a { color: red }</style><p style="margin:0">a b</p>')
+        self.ref = self.dir / "ref.ppm"
+
+    def prove(self, entry, diffs, capture_says=None):
+        """`diffs` is what each probe's frame differs from the reference by."""
+        frames = iter(diffs)
+        with mock.patch.object(wpt_tier1, "capture", return_value=capture_says), mock.patch.object(
+            wpt_tier1, "compare_frames", side_effect=lambda *_: (next(frames), 0.0)
+        ):
+            return wpt_tier1.prove_pass(entry, self.page, self.ref, {"width": 1, "height": 1}, self.dir)
+
+    def test_a_page_that_goes_red_without_style_is_proven(self):
+        self.assertIsNone(self.prove({}, [100]))
+
+    def test_a_page_that_matches_without_style_is_unproven(self):
+        self.assertIn("style removed", self.prove({}, [0]))
+
+    def test_a_mutation_that_changes_nothing_is_unproven(self):
+        entry = {"mutations": [{"find": "a b", "replace": "a c"}]}
+        self.assertIn("a b", self.prove(entry, [100, 0]))
+
+    def test_every_mutation_must_go_red(self):
+        entry = {"mutations": [{"find": "a b", "replace": "a c"}, {"find": "color", "replace": "margin"}]}
+        self.assertIsNone(self.prove(entry, [100, 5, 5]))
+        self.assertIn("color", self.prove(entry, [100, 5, 0]))
+
+    def test_a_mutation_that_no_longer_applies_is_unproven_and_says_so(self):
+        entry = {"mutations": [{"find": "not on the page", "replace": "x"}]}
+        self.assertIn("does not apply", self.prove(entry, [100]))
+
+    def test_a_probe_that_cannot_render_is_unproven(self):
+        self.assertIn("no frame", self.prove({}, [], capture_says="capture exit 1"))
+
+    def test_style_removed_takes_sheets_elements_and_attributes(self):
+        out = wpt_tier1.style_removed(
+            '<link rel="stylesheet" href="a.css"><link rel="match" href="r.html">'
+            "<STYLE>a { }</STYLE><p style='x'>t</p><p title=\"style=y\">u</p>"
         )
+        self.assertNotIn("a.css", out)
+        self.assertNotIn("<STYLE", out)
+        self.assertNotIn("'x'", out)
+        self.assertIn("r.html", out)
+        self.assertIn('title="style=y"', out)
 
-    def test_only_a_pass_is_unproven(self):
-        cases = [
-            {"id": "a", "status": "PASS"},
-            {"id": "b", "status": "FAIL"},
-            {"id": "c", "status": "PASS"},
-        ]
-        entries = {"a": {"unproven": "why"}, "b": {"unproven": "why"}, "c": {}}
-        self.assertEqual(wpt_tier1.unproven_passes(cases, entries), {"a": "why"})
+    def test_apply_mutation_replaces_every_occurrence(self):
+        self.assertEqual(wpt_tier1.apply_mutation("aXbX", {"find": "X", "replace": "y"}), "ayby")
+        self.assertIsNone(wpt_tier1.apply_mutation("ab", {"find": "X", "replace": "y"}))
+
+
+class Counts(unittest.TestCase):
+    CASES = [
+        {"id": "a", "status": "PASS", "area": "x"},
+        {"id": "b", "status": "UNPROVEN", "area": "x", "reason": "why"},
+        {"id": "c", "status": "FAIL", "area": "y"},
+        {"id": "d", "status": "SKIP", "area": "y"},
+        {"id": "e", "status": "ERROR", "area": "y"},
+    ]
+
+    def test_an_unproven_case_leaves_the_pass_count(self):
+        counts = wpt_tier1.count_statuses(self.CASES)
+        self.assertEqual(counts, {"PASS": 1, "FAIL": 1, "UNPROVEN": 1, "SKIP": 1, "ERROR": 1})
+
+    def test_the_rate_keeps_an_unproven_case_in_the_denominator(self):
+        self.assertEqual(wpt_tier1.pass_rate(wpt_tier1.count_statuses(self.CASES)), round(1 / 3, 4))
+
+    def test_per_area_table(self):
+        areas = wpt_tier1.per_area(self.CASES)
+        self.assertEqual(areas["x"], {"PASS": 1, "FAIL": 0, "UNPROVEN": 1, "SKIP": 0, "ERROR": 0})
+        self.assertEqual(areas["y"], {"PASS": 0, "FAIL": 1, "UNPROVEN": 0, "SKIP": 1, "ERROR": 1})
+
+    def test_unproven_passes_carries_the_reason(self):
+        self.assertEqual(wpt_tier1.unproven_passes(self.CASES), {"b": "why"})
+
+    def test_campaign_counts_score_an_unproven_case(self):
+        cases = [{"status": "UNPROVEN", "campaign_diff_pct": 0.0}]
+        self.assertEqual(wpt_tier1.campaign_counts(cases), {"within": 1, "over": 0, "not_measured": 0})
+
+
+class Staging(unittest.TestCase):
+    def test_a_shared_reference_is_staged_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            page = pathlib.Path(td) / "ref.html"
+            page.write_text("<p>one</p>")
+            first = wpt_tier1.stage_html(page)
+            first_mtime = first.stat().st_mtime_ns
+            page.write_text("<p>two</p>")
+            self.assertEqual(wpt_tier1.stage_html(page), first)
+            self.assertEqual(first.stat().st_mtime_ns, first_mtime)
 
 
 class Runnability(unittest.TestCase):
@@ -259,6 +366,18 @@ class Runnability(unittest.TestCase):
         reason = wpt_tier1.unrunnable_reason("<html class=reftest-wait>", "")
         self.assertIn("reftest-wait", reason)
         self.assertNotIn("no script host", reason)
+
+    def test_an_external_script_cannot_run_on_either_side(self):
+        self.assertIn("external script", wpt_tier1.unrunnable_reason("<script src=a.js></script>", ""))
+        self.assertIn("external script", wpt_tier1.unrunnable_reason("", '<script src="a.js"></script>'))
+
+    def test_a_capture_failure_is_the_tools_own_error_line(self):
+        self.assertEqual(
+            wpt_tier1.capture_failure('{"status":"error","error":"Inline script failed"}\n', "2026 WARN x\n"),
+            "Inline script failed",
+        )
+        self.assertEqual(wpt_tier1.capture_failure("not json\n", "last\n"), "last")
+        self.assertEqual(wpt_tier1.capture_failure("", ""), "no output")
 
     def test_capture_turns_script_on_only_for_a_page_with_a_script(self):
         with tempfile.TemporaryDirectory() as td:
@@ -289,6 +408,11 @@ class Provenance(unittest.TestCase):
     def test_a_relative_cargo_target_dir_is_from_the_repo(self):
         self.assertEqual(
             wpt_tier1.capture_bin({"CARGO_TARGET_DIR": "t2"}), REPO / "t2/parity/parity-capture"
+        )
+
+    def test_an_empty_cargo_target_dir_is_the_default(self):
+        self.assertEqual(
+            wpt_tier1.capture_bin({"CARGO_TARGET_DIR": ""}), REPO / "target/parity/parity-capture"
         )
 
     def test_capture_binary_label_survives_a_target_outside_the_repo(self):
@@ -347,6 +471,130 @@ class Manifest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("css/css-flexbox/support/flexbox.css", proc.stdout)
+
+
+EIGHT = {
+    "css-text/overflow-wrap/overflow-wrap-004",
+    "css-text/word-break/break-word-overflow-wrap-interactions",
+    "css-inline/br-font-size",
+    "css-inline/br-line-height",
+    "css-inline/empty-text-node-001",
+    "css-flexbox/align-self-015",
+    "css-flexbox/align-items-baseline-overflow-non-visible",
+    "css-text/word-break/break-boundary-2-chars-002",
+}
+
+
+class Coverage(unittest.TestCase):
+    MANIFEST = json.loads((REPO / "trench/wpt/MANIFEST.json").read_text())
+
+    def test_each_of_the_eight_has_a_second_mutation(self):
+        marked = {e["id"] for e in self.MANIFEST["entries"] if e.get("mutations")}
+        self.assertTrue(EIGHT <= marked, sorted(EIGHT - marked))
+
+    def test_no_entry_is_marked_unproven_by_hand(self):
+        self.assertEqual([e["id"] for e in self.MANIFEST["entries"] if e.get("unproven")], [])
+
+    def test_every_named_area_has_cases_and_a_row(self):
+        areas = {}
+        for e in self.MANIFEST["entries"]:
+            if e.get("area"):
+                areas.setdefault(e["area"], []).append(e)
+        self.assertEqual(sorted(areas), sorted(wpt_import.AREAS))
+        for name, entries in areas.items():
+            self.assertGreaterEqual(len(entries), 10, name)
+            self.assertEqual({e["maps_to"] for e in entries}, {wpt_import.AREAS[name]["row"]}, name)
+
+    def test_the_seed_is_kept(self):
+        self.assertEqual(sum(1 for e in self.MANIFEST["entries"] if not e.get("area")), 30)
+
+    def test_ids_are_unique(self):
+        ids = [e["id"] for e in self.MANIFEST["entries"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_mutations_apply_to_the_page_when_synced(self):
+        if not (wpt_tier1.WPT_ROOT / "css").is_dir():
+            self.skipTest("third_party/wpt not synced")
+        for e in self.MANIFEST["entries"]:
+            text = (wpt_tier1.WPT_ROOT / e["path"]).read_text(errors="replace")
+            for m in e.get("mutations", []):
+                self.assertIn(m["find"], text, e["id"])
+
+
+class OneCommand(unittest.TestCase):
+    def test_sync_then_build_then_run(self):
+        names = [c[1] for c in wpt_coverage.steps([])]
+        self.assertEqual(names, ["scripts/wpt_sync.sh", "build", "scripts/wpt_tier1.py"])
+
+    def test_a_seat_can_leave_out_sync_and_build_and_pass_the_rest_on(self):
+        planned = wpt_coverage.steps(["--no-sync", "--no-build", "--allow-stale"])
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0][1:], ["scripts/wpt_tier1.py", "--allow-stale"])
+
+
+class Importer(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.root = pathlib.Path(self.td.name)
+
+    def write(self, rel, text=""):
+        target = self.root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def reftest(self, rel, ref="t-ref.html", extra=""):
+        self.write(rel, f'<link rel="match" href="{ref}">{extra}<p>x</p>')
+        self.write(str(pathlib.Path(rel).parent / ref), "<p>x</p>")
+
+    def test_a_plain_reftest_is_usable_with_its_reference(self):
+        self.reftest("css/a/t.html")
+        self.assertEqual(wpt_import.usable_ref(self.root / "css/a/t.html", self.root), "css/a/t-ref.html")
+
+    def test_what_the_runner_cannot_score_is_not_imported(self):
+        self.reftest("css/a/w.html", extra='<html class="reftest-wait">')
+        self.reftest("css/a/f.html", extra='<meta name="fuzzy" content="1">')
+        self.reftest("css/a/m.html", extra='<link rel="mismatch" href="t-ref.html">')
+        self.reftest("css/a/two.html", extra='<link rel="match" href="t-ref.html">')
+        self.write("css/a/noref.html", "<p>x</p>")
+        self.reftest("css/a/gone.html", extra='<img src="absent.png">')
+        self.write("css/a/noreftarget.html", '<link rel="match" href="absent-ref.html">')
+        for name in ("w", "f", "m", "two", "noref", "gone", "noreftarget"):
+            self.assertIsNone(wpt_import.usable_ref(self.root / f"css/a/{name}.html", self.root), name)
+
+    def test_candidates_leave_out_references_support_and_staged_copies(self):
+        for rel in (
+            "css/a/t.html",
+            "css/a/t-ref.html",
+            "css/a/reference/r.html",
+            "css/a/support/s.html",
+            "css/a/t.__staged.html",
+            "css/a/t.tentative.html",
+            "css/a/t.xht",
+        ):
+            self.write(rel)
+        found = wpt_import.candidates(self.root, {"dir": "css/a", "include": "."})
+        self.assertEqual(found, ["css/a/t.html"])
+
+    def test_include_filters_on_the_path_inside_the_area(self):
+        self.write("css/a/sticky/one.html")
+        self.write("css/a/two.html")
+        found = wpt_import.candidates(self.root, {"dir": "css/a", "include": "^sticky/"})
+        self.assertEqual(found, ["css/a/sticky/one.html"])
+
+    def test_the_spread_is_even_and_stable(self):
+        names = [f"n{i:02}" for i in range(10)]
+        self.assertEqual(wpt_import.spread(names, 3), ["n00", "n03", "n06"])
+        self.assertEqual(wpt_import.spread(names, 20), names)
+
+    def test_support_closure_excludes_the_test_and_ref(self):
+        self.reftest("css/a/t.html", extra='<link rel="stylesheet" href="s.css">')
+        self.write("css/a/s.css", "a { background: url(i.png) }")
+        self.write("css/a/i.png")
+        self.assertEqual(
+            wpt_import.support_of(["css/a/t.html", "css/a/t-ref.html"], self.root),
+            ["css/a/i.png", "css/a/s.css"],
+        )
 
 
 if __name__ == "__main__":

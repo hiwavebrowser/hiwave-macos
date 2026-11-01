@@ -23,6 +23,8 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
   there, not FAIL. Those are SKIP, with the reason recorded. (Added 2026-08-06
   night 20: three of the seed's six fails were this.) A page with plain inline
   scripts is scored, with script on (--run-inline-scripts, #799).
+- A page with an external script is SKIP: --html-file runs inline scripts only,
+  so its frame lacks what the script does.
 - A page whose local stylesheet, image or font is not on disk is an ERROR, no
   pixels compared. The sparse sync takes only listed paths, and both sides
   rendering without the same sheet can agree for the wrong reason (T14:
@@ -31,8 +33,10 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
   15%) is reported beside it in `campaign_diff_pct`, and never decides a
   status: at 15% a page with a wrong line break still passes. Where it could
   not be measured, `campaign_not_measured` says why.
-- A PASS that still matched with its named property removed (T14's probe) is
-  listed under `unproven_passes`: it counts, but it is not yet proof of support.
+- A match has to go red when the page is broken on purpose. Every match is
+  rendered again with all its style removed, and once per `mutations` entry in
+  the manifest. If any of those still matches, the case is UNPROVEN, with the
+  reason, and is not in the pass count.
 - Root-absolute references (/fonts/ahem.css) are staged to resolve against the
   WPT root, because wptserve serves / from there and file:// does not. A
   reftest whose declared font silently fails to load is not measuring its own
@@ -51,6 +55,7 @@ sync not run, negative control did not go red).
 """
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -58,7 +63,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -71,7 +78,7 @@ WPT_ROOT = REPO_ROOT / "third_party" / "wpt"
 
 def capture_bin(env=os.environ) -> Path:
     """Where the parity build lands: cargo's target dir, relative paths from the repo."""
-    return REPO_ROOT / env.get("CARGO_TARGET_DIR", "target") / "parity" / "parity-capture"
+    return REPO_ROOT / (env.get("CARGO_TARGET_DIR") or "target") / "parity" / "parity-capture"
 
 
 def capture_label(path: Path) -> str:
@@ -91,32 +98,50 @@ ORACLE_DIR = REPO_ROOT / "tools" / "parity_oracle"
 WPT_MAX_DIFF_PCT = 0.0
 CAMPAIGN_PIXELMATCH_THRESHOLD = 0.1  # compare_baseline.mjs, wpt_pair_diff.mjs
 
-REL_MATCH_RE = re.compile(
-    r"<link\b[^>]*\brel\s*=\s*[\"']?match[\"']?[^>]*>", re.IGNORECASE
-)
+STATUSES = ("PASS", "FAIL", "UNPROVEN", "SKIP", "ERROR")
 
 
-def _attr_re(name: str):
-    """An attribute in any of HTML's three quotings, and not `data-<name>`."""
-    return re.compile(
-        rf"(?<![\w-]){name}\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s\"'>]+))", re.IGNORECASE
-    )
+class _PageTags(HTMLParser):
+    """What a page's markup says, read the way a parser reads it: a `>` or an
+    `src=` inside another attribute's quotes, a comment and script text are not tags."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tags = []
+        self.style_text = []
+        self._in_style = False
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, {k: v for k, v in attrs if v}))
+        self._in_style = tag == "style"
+
+    def handle_endtag(self, tag):
+        if tag == "style":
+            self._in_style = False
+
+    def handle_data(self, data):
+        if self._in_style:
+            self.style_text.append(data)
 
 
-def _attr_value(m):
-    return m.group(1) or m.group(2) or m.group(3)
+def page_tags(html: str) -> _PageTags:
+    parser = _PageTags()
+    parser.feed(html)
+    parser.close()
+    return parser
 
 
-HREF_RE = _attr_re("href")
+def _rel_has(attrs, token: str) -> bool:
+    return token in attrs.get("rel", "").lower().split()
+
 
 # wptserve maps / to the WPT root; file:// has no such mapping, so root-absolute
 # references (e.g. /fonts/ahem.css) resolve to the filesystem root and silently
 # load nothing. Staged copies live NEXT TO the originals so relative references
 # keep working and the fixtures on disk stay verbatim.
 STAGED_SUFFIX = ".__staged"
-LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
-REL_STYLESHEET_RE = re.compile(r"\brel\s*=\s*[\"']?[^\"'>]*\bstylesheet\b", re.IGNORECASE)
-SRC_RE = _attr_re("src")
+_STAGED = {}
+_STAGE_LOCK = threading.Lock()
 CSS_REF_RE = re.compile(
     r"@import\s+[\"']([^\"']+)[\"']|url\(\s*[\"']?([^\"')]+?)[\"']?\s*\)", re.IGNORECASE
 )
@@ -124,12 +149,13 @@ ROOT_ABS_ATTR_RE = re.compile(
     r"((?<![\w-])(?:href|src)\s*=\s*)(?:([\"'])(/(?!/)[^\"']*)\2|(/(?!/)[^\s\"'>]+))", re.IGNORECASE
 )
 ROOT_ABS_URL_RE = re.compile(r"(url\(\s*[\"']?)(/(?!/)[^\"')]*)([\"']?\s*\))", re.IGNORECASE)
-# Not resources: what comments, <meta content> and script text happen to say.
-HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-META_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
-SCRIPT_BODY_RE = re.compile(r"(<script\b[^>]*>).*?(</script\s*>)", re.IGNORECASE | re.DOTALL)
-TAG_RE = re.compile(r"<[a-z][^>]*>", re.IGNORECASE)
+STYLE_ELEMENT_RE = re.compile(r"<style\b.*?</style\s*>", re.IGNORECASE | re.DOTALL)
+SHEET_LINK_RE = re.compile(r"""<link\b(?:[^>"']|"[^"]*"|'[^']*')*>""", re.IGNORECASE)
+TAG_WITH_ATTRS_RE = re.compile(r"""<[a-z](?:[^>"']|"[^"]*"|'[^']*')*>""", re.IGNORECASE)
+STYLE_ATTR_RE = re.compile(
+    r"""(\s)style\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+)|("[^"]*"|'[^']*')""", re.IGNORECASE
+)
 
 # A test that declares a web font is tagged so a digest can group its fails.
 # Until n33 (2026-08-26) the tag read "@font-face unimplemented": FontLoader
@@ -186,15 +212,32 @@ def compare_frames(test_ppm: Path, ref_ppm: Path):
 
 def rel_match_hrefs(test_file: Path):
     """All <link rel=match> hrefs in a test file, in document order."""
-    html = test_file.read_text(errors="replace")
+    page = page_tags(test_file.read_text(errors="replace"))
     return [
-        _attr_value(m)
-        for link in REL_MATCH_RE.finditer(html)
-        if (m := HREF_RE.search(link.group(0)))
+        attrs["href"]
+        for tag, attrs in page.tags
+        if tag == "link" and _rel_has(attrs, "match") and attrs.get("href")
     ]
 
 
+def _staged_once(src: Path, make) -> Path:
+    """A reference or sheet many cases share is written once a run: cases run at
+    the same time, and rewriting it would truncate what another capture is reading."""
+    with _STAGE_LOCK:
+        if src not in _STAGED:
+            _STAGED[src] = make(src)
+        return _STAGED[src]
+
+
 def stage_css(src: Path) -> Path:
+    return _staged_once(src, _stage_css)
+
+
+def stage_html(src: Path) -> Path:
+    return _staged_once(src, _stage_html)
+
+
+def _stage_css(src: Path) -> Path:
     """Copy a CSS file beside itself with root-absolute url(...) values resolved."""
     staged = src.with_name(src.stem + STAGED_SUFFIX + src.suffix)
     css = ROOT_ABS_URL_RE.sub(
@@ -205,14 +248,14 @@ def stage_css(src: Path) -> Path:
     return staged
 
 
-def stage_html(src: Path) -> Path:
+def _stage_html(src: Path) -> Path:
     """Copy an HTML file beside itself with root-absolute references resolved
     against the WPT root — what wptserve would have served. Referenced CSS is
     staged recursively so its own url(...) values resolve too."""
     def rewrite(m):
         target = WPT_ROOT / (m.group(3) or m.group(4)).lstrip("/")
         if target.suffix.lower() == ".css" and target.is_file():
-            target = stage_css(target)
+            target = _stage_css_locked(target)
         quote = m.group(2) or '"'
         return m.group(1) + quote + str(target) + quote
 
@@ -225,6 +268,13 @@ def stage_html(src: Path) -> Path:
     return staged
 
 
+def _stage_css_locked(src: Path) -> Path:
+    """stage_css from inside stage_html, which already holds the lock."""
+    if src not in _STAGED:
+        _STAGED[src] = _stage_css(src)
+    return _STAGED[src]
+
+
 def _is_local(url: str) -> bool:
     return not (re.match(r"[a-z][a-z0-9+.-]*:", url, re.IGNORECASE) or url.startswith(("//", "#")))
 
@@ -234,48 +284,55 @@ def _local_target(url: str, base_dir: Path, wpt_root: Path) -> Path:
     return wpt_root / path.lstrip("/") if path.startswith("/") else base_dir / path
 
 
-def missing_resources(html_file: Path, wpt_root: Path):
-    """Local subresources of a page that are not on disk, in the order found.
+def local_resources(html_file: Path, wpt_root: Path):
+    """(url, path) for each local subresource of a page, on disk or not, in the order found.
 
-    Only what the page loads: <link rel=stylesheet>, src=, @import and url(),
-    following linked sheets. <link rel=help|author|match> are not resources.
+    Only what the page loads: <link rel=stylesheet>, src=, @import and url() in
+    <style> and style=, following linked sheets. <link rel=help|author|match> are
+    not resources.
     """
-    missing = []
+    found = []
+    seen_urls = set()
+    seen_sheets = set()
 
     def note(url, base_dir):
         if not _is_local(url):
             return None
         target = _local_target(url, base_dir, wpt_root)
-        if target.is_file():
-            return target
-        if url not in missing:
-            missing.append(url)
-        return None
+        if (url, target) not in seen_urls:
+            seen_urls.add((url, target))
+            found.append((url, target))
+        return target if target.is_file() else None
 
-    def scan_css(css, base_dir, seen):
+    def scan_css(css, base_dir):
         for m in CSS_REF_RE.finditer(CSS_COMMENT_RE.sub("", css)):
-            url = m.group(1) or m.group(2)
-            target = note(url, base_dir)
-            if target and target.suffix.lower() == ".css" and target not in seen:
-                seen.add(target)
-                scan_css(target.read_text(errors="replace"), target.parent, seen)
+            target = note(m.group(1) or m.group(2), base_dir)
+            if target and target.suffix.lower() == ".css" and target not in seen_sheets:
+                seen_sheets.add(target)
+                scan_css(target.read_text(errors="replace"), target.parent)
 
-    html = HTML_COMMENT_RE.sub("", html_file.read_text(errors="replace"))
-    html = SCRIPT_BODY_RE.sub(r"\1\2", META_RE.sub("", html))
-    seen = set()
-    for link in LINK_RE.finditer(html):
-        tag = link.group(0)
-        href = HREF_RE.search(tag)
-        if href and REL_STYLESHEET_RE.search(tag):
-            target = note(_attr_value(href), html_file.parent)
-            if target and target not in seen:
-                seen.add(target)
-                scan_css(target.read_text(errors="replace"), target.parent, seen)
-    for tag in TAG_RE.finditer(html):
-        if src := SRC_RE.search(tag.group(0)):
-            note(_attr_value(src), html_file.parent)
-    scan_css(LINK_RE.sub("", html), html_file.parent, seen)
-    return missing
+    page = page_tags(html_file.read_text(errors="replace"))
+    for tag, attrs in page.tags:
+        if tag == "link" and _rel_has(attrs, "stylesheet") and attrs.get("href"):
+            target = note(attrs["href"], html_file.parent)
+            if target and target not in seen_sheets:
+                seen_sheets.add(target)
+                scan_css(target.read_text(errors="replace"), target.parent)
+    for _tag, attrs in page.tags:
+        if attrs.get("src"):
+            note(attrs["src"], html_file.parent)
+    scan_css("\n".join(page.style_text), html_file.parent)
+    for _tag, attrs in page.tags:
+        if attrs.get("style"):
+            scan_css(attrs["style"], html_file.parent)
+    return found
+
+
+def missing_resources(html_file: Path, wpt_root: Path):
+    """Local subresources of a page that are not on disk, in the order found."""
+    return list(dict.fromkeys(
+        url for url, target in local_resources(html_file, wpt_root) if not target.is_file()
+    ))
 
 
 def unrunnable_reason(test_src: str, ref_src: str):
@@ -292,6 +349,9 @@ def unrunnable_reason(test_src: str, ref_src: str):
         return "reftest-wait: the capture path does not watch for the completion signal"
     if re.search(r"name\s*=\s*[\"']?fuzzy\b", test_src, re.IGNORECASE):
         return "fuzzy annotation: tolerance matching not implemented"
+    for src in (test_src, ref_src):
+        if any(tag == "script" and attrs.get("src") for tag, attrs in page_tags(src).tags):
+            return "external script: --html-file runs inline scripts only"
     return None
 
 
@@ -338,6 +398,19 @@ def capture_args(html_file: Path, out_ppm: Path, viewport):
     return cmd
 
 
+def capture_failure(stdout: str, stderr: str) -> str:
+    """parity-capture's own `error` from its JSON line; stderr's tail is a timestamped log."""
+    lines = stdout.strip().splitlines()
+    try:
+        error = json.loads(lines[-1]).get("error") if lines else None
+    except (ValueError, AttributeError):
+        error = None
+    if error:
+        return str(error)
+    tail = (stderr or stdout or "").strip().splitlines()
+    return tail[-1] if tail else "no output"
+
+
 def capture(html_file: Path, out_ppm: Path, viewport):
     """Render through the engine. Returns None on success, reason on failure."""
     cmd = capture_args(html_file, out_ppm, viewport)
@@ -346,8 +419,7 @@ def capture(html_file: Path, out_ppm: Path, viewport):
     except subprocess.TimeoutExpired:
         return "capture timeout (60s)"
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return f"capture exit {proc.returncode}: {tail[-1] if tail else 'no output'}"
+        return f"capture exit {proc.returncode}: {capture_failure(proc.stdout, proc.stderr)}"
     if not out_ppm.exists() or out_ppm.stat().st_size == 0:
         return "capture produced no frame"
     return None
@@ -386,7 +458,7 @@ def campaign_diff(test_ppm: Path, ref_ppm: Path):
 def campaign_counts(cases):
     """Scored cases against the campaign threshold; an unmeasured one is neither."""
     limit = THRESHOLDS["default"]
-    scored = [c for c in cases if c["status"] in ("PASS", "FAIL")]
+    scored = [c for c in cases if c["status"] in ("PASS", "FAIL", "UNPROVEN")]
     measured = [c["campaign_diff_pct"] for c in scored if c["campaign_diff_pct"] is not None]
     return {
         "within": sum(1 for d in measured if d <= limit),
@@ -395,13 +467,26 @@ def campaign_counts(cases):
     }
 
 
-def unproven_passes(cases, entries_by_id):
-    """PASSes the manifest does not yet believe, each with its reason."""
-    return {
-        c["id"]: entries_by_id[c["id"]]["unproven"]
-        for c in cases
-        if c["status"] == "PASS" and entries_by_id[c["id"]].get("unproven")
-    }
+def unproven_passes(cases):
+    """Matches that also matched when the page was broken on purpose, each with its reason."""
+    return {c["id"]: c["reason"] for c in cases if c["status"] == "UNPROVEN"}
+
+
+def count_statuses(cases):
+    return {s: sum(1 for c in cases if c["status"] == s) for s in STATUSES}
+
+
+def pass_rate(counts):
+    """An unproven case was scored, and is not a pass."""
+    scored = counts["PASS"] + counts["FAIL"] + counts["UNPROVEN"]
+    return round(counts["PASS"] / scored, 4) if scored else None
+
+
+def per_area(cases):
+    areas = {}
+    for c in cases:
+        areas.setdefault(c["area"], []).append(c)
+    return {name: count_statuses(areas[name]) for name in sorted(areas)}
 
 
 def oracle_record():
@@ -477,6 +562,120 @@ def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bo
     }
 
 
+def style_removed(html: str) -> str:
+    """The page with no author style: no <style>, no sheet links, no style= attributes."""
+    html = STYLE_ELEMENT_RE.sub("", html)
+    html = SHEET_LINK_RE.sub(
+        lambda m: "" if _rel_has(page_tags(m.group(0)).tags[0][1], "stylesheet") else m.group(0), html
+    )
+    return TAG_WITH_ATTRS_RE.sub(
+        lambda t: STYLE_ATTR_RE.sub(lambda m: m.group(2) or m.group(1) or "", t.group(0)), html
+    )
+
+
+def apply_mutation(html: str, mutation):
+    """The page with this mutation in, or None if the page does not say `find`."""
+    if mutation["find"] not in html:
+        return None
+    return html.replace(mutation["find"], mutation["replace"])
+
+
+def _probe_matches(name, html, test_file, ref_ppm, viewport, workdir):
+    """(still matches the reference, why it could not tell)."""
+    page = test_file.with_name(f"{test_file.stem}.__probe-{name}{test_file.suffix}")
+    page.write_text(html)
+    frame = workdir / f"probe-{name}.ppm"
+    why = capture(stage_html(page), frame, viewport)
+    if why:
+        return False, why
+    return compare_frames(frame, ref_ppm)[0] == 0, None
+
+
+def prove_pass(entry, test_file: Path, ref_ppm: Path, viewport, workdir: Path):
+    """Why this match proves nothing, or None if every probe went red."""
+    html = test_file.read_text(errors="replace")
+    matches, why = _probe_matches("unstyled", style_removed(html), test_file, ref_ppm, viewport, workdir)
+    if why:
+        return f"style-removed probe rendered no frame: {why}"
+    if matches:
+        return "still matches with all its style removed"
+    for i, mutation in enumerate(entry.get("mutations", [])):
+        mutated = apply_mutation(html, mutation)
+        if mutated is None:
+            return f"mutation does not apply, page has no {mutation['find']!r}"
+        matches, why = _probe_matches(f"m{i}", mutated, test_file, ref_ppm, viewport, workdir)
+        if why:
+            return f"mutation {mutation['find']!r} rendered no frame: {why}"
+        if matches:
+            return f"still matches with {mutation['find']!r} changed to {mutation['replace']!r}"
+    return None
+
+
+def run_case(entry, viewport):
+    """One manifest entry, start to finish; returns its row."""
+    case = {
+        "id": entry["id"],
+        "area": entry.get("area") or "seed",
+        "status": None,
+        "reason": None,
+        "diff_pct": None,
+        "diff_pixels": None,
+        "campaign_diff_pct": None,
+        "campaign_not_measured": None,
+        "rel_match": None,
+        "blocked_by": None,
+        "maps_to": entry.get("maps_to"),
+    }
+    test_file = WPT_ROOT / entry["path"]
+    ref_file = WPT_ROOT / entry["ref"] if entry.get("ref") else None
+
+    if entry.get("kind") != "reftest":
+        case.update(status="SKIP", reason=f"kind={entry.get('kind')} not run in W0b")
+        return case
+    if not test_file.exists():
+        case.update(status="ERROR", rel_match="missing",
+                    reason="test file absent after --check passed (instrument)")
+        return case
+    if ref_file is None or not ref_file.exists():
+        case.update(status="SKIP", rel_match="missing", reason="missing ref")
+        return case
+    # rel=match is the authority; the manifest ref is a candidate.
+    hrefs = rel_match_hrefs(test_file)
+    if not hrefs:
+        case.update(status="ERROR", rel_match="missing",
+                    reason="test has no <link rel=match> — not a reftest at this pin")
+        return case
+    resolved = [
+        (test_file.parent / h).resolve().relative_to(WPT_ROOT.resolve())
+        for h in hrefs
+    ]
+    if ref_file.resolve().relative_to(WPT_ROOT.resolve()) not in resolved:
+        case.update(
+            status="ERROR", rel_match="mismatch",
+            reason=f"manifest ref {entry['ref']} not among rel=match "
+                   f"targets {[str(r) for r in resolved]} — instrument error, "
+                   f"pixels not compared",
+        )
+        return case
+    case["rel_match"] = "ok"
+    test_src = test_file.read_text(errors="replace")
+    ref_src = ref_file.read_text(errors="replace")
+    absent = missing_resources(test_file, WPT_ROOT) + missing_resources(ref_file, WPT_ROOT)
+    stop = gate(test_src, ref_src, absent)
+    if stop:
+        case.update(stop)
+        return case
+    if webfont_dependent(test_src, ref_src):
+        case["blocked_by"] = WEBFONT_GAP
+    with tempfile.TemporaryDirectory(prefix="wpt-") as td:
+        case.update(run_pair(test_file, ref_file, viewport, Path(td)))
+        if case["status"] == "PASS":
+            why = prove_pass(entry, test_file, Path(td) / "ref.ppm", viewport, Path(td))
+            if why:
+                case.update(status="UNPROVEN", reason=why)
+    return case
+
+
 def negative_control(viewport) -> bool:
     """Prove the oracle can go red. True = it failed the mismatched pair."""
     test = NEGATIVE_CONTROL_DIR / "control.html"
@@ -502,6 +701,9 @@ def negative_control(viewport) -> bool:
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--case", help="run a single manifest id")
+    parser.add_argument("--area", help="run one area of the manifest (`seed` is the 30 of W0b)")
+    parser.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1),
+                        help="cases rendered at once (default 4)")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--allow-stale", action="store_true",
                         help="skip the binary-freshness guard (records the run as suspect)")
@@ -514,6 +716,11 @@ def main():
         entries = [e for e in entries if e["id"] == args.case]
         if not entries:
             print(f"no manifest entry with id {args.case}", file=sys.stderr)
+            return 1
+    if args.area:
+        entries = [e for e in entries if (e.get("area") or "seed") == args.area]
+        if not entries:
+            print(f"no manifest entries in area {args.area}", file=sys.stderr)
             return 1
 
     if not CAPTURE_BIN.exists():
@@ -558,72 +765,19 @@ def main():
     ).stdout.strip()
 
     cases = []
-    for entry in entries:
-        case = {
-            "id": entry["id"],
-            "status": None,
-            "reason": None,
-            "diff_pct": None,
-            "diff_pixels": None,
-            "campaign_diff_pct": None,
-            "campaign_not_measured": None,
-            "rel_match": None,
-            "blocked_by": None,
-            "maps_to": entry.get("maps_to"),
-        }
-        test_file = WPT_ROOT / entry["path"]
-        ref_file = WPT_ROOT / entry["ref"] if entry.get("ref") else None
-
-        if entry.get("kind") != "reftest":
-            case.update(status="SKIP", reason=f"kind={entry.get('kind')} not run in W0b")
-        elif not test_file.exists():
-            case.update(status="ERROR", rel_match="missing",
-                        reason="test file absent after --check passed (instrument)")
-        elif ref_file is None or not ref_file.exists():
-            case.update(status="SKIP", rel_match="missing", reason="missing ref")
-        else:
-            # rel=match is the authority; the manifest ref is a candidate.
-            hrefs = rel_match_hrefs(test_file)
-            if not hrefs:
-                case.update(status="ERROR", rel_match="missing",
-                            reason="test has no <link rel=match> — not a reftest at this pin")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        for case in pool.map(lambda entry: run_case(entry, viewport), entries):
+            cases.append(case)
+            if args.verbose or case["status"] != "PASS":
+                detail = case["reason"] or f"diff {case['diff_pct']}%"
+                print(f"  {case['id']:55s} {case['status']:8s} {detail}", flush=True)
             else:
-                resolved = [
-                    (test_file.parent / h).resolve().relative_to(WPT_ROOT.resolve())
-                    for h in hrefs
-                ]
-                if ref_file.resolve().relative_to(WPT_ROOT.resolve()) not in resolved:
-                    case.update(
-                        status="ERROR", rel_match="mismatch",
-                        reason=f"manifest ref {entry['ref']} not among rel=match "
-                               f"targets {[str(r) for r in resolved]} — instrument error, "
-                               f"pixels not compared",
-                    )
-                else:
-                    case["rel_match"] = "ok"
-                    test_src = test_file.read_text(errors="replace")
-                    ref_src = ref_file.read_text(errors="replace")
-                    absent = missing_resources(test_file, WPT_ROOT) + missing_resources(ref_file, WPT_ROOT)
-                    stop = gate(test_src, ref_src, absent)
-                    if stop:
-                        case.update(stop)
-                    else:
-                        if webfont_dependent(test_src, ref_src):
-                            case["blocked_by"] = WEBFONT_GAP
-                        with tempfile.TemporaryDirectory(prefix="wpt-") as td:
-                            case.update(run_pair(test_file, ref_file, viewport, Path(td)))
+                print(f"  {case['id']:55s} PASS", flush=True)
 
-        cases.append(case)
-        if args.verbose or case["status"] != "PASS":
-            detail = case["reason"] or f"diff {case['diff_pct']}%"
-            print(f"  {case['id']:55s} {case['status']:5s} {detail}")
-        else:
-            print(f"  {case['id']:55s} PASS")
-
-    counts = {s: sum(1 for c in cases if c["status"] == s)
-              for s in ("PASS", "FAIL", "SKIP", "ERROR")}
-    scored = counts["PASS"] + counts["FAIL"]
-    rate = round(counts["PASS"] / scored, 4) if scored else None
+    counts = count_statuses(cases)
+    scored = counts["PASS"] + counts["FAIL"] + counts["UNPROVEN"]
+    rate = pass_rate(counts)
+    areas = per_area(cases)
 
     # Whether THIS run has the shape the pin calls presumptively dishonest:
     # everything green, nothing red, on the full seed. Computed, not asserted
@@ -649,11 +803,13 @@ def main():
         "n": len(cases),
         "pass": counts["PASS"],
         "fail": counts["FAIL"],
+        "unproven": counts["UNPROVEN"],
         "skip": counts["SKIP"],
         "error": counts["ERROR"],
         "rate": rate,
         "campaign_rule_counts": campaign_counts(cases),
-        "unproven_passes": unproven_passes(cases, {e["id"]: e for e in entries}),
+        "areas": areas,
+        "unproven_passes": unproven_passes(cases),
         "attribution": {
             "_comment": "Fails grouped by a named engine capability gap. Attribution only — these cases stay in the denominator. A gap here is a lane, not an excuse.",
             "blocked_fails": {
@@ -686,21 +842,24 @@ def main():
         },
     }
 
-    if not args.case:
+    if not args.case and not args.area:
         LAST_RUN_PATH.write_text(json.dumps(last_run, indent=2) + "\n")
         print(f"\nwrote {LAST_RUN_PATH.relative_to(REPO_ROOT)}")
 
     print(f"\nWPT Tier-1: {counts['PASS']}/{scored} scored "
-          f"(pass {counts['PASS']} / fail {counts['FAIL']} / "
+          f"(pass {counts['PASS']} / fail {counts['FAIL']} / unproven {counts['UNPROVEN']} / "
           f"skip {counts['SKIP']} / error {counts['ERROR']}, n={len(cases)}) "
           f"@ pin {manifest['wpt_pin'][:12]}")
+    print(f"  {'area':28s} {'pass':>5s} {'fail':>5s} {'unprv':>5s} {'skip':>5s} {'error':>5s}")
+    for name, row in areas.items():
+        print(f"  {name:28s} {row['PASS']:5d} {row['FAIL']:5d} {row['UNPROVEN']:5d} {row['SKIP']:5d} {row['ERROR']:5d}")
     held = last_run["campaign_rule_counts"]
     print(f"  campaign rule, reported only: {held['within']} within "
           f"{THRESHOLDS['default']}%, {held['over']} over, {held['not_measured']} not measured")
     for why in sorted({c["campaign_not_measured"] for c in cases if c["campaign_not_measured"]}):
         print(f"  campaign rule not measured: {why}")
     if last_run["unproven_passes"]:
-        print(f"  unproven passes: {len(last_run['unproven_passes'])} (see last-run.json)")
+        print(f"  unproven: {len(last_run['unproven_passes'])} (see last-run.json)")
     for gap, ids in last_run["attribution"]["blocked_fails"].items():
         print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
     suspect = last_run["attribution"]["suspect_passes"]["ids"]
