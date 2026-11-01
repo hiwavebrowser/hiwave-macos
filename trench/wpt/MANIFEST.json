@@ -24,9 +24,19 @@
   "support_paths": {
     "_comment": "Shared WPT support files that tests reference by ROOT-ABSOLUTE URL (wptserve serves / from the WPT root; file:// has no such mapping). They are never scored \u2014 but a reftest whose declared font never loads is not measuring what it asserts, so they are part of the instrument, not decoration. Materialised by wpt_sync.sh alongside the tests; the runner rewrites root-absolute references to point at them.",
     "paths": [
-      "fonts/ahem.css",
+      "css/css-flexbox/support/flexbox.css",
+      "css/css-masking/mask-image/support/50x100-opaque-blue.svg",
+      "css/css-masking/mask-image/support/50x50-opaque-blue.svg",
+      "css/css-masking/mask-image/support/mask-half-transparent-100x100.svg",
+      "css/css-position/resources/ref-rectangle.js",
+      "css/css-position/sticky/support/100x100-red.png",
+      "css/css-transforms/support/transform-iframe-001-contents.html",
+      "css/css-transforms/support/transform-lime-square.svg",
+      "css/css-transforms/support/transform-triangle-left.svg",
       "fonts/Ahem.ttf",
-      "css/css-flexbox/support/flexbox.css"
+      "fonts/ahem.css",
+      "images/blue-100x50-transparent-100x50.svg",
+      "images/transparent-100x50-blue-100x50.svg"
     ]
   },
   "buckets": {
@@ -52,12 +62,18 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/overflow-wrap/overflow-wrap-004", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-text/overflow-wrap/overflow-wrap-004",
       "path": "css/css-text/overflow-wrap/overflow-wrap-004.html",
       "ref": "css/css-text/overflow-wrap/overflow-wrap-004-ref.html",
       "kind": "reftest",
       "tier": "1A",
-      "maps_to": "slice-0"
+      "maps_to": "slice-0",
+      "mutations": [
+        {
+          "find": "overflow-wrap: normal;",
+          "replace": "overflow-wrap: anywhere;"
+        }
+      ]
     },
     {
       "id": "css-text/overflow-wrap/overflow-wrap-anywhere-011",
@@ -68,28 +84,46 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/word-break/break-word-overflow-wrap-interactions", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-text/word-break/break-word-overflow-wrap-interactions",
       "path": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions.html",
       "ref": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions-ref.html",
       "kind": "reftest",
       "tier": "1A",
-      "maps_to": "slice-0"
+      "maps_to": "slice-0",
+      "mutations": [
+        {
+          "find": "word-break: break-word; overflow-wrap: normal;",
+          "replace": "overflow-wrap: normal;"
+        }
+      ]
     },
     {
-      "id": "css-inline/br-font-size", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-inline/br-font-size",
       "path": "css/css-inline/br-font-size.html",
       "ref": "css/css-inline/br-font-size-ref.html",
       "kind": "reftest",
       "tier": "1B",
-      "maps_to": "A"
+      "maps_to": "A",
+      "mutations": [
+        {
+          "find": "<br />XXXX<br />XXXXXXXXX",
+          "replace": "<br /><span style=\"font-size:25px\">X</span>XXX<br />XXXXXXXXX"
+        }
+      ]
     },
     {
-      "id": "css-inline/br-line-height", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-inline/br-line-height",
       "path": "css/css-inline/br-line-height.html",
       "ref": "css/css-inline/br-line-height-ref.html",
       "kind": "reftest",
       "tier": "1B",
-      "maps_to": "A"
+      "maps_to": "A",
+      "mutations": [
+        {
+          "find": "<br />XXXX<br />XXXXXXXXX",
+          "replace": "<br /><span style=\"line-height:5\">X</span>XXX<br />XXXXXXXXX"
+        }
+      ]
     },
     {
       "id": "css-inline/empty-span-height",
@@ -124,28 +158,50 @@
       "maps_to": "B"
     },
     {
-      "id": "css-inline/empty-text-node-001", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-inline/empty-text-node-001",
       "path": "css/css-inline/empty-text-node-001.html",
       "ref": "css/css-inline/empty-text-node-001-ref.html",
       "kind": "reftest",
       "tier": "1B",
-      "maps_to": "B2"
+      "maps_to": "B2",
+      "mutations": [
+        {
+          "find": "createTextNode(\"\")",
+          "replace": "createTextNode(\"x\")"
+        },
+        {
+          "find": "content: \"\";",
+          "replace": "content: \"x\";"
+        }
+      ]
     },
     {
-      "id": "css-flexbox/align-self-015", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-flexbox/align-self-015",
       "path": "css/css-flexbox/align-self-015.html",
       "ref": "css/css-flexbox/reference/align-self-015-ref.html",
       "kind": "reftest",
       "tier": "1C",
-      "maps_to": "flex"
+      "maps_to": "flex",
+      "mutations": [
+        {
+          "find": "margin: 0 auto;",
+          "replace": "margin: 0;"
+        }
+      ]
     },
     {
-      "id": "css-flexbox/align-items-baseline-overflow-non-visible", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-flexbox/align-items-baseline-overflow-non-visible",
       "path": "css/css-flexbox/align-items-baseline-overflow-non-visible.html",
       "ref": "css/css-flexbox/reference/align-items-baseline-overflow-non-visible-ref.html",
       "kind": "reftest",
       "tier": "1C",
-      "maps_to": "flex"
+      "maps_to": "flex",
+      "mutations": [
+        {
+          "find": "overflow: hidden;",
+          "replace": "overflow: hidden; display: inline-block;"
+        }
+      ]
     },
     {
       "id": "css-text/line-break/line-break-anywhere-001",
@@ -188,12 +244,22 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/word-break/break-boundary-2-chars-002", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
+      "id": "css-text/word-break/break-boundary-2-chars-002",
       "path": "css/css-text/word-break/break-boundary-2-chars-002.html",
       "ref": "css/css-text/word-break/reference/break-boundary-2-chars-002-ref.html",
       "kind": "reftest",
       "tier": "1A",
-      "maps_to": "slice-0"
+      "maps_to": "slice-0",
+      "mutations": [
+        {
+          "find": "white-space: pre;",
+          "replace": "white-space: normal;"
+        },
+        {
+          "find": "white-space: nowrap;",
+          "replace": "white-space: normal;"
+        }
+      ]
     },
     {
       "id": "css-text/line-break/line-break-anywhere-004",
@@ -274,6 +340,2878 @@
       "kind": "reftest",
       "tier": "1A",
       "maps_to": "slice-0"
+    },
+    {
+      "id": "css-overflow/abspos-shrink-to-fit-with-scrollable-descendant",
+      "path": "css/css-overflow/abspos-shrink-to-fit-with-scrollable-descendant.html",
+      "ref": "css/css-overflow/abspos-shrink-to-fit-with-scrollable-descendant-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/clip-001",
+      "path": "css/css-overflow/clip-001.html",
+      "ref": "css/css-overflow/clip-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/clip-004",
+      "path": "css/css-overflow/clip-004.html",
+      "ref": "css/css-overflow/clip-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/clip-007",
+      "path": "css/css-overflow/clip-007.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/float-with-relpos-and-transform",
+      "path": "css/css-overflow/float-with-relpos-and-transform.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/input-scrollable-region-001",
+      "path": "css/css-overflow/input-scrollable-region-001.html",
+      "ref": "css/css-overflow/reference/input-scrollable-region-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/max-width-container-with-scrollable-descendant",
+      "path": "css/css-overflow/max-width-container-with-scrollable-descendant.html",
+      "ref": "css/css-overflow/max-width-container-with-scrollable-descendant-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/no-scrollable-overflow-vertical-rl",
+      "path": "css/css-overflow/no-scrollable-overflow-vertical-rl.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-auto-scrollbar-gutter-intrinsic-002",
+      "path": "css/css-overflow/overflow-auto-scrollbar-gutter-intrinsic-002.html",
+      "ref": "css/css-overflow/overflow-auto-scrollbar-gutter-intrinsic-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-body-propagation-005",
+      "path": "css/css-overflow/overflow-body-propagation-005.html",
+      "ref": "css/css-overflow/reference/overflow-body-propagation-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-body-propagation-007",
+      "path": "css/css-overflow/overflow-body-propagation-007.html",
+      "ref": "css/css-overflow/overflow-body-propagation-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-body-propagation-010",
+      "path": "css/css-overflow/overflow-body-propagation-010.html",
+      "ref": "css/css-overflow/overflow-body-propagation-010-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-body-propagation-014",
+      "path": "css/css-overflow/overflow-body-propagation-014.html",
+      "ref": "css/css-overflow/overflow-body-propagation-012-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-body-propagation-016",
+      "path": "css/css-overflow/overflow-body-propagation-016.html",
+      "ref": "css/css-overflow/overflow-body-propagation-012-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-002",
+      "path": "css/css-overflow/overflow-clip-margin-002.html",
+      "ref": "css/css-overflow/overflow-clip-margin-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-005",
+      "path": "css/css-overflow/overflow-clip-margin-005.html",
+      "ref": "css/css-overflow/overflow-clip-margin-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-007",
+      "path": "css/css-overflow/overflow-clip-margin-007.html",
+      "ref": "css/css-overflow/overflow-clip-margin-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-010",
+      "path": "css/css-overflow/overflow-clip-margin-010.html",
+      "ref": "css/css-overflow/overflow-clip-margin-010-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-013",
+      "path": "css/css-overflow/overflow-clip-margin-013.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-015",
+      "path": "css/css-overflow/overflow-clip-margin-015.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-018",
+      "path": "css/css-overflow/overflow-clip-margin-018.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-021",
+      "path": "css/css-overflow/overflow-clip-margin-021.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-mul-column-border-box",
+      "path": "css/css-overflow/overflow-clip-margin-mul-column-border-box.html",
+      "ref": "css/css-overflow/overflow-clip-margin-mul-column-border-box-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-margin-svg",
+      "path": "css/css-overflow/overflow-clip-margin-svg.html",
+      "ref": "css/css-overflow/overflow-clip-margin-svg-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-rounded-table",
+      "path": "css/css-overflow/overflow-clip-rounded-table.html",
+      "ref": "css/css-overflow/overflow-clip-rounded-table-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-clip-x-visible-y-svg",
+      "path": "css/css-overflow/overflow-clip-x-visible-y-svg.html",
+      "ref": "css/css-overflow/overflow-clip-x-visible-y-svg-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-img-scroll-non-replaced",
+      "path": "css/css-overflow/overflow-img-scroll-non-replaced.html",
+      "ref": "css/css-overflow/overflow-img-scroll-non-replaced-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-negative-margin",
+      "path": "css/css-overflow/overflow-negative-margin.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/overflow-scroll-big-border-small-content",
+      "path": "css/css-overflow/overflow-scroll-big-border-small-content.html",
+      "ref": "css/css-overflow/overflow-scroll-big-border-small-content-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/paint-containment-svg",
+      "path": "css/css-overflow/paint-containment-svg.html",
+      "ref": "css/css-overflow/paint-containment-svg-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-002",
+      "path": "css/css-overflow/scrollbar-gutter-002.html",
+      "ref": "css/css-overflow/scrollbar-gutter-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-abspos-001",
+      "path": "css/css-overflow/scrollbar-gutter-abspos-001.html",
+      "ref": "css/css-overflow/scrollbar-gutter-abspos-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-fixedpos-002",
+      "path": "css/css-overflow/scrollbar-gutter-fixedpos-002.html",
+      "ref": "css/css-overflow/scrollbar-gutter-fixedpos-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-root-both-edges",
+      "path": "css/css-overflow/scrollbar-gutter-root-both-edges.html",
+      "ref": "css/css-overflow/scrollbar-gutter-root-both-edges-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-rtl-002",
+      "path": "css/css-overflow/scrollbar-gutter-rtl-002.html",
+      "ref": "css/css-overflow/scrollbar-gutter-rtl-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/scrollbar-gutter-vertical-rl-002",
+      "path": "css/css-overflow/scrollbar-gutter-vertical-rl-002.html",
+      "ref": "css/css-overflow/scrollbar-gutter-vertical-rl-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/select-size-overflow-001",
+      "path": "css/css-overflow/select-size-overflow-001.html",
+      "ref": "css/css-overflow/select-size-overflow-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/table-max-content-with-scrollable-descendant",
+      "path": "css/css-overflow/table-max-content-with-scrollable-descendant.html",
+      "ref": "css/css-overflow/table-max-content-with-scrollable-descendant-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/text-overflow-ellipsis-editable-div-with-caret",
+      "path": "css/css-overflow/text-overflow-ellipsis-editable-div-with-caret.html",
+      "ref": "css/css-overflow/reference/text-overflow-ellipsis-editable-div-with-caret-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-overflow/text-overflow-ellipsis-textarea-with-caret",
+      "path": "css/css-overflow/text-overflow-ellipsis-textarea-with-caret.html",
+      "ref": "css/css-overflow/reference/text-overflow-ellipsis-textarea-with-caret-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-overflow",
+      "maps_to": "C2"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-bottom-002",
+      "path": "css/css-position/sticky/position-sticky-bottom-002.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-bottom-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-bottom-003",
+      "path": "css/css-position/sticky/position-sticky-bottom-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-bottom-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-contained-by-display-table",
+      "path": "css/css-position/sticky/position-sticky-contained-by-display-table.html",
+      "ref": "css/css-position/sticky/position-sticky-contained-by-display-table-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-escape-scroller-001",
+      "path": "css/css-position/sticky/position-sticky-escape-scroller-001.html",
+      "ref": "css/css-position/sticky/position-sticky-escape-scroller-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-escape-scroller-002",
+      "path": "css/css-position/sticky/position-sticky-escape-scroller-002.html",
+      "ref": "css/css-position/sticky/position-sticky-escape-scroller-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-escape-scroller-003",
+      "path": "css/css-position/sticky/position-sticky-escape-scroller-003.html",
+      "ref": "css/css-position/sticky/position-sticky-escape-scroller-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-escape-scroller-004",
+      "path": "css/css-position/sticky/position-sticky-escape-scroller-004.html",
+      "ref": "css/css-position/sticky/position-sticky-escape-scroller-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-fixed-ancestor-002",
+      "path": "css/css-position/sticky/position-sticky-fixed-ancestor-002.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-fixed-ancestor-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-fixed-ancestor-003",
+      "path": "css/css-position/sticky/position-sticky-fixed-ancestor-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-fixed-ancestor-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-in-fixed-container",
+      "path": "css/css-position/sticky/position-sticky-in-fixed-container.html",
+      "ref": "css/css-position/sticky/position-sticky-in-fixed-container-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-left-002",
+      "path": "css/css-position/sticky/position-sticky-left-002.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-left-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-left-003",
+      "path": "css/css-position/sticky/position-sticky-left-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-left-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-offset-print",
+      "path": "css/css-position/sticky/position-sticky-offset-print.html",
+      "ref": "css/reference/ref-filled-green-100px-square-print-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-overflow-clip-container",
+      "path": "css/css-position/sticky/position-sticky-overflow-clip-container.html",
+      "ref": "css/css-position/sticky/position-sticky-overflow-clip-container-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-padding-001",
+      "path": "css/css-position/sticky/position-sticky-padding-001.html",
+      "ref": "css/css-position/sticky/position-sticky-padding-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-padding-002",
+      "path": "css/css-position/sticky/position-sticky-padding-002.html",
+      "ref": "css/css-position/sticky/position-sticky-padding-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-right-002",
+      "path": "css/css-position/sticky/position-sticky-right-002.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-right-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-right-003",
+      "path": "css/css-position/sticky/position-sticky-right-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-right-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-rtl",
+      "path": "css/css-position/sticky/position-sticky-rtl.html",
+      "ref": "css/css-position/sticky/position-sticky-rtl-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-pixel-rounding",
+      "path": "css/css-position/sticky/position-sticky-table-pixel-rounding.html",
+      "ref": "css/css-position/sticky/position-sticky-table-pixel-rounding-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-td-bottom",
+      "path": "css/css-position/sticky/position-sticky-table-td-bottom.html",
+      "ref": "css/css-position/sticky/position-sticky-table-td-bottom-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-td-subpixel-zoom",
+      "path": "css/css-position/sticky/position-sticky-table-td-subpixel-zoom.html",
+      "ref": "css/css-position/sticky/position-sticky-table-td-subpixel-zoom-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-td-top",
+      "path": "css/css-position/sticky/position-sticky-table-td-top.html",
+      "ref": "css/css-position/sticky/position-sticky-table-td-top-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-th-bottom",
+      "path": "css/css-position/sticky/position-sticky-table-th-bottom.html",
+      "ref": "css/css-position/sticky/position-sticky-table-th-bottom-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-table-th-top",
+      "path": "css/css-position/sticky/position-sticky-table-th-top.html",
+      "ref": "css/css-position/sticky/position-sticky-table-th-top-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-top-002",
+      "path": "css/css-position/sticky/position-sticky-top-002.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-top-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-top-003",
+      "path": "css/css-position/sticky/position-sticky-top-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-top-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/sticky/position-sticky-top-and-bottom-003",
+      "path": "css/css-position/sticky/position-sticky-top-and-bottom-003.html",
+      "ref": "css/css-position/sticky/reference/position-sticky-top-and-bottom-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-sticky",
+      "maps_to": "C7"
+    },
+    {
+      "id": "css-position/absolute-pos-box-inside-fixed-pos-box-with-changing-height",
+      "path": "css/css-position/absolute-pos-box-inside-fixed-pos-box-with-changing-height.html",
+      "ref": "css/css-position/absolute-pos-box-inside-fixed-pos-box-with-changing-height-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/containing-block-change-button",
+      "path": "css/css-position/containing-block-change-button.html",
+      "ref": "css/css-position/containing-block-change-button-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/nested-inline-abspos-child-with-siblings",
+      "path": "css/css-position/nested-inline-abspos-child-with-siblings.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-dynamic-relayout-007",
+      "path": "css/css-position/position-absolute-dynamic-relayout-007.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-dynamic-static-position-inline",
+      "path": "css/css-position/position-absolute-dynamic-static-position-inline.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-in-inline-006",
+      "path": "css/css-position/position-absolute-in-inline-006.html",
+      "ref": "css/css-position/position-absolute-in-inline-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-in-inline-007b",
+      "path": "css/css-position/position-absolute-in-inline-007b.html",
+      "ref": "css/css-position/position-absolute-in-inline-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-in-inline-008a",
+      "path": "css/css-position/position-absolute-in-inline-008a.html",
+      "ref": "css/css-position/position-absolute-in-inline-008-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-in-inline-009",
+      "path": "css/css-position/position-absolute-in-inline-009.html",
+      "ref": "css/css-position/position-absolute-in-inline-009-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-in-inline-011",
+      "path": "css/css-position/position-absolute-in-inline-011.html",
+      "ref": "css/css-position/position-absolute-in-inline-011-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-large-negative-inset",
+      "path": "css/css-position/position-absolute-large-negative-inset.html",
+      "ref": "css/css-position/position-absolute-large-negative-inset-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-replaced-with-display-table",
+      "path": "css/css-position/position-absolute-replaced-with-display-table.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-root-element-grid",
+      "path": "css/css-position/position-absolute-root-element-grid.html",
+      "ref": "css/css-position/position-absolute-root-element-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-semi-replaced-stretch-button",
+      "path": "css/css-position/position-absolute-semi-replaced-stretch-button.html",
+      "ref": "css/css-position/position-absolute-semi-replaced-stretch-button-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-absolute-semi-replaced-stretch-input",
+      "path": "css/css-position/position-absolute-semi-replaced-stretch-input.html",
+      "ref": "css/css-position/position-absolute-semi-replaced-stretch-input-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-relative-table-tbody-left-absolute-child",
+      "path": "css/css-position/position-relative-table-tbody-left-absolute-child.html",
+      "ref": "css/css-position/position-relative-table-left-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-relative-table-tfoot-left-absolute-child",
+      "path": "css/css-position/position-relative-table-tfoot-left-absolute-child.html",
+      "ref": "css/css-position/position-relative-table-left-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-relative-table-tfoot-top-absolute-child",
+      "path": "css/css-position/position-relative-table-tfoot-top-absolute-child.html",
+      "ref": "css/css-position/position-relative-table-tfoot-top-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-relative-table-thead-top-absolute-child",
+      "path": "css/css-position/position-relative-table-thead-top-absolute-child.html",
+      "ref": "css/css-position/position-relative-table-top-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/position-relative-table-tr-top-absolute-child",
+      "path": "css/css-position/position-relative-table-tr-top-absolute-child.html",
+      "ref": "css/css-position/position-relative-table-top-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/htb-rtl-rtl",
+      "path": "css/css-position/static-position/htb-rtl-rtl.html",
+      "ref": "css/css-position/static-position/htb-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-001",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-001.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-003",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-003.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-005",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-005.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-006",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-006.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-008",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-008.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-010",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-010.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/inline-level-absolute-in-block-level-context-011",
+      "path": "css/css-position/static-position/inline-level-absolute-in-block-level-context-011.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/vlr-ltr-ltr",
+      "path": "css/css-position/static-position/vlr-ltr-ltr.html",
+      "ref": "css/css-position/static-position/vlr-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-position/static-position/vrl-ltr-ltr",
+      "path": "css/css-position/static-position/vrl-ltr-ltr.html",
+      "ref": "css/css-position/static-position/vrl-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-position-absolute",
+      "maps_to": "C15"
+    },
+    {
+      "id": "css-transforms/css-transform-animate-translate-implied-y",
+      "path": "css/css-transforms/css-transform-animate-translate-implied-y.html",
+      "ref": "css/css-transforms/css-transform-animate-translate-implied-y-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-001",
+      "path": "css/css-transforms/matrix/svg-matrix-001.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-009",
+      "path": "css/css-transforms/matrix/svg-matrix-009.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-017",
+      "path": "css/css-transforms/matrix/svg-matrix-017.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-025",
+      "path": "css/css-transforms/matrix/svg-matrix-025.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-033",
+      "path": "css/css-transforms/matrix/svg-matrix-033.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-041",
+      "path": "css/css-transforms/matrix/svg-matrix-041.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-clipped-rect-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-049",
+      "path": "css/css-transforms/matrix/svg-matrix-049.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-057",
+      "path": "css/css-transforms/matrix/svg-matrix-057.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/matrix/svg-matrix-065",
+      "path": "css/css-transforms/matrix/svg-matrix-065.html",
+      "ref": "css/css-transforms/matrix/reference/svg-matrix-four-color-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/rotate/svg-rotate-3args-invalid-003",
+      "path": "css/css-transforms/rotate/svg-rotate-3args-invalid-003.html",
+      "ref": "css/css-transforms/rotate/reference/svg-rotate-3args-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/scale-transform-overlap",
+      "path": "css/css-transforms/scale-transform-overlap.html",
+      "ref": "css/css-transforms/scale-transform-overlap-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/scale/svg-scale-009",
+      "path": "css/css-transforms/scale/svg-scale-009.html",
+      "ref": "css/css-transforms/scale/reference/svg-scale-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/scale/svg-scale-017",
+      "path": "css/css-transforms/scale/svg-scale-017.html",
+      "ref": "css/css-transforms/scale/reference/svg-scale-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-abspos-001",
+      "path": "css/css-transforms/transform-abspos-001.html",
+      "ref": "css/css-transforms/transform-abspos-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-clip-001",
+      "path": "css/css-transforms/transform-clip-001.html",
+      "ref": "css/css-transforms/transform-clip-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-iframe-001",
+      "path": "css/css-transforms/transform-iframe-001.html",
+      "ref": "css/css-transforms/transform-iframe-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-matrix-001",
+      "path": "css/css-transforms/transform-matrix-001.html",
+      "ref": "css/css-transforms/transform-matrix-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin-005",
+      "path": "css/css-transforms/transform-origin-005.html",
+      "ref": "css/css-transforms/transform-origin-ref-2.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin-012",
+      "path": "css/css-transforms/transform-origin-012.html",
+      "ref": "css/css-transforms/transform-origin-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-length-007",
+      "path": "css/css-transforms/transform-origin/svg-origin-length-007.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-length-in-002",
+      "path": "css/css-transforms/transform-origin/svg-origin-length-in-002.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-length-in-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-length-pt-005",
+      "path": "css/css-transforms/transform-origin/svg-origin-length-pt-005.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-length-pt-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-008",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-008.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-016",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-016.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-024",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-024.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-032",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-032.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-040",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-040.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-invalid-002",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-invalid-002.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-invalid-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-origin/svg-origin-relative-length-invalid-010",
+      "path": "css/css-transforms/transform-origin/svg-origin-relative-length-invalid-010.html",
+      "ref": "css/css-transforms/transform-origin/reference/svg-origin-relative-length-invalid-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-root-bg-003",
+      "path": "css/css-transforms/transform-root-bg-003.html",
+      "ref": "css/css-transforms/transform-root-bg-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-scaley-001",
+      "path": "css/css-transforms/transform-scaley-001.html",
+      "ref": "css/css-transforms/transform-scaley-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-table-006",
+      "path": "css/css-transforms/transform-table-006.html",
+      "ref": "css/css-transforms/transform-blank-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-transformable-table-footer-group",
+      "path": "css/css-transforms/transform-transformable-table-footer-group.html",
+      "ref": "css/css-transforms/transform-transformable-table-footer-group-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-transformed-tfoot-contains-fixed-position",
+      "path": "css/css-transforms/transform-transformed-tfoot-contains-fixed-position.html",
+      "ref": "css/css-transforms/transform-transformed-tfoot-contains-fixed-position-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-translate-004",
+      "path": "css/css-transforms/transform-translate-004.html",
+      "ref": "css/css-transforms/transform-translate-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform-translatex-006",
+      "path": "css/css-transforms/transform-translatex-006.html",
+      "ref": "css/css-transforms/reference/transform-translatex-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transforms-rotate-degree-90",
+      "path": "css/css-transforms/transforms-rotate-degree-90.html",
+      "ref": "css/css-transforms/reference/transforms-rotate-degree-90-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/translate/svg-translate-041",
+      "path": "css/css-transforms/translate/svg-translate-041.html",
+      "ref": "css/css-transforms/translate/reference/svg-translate-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/translate/svg-translate-multiple-001",
+      "path": "css/css-transforms/translate/svg-translate-multiple-001.html",
+      "ref": "css/css-transforms/translate/reference/svg-translate-multiple-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-2d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/3d-rendering-context-and-abspos",
+      "path": "css/css-transforms/3d-rendering-context-and-abspos.html",
+      "ref": "css/css-transforms/reference/green.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/3d-rendering-context-and-z-ordering-001",
+      "path": "css/css-transforms/3d-rendering-context-and-z-ordering-001.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/3dtransform-and-filter-no-perspective-001",
+      "path": "css/css-transforms/3dtransform-and-filter-no-perspective-001.html",
+      "ref": "css/css-transforms/3dtransform-and-filter-no-perspective-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/backface-visibility-hidden-003",
+      "path": "css/css-transforms/backface-visibility-hidden-003.html",
+      "ref": "css/css-transforms/backface-visibility-hidden-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/backface-visibility-hidden-006",
+      "path": "css/css-transforms/backface-visibility-hidden-006.html",
+      "ref": "css/css-transforms/backface-visibility-hidden-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/css-rotate-2d-3d-001",
+      "path": "css/css-transforms/css-rotate-2d-3d-001.html",
+      "ref": "css/css-transforms/css-rotate-2d-3d-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/css-transform-3d-rotate3d-Y-negative",
+      "path": "css/css-transforms/css-transform-3d-rotate3d-Y-negative.html",
+      "ref": "css/css-transforms/reference/css-transform-3d-rotateX-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/css-transform-3d-rotateX-negative",
+      "path": "css/css-transforms/css-transform-3d-rotateX-negative.html",
+      "ref": "css/css-transforms/reference/css-transform-3d-rotateX-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/css-transform-3d-rotateY-positive",
+      "path": "css/css-transforms/css-transform-3d-rotateY-positive.html",
+      "ref": "css/css-transforms/reference/css-transform-3d-rotateX-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/css-transform-3d-transform-style",
+      "path": "css/css-transforms/css-transform-3d-transform-style.html",
+      "ref": "css/css-transforms/reference/css-transform-3d-transform-style-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/overflow-perspective-002",
+      "path": "css/css-transforms/overflow-perspective-002.html",
+      "ref": "css/css-transforms/overflow-perspective-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/perspective-children-only-fixpos",
+      "path": "css/css-transforms/perspective-children-only-fixpos.html",
+      "ref": "css/css-transforms/reference/green.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/perspective-origin-x",
+      "path": "css/css-transforms/perspective-origin-x.html",
+      "ref": "css/css-transforms/reference/perspective-origin-reftest.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/perspective-svg-001",
+      "path": "css/css-transforms/perspective-svg-001.html",
+      "ref": "css/css-transforms/perspective-svg-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/perspective-untransformable-no-stacking-context",
+      "path": "css/css-transforms/perspective-untransformable-no-stacking-context.html",
+      "ref": "css/css-transforms/perspective-untransformable-no-stacking-context-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/perspective-zero-point-five",
+      "path": "css/css-transforms/perspective-zero-point-five.html",
+      "ref": "css/css-transforms/reference/green.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/preserve3d-and-flattening-002",
+      "path": "css/css-transforms/preserve3d-and-flattening-002.html",
+      "ref": "css/css-transforms/preserve3d-and-flattening-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/preserve3d-and-flattening-z-order-003",
+      "path": "css/css-transforms/preserve3d-and-flattening-z-order-003.html",
+      "ref": "css/css-transforms/reference/green.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/preserve3d-and-flattening-z-order-006",
+      "path": "css/css-transforms/preserve3d-and-flattening-z-order-006.html",
+      "ref": "css/css-transforms/preserve3d-and-flattening-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/preserve3d-pseudo-element",
+      "path": "css/css-transforms/preserve3d-pseudo-element.html",
+      "ref": "css/css-transforms/preserve3d-pseudo-element-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/subpixel-perspective-backface-hidden",
+      "path": "css/css-transforms/subpixel-perspective-backface-hidden.html",
+      "ref": "css/css-transforms/subpixel-perspective-backface-hidden-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-backface-visibility-003",
+      "path": "css/css-transforms/transform3d-backface-visibility-003.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-backface-visibility-006",
+      "path": "css/css-transforms/transform3d-backface-visibility-006.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-image-scale-002",
+      "path": "css/css-transforms/transform3d-image-scale-002.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-perspective-005",
+      "path": "css/css-transforms/transform3d-perspective-005.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-perspective-origin-001",
+      "path": "css/css-transforms/transform3d-perspective-origin-001.html",
+      "ref": "css/css-transforms/transform3d-perspective-origin-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-preserve3d-004",
+      "path": "css/css-transforms/transform3d-preserve3d-004.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-preserve3d-012",
+      "path": "css/css-transforms/transform3d-preserve3d-012.html",
+      "ref": "css/css-transforms/transform-blank-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-scale-004",
+      "path": "css/css-transforms/transform3d-scale-004.html",
+      "ref": "css/css-transforms/transform-blank-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-transforms/transform3d-sorting-003",
+      "path": "css/css-transforms/transform3d-sorting-003.html",
+      "ref": "css/css-transforms/transform-lime-square-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-transforms-3d",
+      "maps_to": "C10"
+    },
+    {
+      "id": "css-masking/clip-path/animations/clip-path-path-interpolation-with-zoom",
+      "path": "css/css-masking/clip-path/animations/clip-path-path-interpolation-with-zoom.html",
+      "ref": "css/css-masking/clip-path/animations/clip-path-path-interpolation-with-zoom-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-blending-offset",
+      "path": "css/css-masking/clip-path/clip-path-blending-offset.html",
+      "ref": "css/css-masking/clip-path/clip-path-blending-offset-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-columns-shape-001",
+      "path": "css/css-masking/clip-path/clip-path-columns-shape-001.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-columns-shape-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-document-element-will-change",
+      "path": "css/css-masking/clip-path/clip-path-document-element-will-change.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-document-element-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-element-userSpaceOnUse-001",
+      "path": "css/css-masking/clip-path/clip-path-element-userSpaceOnUse-001.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-rectangle-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-element-userSpaceOnUse-004",
+      "path": "css/css-masking/clip-path/clip-path-element-userSpaceOnUse-004.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-ref-bottom-green-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-filter-radius-clips",
+      "path": "css/css-masking/clip-path/clip-path-filter-radius-clips.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-filter-radius-clips-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-inline-004",
+      "path": "css/css-masking/clip-path/clip-path-inline-004.html",
+      "ref": "css/css-masking/clip-path/clip-path-inline-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-inline-006",
+      "path": "css/css-masking/clip-path/clip-path-inline-006.html",
+      "ref": "css/css-masking/clip-path/clip-path-inline-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-inset-round-percent",
+      "path": "css/css-masking/clip-path/clip-path-inset-round-percent.html",
+      "ref": "css/css-masking/clip-path/clip-path-inset-round-percent-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-mix-blend-mode-1",
+      "path": "css/css-masking/clip-path/clip-path-mix-blend-mode-1.html",
+      "ref": "css/css-masking/clip-path/clip-path-mix-blend-mode-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-on-fixed-position-scroll",
+      "path": "css/css-masking/clip-path/clip-path-on-fixed-position-scroll.html",
+      "ref": "css/css-masking/clip-path/clip-path-on-fixed-position-scroll-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-path-002",
+      "path": "css/css-masking/clip-path/clip-path-path-002.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-path-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-path-with-zoom",
+      "path": "css/css-masking/clip-path/clip-path-path-with-zoom.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-path-with-zoom-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-polygon-003",
+      "path": "css/css-masking/clip-path/clip-path-polygon-003.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-rectangle-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-polygon-005",
+      "path": "css/css-masking/clip-path/clip-path-polygon-005.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-rectangle-border-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-polygon-007",
+      "path": "css/css-masking/clip-path/clip-path-polygon-007.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-stripes-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-polygon-010",
+      "path": "css/css-masking/clip-path/clip-path-polygon-010.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-stripes-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-polygon-012",
+      "path": "css/css-masking/clip-path/clip-path-polygon-012.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-stripes-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-rect-002",
+      "path": "css/css-masking/clip-path/clip-path-rect-002.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-rectangle-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-reference-box-001",
+      "path": "css/css-masking/clip-path/clip-path-reference-box-001.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-reference-box-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-reference-box-004",
+      "path": "css/css-masking/clip-path/clip-path-reference-box-004.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-reference-box-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-rotated-will-change-transform",
+      "path": "css/css-masking/clip-path/clip-path-rotated-will-change-transform.html",
+      "ref": "css/css-masking/clip-path/clip-path-rotated-will-change-transform-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-shape-002-units",
+      "path": "css/css-masking/clip-path/clip-path-shape-002-units.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-path-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-shape-004",
+      "path": "css/css-masking/clip-path/clip-path-shape-004.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-shape-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-shape-006",
+      "path": "css/css-masking/clip-path/clip-path-shape-006.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-path-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-shape-009",
+      "path": "css/css-masking/clip-path/clip-path-shape-009.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-shape-control-points-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-shape-foreignobject-non-zero-xy",
+      "path": "css/css-masking/clip-path/clip-path-shape-foreignobject-non-zero-xy.html",
+      "ref": "css/css-masking/clip-path/reference/green-100x100.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-transform-mutated-001",
+      "path": "css/css-masking/clip-path/clip-path-transform-mutated-001.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-transform-mutated-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/clip-path/clip-path-xywh-001",
+      "path": "css/css-masking/clip-path/clip-path-xywh-001.html",
+      "ref": "css/css-masking/clip-path/reference/clip-path-rectangle-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-clip-path",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/backdrop-filter-good-and-bad-mask-image",
+      "path": "css/css-masking/mask-image/backdrop-filter-good-and-bad-mask-image.html",
+      "ref": "css/css-masking/mask-image/backdrop-filter-good-and-bad-mask-image-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/bad-mask-image-svg-3",
+      "path": "css/css-masking/mask-image/bad-mask-image-svg-3.html",
+      "ref": "css/css-masking/mask-image/reference/mask-image-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-clip-3",
+      "path": "css/css-masking/mask-image/mask-clip-3.html",
+      "ref": "css/css-masking/mask-image/mask-clip-3-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-clip-5",
+      "path": "css/css-masking/mask-image/mask-clip-5.html",
+      "ref": "css/css-masking/mask-image/mask-clip-2-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-clip-8",
+      "path": "css/css-masking/mask-image/mask-clip-8.html",
+      "ref": "css/css-masking/mask-image/mask-clip-8-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-composite-1c",
+      "path": "css/css-masking/mask-image/mask-composite-1c.html",
+      "ref": "css/css-masking/mask-image/mask-composite-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-composite-2a",
+      "path": "css/css-masking/mask-image/mask-composite-2a.html",
+      "ref": "css/css-masking/mask-image/mask-composite-2-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-composite-2d",
+      "path": "css/css-masking/mask-image/mask-composite-2d.html",
+      "ref": "css/css-masking/mask-image/mask-composite-2-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-1c",
+      "path": "css/css-masking/mask-image/mask-image-1c.html",
+      "ref": "css/css-masking/mask-image/mask-image-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-5",
+      "path": "css/css-masking/mask-image/mask-image-5.html",
+      "ref": "css/css-masking/mask-image/mask-image-5-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-ib-split",
+      "path": "css/css-masking/mask-image/mask-image-ib-split.html",
+      "ref": "css/css-masking/mask-image/reference/mask-image-ib-split-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-svg-foreignobject-zoomed",
+      "path": "css/css-masking/mask-image/mask-image-svg-foreignobject-zoomed.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-svg-viewport-changed",
+      "path": "css/css-masking/mask-image/mask-image-svg-viewport-changed.html",
+      "ref": "css/css-masking/clip-path/reference/green-100x100.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-image-url-local-mask",
+      "path": "css/css-masking/mask-image/mask-image-url-local-mask.html",
+      "ref": "css/css-masking/mask-image/reference/mask-image-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-origin-1",
+      "path": "css/css-masking/mask-image/mask-origin-1.html",
+      "ref": "css/css-masking/mask-image/mask-origin-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-1a",
+      "path": "css/css-masking/mask-image/mask-position-1a.html",
+      "ref": "css/css-masking/mask-image/mask-position-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-2a",
+      "path": "css/css-masking/mask-image/mask-position-2a.html",
+      "ref": "css/css-masking/mask-image/mask-position-2-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-3a",
+      "path": "css/css-masking/mask-image/mask-position-3a.html",
+      "ref": "css/css-masking/mask-image/mask-position-3-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-4b",
+      "path": "css/css-masking/mask-image/mask-position-4b.html",
+      "ref": "css/css-masking/mask-image/mask-position-4-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-5",
+      "path": "css/css-masking/mask-image/mask-position-5.html",
+      "ref": "css/css-masking/mask-image/mask-position-5-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-position-7",
+      "path": "css/css-masking/mask-image/mask-position-7.html",
+      "ref": "css/css-masking/mask-image/mask-position-7-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-repeat-1",
+      "path": "css/css-masking/mask-image/mask-repeat-1.html",
+      "ref": "css/css-masking/mask-image/mask-repeat-1-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-repeat-2",
+      "path": "css/css-masking/mask-image/mask-repeat-2.html",
+      "ref": "css/css-masking/mask-image/mask-repeat-2-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-auto-auto",
+      "path": "css/css-masking/mask-image/mask-size-auto-auto.html",
+      "ref": "css/css-masking/mask-image/mask-size-auto-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-auto",
+      "path": "css/css-masking/mask-image/mask-size-auto.html",
+      "ref": "css/css-masking/mask-image/mask-size-auto-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-contain-clip-padding",
+      "path": "css/css-masking/mask-image/mask-size-contain-clip-padding.html",
+      "ref": "css/css-masking/mask-image/mask-size-contain-clip-padding-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-cover",
+      "path": "css/css-masking/mask-image/mask-size-cover.html",
+      "ref": "css/css-masking/mask-image/mask-size-cover-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-length-percent",
+      "path": "css/css-masking/mask-image/mask-size-length-percent.html",
+      "ref": "css/css-masking/mask-image/mask-size-length-percent-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-percent-auto",
+      "path": "css/css-masking/mask-image/mask-size-percent-auto.html",
+      "ref": "css/css-masking/mask-image/mask-size-percent-percent-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-masking/mask-image/mask-size-percent-percent",
+      "path": "css/css-masking/mask-image/mask-size-percent-percent.html",
+      "ref": "css/css-masking/mask-image/mask-size-percent-percent-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-masking-mask",
+      "maps_to": "C8"
+    },
+    {
+      "id": "css-ui/outline-009",
+      "path": "css/css-ui/outline-009.html",
+      "ref": "css/css-ui/outline-009-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-020",
+      "path": "css/css-ui/outline-020.html",
+      "ref": "css/css-ui/reference/outline-020-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-022",
+      "path": "css/css-ui/outline-022.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-023",
+      "path": "css/css-ui/outline-023.html",
+      "ref": "css/reference/ref-filled-green-100px-square-only.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-024",
+      "path": "css/css-ui/outline-024.html",
+      "ref": "css/css-ui/reference/outline-024-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-025",
+      "path": "css/css-ui/outline-025.html",
+      "ref": "css/css-ui/reference/outline-024-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-026",
+      "path": "css/css-ui/outline-026.html",
+      "ref": "css/css-ui/reference/outline-024-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-color-002",
+      "path": "css/css-ui/outline-color-002.html",
+      "ref": "css/css-ui/outline-color-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-color-003",
+      "path": "css/css-ui/outline-color-003.html",
+      "ref": "css/css-ui/outline-color-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-color-004",
+      "path": "css/css-ui/outline-color-004.html",
+      "ref": "css/css-ui/outline-color-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-offset-inset-001",
+      "path": "css/css-ui/outline-offset-inset-001.html",
+      "ref": "css/css-ui/outline-offset-inset-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-offset-inset-002",
+      "path": "css/css-ui/outline-offset-inset-002.html",
+      "ref": "css/css-ui/outline-offset-inset-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-offset-inset-003",
+      "path": "css/css-ui/outline-offset-inset-003.html",
+      "ref": "css/css-ui/outline-offset-inset-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-offset-inset-004",
+      "path": "css/css-ui/outline-offset-inset-004.html",
+      "ref": "css/css-ui/outline-offset-inset-004-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-offset",
+      "path": "css/css-ui/outline-offset.html",
+      "ref": "css/css-ui/reference/outline-offset.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-style-011",
+      "path": "css/css-ui/outline-style-011.html",
+      "ref": "css/css-ui/reference/outline-style-011-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-style-012",
+      "path": "css/css-ui/outline-style-012.html",
+      "ref": "css/css-ui/reference/outline-style-012-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-style-013",
+      "path": "css/css-ui/outline-style-013.html",
+      "ref": "css/css-ui/reference/outline-style-013-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-style-014",
+      "path": "css/css-ui/outline-style-014.html",
+      "ref": "css/css-ui/reference/outline-style-014-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-style-inherit",
+      "path": "css/css-ui/outline-style-inherit.html",
+      "ref": "css/css-ui/outline-style-inherit-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-ui/outline-with-padding-001",
+      "path": "css/css-ui/outline-with-padding-001.html",
+      "ref": "css/css-ui/reference/outline-with-padding-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-ui-outline",
+      "maps_to": "C5"
+    },
+    {
+      "id": "css-lists/add-inline-child-after-marker-001",
+      "path": "css/css-lists/add-inline-child-after-marker-001.html",
+      "ref": "css/css-lists/add-inline-child-after-marker-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/change-list-style-position-002",
+      "path": "css/css-lists/change-list-style-position-002.html",
+      "ref": "css/css-lists/change-list-style-position-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/change-list-style-type-002",
+      "path": "css/css-lists/change-list-style-type-002.html",
+      "ref": "css/css-lists/change-list-style-type-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/counters-003",
+      "path": "css/css-lists/counters-003.html",
+      "ref": "css/css-lists/counters-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/counters-006",
+      "path": "css/css-lists/counters-006.html",
+      "ref": "css/css-lists/counters-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/counters-scope-003",
+      "path": "css/css-lists/counters-scope-003.html",
+      "ref": "css/css-lists/counters-scope-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/details-open",
+      "path": "css/css-lists/details-open.html",
+      "ref": "css/css-lists/details-open-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/inline-list-marker",
+      "path": "css/css-lists/inline-list-marker.html",
+      "ref": "css/css-lists/inline-list-marker-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-002",
+      "path": "css/css-lists/li-value-reversed-002.html",
+      "ref": "css/css-lists/li-value-reversed-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-005",
+      "path": "css/css-lists/li-value-reversed-005.html",
+      "ref": "css/css-lists/li-value-reversed-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-006c",
+      "path": "css/css-lists/li-value-reversed-006c.html",
+      "ref": "css/css-lists/li-value-reversed-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-007a",
+      "path": "css/css-lists/li-value-reversed-007a.html",
+      "ref": "css/css-lists/li-value-reversed-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-008b",
+      "path": "css/css-lists/li-value-reversed-008b.html",
+      "ref": "css/css-lists/li-value-reversed-008-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-010",
+      "path": "css/css-lists/li-value-reversed-010.html",
+      "ref": "css/css-lists/li-value-reversed-010-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-013",
+      "path": "css/css-lists/li-value-reversed-013.html",
+      "ref": "css/css-lists/li-value-reversed-013-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-017",
+      "path": "css/css-lists/li-value-reversed-017.html",
+      "ref": "css/css-lists/li-value-reversed-017-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-020",
+      "path": "css/css-lists/li-value-reversed-020.html",
+      "ref": "css/css-lists/li-value-reversed-020-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-023",
+      "path": "css/css-lists/li-value-reversed-023.html",
+      "ref": "css/css-lists/li-value-reversed-011-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-026",
+      "path": "css/css-lists/li-value-reversed-026.html",
+      "ref": "css/css-lists/li-value-reversed-011-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-value-reversed-029",
+      "path": "css/css-lists/li-value-reversed-029.html",
+      "ref": "css/css-lists/li-value-reversed-024-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/li-with-overflow-hidden-change-list-style-position-001",
+      "path": "css/css-lists/li-with-overflow-hidden-change-list-style-position-001.html",
+      "ref": "css/css-lists/li-with-overflow-hidden-change-list-style-position-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-and-grid-001",
+      "path": "css/css-lists/list-and-grid-001.html",
+      "ref": "css/css-lists/list-and-grid-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-marker-symbol-bidi",
+      "path": "css/css-lists/list-marker-symbol-bidi.html",
+      "ref": "css/css-lists/list-marker-symbol-bidi-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-style-type-decimal-vertical-lr",
+      "path": "css/css-lists/list-style-type-decimal-vertical-lr.html",
+      "ref": "css/css-lists/list-style-type-decimal-vertical-lr-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-style-type-string-001b",
+      "path": "css/css-lists/list-style-type-string-001b.html",
+      "ref": "css/css-lists/list-style-type-string-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-style-type-string-005a",
+      "path": "css/css-lists/list-style-type-string-005a.html",
+      "ref": "css/css-lists/list-style-type-string-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/list-style-type-string-007",
+      "path": "css/css-lists/list-style-type-string-007.html",
+      "ref": "css/css-lists/list-style-type-string-007-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/marker-quotes",
+      "path": "css/css-lists/marker-quotes.html",
+      "ref": "css/css-lists/marker-quotes-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/nested-marker-styling",
+      "path": "css/css-lists/nested-marker-styling.html",
+      "ref": "css/css-lists/nested-marker-styling-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-lists/outside-marker-covered-by-relpos-block-link",
+      "path": "css/css-lists/outside-marker-covered-by-relpos-block-link.html",
+      "ref": "css/css-lists/outside-marker-covered-by-relpos-block-link-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-lists",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/letter-spacing/letter-spacing-200",
+      "path": "css/css-text/letter-spacing/letter-spacing-200.html",
+      "ref": "css/css-text/letter-spacing/reference/letter-spacing-200-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/letter-spacing/letter-spacing-bengali-yaphala-001",
+      "path": "css/css-text/letter-spacing/letter-spacing-bengali-yaphala-001.html",
+      "ref": "css/css-text/letter-spacing/reference/letter-spacing-bengali-yaphala-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/letter-spacing/letter-spacing-nesting-001",
+      "path": "css/css-text/letter-spacing/letter-spacing-nesting-001.html",
+      "ref": "css/css-text/letter-spacing/reference/letter-spacing-nesting-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-end-004",
+      "path": "css/css-text/text-align/text-align-end-004.html",
+      "ref": "css/css-text/text-align/reference/text-align-end-ref-004.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-justify-001",
+      "path": "css/css-text/text-align/text-align-justify-001.html",
+      "ref": "css/css-text/text-align/reference/text-align-justify-ref-001.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-justify-tabs-004",
+      "path": "css/css-text/text-align/text-align-justify-tabs-004.html",
+      "ref": "css/css-text/text-align/reference/text-align-justify-tabs-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-last-end",
+      "path": "css/css-text/text-align/text-align-last-end.html",
+      "ref": "css/css-text/text-align/text-align-last-end-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-match-parent-root-rtl",
+      "path": "css/css-text/text-align/text-align-match-parent-root-rtl.html",
+      "ref": "css/css-text/text-align/text-align-match-parent-root-rtl-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-align/text-align-start-014",
+      "path": "css/css-text/text-align/text-align-start-014.html",
+      "ref": "css/css-text/text-align/reference/text-align-start-ref-014.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-indent/text-indent-dynamic-hanging-001",
+      "path": "css/css-text/text-indent/text-indent-dynamic-hanging-001.html",
+      "ref": "css/css-text/text-indent/reference/text-indent-hanging-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-indent/text-indent-text-align-end",
+      "path": "css/css-text/text-indent/text-indent-text-align-end.html",
+      "ref": "css/css-text/text-indent/reference/text-indent-text-align-end-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-transform/text-transform-full-size-kana-001",
+      "path": "css/css-text/text-transform/text-transform-full-size-kana-001.html",
+      "ref": "css/css-text/text-transform/reference/text-transform-full-size-kana-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-transform/text-transform-fullwidth-010",
+      "path": "css/css-text/text-transform/text-transform-fullwidth-010.html",
+      "ref": "css/css-text/text-transform/reference/text-transform-fullwidth-010-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-transform/text-transform-tailoring-003",
+      "path": "css/css-text/text-transform/text-transform-tailoring-003.html",
+      "ref": "css/css-text/text-transform/reference/text-transform-tailoring-003-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/text-transform/text-transform-upperlower-105",
+      "path": "css/css-text/text-transform/text-transform-upperlower-105.html",
+      "ref": "css/css-text/text-transform/reference/text-transform-upperlower-105-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-011",
+      "path": "css/css-text/white-space/break-spaces-011.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-before-first-char-011",
+      "path": "css/css-text/white-space/break-spaces-before-first-char-011.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-before-first-ideographic-char-005",
+      "path": "css/css-text/white-space/break-spaces-before-first-ideographic-char-005.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-before-first-ideographic-char-016",
+      "path": "css/css-text/white-space/break-spaces-before-first-ideographic-char-016.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-with-ideographic-space-004",
+      "path": "css/css-text/white-space/break-spaces-with-ideographic-space-004.html",
+      "ref": "css/css-text/white-space/reference/pre-wrap-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/break-spaces-with-overflow-wrap-006",
+      "path": "css/css-text/white-space/break-spaces-with-overflow-wrap-006.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/full-width-leading-spaces-003",
+      "path": "css/css-text/white-space/full-width-leading-spaces-003.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/pre-wrap-005",
+      "path": "css/css-text/white-space/pre-wrap-005.html",
+      "ref": "css/css-text/white-space/reference/pre-wrap-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/pre-wrap-016",
+      "path": "css/css-text/white-space/pre-wrap-016.html",
+      "ref": "css/css-text/white-space/reference/pre-wrap-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/pre-wrap-align-left-002",
+      "path": "css/css-text/white-space/pre-wrap-align-left-002.html",
+      "ref": "css/css-text/white-space/reference/pre-wrap-align-left-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/pre-wrap-leading-spaces-004",
+      "path": "css/css-text/white-space/pre-wrap-leading-spaces-004.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/pre-wrap-leading-spaces-015",
+      "path": "css/css-text/white-space/pre-wrap-leading-spaces-015.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/tab-stop-threshold-001",
+      "path": "css/css-text/white-space/tab-stop-threshold-001.html",
+      "ref": "css/css-text/white-space/reference/tab-stop-threshold-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/text-wrap-balance-dynamic-001",
+      "path": "css/css-text/white-space/text-wrap-balance-dynamic-001.html",
+      "ref": "css/css-text/white-space/reference/text-wrap-balance-dynamic-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/text-wrap-balance-line-clamp-006",
+      "path": "css/css-text/white-space/text-wrap-balance-line-clamp-006.html",
+      "ref": "css/css-text/white-space/reference/text-wrap-balance-line-clamp-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/textarea-pre-wrap-005",
+      "path": "css/css-text/white-space/textarea-pre-wrap-005.html",
+      "ref": "css/css-text/white-space/reference/textarea-pre-wrap-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/trailing-ideographic-space-020",
+      "path": "css/css-text/white-space/trailing-ideographic-space-020.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/trailing-ideographic-space-break-spaces-007",
+      "path": "css/css-text/white-space/trailing-ideographic-space-break-spaces-007.html",
+      "ref": "css/css-text/white-space/reference/white-space-break-spaces-005-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/trailing-other-space-separators-break-spaces-003",
+      "path": "css/css-text/white-space/trailing-other-space-separators-break-spaces-003.html",
+      "ref": "css/css-text/white-space/reference/trailing-other-space-separators-break-spaces-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/trailing-other-space-separators-break-spaces-015",
+      "path": "css/css-text/white-space/trailing-other-space-separators-break-spaces-015.html",
+      "ref": "css/css-text/white-space/reference/trailing-other-space-separators-break-spaces-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/white-space-applies-to-text-001",
+      "path": "css/css-text/white-space/white-space-applies-to-text-001.html",
+      "ref": "css/css-text/white-space/reference/white-space-applies-to-text-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/white-space-letter-spacing-001",
+      "path": "css/css-text/white-space/white-space-letter-spacing-001.html",
+      "ref": "css/css-text/white-space/reference/white-space-letter-spacing-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/white-space-pre-wrap-trailing-spaces-001",
+      "path": "css/css-text/white-space/white-space-pre-wrap-trailing-spaces-001.html",
+      "ref": "css/css-text/white-space/reference/white-space-pre-wrap-trailing-spaces-001-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/white-space-vs-joiners-002",
+      "path": "css/css-text/white-space/white-space-vs-joiners-002.html",
+      "ref": "css/css-text/white-space/reference/white-space-vs-joiners-002-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
+    },
+    {
+      "id": "css-text/white-space/ws-break-spaces-applies-to-010",
+      "path": "css/css-text/white-space/ws-break-spaces-applies-to-010.html",
+      "ref": "css/css-text/white-space/reference/ws-break-spaces-applies-to-006-ref.html",
+      "kind": "reftest",
+      "tier": "2",
+      "area": "css-text-basics",
+      "maps_to": "C6"
     }
-  ]
+  ],
+  "coverage_note": "Entries with an `area` are T15's: chosen by scripts/wpt_import.py, a FAIL goes to the Z row in `maps_to`. `mutations` break a page on purpose; the runner requires each to go red."
 }

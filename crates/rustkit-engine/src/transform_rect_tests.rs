@@ -296,6 +296,31 @@ fn translate_flattens_a_depth() {
     translate_after_an_earlier_one("1px 2px calc(1px + 1px)", "21 12 100 50");
 }
 
+/// The depth is a `<length>`: no percentage, not even inside a function, and no keyword.
+/// Chromium 143, `translate_z_probe.mjs`.
+#[test]
+fn translate_refuses_a_depth_that_is_not_a_length() {
+    for z in [
+        "3%",
+        "0%",
+        "auto",
+        "fit-content",
+        "calc(1px + 1%)",
+        "calc(0% + 1px)",
+        "min(1%, 2px)",
+        "max(1px, calc(1px + 1%))",
+        "clamp(1px, 1%, 2px)",
+        "3",
+    ] {
+        translate_after_an_earlier_one(&format!("1px 2px {z}"), "27 10 100 50");
+    }
+    for z in ["0", "-3px", "3em", "3vw", "calc(1px + 1em)", "min(1px, 2px)"] {
+        translate_after_an_earlier_one(&format!("1px 2px {z}"), "21 12 100 50");
+    }
+    // A percentage is fine in the other two.
+    translate_after_an_earlier_one("10% 10% 3px", "30 15 100 50");
+}
+
 #[test]
 fn translate_takes_three_values_at_most() {
     translate_after_an_earlier_one("1px 2px 3px 4px", "27 10 100 50");
