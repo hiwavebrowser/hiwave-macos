@@ -52,7 +52,7 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/overflow-wrap/overflow-wrap-004",
+      "id": "css-text/overflow-wrap/overflow-wrap-004", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-text/overflow-wrap/overflow-wrap-004.html",
       "ref": "css/css-text/overflow-wrap/overflow-wrap-004-ref.html",
       "kind": "reftest",
@@ -68,7 +68,7 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/word-break/break-word-overflow-wrap-interactions",
+      "id": "css-text/word-break/break-word-overflow-wrap-interactions", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions.html",
       "ref": "css/css-text/word-break/word-break-break-word-overflow-wrap-interactions-ref.html",
       "kind": "reftest",
@@ -76,7 +76,7 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-inline/br-font-size",
+      "id": "css-inline/br-font-size", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-inline/br-font-size.html",
       "ref": "css/css-inline/br-font-size-ref.html",
       "kind": "reftest",
@@ -84,7 +84,7 @@
       "maps_to": "A"
     },
     {
-      "id": "css-inline/br-line-height",
+      "id": "css-inline/br-line-height", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-inline/br-line-height.html",
       "ref": "css/css-inline/br-line-height-ref.html",
       "kind": "reftest",
@@ -124,7 +124,7 @@
       "maps_to": "B"
     },
     {
-      "id": "css-inline/empty-text-node-001",
+      "id": "css-inline/empty-text-node-001", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-inline/empty-text-node-001.html",
       "ref": "css/css-inline/empty-text-node-001-ref.html",
       "kind": "reftest",
@@ -132,7 +132,7 @@
       "maps_to": "B2"
     },
     {
-      "id": "css-flexbox/align-self-015",
+      "id": "css-flexbox/align-self-015", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-flexbox/align-self-015.html",
       "ref": "css/css-flexbox/reference/align-self-015-ref.html",
       "kind": "reftest",
@@ -140,7 +140,7 @@
       "maps_to": "flex"
     },
     {
-      "id": "css-flexbox/align-items-baseline-overflow-non-visible",
+      "id": "css-flexbox/align-items-baseline-overflow-non-visible", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-flexbox/align-items-baseline-overflow-non-visible.html",
       "ref": "css/css-flexbox/reference/align-items-baseline-overflow-non-visible-ref.html",
       "kind": "reftest",
@@ -188,7 +188,7 @@
       "maps_to": "slice-0"
     },
     {
-      "id": "css-text/word-break/break-boundary-2-chars-002",
+      "id": "css-text/word-break/break-boundary-2-chars-002", "unproven": "T14 probe: still matches with the named property removed; a second mutation is owed",
       "path": "css/css-text/word-break/break-boundary-2-chars-002.html",
       "ref": "css/css-text/word-break/reference/break-boundary-2-chars-002-ref.html",
       "kind": "reftest",
