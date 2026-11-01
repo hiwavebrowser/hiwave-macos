@@ -43116,7 +43116,8 @@ mod individual_transform_tests {
         assert_eq!(s.scale, Some(TransformOp::Scale(2.0, 2.0)));
         let s = styled(&[("rotate", "10deg"), ("rotate", "x 45deg"), ("translate", "1px 2px 3px")]);
         assert_eq!(s.rotate, Some(TransformOp::Rotate(10.0)));
-        assert_eq!(s.translate, None);
+        // A depth flattens, as in Chromium 143 (`translate_flattens_a_depth`).
+        assert_eq!(s.translate, Some(TransformOp::Translate(Length::Px(1.0), Length::Px(2.0))));
     }
 
     #[test]
