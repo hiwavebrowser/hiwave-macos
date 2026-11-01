@@ -69,6 +69,29 @@ pub struct BoxGeometry {
     pub held: bool,
 }
 
+/// Element ids on a box's `scroller` chain that actually scroll (#850 /
+/// ec0b831d). Transformed boxes ride the same chain so rects follow paint,
+/// but `scrollChain` / `setOwn` must skip them.
+pub(crate) fn scrolling_chain_ids(
+    geometry: &HashMap<usize, BoxGeometry>,
+    start: Option<usize>,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut at = start;
+    while let Some(id) = at {
+        match geometry.get(&id) {
+            Some(g) => {
+                if g.scrolls {
+                    out.push(id);
+                }
+                at = g.scroller;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 /// The offsets script scrolled a view's elements to, by raw NodeId: one table
 /// the bindings and the engine share. Script writes it and reads it back at
 /// once; the engine applies it when script settles (paint) and on a hit test.
@@ -1611,15 +1634,8 @@ pub(crate) fn install(
                             up = n.parent();
                         }
                         let mut chain = String::from(if fixed { "f" } else { "w" });
-                        let mut at = g.scroller;
-                        while let Some(scroller) = at {
-                            let above = host.geometry.get(&scroller);
-                            // A transformed box on the chain moves the box,
-                            // but cannot be scrolled.
-                            if above.is_some_and(|g| g.scrolls) {
-                                chain.push_str(&format!(" {scroller}"));
-                            }
-                            at = above.and_then(|g| g.scroller);
+                        for scroller in scrolling_chain_ids(&host.geometry, g.scroller) {
+                            chain.push_str(&format!(" {scroller}"));
                         }
                         JsValue::String(chain)
                     }

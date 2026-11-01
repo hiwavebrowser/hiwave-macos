@@ -74,6 +74,9 @@ mod sizing_equivalence_tests;
 #[cfg(test)]
 mod table_layout_tests;
 
+#[cfg(test)]
+mod element_scroll_helper_tests;
+
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
