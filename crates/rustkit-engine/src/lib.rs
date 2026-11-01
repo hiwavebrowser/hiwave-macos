@@ -22397,9 +22397,11 @@ fn geometry_snapshot(
         absolute: Option<usize>,
         fixed: Option<usize>,
         /// Under a fixed box the scroll does not move, and under a transform,
-        /// which holds a fixed box to the page.
+        /// which holds a fixed box to the page. So does a filter. Chromium's
+        /// other such properties (`will-change`, `contain`, `perspective`,
+        /// `backdrop-filter`) are not parsed here.
         held: bool,
-        transformed: bool,
+        holds_fixed: bool,
     }
     fn walk(
         b: &LayoutBox,
@@ -22432,13 +22434,13 @@ fn geometry_snapshot(
         let transformed = transform.is_some();
         let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
-        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.transformed);
+        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
         let under = Scrollers {
             flow: inner,
             absolute: if positioned || transformed { inner } else { scrollers.absolute },
             fixed: if transformed { inner } else { scrollers.fixed },
             held,
-            transformed: scrollers.transformed || transformed,
+            holds_fixed: scrollers.holds_fixed || transformed || !b.style.filter.is_empty(),
         };
         // What the children reach, without this box's own border: that is
         // not scrollable overflow.
@@ -22532,7 +22534,7 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, transformed: false };
+    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, holds_fixed: false };
     walk(root, &mut out, &mut styles, None, none);
     (out, styles)
 }
