@@ -57,7 +57,7 @@ const PAGE2: &str = concat!(
 );
 
 const STATE: &str = "function state() { \
-    return ['in', 'out', 'hid', 'clip', 'rel', 'big-s', 's', 'f'].map(function (i) { \
+    return ['in', 'out', 'hid', 'clip', 'rel', 'big-s', 's', 'f', 'tw', 'tb'].map(function (i) { \
         var e = document.getElementById(i); \
         return e && (e.scrollLeft || e.scrollTop) ? i + '=' + e.scrollLeft + ',' + e.scrollTop : ''; \
     }).filter(Boolean).concat('win=' + scrollX + ',' + scrollY).join(' '); } \
@@ -359,4 +359,26 @@ fn an_href_with_a_bare_hash_still_navigates() {
     // Only the hash setter compares fragments; `href` to the URL plus `#`
     // is a fragment navigation in Chromium too.
     assert_eq!(hash_case("/", "location.href = location.href + '#'"), "in=0,40 win=0,0 1 1 /# view=0,0");
+}
+
+// A transformed box is on the layout's `scroller` chain since #852 (it moves
+// the boxes inside it), but it does not scroll. Chromium 143.0.7499.4 on
+// this page (`c2c_transform_chain_probe.mjs` on the hub): only `#s` and the
+// window move. For `#tb-t` Chromium also moves the window 5 across; x stays
+// 0 here, as above.
+const PAGE3: &str = concat!(
+    "<!doctype html><style>body{margin:0;height:3000px}#sp0{height:1000px}",
+    "#s{overflow:auto;width:200px;height:100px}#s-gap{height:300px}",
+    "#tw{transform:translateY(50px);height:200px}#tw-gap{height:100px}#tw-t{height:20px}#s-end{height:100px}",
+    "#tb{transform:translateX(5px)}#tb-gap{height:500px}#tb-t{height:20px}",
+    "</style><body><div id=sp0></div><div id=s><div id=s-gap></div>",
+    "<div id=tw><div id=tw-gap></div><div id=tw-t></div></div><div id=s-end></div></div>",
+    "<div id=tb><div id=tb-gap></div><div id=tb-t></div></div></body>",
+);
+
+#[test]
+fn a_transformed_box_that_does_not_scroll_is_not_a_scroller() {
+    check(PAGE3, "$('tw-t').scrollIntoView()", "s=0,450 win=0,1000");
+    check(PAGE3, "$('tw-t').scrollIntoView({ block: 'nearest' })", "s=0,370 win=0,500");
+    check(PAGE3, "$('tb-t').scrollIntoView()", "win=0,1600");
 }
