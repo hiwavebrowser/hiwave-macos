@@ -148,10 +148,29 @@
             case 'end': return cur + start + size - view;
             case 'center': return cur + start + size / 2 - view / 2;
             default:
-                if (start >= 0 && start + size <= view) return cur;
-                if (size > view || start < 0) return cur + start;
+                var end = start + size;
+                if ((start >= 0 && end <= view) || (start <= 0 && end >= view)) return cur;
+                if ((start < 0 && size < view) || (end > view && size > view)) return cur + start;
                 return cur + start + size - view;
         }
+    }
+    // Each scroller around the element in turn, innermost first, then the
+    // window. An absolute box skips a scroller its containing block is above,
+    // and nothing moves a fixed box but the scrollers inside it. An element
+    // with no box scrolls nothing.
+    function intoView(el, block, inline) {
+        var chain = table.chain(el);
+        if (!chain) return;
+        chain.scrollers.forEach(function (s) {
+            var r = el.getBoundingClientRect(), b = s.getBoundingClientRect(), o = own(s);
+            setOwn(s,
+                align(r.left - b.left - s.clientLeft, r.width, s.clientWidth, o.x, inline),
+                align(r.top - b.top - s.clientTop, r.height, s.clientHeight, o.y, block));
+        });
+        if (!chain.window) return;
+        var r = el.getBoundingClientRect(), p = pos();
+        to(align(r.left, r.width, g.innerWidth, p.x, inline), align(r.top, r.height, g.innerHeight, p.y, block));
+        scrolled(p);
     }
     method(E, 'scrollIntoView', function (arg) {
         var block = 'start', inline = 'nearest';
@@ -160,9 +179,37 @@
             if (arg.block) block = arg.block;
             if (arg.inline) inline = arg.inline;
         }
-        var r = this.getBoundingClientRect(), p = pos();
-        to(align(r.left, r.width, g.innerWidth, p.x, inline), align(r.top, r.height, g.innerHeight, p.y, block));
-        scrolled(p);
+        intoView(this, block, inline);
+    });
+
+    // The indicated part of the document (HTML §7.4.6.4): an id, then a link's
+    // name, as written and then percent-decoded. The empty fragment and `top`
+    // are the top of the page; anything else stays where it is.
+    function indicated(fragment) {
+        function find(name) {
+            var el = document.getElementById(name);
+            if (el) return el;
+            var links = document.getElementsByTagName('a');
+            for (var i = 0; i < links.length; i++) {
+                if (links[i].getAttribute('name') === name) return links[i];
+            }
+            return null;
+        }
+        var el = fragment ? find(fragment) : null;
+        if (el) return el;
+        try { fragment = decodeURIComponent(fragment); } catch (_) {}
+        return fragment ? find(fragment) : null;
+    }
+    Object.defineProperty(g, '__rkScrollToFragment', {
+        value: function (fragment) {
+            var el = indicated(fragment);
+            if (el) { intoView(el, 'start', 'nearest'); return; }
+            if (fragment !== '' && fragment.toLowerCase() !== 'top') return;
+            var p = pos();
+            to(0, 0);
+            scrolled(p);
+        },
+        configurable: true, writable: true, enumerable: false
     });
 
     // The engine calls this when the USER scrolled (wheel, keys, scrollbar):

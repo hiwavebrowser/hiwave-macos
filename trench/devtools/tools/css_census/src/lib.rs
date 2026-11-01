@@ -396,6 +396,9 @@ pub enum Effect {
     NotVisual,
     /// A capture failed.
     NoCapture,
+    /// Agrees with Chrome only as far as a badly off control excuses: the frame
+    /// cannot say whether the value works. See [`FLOOR_CREDIT`].
+    Unproven,
 }
 
 impl Effect {
@@ -406,6 +409,7 @@ impl Effect {
             Effect::Unexercised => "unexercised",
             Effect::NotVisual => "not-visual",
             Effect::NoCapture => "no-capture",
+            Effect::Unproven => "unproven",
         }
     }
 }
@@ -415,9 +419,6 @@ pub struct Verdict {
     pub parse: bool,
     pub computed: bool,
     pub effect: Effect,
-    /// Chrome reads the same with and without the declaration, so a matching
-    /// read could be the initial value.
-    pub computed_read_vacuous: bool,
 }
 
 /// Whitespace-normalised, numbers within 0.05: a resolved width is a float on
@@ -478,11 +479,20 @@ pub fn changed_pixels(a: &Frame, b: &Frame) -> usize {
         .count()
 }
 
+/// How much of the controls' disagreement a match may lean on, in probes. Glyph
+/// seats put the text contexts' floors at 88 or under; a floor past this is a
+/// box in the wrong place, and the value's frame inherits that error wherever
+/// the value lands. Half the floor would not do: `background-clip` sits 450 off
+/// a 916 floor. Neither would a per-probe delta: `background-repeat: repeat-x`
+/// and a sound `text-align: center` both disagree on a tenth of their changes.
+pub const FLOOR_CREDIT: usize = 100;
+
 /// Three questions. Did the declaration change anything in Chrome? Does the
 /// engine's frame agree with Chrome's, allowing the controls' own disagreement
-/// plus a tenth of the change (at least 2 probes)? And did the engine change at
-/// least half as many pixels? The last one catches what the probes forgive: a
-/// thin line the engine never drew.
+/// up to [`FLOOR_CREDIT`] plus a tenth of the change (at least 2 probes)? And did
+/// the engine change at least half as many pixels? The last one catches what the
+/// probes forgive: a thin line the engine never drew. Off by no more than the
+/// whole floor allows is [`Effect::Unproven`].
 fn effect_of(
     value: (&PageRead, &Frame),
     control: (&PageRead, &Frame),
@@ -495,12 +505,14 @@ fn effect_of(
     }
     let floor = probe_diff(control.1, engine_control);
     let off = probe_diff(value.1, engine.1);
-    let allowed = floor + (probe_diff(value.1, control.1) / 10).max(2);
+    let own = (probe_diff(value.1, control.1) / 10).max(2);
     let engine_changed = changed_pixels(engine.1, engine_control);
-    if rects_match(value.0, engine.0) && off <= allowed && engine_changed * 2 >= changed {
-        Effect::Match
-    } else {
+    if !rects_match(value.0, engine.0) || engine_changed * 2 < changed || off > floor + own {
         Effect::Mismatch
+    } else if off > floor.min(FLOOR_CREDIT) + own {
+        Effect::Unproven
+    } else {
+        Effect::Match
     }
 }
 
@@ -513,12 +525,6 @@ pub fn judge(m: &Measure) -> Verdict {
         .unwrap_or("");
     let chrome_computed = m
         .chrome_value
-        .read
-        .as_ref()
-        .map(|r| r.computed.as_str())
-        .unwrap_or("");
-    let chrome_control = m
-        .chrome_control
         .read
         .as_ref()
         .map(|r| r.computed.as_str())
@@ -562,7 +568,6 @@ pub fn judge(m: &Measure) -> Verdict {
         parse: m.arm || engine_moved,
         computed,
         effect,
-        computed_read_vacuous: chrome_computed == chrome_control,
     }
 }
 
@@ -601,7 +606,7 @@ impl Class {
 pub fn class_of(values: &[Verdict]) -> Class {
     let measured = values
         .iter()
-        .any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch));
+        .any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch | Effect::Unproven));
     values
         .iter()
         .filter(|v| !(measured && v.effect == Effect::Unexercised))
@@ -621,7 +626,9 @@ pub fn is_red(class: Class, values: &[Verdict]) -> bool {
     match class {
         Class::Unsupported | Class::Parse => true,
         Class::Effect_ => false,
-        Class::Computed => values.iter().any(|v| v.effect == Effect::Mismatch),
+        Class::Computed => values
+            .iter()
+            .any(|v| matches!(v.effect, Effect::Mismatch | Effect::Unproven)),
     }
 }
 
@@ -644,39 +651,108 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
     None
 }
 
-/// The property names the engine has an arm for, read from the source the same
-/// way `scripts/declaration_census.py` does: a line that is a `"name" | "name"
-/// =>` arm at the match's own indentation (8 to 12 columns). A deeper match on
-/// values is not an arm. The logical map's arms count too.
-pub fn extract_arms(src: &str) -> BTreeSet<String> {
+/// The `"name" | "name"` heads of one match body, at its own indentation (8 to
+/// 12 columns); a deeper match on values is not an arm. A head may run onto more
+/// lines and may carry a guard. `_ if f(property)` is handed to `guard`.
+fn read_heads(body: &str, mut guard: impl FnMut(&str), arms: &mut BTreeSet<String>) {
+    let lines: Vec<&str> = body.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let indent = line.len() - line.trim_start().len();
+        let first = line.trim();
+        if !(8..=12).contains(&indent) {
+            continue;
+        }
+        if first.starts_with("_ if ") {
+            if let Some((cond, _)) = first.split_once("=>") {
+                guard(cond);
+            }
+            continue;
+        }
+        if !first.starts_with('"') {
+            continue;
+        }
+        let mut head = first.to_string();
+        let mut next = i + 1;
+        // Only a `|`, or a line opening with one, continues a head: a string
+        // argument at this depth ends in `,` and is no arm.
+        while !head.contains("=>") {
+            let Some(more) = lines.get(next).map(|l| l.trim()) else {
+                break;
+            };
+            if !head.ends_with('|') && !more.starts_with('|') {
+                break;
+            }
+            head = format!("{head} {more}");
+            next += 1;
+        }
+        let Some((head, _)) = head.split_once("=>") else {
+            continue;
+        };
+        let head = head.split_once(" if ").map_or(head, |(names, _)| names);
+        for part in head.split('|') {
+            let name = part.trim().trim_matches('"');
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+                arms.insert(name.to_ascii_lowercase());
+            }
+        }
+    }
+}
+
+/// The names a guard's function accepts: the heads of its match, with and
+/// without a prefix it strips first. `helpers` holds functions from other crates.
+fn guard_names(cond: &str, src: &str, helpers: &str, arms: &mut BTreeSet<String>) {
+    let Some(open) = cond.find("(property)") else {
+        return;
+    };
+    let name = cond[..open].rsplit([':', ' ']).next().unwrap_or("");
+    let signature = format!("fn {name}(");
+    let Some(body) = fn_body(helpers, &signature).or_else(|| fn_body(src, &signature)) else {
+        return;
+    };
+    let mut names = BTreeSet::new();
+    read_heads(body, |_| {}, &mut names);
+    if let Some((_, rest)) = body.split_once("strip_prefix(\"") {
+        if let Some((prefix, _)) = rest.split_once('"') {
+            let prefixed: Vec<String> = names.iter().map(|n| format!("{prefix}{n}")).collect();
+            names.extend(prefixed);
+        }
+    }
+    arms.extend(names);
+}
+
+/// The property names the engine has an arm for, read from the source much as
+/// `scripts/declaration_census.py` does, plus what its guard arms accept. The
+/// logical map's arms count too.
+pub fn extract_arms(src: &str, helpers: &str) -> BTreeSet<String> {
     let mut arms = BTreeSet::new();
     for signature in ["fn apply_style_property", "fn logical_to_physical"] {
         let Some(body) = fn_body(src, signature) else {
             continue;
         };
-        for line in body.lines() {
-            let indent = line.len() - line.trim_start().len();
-            let Some((head, _)) = line.trim().split_once("=>") else {
-                continue;
-            };
-            if !(8..=12).contains(&indent) || !head.trim_start().starts_with('"') {
-                continue;
-            }
-            for part in head.split('|') {
-                let name = part.trim().trim_matches('"');
-                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
-                    arms.insert(name.to_ascii_lowercase());
-                }
-            }
+        let mut guards = Vec::new();
+        read_heads(body, |cond| guards.push(cond.to_string()), &mut arms);
+        for cond in guards {
+            guard_names(&cond, src, helpers, &mut arms);
         }
     }
     arms
 }
 
+/// Where this branch left develop, shortened. Without `origin/develop` there is
+/// no such point, and the report says it read HEAD rather than call it develop.
+pub fn engine_sha(merge_base: Option<&str>, head: &str) -> String {
+    let short = |s: &str| s.chars().take(8).collect::<String>();
+    match merge_base {
+        Some(base) => short(base),
+        None => format!("{} (HEAD, no origin/develop)", short(head)),
+    }
+}
+
 /// A set without the spine, or far too small, means the reader lost the match
 /// statement. That is a refusal, never "everything is unsupported".
 pub fn check_arms(arms: BTreeSet<String>) -> Result<BTreeSet<String>, String> {
-    const REQUIRED: [&str; 7] = [
+    const REQUIRED: [&str; 8] = [
+        "mask-image",
         "display",
         "width",
         "height",
@@ -881,6 +957,7 @@ fn why(r: &Row) -> String {
                     format!(" (geometry, {} probes)", v.probes_off)
                 }
                 Effect::Mismatch => format!(" ({} probes)", v.probes_off),
+                Effect::Unproven => format!(" (control-limited, {} probes)", v.probes_off),
                 _ => String::new(),
             };
             format!("{}: {}{miss}{read}", code(&v.value), v.effect.label())
@@ -921,7 +998,7 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     md.push_str("- An `unexercised` value changed nothing in Chrome, so it cannot pass effect; `not-visual` properties paint nothing in a static frame and stop at computed.\n");
     md.push_str("- An arm that applies a property and is then ignored still counts as parse.\n\n");
     if !meta.contexts_off.is_empty() {
-        md.push_str("Controls that already disagree with Chrome (off probes, credited as noise on that context's rows):\n\n");
+        md.push_str(&format!("Controls that already disagree with Chrome (off probes, credited as noise on that context's rows up to {FLOOR_CREDIT}; a value that agrees only with more credit than that reads `unproven`, red, `control-limited`):\n\n"));
         for (context, off) in &meta.contexts_off {
             md.push_str(&format!("- {context}: {off}\n"));
         }
