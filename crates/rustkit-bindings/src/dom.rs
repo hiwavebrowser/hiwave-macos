@@ -1544,7 +1544,7 @@ pub(crate) fn install(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
-            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom" | "scroll")) {
+            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom" | "scroll" | "scrollChain")) {
                 DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
@@ -1588,6 +1588,32 @@ pub(crate) fn install(
                         JsValue::String(String::new())
                     }
                 }
+                // What scrolling to this element moves: "w" when the window
+                // does ("f" under a fixed box), then the scrollers, innermost
+                // first. "" when it has no box.
+                (Some(node), Some("scrollChain")) => match host.geometry.get(&node.id.raw()) {
+                    Some(g) => {
+                        let mut fixed = false;
+                        let mut up = Some(node.clone());
+                        while let (false, Some(n)) = (fixed, up) {
+                            fixed = host.geometry.get(&n.id.raw()).is_some_and(|g| g.position == 2);
+                            up = n.parent();
+                        }
+                        let mut chain = String::from(if fixed { "f" } else { "w" });
+                        let mut at = g.scroller;
+                        while let Some(scroller) = at {
+                            let above = host.geometry.get(&scroller);
+                            // A transformed box on the chain moves the box,
+                            // but cannot be scrolled.
+                            if above.is_some_and(|g| g.scrolls) {
+                                chain.push_str(&format!(" {scroller}"));
+                            }
+                            at = above.and_then(|g| g.scroller);
+                        }
+                        JsValue::String(chain)
+                    }
+                    None => JsValue::String(String::new()),
+                },
                 (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
@@ -2813,6 +2839,12 @@ const WRAPPERS_JS: &str = r#"
             return { x: finite(p[0]), y: finite(p[1]) };
         },
         write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); },
+        chain: function (el) {
+            var raw = info(el, 'scrollChain');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { window: p[0] === 'w', scrollers: p.slice(1).map(function (id) { return wrap(+id); }) };
+        },
         byId: function (id) { return wrap(id); }
     };
     function scrollOffset(axis) {

@@ -104,6 +104,24 @@
         },
         enumerable: true, configurable: true
     });
+    // The hash setter (HTML §7.2.4) is the fragment navigation. Script could
+    // assign `location.hash` and nothing happened until 2026-10-31.
+    var hashValue = loc.hash || '';
+    Object.defineProperty(loc, 'hash', {
+        get: function () { return hashValue; },
+        set: function (v) {
+            if (syncing) { hashValue = String(v); return; }
+            var target;
+            try { target = new URL(hrefValue.split('#')[0] + '#' + String(v).replace(/^#/, '')); } catch (e) { return; }
+            // The fragment already there (none reads as empty) is no
+            // navigation: `location.hash = ''` on a URL without one stays put.
+            var at = hrefValue.indexOf('#');
+            if (target.hash.slice(1) === (at < 0 ? '' : hrefValue.slice(at + 1))) return;
+            go(target);
+        },
+        enumerable: true, configurable: true
+    });
+    g.__rustkit_location_hash_sync = function (hash) { hashValue = hash; };
     // Location's stringifier is its href (HTML §7.3). `new URL(path, location)`
     // and `String(location)` use it; without it the base is "[object Object]"
     // and the URL constructor throws Invalid URL.
@@ -200,14 +218,25 @@
 
     // The engine followed a link to a fragment of this document (HTML
     // §7.4.2.3.3): a new entry, the new URL, then `hashchange`.
+    // The same URL again adds no entry and hears no `hashchange`, but scrolls.
     g.__rustkit_fragment_navigation = function (href) {
         var oldURL = loc.href;
-        if (oldURL === href) return;
-        entries.length = index + 1;
-        entries.push({ url: href, state: null });
-        index++;
-        setLocation(href);
-        g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+        if (oldURL !== href) {
+            entries.length = index + 1;
+            entries.push({ url: href, state: null });
+            index++;
+            setLocation(href);
+        }
+        g.__rustkit_scroll_to_location_fragment();
+        if (oldURL !== href) {
+            g.dispatchEvent(new HashChangeEvent('hashchange', { oldURL: oldURL, newURL: loc.href }));
+        }
+    };
+    // Scroll to what the URL's fragment names, if it has one (a URL ending in
+    // a bare `#` has an empty one, whose `hash` reads as none).
+    g.__rustkit_scroll_to_location_fragment = function () {
+        var at = loc.href.indexOf('#');
+        if (at >= 0 && typeof g.__rkScrollToFragment === 'function') g.__rkScrollToFragment(loc.href.slice(at + 1));
     };
 
     // What script's `link.click()` does once no listener cancelled it: the

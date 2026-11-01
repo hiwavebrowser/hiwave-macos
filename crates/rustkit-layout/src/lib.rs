@@ -1702,23 +1702,57 @@ impl LayoutBox {
             && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
     }
 
-    /// How far this box's content can scroll on each axis: what its
-    /// descendants reach past its padding box.
-    pub fn element_scroll_max(&self) -> (f32, f32) {
-        fn reach(b: &LayoutBox, right: &mut f32, bottom: &mut f32) {
-            let border = b.dimensions.border_box();
-            *right = right.max(border.x + border.width);
-            *bottom = bottom.max(border.y + border.height);
-            for child in &b.children {
-                reach(child, right, bottom);
+    /// Whether what this box's content reaches past it is cut off, so it is
+    /// not overflow of a scroller around it: a scroller, or `clip` both ways.
+    pub fn clips_its_content(&self) -> bool {
+        use rustkit_css::Overflow;
+        self.is_element_scroller()
+            || (self.style.overflow_x == Overflow::Clip && self.style.overflow_y == Overflow::Clip)
+    }
+
+    /// Grow (`right`, `bottom`) to what this box reaches, its descendants
+    /// included, as overflow of a scroller around it.
+    pub fn reach_as_overflow(&self, right: &mut f32, bottom: &mut f32) {
+        let border = self.dimensions.border_box();
+        *right = right.max(border.x + border.width);
+        *bottom = bottom.max(border.y + border.height);
+        if self.clips_its_content() {
+            self.escaped_reach(right, bottom);
+        } else {
+            for child in &self.children {
+                child.reach_as_overflow(right, bottom);
             }
         }
-        let padding = self.dimensions.padding_box();
-        let (mut right, mut bottom) = (padding.x + padding.width, padding.y + padding.height);
-        for child in &self.children {
-            reach(child, &mut right, &mut bottom);
+    }
+
+    /// The absolute boxes under this clipping box whose containing block is
+    /// above it: its clip does not cut them.
+    fn escaped_reach(&self, right: &mut f32, bottom: &mut f32) {
+        if self.holds_absolute_boxes() {
+            return;
         }
-        (right - padding.x - padding.width, bottom - padding.y - padding.height)
+        for child in &self.children {
+            if child.position == Position::Absolute {
+                child.reach_as_overflow(right, bottom);
+            } else {
+                child.escaped_reach(right, bottom);
+            }
+        }
+    }
+
+    /// How far this box's content can scroll on each axis: what its
+    /// descendants reach, then its padding at that end, past its padding box.
+    pub fn element_scroll_max(&self) -> (f32, f32) {
+        let padding = self.dimensions.padding_box();
+        let (mut right, mut bottom) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for child in &self.children {
+            child.reach_as_overflow(&mut right, &mut bottom);
+        }
+        let own = &self.dimensions.padding;
+        (
+            (right + own.right - padding.x - padding.width).max(0.0),
+            (bottom + own.bottom - padding.y - padding.height).max(0.0),
+        )
     }
 
     /// Whether the wheel may move this scroller, on each axis. `hidden` scrolls
