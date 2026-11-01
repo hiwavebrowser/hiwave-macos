@@ -1602,8 +1602,13 @@ pub(crate) fn install(
                         let mut chain = String::from(if fixed { "f" } else { "w" });
                         let mut at = g.scroller;
                         while let Some(scroller) = at {
-                            chain.push_str(&format!(" {scroller}"));
-                            at = host.geometry.get(&scroller).and_then(|g| g.scroller);
+                            let above = host.geometry.get(&scroller);
+                            // A transformed box on the chain moves the box,
+                            // but cannot be scrolled.
+                            if above.is_some_and(|g| g.scrolls) {
+                                chain.push_str(&format!(" {scroller}"));
+                            }
+                            at = above.and_then(|g| g.scroller);
                         }
                         JsValue::String(chain)
                     }
