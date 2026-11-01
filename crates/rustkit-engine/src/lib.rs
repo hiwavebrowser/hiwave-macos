@@ -21230,15 +21230,14 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
 }
 
 /// `translate: none | <length-percentage> [<length-percentage> <length>?]?`.
-/// `Some(None)` is `none`; `None` is invalid. A nonzero z is 3D, which the
-/// 2D painter can't honour, so the declaration is dropped rather than
-/// painted flat.
+/// `Some(None)` is `none`; `None` is invalid. The painter is 2D: with no
+/// perspective a z moves nothing on the page's plane.
 fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") {
         return Some(None);
     }
-    let parts: Vec<&str> = value.split_whitespace().collect();
+    let parts = split_outside_functions(value);
     if parts.is_empty() || parts.len() > 3 {
         return None;
     }
@@ -21247,14 +21246,42 @@ fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::Transfo
         Some(p) => parse_length(p)?,
         None => rustkit_css::Length::Zero,
     };
+    // The depth is a `<length>`: no percentage, even inside a function, no keyword,
+    // and no number but zero.
     if let Some(z) = parts.get(2) {
-        match parse_length(z)? {
-            rustkit_css::Length::Zero => {}
-            rustkit_css::Length::Px(v) if v == 0.0 => {}
-            _ => return None,
+        if z.contains('%')
+            || z.parse::<f32>().is_ok_and(|n| n != 0.0)
+            || matches!(parse_length(z)?, rustkit_css::Length::Auto | rustkit_css::Length::FitContent)
+        {
+            return None;
         }
     }
     Some(Some(rustkit_css::TransformOp::Translate(x, y)))
+}
+
+/// The parts of a value between the white space outside functions:
+/// `0px calc(-100% - 1px)` is two.
+fn split_outside_functions(value: &str) -> Vec<&str> {
+    let (mut depth, mut start, mut parts) = (0, None, Vec::new());
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        match (ch.is_whitespace() && depth == 0, start) {
+            (true, Some(from)) => {
+                parts.push(&value[from..i]);
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        parts.push(&value[from..]);
+    }
+    parts
 }
 
 /// `rotate: none | <angle> | z <angle>` (the 2D forms). Other axes are 3D
@@ -43320,7 +43347,7 @@ mod individual_transform_tests {
     }
 
     #[test]
-    fn none_resets_and_invalid_or_3d_values_are_dropped() {
+    fn none_resets_invalid_values_drop_and_a_depth_flattens() {
         let s = styled(&[("translate", "4px"), ("translate", "none")]);
         assert_eq!(s.translate, None);
         // Invalid and 3D values leave the previous value alone.
@@ -43328,7 +43355,8 @@ mod individual_transform_tests {
         assert_eq!(s.scale, Some(TransformOp::Scale(2.0, 2.0)));
         let s = styled(&[("rotate", "10deg"), ("rotate", "x 45deg"), ("translate", "1px 2px 3px")]);
         assert_eq!(s.rotate, Some(TransformOp::Rotate(10.0)));
-        assert_eq!(s.translate, None);
+        // A depth flattens, as in Chromium 143 (`translate_flattens_a_depth`).
+        assert_eq!(s.translate, Some(TransformOp::Translate(Length::Px(1.0), Length::Px(2.0))));
     }
 
     #[test]
