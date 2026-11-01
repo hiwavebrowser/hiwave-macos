@@ -505,6 +505,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod transform_parse_tests;
+#[cfg(all(test, feature = "headless"))]
 mod transform_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
@@ -12354,6 +12356,7 @@ impl Engine {
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
             "box-sizing" => style.box_sizing = parent.box_sizing,
+            "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
             "border-spacing" => style.border_spacing = parent.border_spacing,
             "border-collapse" => style.border_collapse = parent.border_collapse,
@@ -13955,6 +13958,7 @@ impl layout_ctx::LayoutCtx {
         match property {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
+            "transform" => style.transform = rustkit_css::TransformList::none(),
             // `background: initial` / `unset`: no colour, no image.
             "background" => {
                 style.background_color = rustkit_css::Color::TRANSPARENT;
@@ -21198,36 +21202,24 @@ fn parse_timing_function(value: &str) -> rustkit_css::TimingFunction {
 
 /// Parse a CSS transform value into a TransformList.
 fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
-    let value = value.trim();
-    if value == "none" {
+    // Function names, units and keywords all ignore case.
+    let value = value.trim().to_ascii_lowercase();
+    // `transform` does not inherit, so these all mean its initial value.
+    if matches!(value.as_str(), "none" | "initial" | "unset" | "revert" | "revert-layer") {
         return Some(rustkit_css::TransformList::none());
     }
 
     let mut ops = Vec::new();
-    let mut remaining = value;
+    let mut remaining = value.as_str();
 
+    // One function the parser does not take refuses the whole declaration.
     while !remaining.is_empty() {
-        remaining = remaining.trim_start();
-
-        // Find the function name
-        if let Some(paren_pos) = remaining.find('(') {
-            let func_name = &remaining[..paren_pos];
-            let after_paren = &remaining[paren_pos + 1..];
-
-            // Find matching closing paren
-            if let Some(close_pos) = find_matching_paren(after_paren) {
-                let args = &after_paren[..close_pos];
-                remaining = &after_paren[close_pos + 1..];
-
-                if let Some(op) = parse_transform_op(func_name, args) {
-                    ops.push(op);
-                }
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
+        let paren_pos = remaining.find('(')?;
+        let func_name = &remaining[..paren_pos];
+        let after_paren = &remaining[paren_pos + 1..];
+        let close_pos = find_matching_paren(after_paren)?;
+        ops.push(parse_transform_op(func_name, &after_paren[..close_pos])?);
+        remaining = after_paren[close_pos + 1..].trim_start();
     }
 
     if ops.is_empty() {
@@ -21338,76 +21330,316 @@ fn parse_individual_scale(value: &str) -> Option<Option<rustkit_css::TransformOp
     Some(Some(rustkit_css::TransformOp::Scale(sx, sy)))
 }
 
-/// Parse a single transform operation.
+/// Parse a single transform operation. The painter is 2D: with no perspective
+/// a 3D function flattens onto the page, keeping what it does to x and y, and
+/// `perspective()` moves nothing on the page's plane. What perspective does to
+/// a depth is not kept.
 fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp> {
-    let args = args.trim();
-    let parts: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
+    use rustkit_css::TransformOp as Op;
 
-    match func.trim() {
-        "translate" => {
-            let x = parse_length(parts.first()?)?;
-            let y = parts
-                .get(1)
-                .and_then(|s| parse_length(s))
-                .unwrap_or(rustkit_css::Length::Zero);
-            Some(rustkit_css::TransformOp::Translate(x, y))
-        }
-        "translateX" => {
-            let x = parse_length(parts.first()?)?;
-            Some(rustkit_css::TransformOp::TranslateX(x))
-        }
-        "translateY" => {
-            let y = parse_length(parts.first()?)?;
-            Some(rustkit_css::TransformOp::TranslateY(y))
-        }
-        "scale" => {
-            let sx = parts.first()?.parse::<f32>().ok()?;
-            let sy = parts
-                .get(1)
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(sx);
-            Some(rustkit_css::TransformOp::Scale(sx, sy))
-        }
-        "scaleX" => {
-            let s = parts.first()?.parse::<f32>().ok()?;
-            Some(rustkit_css::TransformOp::ScaleX(s))
-        }
-        "scaleY" => {
-            let s = parts.first()?.parse::<f32>().ok()?;
-            Some(rustkit_css::TransformOp::ScaleY(s))
-        }
-        "rotate" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::Rotate(angle))
-        }
-        "skew" => {
-            let ax = parse_angle(parts.first()?)?;
-            let ay = parts.get(1).and_then(|s| parse_angle(s)).unwrap_or(0.0);
-            Some(rustkit_css::TransformOp::Skew(ax, ay))
-        }
-        "skewX" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::SkewX(angle))
-        }
-        "skewY" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::SkewY(angle))
-        }
-        "matrix" => {
-            if parts.len() >= 6 {
-                let a = parts[0].parse::<f32>().ok()?;
-                let b = parts[1].parse::<f32>().ok()?;
-                let c = parts[2].parse::<f32>().ok()?;
-                let d = parts[3].parse::<f32>().ok()?;
-                let e = parts[4].parse::<f32>().ok()?;
-                let f = parts[5].parse::<f32>().ok()?;
-                Some(rustkit_css::TransformOp::Matrix(a, b, c, d, e, f))
-            } else {
-                None
+    /// The commas at this level: `translate(calc(1px + min(2px, 3px)), 0)`.
+    fn split_args(args: &str) -> Vec<&str> {
+        let (mut depth, mut start, mut parts) = (0, 0, Vec::new());
+        for (i, ch) in args.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(args[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
             }
+        }
+        parts.push(args[start..].trim());
+        parts
+    }
+    /// `<number> | <percentage>`.
+    fn factor(s: &str) -> Option<f32> {
+        if let Some(math) = transform_math(s) {
+            return match math {
+                (v, TransformMathKind::Number) => Some(v),
+                (v, TransformMathKind::Percent) => Some(v / 100.0),
+                (_, TransformMathKind::Angle) => None,
+            };
+        }
+        match s.strip_suffix('%') {
+            Some(p) => css_number(p).map(|v| v / 100.0),
+            None => css_number(s),
+        }
+    }
+    /// `<angle> | 0`: a bare number other than zero is not an angle here, nor
+    /// is a math function that comes to a number.
+    fn angle(s: &str) -> Option<f32> {
+        if let Some(math) = transform_math(s) {
+            return match math {
+                (v, TransformMathKind::Angle) => Some(if v.is_finite() { v } else { 0.0 }),
+                _ => None,
+            };
+        }
+        match css_number(s) {
+            Some(n) => (n == 0.0).then_some(0.0),
+            None => css_angle(s),
+        }
+    }
+    /// `<length-percentage>`: a bare number other than zero is not a length,
+    /// and `inf` or `nan` before a unit is no number.
+    fn length(s: &str) -> Option<rustkit_css::Length> {
+        if s.trim_start_matches(['+', '-']).starts_with(['i', 'n']) {
+            return None;
+        }
+        match s.parse::<f32>() {
+            Ok(n) if n != 0.0 => None,
+            _ => parse_length(s),
+        }
+    }
+    /// A length with no percentage: a depth has no box side to be a part of.
+    fn depth(s: &str) -> Option<()> {
+        match length(s)? {
+            rustkit_css::Length::Percent(_) => None,
+            _ => Some(()),
+        }
+    }
+    fn number(s: &str) -> Option<f32> {
+        match transform_math(s) {
+            Some((v, TransformMathKind::Number)) => Some(v),
+            Some(_) => None,
+            None => css_number(s),
+        }
+    }
+    let still = || Op::Translate(rustkit_css::Length::Zero, rustkit_css::Length::Zero);
+
+    let func = func.to_ascii_lowercase();
+    let parts = split_args(args);
+    match (func.as_str(), parts.as_slice()) {
+        ("translate", [x]) => Some(Op::Translate(length(x)?, rustkit_css::Length::Zero)),
+        ("translate", [x, y]) => Some(Op::Translate(length(x)?, length(y)?)),
+        ("translatex", [x]) => Some(Op::TranslateX(length(x)?)),
+        ("translatey", [y]) => Some(Op::TranslateY(length(y)?)),
+        ("translatez", [z]) => {
+            depth(z)?;
+            Some(still())
+        }
+        ("translate3d", [x, y, z]) => {
+            depth(z)?;
+            Some(Op::Translate(length(x)?, length(y)?))
+        }
+        ("scale", [s]) => {
+            let s = factor(s)?;
+            Some(Op::Scale(s, s))
+        }
+        ("scale", [x, y]) => Some(Op::Scale(factor(x)?, factor(y)?)),
+        ("scalex", [s]) => Some(Op::ScaleX(factor(s)?)),
+        ("scaley", [s]) => Some(Op::ScaleY(factor(s)?)),
+        ("scalez", [s]) => {
+            factor(s)?;
+            Some(still())
+        }
+        ("scale3d", [x, y, z]) => {
+            factor(z)?;
+            Some(Op::Scale(factor(x)?, factor(y)?))
+        }
+        ("rotate" | "rotatez", [a]) => Some(Op::Rotate(angle(a)?)),
+        ("rotatex", [a]) => Some(Op::ScaleY(angle(a)?.to_radians().cos())),
+        ("rotatey", [a]) => Some(Op::ScaleX(angle(a)?.to_radians().cos())),
+        ("rotate3d", [x, y, z, a]) => {
+            let (x, y, z) = (number(x)?, number(y)?, number(z)?);
+            let a = angle(a)?.to_radians();
+            let length = (x * x + y * y + z * z).sqrt();
+            if length == 0.0 {
+                return Some(still());
+            }
+            let (x, y, z) = (x / length, y / length, z / length);
+            let (sin, cos) = a.sin_cos();
+            let turn = 1.0 - cos;
+            Some(Op::Matrix(
+                cos + x * x * turn,
+                y * x * turn + z * sin,
+                x * y * turn - z * sin,
+                cos + y * y * turn,
+                0.0,
+                0.0,
+            ))
+        }
+        ("skew", [x]) => Some(Op::Skew(angle(x)?, 0.0)),
+        ("skew", [x, y]) => Some(Op::Skew(angle(x)?, angle(y)?)),
+        ("skewx", [a]) => Some(Op::SkewX(angle(a)?)),
+        ("skewy", [a]) => Some(Op::SkewY(angle(a)?)),
+        ("matrix", [a, b, c, d, e, f]) => Some(Op::Matrix(
+            number(a)?,
+            number(b)?,
+            number(c)?,
+            number(d)?,
+            number(e)?,
+            number(f)?,
+        )),
+        ("matrix3d", m) if m.len() == 16 => {
+            let n = m.iter().map(|v| number(v)).collect::<Option<Vec<f32>>>()?;
+            Some(Op::Matrix(n[0], n[1], n[4], n[5], n[12], n[13]))
+        }
+        ("perspective", [p]) => {
+            if *p != "none" {
+                depth(p)?;
+                // A math function is clamped to zero, not refused.
+                if p.starts_with('-') && length(p)?.to_px(16.0, 16.0, 0.0) < 0.0 {
+                    return None;
+                }
+            }
+            Some(still())
         }
         _ => None,
     }
+}
+
+/// A CSS `<number>`, which `f32`'s own parser is wider than: no `inf`, no
+/// `nan`, no `5.`. Too large for an `f32` is the largest one.
+fn css_number(s: &str) -> Option<f32> {
+    let plain = s.ends_with(|c: char| c.is_ascii_digit())
+        && !s.contains(".e")
+        && s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e'));
+    if !plain {
+        return None;
+    }
+    s.parse::<f32>().ok().map(|v| v.clamp(-f32::MAX, f32::MAX))
+}
+
+/// `parse_angle` for a value with a unit and a CSS `<number>` before it.
+fn css_angle(s: &str) -> Option<f32> {
+    let digits = s.strip_suffix("grad").or(s.strip_suffix("turn")).or(s.strip_suffix("deg")).or(s.strip_suffix("rad"))?;
+    css_number(digits)?;
+    parse_angle(s)
+}
+
+/// What a math function in a transform comes to.
+#[derive(Clone, Copy, PartialEq)]
+enum TransformMathKind {
+    Number,
+    /// In degrees.
+    Angle,
+    Percent,
+}
+
+/// The value of `calc()`, `min()`, `max()` or `clamp()` over numbers, angles
+/// and percentages, in lower case, for the places a transform takes a number
+/// or an angle. Lengths go to `parse_length`. `None` when `s` is not one, or
+/// its types do not add up.
+fn transform_math(s: &str) -> Option<(f32, TransformMathKind)> {
+    use TransformMathKind::{Angle, Number, Percent};
+
+    fn sum(r: &mut &str) -> Option<(f32, TransformMathKind)> {
+        let (mut value, kind) = product(r)?;
+        loop {
+            let after = r.trim_start();
+            // `+` and `-` need white space on both sides.
+            let spaced = after.len() < r.len() && after.get(1..).is_some_and(|tail| tail.starts_with(char::is_whitespace));
+            let sign = match after.chars().next() {
+                Some('+') if spaced => 1.0,
+                Some('-') if spaced => -1.0,
+                _ => return Some((value, kind)),
+            };
+            *r = &after[1..];
+            let (next, next_kind) = product(r)?;
+            if next_kind != kind {
+                return None;
+            }
+            value += sign * next;
+        }
+    }
+    fn product(r: &mut &str) -> Option<(f32, TransformMathKind)> {
+        let (mut value, mut kind) = unit(r)?;
+        loop {
+            let after = r.trim_start();
+            match after.chars().next() {
+                Some('*') => {
+                    *r = &after[1..];
+                    let (next, next_kind) = unit(r)?;
+                    kind = match (kind, next_kind) {
+                        (k, Number) => k,
+                        (Number, k) => k,
+                        _ => return None,
+                    };
+                    value *= next;
+                }
+                Some('/') => {
+                    *r = &after[1..];
+                    let (next, next_kind) = unit(r)?;
+                    if next_kind != Number {
+                        return None;
+                    }
+                    value /= next;
+                }
+                _ => return Some((value, kind)),
+            }
+        }
+    }
+    fn unit(r: &mut &str) -> Option<(f32, TransformMathKind)> {
+        *r = r.trim_start();
+        if let Some(inner) = r.strip_prefix('(') {
+            *r = inner;
+            let value = sum(r)?;
+            *r = r.trim_start().strip_prefix(')')?;
+            return Some(value);
+        }
+        if let Some(value) = function(r) {
+            return value;
+        }
+        let end = r.find(|c: char| c.is_whitespace() || matches!(c, ')' | ',' | '*' | '/')).unwrap_or(r.len());
+        let (token, rest) = r.split_at(end);
+        *r = rest;
+        if let Some(percent) = token.strip_suffix('%') {
+            return Some((css_number(percent)?, Percent));
+        }
+        match css_number(token) {
+            Some(number) => Some((number, Number)),
+            None => Some((css_angle(token)?, Angle)),
+        }
+    }
+    /// `Some` when `r` starts with a math function; inside, `None` when it is bad.
+    fn function(r: &mut &str) -> Option<Option<(f32, TransformMathKind)>> {
+        let open = r.find('(')?;
+        let name = &r[..open];
+        if !matches!(name, "calc" | "min" | "max" | "clamp") {
+            return None;
+        }
+        let mut inner = &r[open + 1..];
+        let mut args = Vec::new();
+        loop {
+            let Some(arg) = sum(&mut inner) else {
+                return Some(None);
+            };
+            args.push(arg);
+            let after = inner.trim_start();
+            match after.chars().next() {
+                Some(',') => inner = &after[1..],
+                Some(')') => {
+                    inner = &after[1..];
+                    break;
+                }
+                _ => return Some(None),
+            }
+        }
+        *r = inner;
+        let kind = args[0].1;
+        if args.iter().any(|arg| arg.1 != kind) {
+            return Some(None);
+        }
+        let values: Vec<f32> = args.iter().map(|arg| arg.0).collect();
+        let value = match (name, values.as_slice()) {
+            ("calc", [v]) => *v,
+            ("min", all) => all.iter().copied().fold(f32::INFINITY, f32::min),
+            ("max", all) => all.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            ("clamp", [low, v, high]) => v.min(*high).max(*low),
+            _ => return Some(None),
+        };
+        Some(Some((value, kind)))
+    }
+
+    let mut rest = s;
+    let value = function(&mut rest)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    value
 }
 
 /// Parse a CSS angle value (e.g., "45deg", "1rad", "0.5turn") into degrees.
