@@ -274,6 +274,8 @@ fn a_panel_slides_out_of_its_clipping_wrapper() {
         page,
         "$('p').getBoundingClientRect().y - $('w').getBoundingClientRect().y + ' ' + $('p').getBoundingClientRect().height",
         "-201 200",
+    );
+}
 
 const FIXED: &str = "<!doctype html><style>body{margin:0;height:3000px}</style>\
     <div id=m style=\"position:fixed;left:50%;top:10px;width:200px;height:50px;transform:translateX(-50%)\"></div>\
