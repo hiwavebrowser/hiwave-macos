@@ -253,9 +253,7 @@ fn a_transform_above_moves_it_after_the_rule() {
         .iter()
         .map(|y| format!("(window.scrollTo(0, {y}), at('e'))"))
         .collect();
-    // `getBoundingClientRect` leaves transforms out here (row C10), so these
-    // are Chromium's values less the transform's 100.
-    check(PAGE2, &format!("[{}].join(' ')", steps.join(", ")), "1100,400 1100,100 1100,10 1100,10 1100,-420");
+    check(PAGE2, &format!("[{}].join(' ')", steps.join(", ")), "1100,500 1100,200 1100,110 1100,110 1100,-320");
 }
 
 #[test]
@@ -393,4 +391,61 @@ fn after_a_window_scroll_a_click_finds_the_stuck_box() {
     let hit = Engine::hit_at(&engine.views[&view], 320.0, 40.0).expect("hit");
     let rect = (hit.border_box.x, hit.border_box.y, hit.border_box.width);
     assert_eq!(rect, (300.0, 400.0, 40.0), "#w, as laid out");
+}
+
+/// Sticky boxes under transforms (`trench/z/tools/c2/c2d_r1_probe.mjs`).
+const TRANSFORMS: &str = concat!(
+    "<!doctype html><style>body{margin:0;height:3000px}.tall{height:600px}.gap{height:50px}",
+    ".st{position:sticky;top:0;height:20px;width:50px}",
+    "#a-s{position:absolute;left:0;top:0;width:200px;height:100px;overflow:auto;transform:translateX(10px)}",
+    "#b-s{position:absolute;left:300px;top:0;width:200px;height:100px;overflow:auto}#b{transform:scale(2)}",
+    "#d-s{position:absolute;left:0;top:200px;width:200px;height:100px;overflow:auto;transform:scale(2);transform-origin:0 0}",
+    "#sp{height:400px}#c-tr{transform:translateY(50px);margin-left:600px;height:1000px}",
+    "</style><body>",
+    "<div id=a-s><div class=gap></div><div class=st id=a></div><div class=tall></div></div>",
+    "<div id=b-s><div class=gap></div><div class=st id=b></div><div class=tall></div></div>",
+    "<div id=d-s><div class=gap></div><div class=st id=d></div><div class=tall></div></div>",
+    "<div id=sp></div><div id=c-tr><div class=st id=c></div></div></body>",
+);
+
+#[test]
+fn it_sticks_in_a_transformed_scroller() {
+    check(TRANSFORMS, "$('a-s').scrollTop = 100; at('a')", "10,0");
+}
+
+#[test]
+fn its_own_transform_goes_with_it() {
+    check(TRANSFORMS, "$('b-s').scrollTop = 100; at('b')", "275,-10");
+}
+
+#[test]
+fn it_sticks_in_a_scaled_scroller() {
+    check(TRANSFORMS, "$('d-s').scrollTop = 100; at('d')", "0,200");
+}
+
+#[test]
+fn it_sticks_to_the_window_under_a_transform() {
+    check(
+        TRANSFORMS,
+        "[0, 300, 450, 700, 1200].map(function (y) { window.scrollTo(0, y); return at('c'); }).join(' ')",
+        "600,450 600,150 600,50 600,50 600,50",
+    );
+}
+
+/// A sticky box under a fixed box takes nothing from a sticky box above that.
+const IN_FIXED_IN_STICKY: &str = concat!(
+    "<!doctype html><style>body{margin:0;height:3000px}",
+    "#sp{height:400px}#ws{position:sticky;top:50px;width:300px;height:200px;margin-left:100px}",
+    "#wf{position:fixed;left:400px;top:0;width:200px;height:200px}",
+    "#wfs{position:sticky;top:10px;width:100px;height:50px}",
+    "</style><body><div id=sp></div><div id=ws><div id=wf><div id=wfs></div></div></div></body>",
+);
+
+#[test]
+fn a_fixed_box_cuts_off_the_sticky_boxes_above_it() {
+    check(
+        IN_FIXED_IN_STICKY,
+        "[0, 500, 1000].map(function (y) { window.scrollTo(0, y); return at('wfs') + ':' + hit(410, 55) + ':' + hit(410, 5); }).join(' ')",
+        "400,10:wfs:wf 400,10:wfs:wf 400,10:wfs:wf",
+    );
 }
