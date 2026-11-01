@@ -21221,28 +21221,14 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
     let mut ops = Vec::new();
     let mut remaining = value;
 
+    // One function the parser does not take refuses the whole declaration.
     while !remaining.is_empty() {
-        remaining = remaining.trim_start();
-
-        // Find the function name
-        if let Some(paren_pos) = remaining.find('(') {
-            let func_name = &remaining[..paren_pos];
-            let after_paren = &remaining[paren_pos + 1..];
-
-            // Find matching closing paren
-            if let Some(close_pos) = find_matching_paren(after_paren) {
-                let args = &after_paren[..close_pos];
-                remaining = &after_paren[close_pos + 1..];
-
-                if let Some(op) = parse_transform_op(func_name, args) {
-                    ops.push(op);
-                }
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
+        let paren_pos = remaining.find('(')?;
+        let func_name = &remaining[..paren_pos];
+        let after_paren = &remaining[paren_pos + 1..];
+        let close_pos = find_matching_paren(after_paren)?;
+        ops.push(parse_transform_op(func_name, &after_paren[..close_pos])?);
+        remaining = after_paren[close_pos + 1..].trim_start();
     }
 
     if ops.is_empty() {
@@ -21326,73 +21312,136 @@ fn parse_individual_scale(value: &str) -> Option<Option<rustkit_css::TransformOp
     Some(Some(rustkit_css::TransformOp::Scale(sx, sy)))
 }
 
-/// Parse a single transform operation.
+/// Parse a single transform operation. The painter is 2D: with no perspective
+/// a 3D function flattens onto the page, keeping what it does to x and y, and
+/// `perspective()` moves nothing on the page's plane. What perspective does to
+/// a depth is not kept.
 fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp> {
-    let args = args.trim();
-    let parts: Vec<&str> = args.split(',').map(|s| s.trim()).collect();
+    use rustkit_css::TransformOp as Op;
 
-    match func.trim() {
-        "translate" => {
-            let x = parse_length(parts.first()?)?;
-            let y = parts
-                .get(1)
-                .and_then(|s| parse_length(s))
-                .unwrap_or(rustkit_css::Length::Zero);
-            Some(rustkit_css::TransformOp::Translate(x, y))
-        }
-        "translateX" => {
-            let x = parse_length(parts.first()?)?;
-            Some(rustkit_css::TransformOp::TranslateX(x))
-        }
-        "translateY" => {
-            let y = parse_length(parts.first()?)?;
-            Some(rustkit_css::TransformOp::TranslateY(y))
-        }
-        "scale" => {
-            let sx = parts.first()?.parse::<f32>().ok()?;
-            let sy = parts
-                .get(1)
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(sx);
-            Some(rustkit_css::TransformOp::Scale(sx, sy))
-        }
-        "scaleX" => {
-            let s = parts.first()?.parse::<f32>().ok()?;
-            Some(rustkit_css::TransformOp::ScaleX(s))
-        }
-        "scaleY" => {
-            let s = parts.first()?.parse::<f32>().ok()?;
-            Some(rustkit_css::TransformOp::ScaleY(s))
-        }
-        "rotate" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::Rotate(angle))
-        }
-        "skew" => {
-            let ax = parse_angle(parts.first()?)?;
-            let ay = parts.get(1).and_then(|s| parse_angle(s)).unwrap_or(0.0);
-            Some(rustkit_css::TransformOp::Skew(ax, ay))
-        }
-        "skewX" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::SkewX(angle))
-        }
-        "skewY" => {
-            let angle = parse_angle(parts.first()?)?;
-            Some(rustkit_css::TransformOp::SkewY(angle))
-        }
-        "matrix" => {
-            if parts.len() >= 6 {
-                let a = parts[0].parse::<f32>().ok()?;
-                let b = parts[1].parse::<f32>().ok()?;
-                let c = parts[2].parse::<f32>().ok()?;
-                let d = parts[3].parse::<f32>().ok()?;
-                let e = parts[4].parse::<f32>().ok()?;
-                let f = parts[5].parse::<f32>().ok()?;
-                Some(rustkit_css::TransformOp::Matrix(a, b, c, d, e, f))
-            } else {
-                None
+    /// The commas at this level: `translate(calc(1px + min(2px, 3px)), 0)`.
+    fn split_args(args: &str) -> Vec<&str> {
+        let (mut depth, mut start, mut parts) = (0, 0, Vec::new());
+        for (i, ch) in args.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(args[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
             }
+        }
+        parts.push(args[start..].trim());
+        parts
+    }
+    /// `<number> | <percentage>`.
+    fn factor(s: &str) -> Option<f32> {
+        match s.strip_suffix('%') {
+            Some(p) => p.parse::<f32>().ok().map(|v| v / 100.0),
+            None => s.parse::<f32>().ok(),
+        }
+    }
+    /// `<angle> | 0`: a bare number other than zero is not an angle here.
+    fn angle(s: &str) -> Option<f32> {
+        match s.parse::<f32>() {
+            Ok(n) if n != 0.0 => None,
+            _ => parse_angle(s),
+        }
+    }
+    /// `<length-percentage>`: a bare number other than zero is not a length.
+    fn length(s: &str) -> Option<rustkit_css::Length> {
+        match s.parse::<f32>() {
+            Ok(n) if n != 0.0 => None,
+            _ => parse_length(s),
+        }
+    }
+    /// A length with no percentage: a depth has no box side to be a part of.
+    fn depth(s: &str) -> Option<()> {
+        match length(s)? {
+            rustkit_css::Length::Percent(_) => None,
+            _ => Some(()),
+        }
+    }
+    fn number(s: &str) -> Option<f32> {
+        s.parse::<f32>().ok()
+    }
+    let still = || Op::Translate(rustkit_css::Length::Zero, rustkit_css::Length::Zero);
+
+    let func = func.to_ascii_lowercase();
+    let parts = split_args(args);
+    match (func.as_str(), parts.as_slice()) {
+        ("translate", [x]) => Some(Op::Translate(length(x)?, rustkit_css::Length::Zero)),
+        ("translate", [x, y]) => Some(Op::Translate(length(x)?, length(y)?)),
+        ("translatex", [x]) => Some(Op::TranslateX(length(x)?)),
+        ("translatey", [y]) => Some(Op::TranslateY(length(y)?)),
+        ("translatez", [z]) => {
+            depth(z)?;
+            Some(still())
+        }
+        ("translate3d", [x, y, z]) => {
+            depth(z)?;
+            Some(Op::Translate(length(x)?, length(y)?))
+        }
+        ("scale", [s]) => {
+            let s = factor(s)?;
+            Some(Op::Scale(s, s))
+        }
+        ("scale", [x, y]) => Some(Op::Scale(factor(x)?, factor(y)?)),
+        ("scalex", [s]) => Some(Op::ScaleX(factor(s)?)),
+        ("scaley", [s]) => Some(Op::ScaleY(factor(s)?)),
+        ("scalez", [s]) => {
+            factor(s)?;
+            Some(still())
+        }
+        ("scale3d", [x, y, z]) => {
+            factor(z)?;
+            Some(Op::Scale(factor(x)?, factor(y)?))
+        }
+        ("rotate" | "rotatez", [a]) => Some(Op::Rotate(angle(a)?)),
+        ("rotatex", [a]) => Some(Op::ScaleY(angle(a)?.to_radians().cos())),
+        ("rotatey", [a]) => Some(Op::ScaleX(angle(a)?.to_radians().cos())),
+        ("rotate3d", [x, y, z, a]) => {
+            let (x, y, z) = (number(x)?, number(y)?, number(z)?);
+            let a = angle(a)?.to_radians();
+            let length = (x * x + y * y + z * z).sqrt();
+            if length == 0.0 {
+                return Some(still());
+            }
+            let (x, y, z) = (x / length, y / length, z / length);
+            let (sin, cos) = a.sin_cos();
+            let turn = 1.0 - cos;
+            Some(Op::Matrix(
+                cos + x * x * turn,
+                y * x * turn + z * sin,
+                x * y * turn - z * sin,
+                cos + y * y * turn,
+                0.0,
+                0.0,
+            ))
+        }
+        ("skew", [x]) => Some(Op::Skew(angle(x)?, 0.0)),
+        ("skew", [x, y]) => Some(Op::Skew(angle(x)?, angle(y)?)),
+        ("skewx", [a]) => Some(Op::SkewX(angle(a)?)),
+        ("skewy", [a]) => Some(Op::SkewY(angle(a)?)),
+        ("matrix", [a, b, c, d, e, f]) => Some(Op::Matrix(
+            number(a)?,
+            number(b)?,
+            number(c)?,
+            number(d)?,
+            number(e)?,
+            number(f)?,
+        )),
+        ("matrix3d", m) if m.len() == 16 => {
+            let n = m.iter().map(|v| number(v)).collect::<Option<Vec<f32>>>()?;
+            Some(Op::Matrix(n[0], n[1], n[4], n[5], n[12], n[13]))
+        }
+        ("perspective", [p]) => {
+            if !p.eq_ignore_ascii_case("none") {
+                depth(p)?;
+            }
+            Some(still())
         }
         _ => None,
     }
