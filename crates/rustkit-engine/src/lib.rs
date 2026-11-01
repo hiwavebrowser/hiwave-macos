@@ -3734,6 +3734,7 @@ impl Engine {
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
         let layout = view.layout.as_ref()?;
+        layout.stamp_sticky_shifts(view.scroll_offset);
         let page_point = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
         // Every pointer move asks here, and finding the fixed boxes visits
         // the whole tree: it is done once, when the layout is stored.
@@ -8017,6 +8018,8 @@ impl Engine {
         // Element scroll offsets carry over to the new boxes, clamped to them.
         if let Some(view) = self.views.get(&id) {
             stamp_element_scrolls(&root_box, &view.lay.element_scrolls);
+            root_box.stamp_sticky((bounds.width as f32, bounds.height as f32));
+            root_box.stamp_sticky_shifts(view.scroll_offset);
         }
 
         // Generate display list
@@ -18323,6 +18326,8 @@ impl Engine {
                 Cmd::PopFilter => serde_json::json!({ "op": "pop_filter" }),
                 Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
                 Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
+                Cmd::PushWindowSticky(_) => serde_json::json!({ "op": "push_window_sticky" }),
+                Cmd::PopWindowSticky => serde_json::json!({ "op": "pop_window_sticky" }),
                 // Not yet modelled: form controls, carets, focus rings, and
                 // the SVG primitives. Named and dumped rather than dropped.
                 other => serde_json::json!({
@@ -18856,6 +18861,7 @@ impl Engine {
             return;
         };
         stamp_element_scrolls(&layout, &view.lay.element_scrolls);
+        layout.stamp_sticky_shifts(view.scroll_offset);
         let display_list = self.display_list_for(id, &layout);
         if let Some(view) = self.views.get_mut(&id) {
             view.display_list = Some(Arc::new(display_list));
@@ -19007,6 +19013,7 @@ impl Engine {
             );
             drop(memo_aside);
             stamp_element_scrolls(&built, &lay.element_scrolls);
+            built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
             let root_element = document.document_element().map(|e| e.id.raw());
             // As the engine's relayout sets `max_scroll_offset`.
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
@@ -21954,10 +21961,29 @@ pub(crate) fn scrolled_commands(
         origin: (0.0, 0.0),
     };
     let mut scrolled = Vec::with_capacity(commands.len() + 2);
+    // What the open sticky runs have moved things by, innermost last.
+    let mut sticky: Vec<(f32, f32)> = Vec::new();
     scrolled.push(translate(-scroll_offset.0, -scroll_offset.1));
     scrolled.extend(commands.iter().map(|command| match command {
-        DisplayCommand::PushViewportFixed => translate(scroll_offset.0, scroll_offset.1),
-        DisplayCommand::PopViewportFixed => DisplayCommand::PopTransform,
+        DisplayCommand::PushViewportFixed => {
+            let around = *sticky.last().unwrap_or(&(0.0, 0.0));
+            sticky.push((0.0, 0.0));
+            translate(scroll_offset.0 - around.0, scroll_offset.1 - around.1)
+        }
+        DisplayCommand::PopViewportFixed => {
+            sticky.pop();
+            DisplayCommand::PopTransform
+        }
+        DisplayCommand::PushWindowSticky(rule) => {
+            let around = *sticky.last().unwrap_or(&(0.0, 0.0));
+            let (x, y) = rule.shift(scroll_offset, around);
+            sticky.push((around.0 + x, around.1 + y));
+            translate(x, y)
+        }
+        DisplayCommand::PopWindowSticky => {
+            sticky.pop();
+            DisplayCommand::PopTransform
+        }
         other => other.clone(),
     }));
     scrolled.push(DisplayCommand::PopTransform);
@@ -22213,6 +22239,7 @@ fn layout_hit_tester(
             stamp_element_scrolls(&layout, &scrolls);
             stamped.set(generation);
         }
+        layout.stamp_sticky_shifts(scroll);
         let hit = layout.hit_test_scrolled(x, y, scroll);
         if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
             return Some(id);
@@ -22348,6 +22375,10 @@ fn geometry_snapshot(
         flow: Option<usize>,
         absolute: Option<usize>,
         fixed: Option<usize>,
+        /// Under a fixed box the scroll does not move, and under a transform,
+        /// which holds a fixed box to the page.
+        held: bool,
+        transformed: bool,
     }
     fn walk(
         b: &LayoutBox,
@@ -22370,13 +22401,17 @@ fn geometry_snapshot(
             _ => scrollers.flow,
         };
         let scrolls = b.is_element_scroller();
-        let inner = if scrolls { b.node_id } else { scroller };
+        let sticky = b.sticky_rule.get();
+        let inner = if scrolls || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
         let transformed = !b.style.effective_transform().is_identity();
+        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.transformed);
         let under = Scrollers {
             flow: inner,
             absolute: if positioned { inner } else { scrollers.absolute },
             fixed: if transformed { inner } else { scrollers.fixed },
+            held,
+            transformed: scrollers.transformed || transformed,
         };
         // What the children reach, without this box's own border: that is
         // not scrollable overflow.
@@ -22438,6 +22473,8 @@ fn geometry_snapshot(
                 position,
                 scroller,
                 scrolls,
+                sticky,
+                held,
             };
             styles.entry(node).or_insert_with(|| {
                 let mut lines = computed_style_lines(b);
@@ -22467,7 +22504,7 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    let none = Scrollers { flow: None, absolute: None, fixed: None };
+    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, transformed: false };
     walk(root, &mut out, &mut styles, None, none);
     (out, styles)
 }
@@ -22538,6 +22575,8 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         position: 0,
         scroller: None,
         scrolls: false,
+        sticky: None,
+        held: false,
     }
 }
 

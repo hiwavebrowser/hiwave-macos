@@ -180,7 +180,9 @@ pub(crate) fn order_probe(cmd: &DisplayCommand) -> Option<(Batch, Option<Rect>)>
         | C::PushFilter(_)
         | C::PopFilter
         | C::PushViewportFixed
-        | C::PopViewportFixed => return None,
+        | C::PopViewportFixed
+        | C::PushWindowSticky(_)
+        | C::PopWindowSticky => return None,
         // Fills keep the exact rect the check has always used.
         C::SolidColor(color, rect) | C::RoundedRect { color, rect, .. } => {
             if color.a <= 0.0 {

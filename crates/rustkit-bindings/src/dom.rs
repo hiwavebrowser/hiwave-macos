@@ -60,6 +60,23 @@ pub struct BoxGeometry {
     pub scroller: Option<usize>,
     /// Whether this box is an element scroller itself.
     pub scrolls: bool,
+    /// `position: sticky`: where it moves to. A sticky box is on the
+    /// `scroller` chain of the boxes under it, since it moves them too.
+    pub sticky: Option<rustkit_css::StickyRule>,
+    /// In a fixed box the window's scroll does not move: its rect is where
+    /// layout put it, wherever the page is.
+    pub held: bool,
+}
+
+/// What moves a box from where layout put it (`DomHost::moved_by`).
+#[derive(Clone, Copy, Default)]
+struct MovedBy {
+    /// By the element scrollers above it.
+    scrolled: (f32, f32),
+    /// By sticky boxes: its own shift and those above it.
+    stuck: (f32, f32),
+    /// The part of `stuck` from inside the nearest scroller.
+    above: (f32, f32),
 }
 
 /// The offsets script scrolled a view's elements to, by raw NodeId: one table
@@ -218,22 +235,56 @@ impl DomHost {
         }
     }
 
-    /// What the element scrollers above a box have moved it by.
-    fn element_scroll_over(&self, geometry: &BoxGeometry) -> (f32, f32) {
+    /// Where the window is now, script's own scroll included.
+    fn window_scroll(&self) -> (f32, f32) {
+        let state = self.scroll_state.borrow();
+        (state.x, state.y)
+    }
+
+    /// What the scrollers and sticky boxes above a box, and the box itself
+    /// when it is sticky, have moved it by. Live: script reads a rect right
+    /// after a scroll, before the engine hears of it.
+    fn moved_by(&self, geometry: &BoxGeometry) -> MovedBy {
         let scrolls = self.element_scrolls.borrow();
-        let (mut x, mut y) = (0.0, 0.0);
-        if scrolls.offsets.is_empty() {
-            return (x, y);
-        }
-        let mut at = geometry.scroller;
-        while let Some(scroller) = at {
-            if let Some((dx, dy)) = scrolls.offsets.get(&scroller) {
-                x += dx;
-                y += dy;
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, &scrolls.offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, &scrolls.offsets, &mut moved);
+        moved
+    }
+
+    /// `moved_by` for what is under the box `node`, its own scroll included.
+    fn moved_by_chain(&self, node: usize, offsets: &HashMap<usize, (f32, f32)>) -> MovedBy {
+        let Some(geometry) = self.geometry.get(&node) else {
+            return MovedBy::default();
+        };
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, offsets, &mut moved);
+        if geometry.scrolls {
+            if let Some((dx, dy)) = offsets.get(&node) {
+                moved.scrolled = (moved.scrolled.0 + dx, moved.scrolled.1 + dy);
             }
-            at = self.geometry.get(&scroller).and_then(|g| g.scroller);
+            moved.above = (0.0, 0.0);
         }
-        (x, y)
+        moved
+    }
+
+    fn add_sticky(&self, geometry: &BoxGeometry, offsets: &HashMap<usize, (f32, f32)>, moved: &mut MovedBy) {
+        let Some(rule) = geometry.sticky else {
+            return;
+        };
+        let scroll = match rule.port {
+            rustkit_css::StickyPort::Window => self.window_scroll(),
+            rustkit_css::StickyPort::Still => (0.0, 0.0),
+            rustkit_css::StickyPort::Element(node) => offsets.get(&node).copied().unwrap_or((0.0, 0.0)),
+        };
+        let (x, y) = rule.shift(scroll, moved.above);
+        moved.stuck = (moved.stuck.0 + x, moved.stuck.1 + y);
+        moved.above = (moved.above.0 + x, moved.above.1 + y);
     }
 
     /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
@@ -1514,14 +1565,18 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
-                        // Rects are where the scrollers put the box; the
-                        // last two are where layout did (`offsetTop`).
-                        let (dx, dy) = host.element_scroll_over(g);
+                        // Rects are where the scrollers and sticky boxes put
+                        // the box; the last two leave the scrollers out
+                        // (`offsetTop`).
+                        let moved = host.moved_by(g);
+                        let (x, y) = (g.x + moved.stuck.0, g.y + moved.stuck.1);
+                        // The rect's reader takes the window's scroll off.
+                        let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
                             "{} {} {} {} {} {} {} {} {} {} {} {} {}",
-                            n(g.x - dx), n(g.y - dy), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(x - moved.scrolled.0 + page.0), n(y - moved.scrolled.1 + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
                             n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
-                            n(g.x), n(g.y)
+                            n(x), n(y)
                         ))
                     }
                     None => JsValue::String(String::new()),
@@ -1551,8 +1606,13 @@ pub(crate) fn install(
                         let mut chain = String::from(if fixed { "f" } else { "w" });
                         let mut at = g.scroller;
                         while let Some(scroller) = at {
-                            chain.push_str(&format!(" {scroller}"));
-                            at = host.geometry.get(&scroller).and_then(|g| g.scroller);
+                            let above = host.geometry.get(&scroller);
+                            // A sticky box on the chain moves the box, but
+                            // cannot be scrolled.
+                            if above.is_some_and(|g| g.scrolls) {
+                                chain.push_str(&format!(" {scroller}"));
+                            }
+                            at = above.and_then(|g| g.scroller);
                         }
                         JsValue::String(chain)
                     }
@@ -1599,7 +1659,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             if let Some(tester) = host.hit_tester.clone() {
-                return tester(x, y, host.scroll)
+                return tester(x, y, host.window_scroll())
                     .map_or(JsValue::Null, |id| JsValue::Number(id as f64));
             }
             box_hit(&host, x, y).map_or(JsValue::Null, |id| JsValue::Number(id as f64))

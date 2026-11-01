@@ -1653,6 +1653,30 @@ pub struct LayoutBox {
     /// reads it: the boxes under a scroller stay where layout put them, and
     /// the painter, the hit test and the geometry snapshot apply the offset.
     pub element_scroll: std::cell::Cell<(f32, f32)>,
+    /// `position: sticky`: where the rule puts this box (`stamp_sticky`).
+    /// Like `element_scroll`, layout never reads it: the box stays where the
+    /// flow put it, and the painter, hit test and snapshot apply the shift.
+    pub sticky_rule: std::cell::Cell<Option<rustkit_css::StickyRule>>,
+    /// What `sticky_rule` gives at the current scroll (`stamp_sticky_shifts`).
+    pub sticky_shift: std::cell::Cell<(f32, f32)>,
+    /// On the root box: the path to each sticky box, outermost first.
+    pub sticky_paths: std::cell::RefCell<Vec<Vec<usize>>>,
+}
+
+/// The scrollport each kind of box under a box answers to: an absolute box
+/// is in the scrolling box of its containing block, and a fixed box in none,
+/// unless a transform holds it.
+#[derive(Clone, Copy)]
+struct StickyPorts {
+    flow: StickyScrollport,
+    absolute: StickyScrollport,
+    fixed: StickyScrollport,
+}
+
+#[derive(Clone, Copy)]
+struct StickyScrollport {
+    port: rustkit_css::StickyPort,
+    rect: Rect,
 }
 
 impl LayoutBox {
@@ -1685,7 +1709,147 @@ impl LayoutBox {
             table_caption_shift: None,
             context_floats: None,
             element_scroll: std::cell::Cell::new((0.0, 0.0)),
+            sticky_rule: std::cell::Cell::new(None),
+            sticky_shift: std::cell::Cell::new((0.0, 0.0)),
+            sticky_paths: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Give every `position: sticky` box of a finished layout its rule, on
+    /// the root box. `viewport` is the window's size.
+    pub fn stamp_sticky(&self, viewport: (f32, f32)) {
+        let window = Rect::new(0.0, 0.0, viewport.0, viewport.1);
+        let scrollport = |port| StickyScrollport { port, rect: window };
+        let ports = StickyPorts {
+            flow: scrollport(rustkit_css::StickyPort::Window),
+            absolute: scrollport(rustkit_css::StickyPort::Window),
+            fixed: scrollport(rustkit_css::StickyPort::Still),
+        };
+        let mut paths = Vec::new();
+        self.find_sticky(ports, &self.dimensions, &mut Vec::new(), &mut paths);
+        *self.sticky_paths.borrow_mut() = paths;
+    }
+
+    fn find_sticky(
+        &self,
+        ports: StickyPorts,
+        containing_block: &Dimensions,
+        path: &mut Vec<usize>,
+        paths: &mut Vec<Vec<usize>>,
+    ) {
+        let own = match self.position {
+            Position::Absolute => ports.absolute,
+            Position::Fixed => ports.fixed,
+            _ => ports.flow,
+        };
+        if self.style.position == rustkit_css::Position::Sticky
+            && self.node_id.is_some()
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak)
+        {
+            self.sticky_rule.set(Some(self.sticky_rule_in(own, containing_block)));
+            paths.push(path.clone());
+        }
+        let inner = match self.node_id {
+            Some(node) if self.is_element_scroller() => StickyScrollport {
+                port: rustkit_css::StickyPort::Element(node),
+                rect: self.dimensions.content,
+            },
+            _ => own,
+        };
+        let positioned = self.position != Position::Static || self.style.position != rustkit_css::Position::Static;
+        let under = StickyPorts {
+            flow: inner,
+            absolute: if positioned { inner } else { ports.absolute },
+            fixed: if self.style.effective_transform().is_identity() { ports.fixed } else { inner },
+        };
+        // A scroller holds its children across all it can scroll to.
+        let scrolled_extent = self.is_element_scroller().then(|| {
+            let (x, y) = self.element_scroll_max();
+            let mut extent = self.dimensions.clone();
+            extent.content.width += x;
+            extent.content.height += y;
+            extent
+        });
+        let held = match &scrolled_extent {
+            Some(extent) => extent,
+            None if matches!(self.box_type, BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak) => containing_block,
+            None => &self.dimensions,
+        };
+        for (index, child) in self.children.iter().enumerate() {
+            path.push(index);
+            child.find_sticky(under, held, path, paths);
+            path.pop();
+        }
+    }
+
+    fn sticky_rule_in(&self, port: StickyScrollport, containing_block: &Dimensions) -> rustkit_css::StickyRule {
+        let mut basis = Dimensions::default();
+        basis.content = port.rect;
+        let insets = self.resolved_offsets(&basis);
+        let bx = self.dimensions.border_box();
+        let cb = containing_block.content;
+        let margin = &self.dimensions.margin;
+        rustkit_css::StickyRule {
+            port: port.port,
+            scrollport: (port.rect.x, port.rect.y, port.rect.width, port.rect.height),
+            natural: (bx.x, bx.y, bx.width, bx.height),
+            top: insets.top,
+            right: insets.right,
+            bottom: insets.bottom,
+            left: insets.left,
+            room_x: (
+                (cb.x + margin.left - bx.x).min(0.0),
+                (cb.x + cb.width - margin.right - bx.x - bx.width).max(0.0),
+            ),
+            room_y: (
+                (cb.y + margin.top - bx.y).min(0.0),
+                (cb.y + cb.height - margin.bottom - bx.y - bx.height).max(0.0),
+            ),
+        }
+    }
+
+    /// Work out every sticky box's shift for the scrolls as they are, on the
+    /// root box. Visits the sticky boxes only: every pointer move comes here.
+    pub fn stamp_sticky_shifts(&self, window_scroll: (f32, f32)) {
+        for path in self.sticky_paths.borrow().iter() {
+            let (mut at, mut above, mut scroller) = (self, (0.0, 0.0), None);
+            for &index in path {
+                let shift = at.sticky_shift.get();
+                above = (above.0 + shift.0, above.1 + shift.1);
+                if at.is_element_scroller() {
+                    above = (0.0, 0.0);
+                    scroller = at.node_id.map(|node| (node, at.element_scroll.get()));
+                }
+                let Some(child) = at.children.get(index) else {
+                    break;
+                };
+                at = child;
+            }
+            let Some(rule) = at.sticky_rule.get() else {
+                continue;
+            };
+            let scroll = match rule.port {
+                rustkit_css::StickyPort::Window => window_scroll,
+                rustkit_css::StickyPort::Still => (0.0, 0.0),
+                rustkit_css::StickyPort::Element(node) => match scroller {
+                    Some((nearest, offset)) if nearest == node => offset,
+                    _ => self.element_scroll_of(node),
+                },
+            };
+            at.sticky_shift.set(rule.shift(scroll, above));
+        }
+    }
+
+    /// The scroll of the scroller with this node, anywhere under this box.
+    fn element_scroll_of(&self, node: usize) -> (f32, f32) {
+        if self.node_id == Some(node) && self.is_element_scroller() {
+            return self.element_scroll.get();
+        }
+        self.children
+            .iter()
+            .map(|child| child.element_scroll_of(node))
+            .find(|&offset| offset != (0.0, 0.0))
+            .unwrap_or((0.0, 0.0))
     }
 
     /// Whether script can scroll this box: an element whose `overflow` is
@@ -7062,10 +7226,8 @@ impl LayoutBox {
     /// `relative z-10` hero text painted under its `absolute inset-0` image
     /// (hand test 10-27, R2). Read the computed style for those. A text run
     /// copies its parent's style and an anonymous box is not an element, so
-    /// only element boxes count. `sticky` is left in normal flow: it is
-    /// still laid out as static and scrolls with the page, so painting it
-    /// positioned would lay it over a fixed bar it never reaches in Chrome
-    /// (`render_no_clone_tests::fixed_sticky_images_and_iframes_draw_the_same_under_scroll`).
+    /// only element boxes count. `sticky` is laid out as static too, and
+    /// paints over what it sticks above.
     pub fn paint_z(&self) -> Option<i32> {
         if self.position != Position::Static {
             return Some(self.z_index);
@@ -7074,8 +7236,8 @@ impl LayoutBox {
             self.box_type,
             BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
         );
-        let relative = self.style.position == rustkit_css::Position::Relative;
-        (element && relative).then_some(self.style.z_index)
+        let offset = matches!(self.style.position, rustkit_css::Position::Relative | rustkit_css::Position::Sticky);
+        (element && offset).then_some(self.style.z_index)
     }
 
     /// The z-index `child` paints at among this box's children when it
@@ -7386,6 +7548,9 @@ impl LayoutBox {
             Some(m) => invert_affine(m).map(|inv| apply_affine(inv, x, y))?,
             None => (x, y),
         };
+        // A sticky box and its descendants are drawn moved, in the same way.
+        let shift = self.sticky_shift.get();
+        let (x, y) = (x - shift.0, y - shift.1);
 
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
@@ -8160,6 +8325,15 @@ pub enum DisplayCommand {
     PushViewportFixed,
     /// End of a `PushViewportFixed` run.
     PopViewportFixed,
+
+    /// Start of a `position: sticky` box that sticks to the window. What
+    /// follows, up to the matching `PopWindowSticky`, is drawn moved by what
+    /// the rule gives at the page's scroll, which only whoever draws the list
+    /// knows (`Renderer::set_scroll_offset`), so a window scroll does not
+    /// build the list again. These nest.
+    PushWindowSticky(rustkit_css::StickyRule),
+    /// End of a `PushWindowSticky` run.
+    PopWindowSticky,
 
     /// Draw text with a gradient fill (for background-clip: text effect).
     GradientText {
@@ -9161,6 +9335,23 @@ impl DisplayList {
             self.open_element_scroll = (0.0, 0.0);
         }
 
+        // A sticky box moves with everything it paints. What is under a
+        // scroller is known now, and this list is built again when it scrolls;
+        // what is under the window waits for the frame. In `open_element_scroll`
+        // too, so a fixed box inside undoes it.
+        let sticky_rule = layout_box.sticky_rule.get();
+        let window_sticky = sticky_rule.filter(|rule| rule.port == rustkit_css::StickyPort::Window);
+        let sticky_scroll = if sticky_rule.is_some() && window_sticky.is_none() {
+            let (x, y) = layout_box.sticky_shift.get();
+            (-x, -y)
+        } else {
+            (0.0, 0.0)
+        };
+        if let Some(rule) = window_sticky {
+            self.commands.push(DisplayCommand::PushWindowSticky(rule));
+        }
+        self.open_scroll_of(sticky_scroll);
+
         // Check if this creates a new stacking context
         let creates_context = layout_box
             .stacking_context
@@ -9366,6 +9557,11 @@ impl DisplayList {
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        self.close_element_scroll(sticky_scroll);
+        if window_sticky.is_some() {
+            self.commands.push(DisplayCommand::PopWindowSticky);
         }
 
         if let Some(open) = held_from_element_scroll {

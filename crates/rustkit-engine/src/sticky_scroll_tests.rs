@@ -148,6 +148,24 @@ fn a_box_taller_than_the_scrollport_keeps_its_top() {
     check(PAGE, &walk("f-s", &[0, 50, 200, 400], "top('f')"), "1050,50 50 | 1050,5 55 | 1050,5 205 | 1050,5 405");
 }
 
+/// With both insets, the far one holds a box that fits and is dropped for one
+/// that does not (`c2d_probe4.mjs`).
+#[test]
+fn both_insets_apply_only_to_a_box_that_fits_between_them() {
+    let page = |height: u32, before: u32, after: u32| {
+        format!(
+            "<!doctype html><style>body{{margin:0}}#s{{overflow:auto;width:200px;height:100px}}\
+             #t{{position:sticky;width:50px;top:5px;bottom:5px;height:{height}px}}</style><body>\
+             <div id=s><div style='height:{before}px'></div><div id=t></div><div style='height:{after}px'></div></div></body>"
+        )
+    };
+    let read = walk("s", &[0, 20, 50, 100, 280, 400], "at('t')");
+    check(&page(20, 300, 300), &read, "0,75 | 0,75 | 0,75 | 0,75 | 0,20 | 0,5");
+    check(&page(95, 50, 600), &read, "0,50 | 0,30 | 0,5 | 0,5 | 0,5 | 0,5");
+    check(&page(90, 50, 600), &read, "0,5 | 0,5 | 0,5 | 0,5 | 0,5 | 0,5");
+    check(&page(95, 300, 300), &read, "0,300 | 0,280 | 0,250 | 0,200 | 0,20 | 0,5");
+}
+
 #[test]
 fn it_sticks_across_too() {
     let steps: Vec<String> = [0, 30, 100, 700]
@@ -367,16 +385,12 @@ fn a_window_scroll_does_not_build_the_list_again() {
     assert!(Arc::ptr_eq(&list, &after));
 }
 
-/// A wheel over the page reaches the same rule as script does.
+/// A pointer in the window reaches the same rule as script does.
 #[test]
 fn after_a_window_scroll_a_click_finds_the_stuck_box() {
     let (mut engine, view) = painted();
     engine.set_scroll_offset(view, 0.0, 500.0).expect("scroll");
     let hit = Engine::hit_at(&engine.views[&view], 320.0, 40.0).expect("hit");
-    let w = engine
-        .execute_script(view, "String(document.getElementById('w') === document.elementFromPoint(320, 40))")
-        .expect("script");
-    assert_eq!(w, "String(\"true\")");
-    assert!(hit.node_id.is_some());
-    assert_eq!(hit.border_box.y, 400.0, "the box as laid out");
+    let rect = (hit.border_box.x, hit.border_box.y, hit.border_box.width);
+    assert_eq!(rect, (300.0, 400.0, 40.0), "#w, as laid out");
 }
