@@ -252,6 +252,100 @@ fn what_is_no_containing_block_leaves_a_fixed_box_alone() {
     }
 }
 
+/// `will-change` holds a fixed box when it names a property that would.
+/// Chromium 143, `held2_probe.mjs`.
+#[test]
+fn will_change_holds_a_fixed_box_to_the_page() {
+    for wrapper in [
+        "will-change:transform",
+        "will-change:TRANSFORM",
+        "will-change:top, transform",
+        "will-change:translate",
+        "will-change:scale",
+        "will-change:rotate",
+        "will-change:perspective",
+        "will-change:filter",
+        "will-change:backdrop-filter",
+        "will-change:contain",
+        "will-change:transform-style",
+        "will-change:-webkit-transform",
+        "will-change:transform;will-change:bogus,",
+    ] {
+        fixed_moves_by(wrapper, "-500");
+    }
+    for wrapper in [
+        "will-change:auto",
+        "will-change:position",
+        "will-change:scroll-position",
+        "will-change:contents",
+        "will-change:transform;will-change:auto",
+    ] {
+        fixed_moves_by(wrapper, "0");
+    }
+}
+
+/// `contain` holds a fixed box for paint and layout, and so for the two that imply them.
+#[test]
+fn contain_holds_a_fixed_box_to_the_page() {
+    for wrapper in [
+        "contain:paint",
+        "contain:PAINT",
+        "contain:layout",
+        "contain:strict",
+        "contain:content",
+        "contain:layout paint",
+        "contain:paint;contain:bogus",
+    ] {
+        fixed_moves_by(wrapper, "-500");
+    }
+    for wrapper in [
+        "contain:none",
+        "contain:size",
+        "contain:style",
+        "contain:inline-size",
+        "contain:size style",
+        "contain:paint;contain:none",
+        "contain:paint paint",
+    ] {
+        fixed_moves_by(wrapper, "0");
+    }
+}
+
+/// A transform that moves nothing still holds it.
+#[test]
+fn an_identity_transform_holds_a_fixed_box_to_the_page() {
+    fixed_moves_by("transform:translate(0)", "-500");
+    fixed_moves_by("transform:scale(1)", "-500");
+    fixed_moves_by("transform:none", "0");
+}
+
+/// What holds a fixed box in a scroller goes with the scroller, and takes
+/// its fixed and absolute children along. With nothing holding them, they stay.
+#[test]
+fn a_box_that_holds_a_fixed_box_scrolls_it_with_its_scroller() {
+    for (wrapper, moved) in [
+        ("", "0 0"),
+        ("filter:blur(1px)", "-40 -40"),
+        ("will-change:transform", "-40 -40"),
+        ("contain:paint", "-40 -40"),
+        ("transform:translateX(0)", "-40 -40"),
+    ] {
+        let page = format!(
+            "<!doctype html><style>body{{margin:0}}</style>\
+             <div id=s style=\"width:200px;height:100px;overflow:auto\">\
+             <div id=w style=\"width:100px;height:20px;{wrapper}\">\
+             <div id=f style=\"position:fixed;left:3px;top:4px;width:10px;height:10px\"></div>\
+             <div id=a style=\"position:absolute;left:5px;top:6px;width:10px;height:10px\"></div></div>\
+             <div style=\"height:800px\"></div></div>"
+        );
+        check(
+            &page,
+            "var y = (i) => $(i).getBoundingClientRect().y; var f = y('f'), a = y('a'); $('s').scrollTop = 40; (y('f') - f) + ' ' + (y('a') - a)",
+            moved,
+        );
+    }
+}
+
 /// Neither the window's scroll nor the scroller's moves it.
 #[test]
 fn a_fixed_box_in_an_element_scroller_stays_put() {
