@@ -260,9 +260,7 @@ class GatePrecedence(unittest.TestCase):
         self.assertIsNone(wpt_tier1.gate("<p>x</p>", "<p>x</p>", []))
 
 
-class Proof(unittest.TestCase):
-    """A PASS has to go red under a mutation, or it leaves the pass count."""
-
+class ProofCase(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self.addCleanup(self.td.cleanup)
@@ -278,6 +276,10 @@ class Proof(unittest.TestCase):
             wpt_tier1, "compare_frames", side_effect=lambda *_: (next(frames), 0.0)
         ):
             return wpt_tier1.prove_pass(entry, self.page, self.ref, {"width": 1, "height": 1}, self.dir)
+
+
+class Proof(ProofCase):
+    """A PASS has to go red under a mutation, or it leaves the pass count."""
 
     def test_a_page_that_goes_red_without_style_is_proven(self):
         self.assertIsNone(self.prove({}, [100]))
@@ -315,6 +317,231 @@ class Proof(unittest.TestCase):
     def test_apply_mutation_replaces_every_occurrence(self):
         self.assertEqual(wpt_tier1.apply_mutation("aXbX", {"find": "X", "replace": "y"}), "ayby")
         self.assertIsNone(wpt_tier1.apply_mutation("ab", {"find": "X", "replace": "y"}))
+
+
+class AreaProbe(ProofCase):
+    """T15b (#856 R1): a page reacting to its style does not show the engine does the
+    thing the test asserts. All 14 outline passes matched with outline forced off."""
+
+    def test_a_pass_that_still_matches_under_its_area_probe_is_unproven(self):
+        why = self.prove({"area": "css-ui-outline"}, [100, 0])
+        self.assertIn("css-ui-outline", why)
+        self.assertIn("outline", why)
+
+    def test_a_pass_that_goes_red_under_its_area_probe_is_proven(self):
+        self.assertIsNone(self.prove({"area": "css-ui-outline"}, [100, 5]))
+
+    def test_the_area_probe_comes_with_the_mutations_not_instead_of_them(self):
+        entry = {"area": "css-ui-outline", "mutations": [{"find": "a b", "replace": "a c"}]}
+        self.assertIn("a b", self.prove(entry, [100, 5, 0]))
+
+    def test_the_seed_has_no_area_probe(self):
+        self.assertIsNone(wpt_tier1.area_mutated("<p>x</p>", "seed"))
+
+    def test_the_rule_comes_last_and_forces_the_property(self):
+        out = wpt_tier1.area_mutated("<style>p { outline: 1px solid }</style><p>x</p>", "css-ui-outline")
+        self.assertTrue(out.startswith("<style>p { outline: 1px solid }</style><p>x</p>"))
+        self.assertIn("outline: none !important", out)
+
+    def test_each_area_forces_off_what_it_asserts(self):
+        for area, word in (
+            ("css-masking-clip-path", "clip-path"),
+            ("css-masking-mask", "mask"),
+            ("css-transforms-2d", "transform"),
+            ("css-transforms-3d", "transform"),
+            ("css-position-sticky", "position"),
+            ("css-position-absolute", "position"),
+            ("css-overflow", "overflow"),
+            ("css-lists", "list-style"),
+            ("css-text-basics", "letter-spacing"),
+        ):
+            self.assertIn(f"{word}", wpt_tier1.area_mutated("", area), area)
+
+    def test_every_imported_area_has_a_probe(self):
+        self.assertEqual(sorted(wpt_tier1.AREA_PROBES), sorted(wpt_import.AREAS))
+
+
+class ProbePages(ProofCase):
+    """T15b: one run left 260 `.__probe-*` files in third_party/wpt."""
+
+    def left_over(self):
+        return sorted(p.name for p in self.dir.iterdir() if ".__probe-" in p.name)
+
+    def test_probe_pages_are_on_disk_for_the_capture_and_gone_after(self):
+        seen = []
+
+        def capture(html_file, *_):
+            seen.append(html_file.is_file())
+
+        with mock.patch.object(wpt_tier1, "capture", side_effect=capture), mock.patch.object(
+            wpt_tier1, "compare_frames", return_value=(5, 0.0)
+        ):
+            why = wpt_tier1.prove_pass(
+                {"area": "css-ui-outline"}, self.page, self.ref, {"width": 1, "height": 1}, self.dir
+            )
+        self.assertIsNone(why)
+        self.assertEqual(seen, [True, True])
+        self.assertEqual(self.left_over(), [])
+
+    def test_a_probe_that_cannot_render_leaves_nothing_either(self):
+        self.prove({}, [], capture_says="capture exit 1")
+        self.assertEqual(self.left_over(), [])
+
+    def test_the_stage_cache_forgets_a_deleted_probe_page(self):
+        self.prove({}, [100])
+        self.assertEqual([p for p in wpt_tier1._STAGED if ".__probe-" in p.name], [])
+
+
+class ZeroInk(unittest.TestCase):
+    """T15b: under 480 inked pixels read as blank, so thin frames with real ink were ERRORs."""
+
+    W, H = 100, 100
+
+    def frame(self, dark=0):
+        pixels = bytearray(b"\xff" * (self.W * self.H * 3))
+        pixels[: dark * 3] = b"\x00" * (dark * 3)
+        return f"P6\n{self.W} {self.H}\n255\n".encode() + bytes(pixels)
+
+    def run_it(self, test_dark, ref_dark):
+        frames = iter((test_dark, ref_dark))
+
+        def capture(_html, out, _viewport):
+            out.write_bytes(self.frame(next(frames)))
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+            wpt_tier1, "capture", side_effect=capture
+        ), mock.patch.object(wpt_tier1, "campaign_diff", return_value=(None, "not here")):
+            return wpt_tier1.run_pair(
+                pathlib.Path("t.html"), pathlib.Path("r.html"), {}, pathlib.Path(td), stage=False
+            )
+
+    def test_a_thin_frame_with_ink_is_scored_and_can_match(self):
+        self.assertEqual(self.run_it(3, 3)["status"], "PASS")
+
+    def test_a_thin_frame_with_ink_is_scored_and_can_fail(self):
+        out = self.run_it(3, 4)
+        self.assertEqual((out["status"], out["diff_pixels"]), ("FAIL", 1))
+
+    def test_zero_ink_on_either_side_names_that_side(self):
+        for test_dark, ref_dark, side in ((0, 3, "test"), (3, 0, "ref"), (0, 0, "test+ref")):
+            out = self.run_it(test_dark, ref_dark)
+            self.assertEqual(out["status"], "ERROR")
+            self.assertIn(f"zero-ink frame ({side})", out["reason"])
+
+    def test_a_full_frame_of_one_colour_has_ink(self):
+        self.assertEqual(self.run_it(self.W * self.H, self.W * self.H)["status"], "PASS")
+
+
+class ChromiumRecheck(unittest.TestCase):
+    """T15b: tab-stop-threshold-001 differs by 0.05% here, and by 129 px in Chromium's own
+    test and ref. A small FAIL Chromium cannot match either is not an engine verdict."""
+
+    ENTRIES = [{"id": "small", "path": "a/small.html", "ref": "a/small-ref.html"}]
+
+    def case(self, status="FAIL", diff_pct=0.05, id_="small"):
+        return {"id": id_, "status": status, "diff_pct": diff_pct, "reason": None}
+
+    def recheck(self, cases, answer):
+        with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p):
+            wpt_tier1.recheck_small_fails(cases, self.ENTRIES, lambda pairs: answer)
+        return cases
+
+    def test_a_small_fail_chromium_also_differs_on_becomes_skip_with_the_reason(self):
+        case = self.recheck([self.case()], ({"small": 129}, "143.0", None))[0]
+        self.assertEqual(case["status"], "SKIP")
+        self.assertIn("129", case["reason"])
+        self.assertIn("143.0", case["reason"])
+        self.assertEqual(case["chromium_diff_pixels"], 129)
+
+    def test_a_small_fail_chromium_matches_on_stays_a_fail(self):
+        case = self.recheck([self.case()], ({"small": 0}, "143.0", None))[0]
+        self.assertEqual(case["status"], "FAIL")
+        self.assertEqual(case["chromium_diff_pixels"], 0)
+
+    def test_only_fails_under_the_limit_are_asked_about(self):
+        asked = []
+        cases = [
+            self.case(diff_pct=0.1, id_="at"),
+            self.case(diff_pct=5.0, id_="big"),
+            self.case(status="PASS", diff_pct=0.0, id_="pass"),
+        ]
+        wpt_tier1.recheck_small_fails(cases, self.ENTRIES, lambda pairs: asked.extend(pairs) or ({}, "v", None))
+        self.assertEqual(asked, [])
+        self.assertEqual([c["status"] for c in cases], ["FAIL", "FAIL", "PASS"])
+
+    def test_the_question_is_about_the_staged_pages(self):
+        asked = []
+        with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p.with_suffix(".s")):
+            wpt_tier1.recheck_small_fails(
+                [self.case()], self.ENTRIES, lambda pairs: asked.extend(pairs) or ({"small": 0}, "v", None)
+            )
+        self.assertEqual(asked[0]["test"], str(wpt_tier1.WPT_ROOT / "a/small.s"))
+        self.assertEqual(asked[0]["ref"], str(wpt_tier1.WPT_ROOT / "a/small-ref.s"))
+
+    def test_when_chromium_cannot_answer_the_fail_stays_and_says_why(self):
+        case = self.recheck([self.case()], (None, None, "no chromium"))[0]
+        self.assertEqual(case["status"], "FAIL")
+        self.assertEqual(case["chromium_not_measured"], "no chromium")
+
+    def test_a_case_missing_from_the_answer_stays_a_fail_and_says_so(self):
+        case = self.recheck([self.case()], ({}, "143.0", None))[0]
+        self.assertEqual(case["status"], "FAIL")
+        self.assertIn("no answer", case["chromium_not_measured"])
+
+    def test_oracle_failures_each_have_a_reason(self):
+        pairs = [{"id": "a", "test": "t", "ref": "r"}]
+        for proc, word in (
+            (mock.Mock(returncode=1, stdout="", stderr="boom"), "boom"),
+            (mock.Mock(returncode=0, stdout="not json", stderr=""), "JSON"),
+            (mock.Mock(returncode=0, stdout="[1]", stderr=""), "JSON"),
+        ):
+            with mock.patch.object(wpt_tier1.subprocess, "run", return_value=proc), mock.patch.object(
+                pathlib.Path, "is_dir", return_value=True
+            ):
+                diffs, _version, why = wpt_tier1.chromium_pair_diffs(pairs)
+            self.assertIsNone(diffs)
+            self.assertIn(word, why)
+
+    def test_the_oracle_answer_is_read(self):
+        out = json.dumps({"version": "143.0", "diffs": {"a": 7}})
+        proc = mock.Mock(returncode=0, stdout=out, stderr="")
+        with mock.patch.object(wpt_tier1.subprocess, "run", return_value=proc), mock.patch.object(
+            pathlib.Path, "is_dir", return_value=True
+        ):
+            self.assertEqual(wpt_tier1.chromium_pair_diffs([]), ({"a": 7}, "143.0", None))
+
+
+class BlindSpots(unittest.TestCase):
+    """T15b: UNPROVEN on these pages means the probes cannot reach what they assert."""
+
+    def test_an_svg_transform_attribute_is_named(self):
+        self.assertIn("SVG transform", wpt_tier1.probe_blind_spot('<svg><rect transform="scale(2)"/></svg>'))
+
+    def test_a_transform_attribute_set_from_script_is_named(self):
+        html = "<script>r.setAttribute('transform', 'scale(2)')</script>"
+        self.assertIn("SVG transform", wpt_tier1.probe_blind_spot(html))
+
+    def test_a_class_toggled_from_script_is_named(self):
+        for line in ("e.classList.add('a')", "e.className = 'a'", "e.setAttribute('class', 'a')"):
+            self.assertIn("class", wpt_tier1.probe_blind_spot(f"<script>{line}</script>"), line)
+
+    def test_plain_pages_and_css_transforms_have_none(self):
+        self.assertIsNone(wpt_tier1.probe_blind_spot('<p style="transform: scale(2)" data-transform="x">a</p>'))
+        self.assertIsNone(wpt_tier1.probe_blind_spot("<p>classList is only a word here</p>"))
+
+    def test_the_case_row_says_so(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "t.html").write_text('<link rel="match" href="r.html"><svg><g transform="scale(2)"/></svg>')
+            (root / "r.html").write_text("<p>x</p>")
+            entry = {"id": "t", "path": "t.html", "ref": "r.html", "kind": "reftest", "area": "css-transforms-2d"}
+            with mock.patch.object(wpt_tier1, "WPT_ROOT", root), mock.patch.object(
+                wpt_tier1, "run_pair", return_value={"status": "PASS", "reason": None}
+            ), mock.patch.object(wpt_tier1, "prove_pass", return_value="still matches"):
+                case = wpt_tier1.run_case(entry, {})
+        self.assertEqual(case["status"], "UNPROVEN")
+        self.assertIn("still matches", case["reason"])
+        self.assertIn("SVG transform", case["reason"])
 
 
 class Counts(unittest.TestCase):
