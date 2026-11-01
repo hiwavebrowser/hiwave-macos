@@ -19,6 +19,7 @@ from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
+import wpt_coverage  # noqa: E402
 import wpt_import  # noqa: E402
 import wpt_tier1  # noqa: E402
 
@@ -366,6 +367,18 @@ class Runnability(unittest.TestCase):
         self.assertIn("reftest-wait", reason)
         self.assertNotIn("no script host", reason)
 
+    def test_an_external_script_cannot_run_on_either_side(self):
+        self.assertIn("external script", wpt_tier1.unrunnable_reason("<script src=a.js></script>", ""))
+        self.assertIn("external script", wpt_tier1.unrunnable_reason("", '<script src="a.js"></script>'))
+
+    def test_a_capture_failure_is_the_tools_own_error_line(self):
+        self.assertEqual(
+            wpt_tier1.capture_failure('{"status":"error","error":"Inline script failed"}\n', "2026 WARN x\n"),
+            "Inline script failed",
+        )
+        self.assertEqual(wpt_tier1.capture_failure("not json\n", "last\n"), "last")
+        self.assertEqual(wpt_tier1.capture_failure("", ""), "no output")
+
     def test_capture_turns_script_on_only_for_a_page_with_a_script(self):
         with tempfile.TemporaryDirectory() as td:
             page = pathlib.Path(td) / "p.html"
@@ -506,6 +519,17 @@ class Coverage(unittest.TestCase):
             text = (wpt_tier1.WPT_ROOT / e["path"]).read_text(errors="replace")
             for m in e.get("mutations", []):
                 self.assertIn(m["find"], text, e["id"])
+
+
+class OneCommand(unittest.TestCase):
+    def test_sync_then_build_then_run(self):
+        names = [c[1] for c in wpt_coverage.steps([])]
+        self.assertEqual(names, ["scripts/wpt_sync.sh", "build", "scripts/wpt_tier1.py"])
+
+    def test_a_seat_can_leave_out_sync_and_build_and_pass_the_rest_on(self):
+        planned = wpt_coverage.steps(["--no-sync", "--no-build", "--allow-stale"])
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0][1:], ["scripts/wpt_tier1.py", "--allow-stale"])
 
 
 class Importer(unittest.TestCase):
