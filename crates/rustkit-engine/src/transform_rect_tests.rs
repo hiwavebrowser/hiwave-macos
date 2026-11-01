@@ -222,6 +222,87 @@ fn an_absolute_box_held_by_a_transformed_scroller_scrolls_with_it() {
     check(HOLDS, "$('sc').scrollTop = 30; box('sabs')", "2 223 10 10");
 }
 
+const FIXED: &str = "<!doctype html><style>body{margin:0;height:3000px}</style>\
+    <div id=m style=\"position:fixed;left:50%;top:10px;width:200px;height:50px;transform:translateX(-50%)\"></div>\
+    <div id=plain style=\"position:fixed;left:7px;top:9px;width:20px;height:20px\"></div>\
+    <div id=wrap style=\"position:fixed;left:100px;top:100px;width:200px;height:100px;transform:scale(2);transform-origin:0 0\">\
+      <div id=kid style=\"position:absolute;left:5px;top:6px;width:10px;height:10px\"></div>\
+      <div id=fkid style=\"width:20px;height:10px\"></div>\
+    </div>\
+    <div id=undertr style=\"position:fixed;left:300px;top:300px;width:100px;height:100px;overflow:auto;transform:translate(1px,2px)\">\
+      <div id=skid style=\"height:30px;width:30px\"></div><div style=\"height:400px\"></div>\
+    </div>\
+    <div id=fs style=\"position:fixed;left:500px;top:100px;width:100px;height:100px;overflow:auto\">\
+      <div id=fsk style=\"height:20px;width:40px;transform:translate(3px,4px)\"></div><div style=\"height:400px\"></div>\
+    </div>\
+    <div id=flow style=\"width:50px;height:50px;transform:translate(1px,2px)\"></div>\
+    <div style=\"height:200px\"></div>\
+    <div id=inner style=\"width:100px;height:100px;transform:translate(10px,20px)\">\
+      <div id=abs style=\"position:absolute;left:1px;top:2px;width:10px;height:10px\"></div>\
+    </div>";
+
+const HELD_READ: &str = "['m', 'plain', 'wrap', 'kid', 'fkid', 'undertr', 'skid', 'fs', 'fsk']\
+     .map(box).join(' | ')";
+
+const HELD_AT_ANY_SCROLL: &str = "300 10 200 50 | 7 9 20 20 | 100 100 400 200 | 110 112 20 20 | \
+     100 100 40 20 | 301 302 100 100 | 301 302 30 30 | 500 100 100 100 | 503 104 40 20";
+
+#[test]
+fn a_fixed_box_does_not_read_the_window_scroll_at_the_top() {
+    check(FIXED, HELD_READ, HELD_AT_ANY_SCROLL);
+}
+
+/// The centred modal: `left:50%` + `translateX(-50%)`.
+#[test]
+fn a_transformed_fixed_box_stays_put_when_the_window_scrolls() {
+    check(FIXED, "window.scrollTo(0, 500); box('m')", "300 10 200 50");
+}
+
+#[test]
+fn a_plain_fixed_box_stays_put_when_the_window_scrolls() {
+    check(FIXED, "window.scrollTo(0, 500); box('plain')", "7 9 20 20");
+}
+
+#[test]
+fn what_is_under_a_fixed_box_stays_put_when_the_window_scrolls() {
+    check(
+        FIXED,
+        &format!("window.scrollTo(0, 500); {HELD_READ}"),
+        HELD_AT_ANY_SCROLL,
+    );
+}
+
+/// Under a fixed box an element's own scroll still moves what it holds.
+#[test]
+fn an_element_scroll_under_a_fixed_box_still_moves_its_content() {
+    check(
+        FIXED,
+        "window.scrollTo(0, 500); $('undertr').scrollTop = 7; $('fs').scrollTop = 7; \
+         [box('undertr'), box('skid'), box('fs'), box('fsk')].join(' | ')",
+        "301 302 100 100 | 301 295 30 30 | 500 100 100 100 | 503 97 40 20",
+    );
+}
+
+/// `getClientRects` is the same read.
+#[test]
+fn get_client_rects_of_a_fixed_box_stays_put_too() {
+    check(
+        FIXED,
+        "window.scrollTo(0, 500); var c = $('m').getClientRects()[0]; nums([c.x, c.y, c.width, c.height])",
+        "300 10 200 50",
+    );
+}
+
+/// A transform in the page's flow still goes with the page.
+#[test]
+fn a_transformed_box_in_the_flow_moves_with_the_window() {
+    check(
+        FIXED,
+        "window.scrollTo(0, 500); [box('flow'), box('inner'), box('abs')].join(' | ')",
+        "1 -498 50 50 | 10 -230 100 100 | 11 -228 10 10",
+    );
+}
+
 const INLINES: &str = "<!doctype html><style>body{margin:0}</style>\
     <div style=\"width:300px\"><span id=sp style=\"transform:translate(30px,40px)\">text</span>\
     <span id=ib style=\"display:inline-block;width:20px;height:20px;transform:translate(30px,40px)\"></span>\

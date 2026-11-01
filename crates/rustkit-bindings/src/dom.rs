@@ -64,6 +64,9 @@ pub struct BoxGeometry {
     pub transform: Option<[f32; 6]>,
     /// Whether this box is an element scroller itself.
     pub scrolls: bool,
+    /// In a fixed box the window's scroll does not move: its rect is where
+    /// layout put it, wherever the page is.
+    pub held: bool,
 }
 
 /// The offsets script scrolled a view's elements to, by raw NodeId: one table
@@ -263,6 +266,12 @@ impl DomHost {
             bottom = bottom.max(c.1);
         }
         Some((left, top, right - left, bottom - top))
+    }
+
+    /// Where the window is now, script's own scroll included.
+    fn window_scroll(&self) -> (f32, f32) {
+        let state = self.scroll_state.borrow();
+        (state.x, state.y)
     }
 
     /// What the element scrollers above a box have moved it by.
@@ -1568,9 +1577,11 @@ pub(crate) fn install(
                             let (dx, dy) = host.element_scroll_over(g);
                             (g.x - dx, g.y - dy, g.width, g.height)
                         });
+                        // The rect's reader takes the window's scroll off.
+                        let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
                             "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
-                            n(rx), n(ry), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(rx + page.0), n(ry + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
                             n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
                             n(g.x), n(g.y), n(rw), n(rh)
                         ))
