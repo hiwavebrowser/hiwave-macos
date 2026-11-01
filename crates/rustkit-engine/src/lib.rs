@@ -22367,6 +22367,10 @@ fn geometry_snapshot(
         flow: Option<usize>,
         absolute: Option<usize>,
         fixed: Option<usize>,
+        /// Under a fixed box the scroll does not move, and under a transform,
+        /// which holds a fixed box to the page.
+        held: bool,
+        transformed: bool,
     }
     fn walk(
         b: &LayoutBox,
@@ -22398,10 +22402,13 @@ fn geometry_snapshot(
         let transformed = transform.is_some();
         let inner = if scrolls || transformed { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
+        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.transformed);
         let under = Scrollers {
             flow: inner,
             absolute: if positioned || transformed { inner } else { scrollers.absolute },
             fixed: if transformed { inner } else { scrollers.fixed },
+            held,
+            transformed: scrollers.transformed || transformed,
         };
         // What the children reach, without this box's own border: that is
         // not scrollable overflow.
@@ -22464,6 +22471,7 @@ fn geometry_snapshot(
                 scroller,
                 transform,
                 scrolls,
+                held,
             };
             styles.entry(node).or_insert_with(|| {
                 let mut lines = computed_style_lines(b);
@@ -22493,7 +22501,7 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    let none = Scrollers { flow: None, absolute: None, fixed: None };
+    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, transformed: false };
     walk(root, &mut out, &mut styles, None, none);
     (out, styles)
 }
@@ -22565,6 +22573,7 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         scroller: None,
         transform: None,
         scrolls: false,
+        held: false,
     }
 }
 
