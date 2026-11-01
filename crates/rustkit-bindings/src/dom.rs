@@ -55,9 +55,13 @@ pub struct BoxGeometry {
     pub scroll_height: f32,
     /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
     pub position: u8,
-    /// The nearest element scroller whose scroll moves this box (`x`, `y` are
-    /// where layout put it, before any of them). Follow it up to add them up.
+    /// The nearest element scroller or transformed box that moves this box
+    /// (`x`, `y` are where layout put it, before any of them). Follow it up
+    /// to add them up.
     pub scroller: Option<usize>,
+    /// This box's own transform, about its origin, in layout coordinates, as
+    /// `[a, b, c, d, e, f]`.
+    pub transform: Option<[f32; 6]>,
     /// Whether this box is an element scroller itself.
     pub scrolls: bool,
 }
@@ -216,6 +220,49 @@ impl DomHost {
             (self.geometry, self.computed) = source();
             self.geometry_builds += 1;
         }
+    }
+
+    /// The rect of a box under a transform, its own or one above it, as x, y,
+    /// width, height: the bounding box of its corners taken up the chain, each
+    /// scroller's scroll inside that scroller's own transform. `None` when no
+    /// transform is on the chain, and `element_scroll_over` is the whole answer.
+    fn transformed_rect(&self, geometry: &BoxGeometry) -> Option<(f32, f32, f32, f32)> {
+        let (x, y, r, b) = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height);
+        let mut corners = [(x, y), (r, y), (x, b), (r, b)];
+        let mut any = false;
+        let mut apply = |corners: &mut [(f32, f32); 4], m: Option<[f32; 6]>| {
+            if let Some(m) = m {
+                any = true;
+                for c in corners.iter_mut() {
+                    *c = (m[0] * c.0 + m[2] * c.1 + m[4], m[1] * c.0 + m[3] * c.1 + m[5]);
+                }
+            }
+        };
+        apply(&mut corners, geometry.transform);
+        let scrolls = self.element_scrolls.borrow();
+        let mut at = geometry.scroller;
+        while let Some(node) = at {
+            if let Some((dx, dy)) = scrolls.offsets.get(&node) {
+                for c in corners.iter_mut() {
+                    *c = (c.0 - dx, c.1 - dy);
+                }
+            }
+            let above = self.geometry.get(&node);
+            apply(&mut corners, above.and_then(|g| g.transform));
+            at = above.and_then(|g| g.scroller);
+        }
+        if !any {
+            return None;
+        }
+        let (mut left, mut top) = corners[0];
+        let (mut right, mut bottom) = corners[0];
+        for c in &corners[1..] {
+            left = left.min(c.0);
+            top = top.min(c.1);
+            right = right.max(c.0);
+            bottom = bottom.max(c.1);
+        }
+        Some((left, top, right - left, bottom - top))
     }
 
     /// What the element scrollers above a box have moved it by.
@@ -1514,14 +1561,18 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
-                        // Rects are where the scrollers put the box; the
-                        // last two are where layout did (`offsetTop`).
-                        let (dx, dy) = host.element_scroll_over(g);
+                        // The first two and the last two are for rects: where
+                        // the scrollers and transforms put the box. The rest,
+                        // `offsetTop` among them, are where layout did.
+                        let (rx, ry, rw, rh) = host.transformed_rect(g).unwrap_or_else(|| {
+                            let (dx, dy) = host.element_scroll_over(g);
+                            (g.x - dx, g.y - dy, g.width, g.height)
+                        });
                         JsValue::String(format!(
-                            "{} {} {} {} {} {} {} {} {} {} {} {} {}",
-                            n(g.x - dx), n(g.y - dy), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            n(rx), n(ry), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
                             n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
-                            n(g.x), n(g.y)
+                            n(g.x), n(g.y), n(rw), n(rh)
                         ))
                     }
                     None => JsValue::String(String::new()),
@@ -2771,7 +2822,7 @@ const WRAPPERS_JS: &str = r#"
         var p = raw.split(' ');
         var n = [];
         for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
-        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12] };
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12], rw: n[13], rh: n[14] };
     }
     // What web_scroll.js scrolls an element with; it takes this and deletes
     // it. read: null when the element cannot scroll now.
@@ -2808,11 +2859,11 @@ const WRAPPERS_JS: &str = r#"
     Element.prototype.getBoundingClientRect = function () {
         var b = geom(this);
         if (!b) return rect(0, 0, 0, 0);
-        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h);
+        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh);
     };
     Element.prototype.getClientRects = function () {
         var b = geom(this);
-        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h)] : [];
+        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh)] : [];
         return out;
     };
     function metric(name, pick) {

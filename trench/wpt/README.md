@@ -26,8 +26,13 @@ python3 scripts/wpt_tier1.py
 
 No Chrome is involved: a case passes when its test frame and reference frame match exactly. `status` uses
 that rule alone. The campaign's rule (pixelmatch 0.1, 15%) is reported beside it as `campaign_diff_pct` and
-`campaign_rule_counts`, and never sets a status; it needs `tools/parity_oracle/node_modules` and reads
-`not_measured` without them.
+`campaign_rule_counts`, and never sets a status; it needs `tools/parity_oracle/node_modules`, and a case it
+could not measure says why in `campaign_not_measured`.
+
+The runner reads `<CARGO_TARGET_DIR or target>/parity/parity-capture`. `scripts/parity_test.py` builds and runs
+the `--release` binary instead, so a campaign number and a WPT count on one commit come from two builds of the
+same source. `unproven_passes` in `last-run.json` lists passes that still matched with their named property
+removed (T14's probe, `unproven` in the manifest): they count, and they are not yet proof of support.
 
 ## Layout
 
@@ -36,7 +41,7 @@ that rule alone. The campaign's rule (pixelmatch 0.1, 15%) is reported beside it
 | `MANIFEST.json` | **Source of truth.** 30 test ids, their paths, buckets, support files, and which slice each one funds. |
 | `scripts/wpt_sync.sh` | Materialises *only* the manifest paths into `third_party/wpt/` (gitignored). The manifest drives the checkout, never the reverse. |
 | `scripts/wpt_tier1.py` | The runner. Aborts if the negative control does not go red. |
-| `last-run.json` | Written by the runner (gitignored): counts, per-case rows, `develop_sha`, `oracle`. |
+| `last-run.json` | Written by the runner (gitignored): counts, per-case rows, `develop_sha`, `oracle`, `unproven_passes`. |
 
 ## The honesty note that gates this whole lane
 
@@ -52,15 +57,15 @@ module docs, where someone reading the code will hit it.
 
 - **ERROR** is the instrument: a capture failed, a frame was blank, `rel=match` disagrees with the manifest,
   or a page's local resource is not on disk. No pixels compared. Add a missing file to
-  `MANIFEST.support_paths`.
+  `MANIFEST.support_paths`. A missing resource outranks SKIP.
 - **SKIP** is a case the path cannot probe: `reftest-wait` (the frame is taken after load and nothing watches
   for the completion signal) and `fuzzy` annotations.
 - An inline script without a wait is scored, with `--run-inline-scripts`.
 
 ## Known gaps
 
-1. **On the macOS seat `wpt_sync.sh` has only run step by step.** The allowlist refuses the script as a
-   whole, so T14 ran its git commands by hand in a fresh checkout. Its `--stdin` path list has not run.
+1. **The macOS lane seat cannot run `wpt_sync.sh` as a script.** Its allowlist refuses it, so lane sessions run
+   the git steps by hand. The script itself ran end to end in the #844 R1, `--stdin` path list included.
 2. **Seed is 30.** Grow it only when a campaign dig would have been clearer with a WPT id.
 3. **No CI gate.** Per the pin §5 and Pete's standing rule, WPT must not gate PR merges until a floor is
    deliberately locked.
