@@ -509,6 +509,8 @@ mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sticky_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
