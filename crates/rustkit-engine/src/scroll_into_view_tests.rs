@@ -57,7 +57,7 @@ const PAGE2: &str = concat!(
 );
 
 const STATE: &str = "function state() { \
-    return ['in', 'out', 'hid', 'clip', 'rel', 'big-s', 's', 'f'].map(function (i) { \
+    return ['in', 'out', 'hid', 'clip', 'rel', 'big-s', 's', 'f', 'tw', 'tb'].map(function (i) { \
         var e = document.getElementById(i); \
         return e && (e.scrollLeft || e.scrollTop) ? i + '=' + e.scrollLeft + ',' + e.scrollTop : ''; \
     }).filter(Boolean).concat('win=' + scrollX + ',' + scrollY).join(' '); } \
@@ -306,4 +306,79 @@ fn an_absolute_box_skips_a_static_scroller() {
         "<body><div id=s><div style=height:300px></div><div id=a></div></div></body>",
     );
     check(page, "$('a').scrollIntoView()", "win=0,1800");
+}
+
+// `location.hash = v` when the URL's fragment (none reads as empty) is
+// already `v` without its `#` does nothing (HTML §7.2.4, the hash setter).
+// Chromium 143.0.7499.4 on PAGE (`c2c_hash_probe.mjs` on the hub): the
+// window and `#in` stay, no `hashchange`, no entry, the URL unchanged.
+// Clearing a fragment that is there goes to the top and is heard.
+
+/// From `path`, with the window at 50 and `#in` at 40, run `script`, then
+/// the scroll state, `hashchange`s heard, entries added, and the URL.
+fn hash_case(path: &str, script: &str) -> String {
+    let (mut engine, view, _server) = serve(PAGE, path);
+    read(
+        &mut engine,
+        view,
+        "window.hc = 0; window.onhashchange = function () { hc++; }; scrollTo(0, 50); $('in').scrollTop = 40; window.len0 = history.length",
+    );
+    read(&mut engine, view, script);
+    let got = read(
+        &mut engine,
+        view,
+        "state() + ' ' + hc + ' ' + (history.length - len0) + ' ' + location.href.slice(location.origin.length)",
+    );
+    let (x, y) = engine.get_scroll_offset(view).unwrap();
+    format!("{got} view={x},{y}")
+}
+
+#[test]
+fn clearing_the_hash_of_a_url_without_one_does_nothing() {
+    assert_eq!(hash_case("/", "location.hash = ''"), "in=0,40 win=0,50 0 0 / view=0,50");
+    assert_eq!(hash_case("/", "location.hash = '#'"), "in=0,40 win=0,50 0 0 / view=0,50");
+}
+
+#[test]
+fn clearing_a_fragment_goes_to_the_top_and_is_heard() {
+    assert_eq!(hash_case("/#nope", "location.hash = ''"), "in=0,40 win=0,0 1 1 /# view=0,0");
+    assert_eq!(hash_case("/#nope", "location.hash = '#'"), "in=0,40 win=0,0 1 1 /# view=0,0");
+}
+
+#[test]
+fn the_same_hash_again_does_nothing() {
+    assert_eq!(hash_case("/#nope", "location.hash = 'nope'"), "in=0,40 win=0,50 0 0 /#nope view=0,50");
+    assert_eq!(hash_case("/#nope", "location.hash = '#nope'"), "in=0,40 win=0,50 0 0 /#nope view=0,50");
+    // A bare `#` is an empty fragment, the same as the one asked for.
+    assert_eq!(hash_case("/#", "location.hash = ''"), "in=0,40 win=0,50 0 0 /# view=0,50");
+    assert_eq!(hash_case("/#", "location.hash = '#'"), "in=0,40 win=0,50 0 0 /# view=0,50");
+}
+
+#[test]
+fn an_href_with_a_bare_hash_still_navigates() {
+    // Only the hash setter compares fragments; `href` to the URL plus `#`
+    // is a fragment navigation in Chromium too.
+    assert_eq!(hash_case("/", "location.href = location.href + '#'"), "in=0,40 win=0,0 1 1 /# view=0,0");
+}
+
+// A transformed box is on the layout's `scroller` chain since #852 (it moves
+// the boxes inside it), but it does not scroll. Chromium 143.0.7499.4 on
+// this page (`c2c_transform_chain_probe.mjs` on the hub): only `#s` and the
+// window move. For `#tb-t` Chromium also moves the window 5 across; x stays
+// 0 here, as above.
+const PAGE3: &str = concat!(
+    "<!doctype html><style>body{margin:0;height:3000px}#sp0{height:1000px}",
+    "#s{overflow:auto;width:200px;height:100px}#s-gap{height:300px}",
+    "#tw{transform:translateY(50px);height:200px}#tw-gap{height:100px}#tw-t{height:20px}#s-end{height:100px}",
+    "#tb{transform:translateX(5px)}#tb-gap{height:500px}#tb-t{height:20px}",
+    "</style><body><div id=sp0></div><div id=s><div id=s-gap></div>",
+    "<div id=tw><div id=tw-gap></div><div id=tw-t></div></div><div id=s-end></div></div>",
+    "<div id=tb><div id=tb-gap></div><div id=tb-t></div></div></body>",
+);
+
+#[test]
+fn a_transformed_box_that_does_not_scroll_is_not_a_scroller() {
+    check(PAGE3, "$('tw-t').scrollIntoView()", "s=0,450 win=0,1000");
+    check(PAGE3, "$('tw-t').scrollIntoView({ block: 'nearest' })", "s=0,370 win=0,500");
+    check(PAGE3, "$('tb-t').scrollIntoView()", "win=0,1600");
 }

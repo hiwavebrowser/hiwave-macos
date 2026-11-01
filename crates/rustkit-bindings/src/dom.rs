@@ -55,9 +55,13 @@ pub struct BoxGeometry {
     pub scroll_height: f32,
     /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
     pub position: u8,
-    /// The nearest element scroller whose scroll moves this box (`x`, `y` are
-    /// where layout put it, before any of them). Follow it up to add them up.
+    /// The nearest element scroller or transformed box that moves this box
+    /// (`x`, `y` are where layout put it, before any of them). Follow it up
+    /// to add them up.
     pub scroller: Option<usize>,
+    /// This box's own transform, about its origin, in layout coordinates, as
+    /// `[a, b, c, d, e, f]`.
+    pub transform: Option<[f32; 6]>,
     /// Whether this box is an element scroller itself.
     pub scrolls: bool,
     /// `position: sticky`: where it moves to. A sticky box is on the
@@ -233,6 +237,59 @@ impl DomHost {
             (self.geometry, self.computed) = source();
             self.geometry_builds += 1;
         }
+    }
+
+    /// The rect of a box under a transform, its own or one above it, as x, y,
+    /// width, height: the bounding box of its corners taken up the chain. At
+    /// each box its transform, about where layout put it, then its sticky
+    /// shift, which carries the transform's origin along; then the scroll of
+    /// the scroller above, inside that scroller's own transform. `None` when
+    /// no transform is on the chain, and `moved_by` is the whole answer.
+    fn transformed_rect(&self, geometry: &BoxGeometry) -> Option<(f32, f32, f32, f32)> {
+        let mut chain = vec![(None, geometry)];
+        let mut at = geometry.scroller;
+        while let Some((node, above)) = at.and_then(|node| Some((node, self.geometry.get(&node)?))) {
+            chain.push((Some(node), above));
+            at = above.scroller;
+        }
+        if chain.iter().all(|(_, g)| g.transform.is_none()) {
+            return None;
+        }
+        let scrolls = self.element_scrolls.borrow();
+        // Each shift depends on those above it, so these go from the top.
+        let mut shifts = vec![(0.0, 0.0); chain.len()];
+        let mut moved = MovedBy::default();
+        for (i, (node, g)) in chain.iter().enumerate().rev() {
+            let before = moved.stuck;
+            self.add_sticky(g, &scrolls.offsets, &mut moved);
+            shifts[i] = (moved.stuck.0 - before.0, moved.stuck.1 - before.1);
+            if node.is_some() && g.scrolls {
+                moved.above = (0.0, 0.0);
+            }
+        }
+        let (x, y, r, b) = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height);
+        let mut corners = [(x, y), (r, y), (x, b), (r, b)];
+        for (i, (node, g)) in chain.iter().enumerate() {
+            let scroll = node.filter(|_| g.scrolls).and_then(|node| scrolls.offsets.get(&node));
+            let (dx, dy) = scroll.copied().unwrap_or((0.0, 0.0));
+            for c in corners.iter_mut() {
+                let (px, py) = (c.0 - dx, c.1 - dy);
+                let (tx, ty) = match g.transform {
+                    Some(m) => (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]),
+                    None => (px, py),
+                };
+                *c = (tx + shifts[i].0, ty + shifts[i].1);
+            }
+        }
+        let (mut left, mut top) = corners[0];
+        let (mut right, mut bottom) = corners[0];
+        for c in &corners[1..] {
+            left = left.min(c.0);
+            top = top.min(c.1);
+            right = right.max(c.0);
+            bottom = bottom.max(c.1);
+        }
+        Some((left, top, right - left, bottom - top))
     }
 
     /// Where the window is now, script's own scroll included.
@@ -1565,18 +1622,22 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
-                        // Rects are where the scrollers and sticky boxes put
-                        // the box; the last two leave the scrollers out
-                        // (`offsetTop`).
+                        // The first two and the last two are for rects: where
+                        // the scrollers, sticky boxes and transforms put the
+                        // box. The rest, `offsetTop` among them, leave the
+                        // scrollers and transforms out.
                         let moved = host.moved_by(g);
                         let (x, y) = (g.x + moved.stuck.0, g.y + moved.stuck.1);
+                        let (rx, ry, rw, rh) = host
+                            .transformed_rect(g)
+                            .unwrap_or((x - moved.scrolled.0, y - moved.scrolled.1, g.width, g.height));
                         // The rect's reader takes the window's scroll off.
                         let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
-                            "{} {} {} {} {} {} {} {} {} {} {} {} {}",
-                            n(x - moved.scrolled.0 + page.0), n(y - moved.scrolled.1 + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            n(rx + page.0), n(ry + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
                             n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
-                            n(x), n(y)
+                            n(x), n(y), n(rw), n(rh)
                         ))
                     }
                     None => JsValue::String(String::new()),
@@ -1607,8 +1668,8 @@ pub(crate) fn install(
                         let mut at = g.scroller;
                         while let Some(scroller) = at {
                             let above = host.geometry.get(&scroller);
-                            // A sticky box on the chain moves the box, but
-                            // cannot be scrolled.
+                            // A sticky or transformed box on the chain moves
+                            // the box, but cannot be scrolled.
                             if above.is_some_and(|g| g.scrolls) {
                                 chain.push_str(&format!(" {scroller}"));
                             }
@@ -2831,7 +2892,7 @@ const WRAPPERS_JS: &str = r#"
         var p = raw.split(' ');
         var n = [];
         for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
-        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12] };
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12], rw: n[13], rh: n[14] };
     }
     // What web_scroll.js scrolls an element with; it takes this and deletes
     // it. read: null when the element cannot scroll now.
@@ -2868,11 +2929,11 @@ const WRAPPERS_JS: &str = r#"
     Element.prototype.getBoundingClientRect = function () {
         var b = geom(this);
         if (!b) return rect(0, 0, 0, 0);
-        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h);
+        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh);
     };
     Element.prototype.getClientRects = function () {
         var b = geom(this);
-        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h)] : [];
+        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh)] : [];
         return out;
     };
     function metric(name, pick) {

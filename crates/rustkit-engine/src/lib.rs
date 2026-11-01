@@ -505,6 +505,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod transform_rect_tests;
+#[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
@@ -22356,10 +22358,9 @@ impl layout_ctx::LayoutCtx {
 /// (`DomBindings::set_geometry`). An element laid out as several boxes (a
 /// block split around anonymous boxes) reports the union of its boxes.
 /// `scroll_*` is the extent of the box's descendants from its padding edge.
-/// Transforms are not applied (`getBoundingClientRect` of a transformed
-/// element reports its untransformed box for now). Nor are element scrolls:
-/// each box names the scroller that moves it, and a read adds them up, so a
-/// scroll does not cost a new snapshot.
+/// Neither transforms nor element scrolls are applied: each box names the
+/// nearest scroller or transformed box that moves it, and a read goes up the
+/// chain, so a scroll does not cost a new snapshot.
 fn geometry_snapshot(
     root: &LayoutBox,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
@@ -22367,9 +22368,9 @@ fn geometry_snapshot(
     /// ancestor's box (anonymous boxes between do not count): an element
     /// whose set is another `Arc` publishes it with its style rows.
     ///
-    /// `scrollers` is the nearest scroller moving each kind of box under this
-    /// one. An absolute box is in the scrolling box of its containing block,
-    /// and a fixed box in none, unless a transform holds it.
+    /// `scrollers` is the nearest scroller or transformed box moving each kind
+    /// of box under this one. An absolute box is in the scrolling box of its
+    /// containing block, and a fixed box in none, unless a transform holds it.
     #[derive(Clone, Copy)]
     struct Scrollers {
         flow: Option<usize>,
@@ -22402,13 +22403,19 @@ fn geometry_snapshot(
         };
         let scrolls = b.is_element_scroller();
         let sticky = b.sticky_rule.get();
-        let inner = if scrolls || sticky.is_some() { b.node_id } else { scroller };
+        // A transform does not apply to a plain inline box, as in Chrome.
+        let transform = match b.box_type {
+            BoxType::Inline => None,
+            _ if b.node_id.is_none() => None,
+            _ => own_transform_affine(b),
+        };
+        let transformed = transform.is_some();
+        let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
-        let transformed = !b.style.effective_transform().is_identity();
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.transformed);
         let under = Scrollers {
             flow: inner,
-            absolute: if positioned { inner } else { scrollers.absolute },
+            absolute: if positioned || transformed { inner } else { scrollers.absolute },
             fixed: if transformed { inner } else { scrollers.fixed },
             held,
             transformed: scrollers.transformed || transformed,
@@ -22472,6 +22479,7 @@ fn geometry_snapshot(
                 scroll_height: finite_f32((bottom - py).max(ph)),
                 position,
                 scroller,
+                transform,
                 scrolls,
                 sticky,
                 held,
@@ -22574,6 +22582,7 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         scroll_height: (bottom - pb.y).max(pb.height),
         position: 0,
         scroller: None,
+        transform: None,
         scrolls: false,
         sticky: None,
         held: false,

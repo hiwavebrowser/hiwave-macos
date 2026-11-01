@@ -113,6 +113,10 @@
             if (syncing) { hashValue = String(v); return; }
             var target;
             try { target = new URL(hrefValue.split('#')[0] + '#' + String(v).replace(/^#/, '')); } catch (e) { return; }
+            // The fragment already there (none reads as empty) is no
+            // navigation: `location.hash = ''` on a URL without one stays put.
+            var at = hrefValue.indexOf('#');
+            if (target.hash.slice(1) === (at < 0 ? '' : hrefValue.slice(at + 1))) return;
             go(target);
         },
         enumerable: true, configurable: true
