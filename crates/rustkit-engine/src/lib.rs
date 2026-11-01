@@ -21254,8 +21254,15 @@ fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::Transfo
         Some(p) => parse_length(p)?,
         None => rustkit_css::Length::Zero,
     };
+    // The depth is a `<length>`: no percentage, even inside a function, no keyword,
+    // and no number but zero.
     if let Some(z) = parts.get(2) {
-        parse_length(z)?;
+        if z.contains('%')
+            || z.parse::<f32>().is_ok_and(|n| n != 0.0)
+            || matches!(parse_length(z)?, rustkit_css::Length::Auto | rustkit_css::Length::FitContent)
+        {
+            return None;
+        }
     }
     Some(Some(rustkit_css::TransformOp::Translate(x, y)))
 }
@@ -43108,7 +43115,7 @@ mod individual_transform_tests {
     }
 
     #[test]
-    fn none_resets_and_invalid_or_3d_values_are_dropped() {
+    fn none_resets_invalid_values_drop_and_a_depth_flattens() {
         let s = styled(&[("translate", "4px"), ("translate", "none")]);
         assert_eq!(s.translate, None);
         // Invalid and 3D values leave the previous value alone.
