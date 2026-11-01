@@ -505,6 +505,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod transform_parse_tests;
+#[cfg(all(test, feature = "headless"))]
 mod transform_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
