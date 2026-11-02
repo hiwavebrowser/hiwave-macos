@@ -738,6 +738,11 @@ pub fn extract_arms(src: &str, helpers: &str) -> BTreeSet<String> {
     arms
 }
 
+/// Guards on the property name the reader could not turn into names.
+pub fn unread_guards(_src: &str, _helpers: &str) -> Vec<String> {
+    Vec::new()
+}
+
 /// Where this branch left develop, shortened. Without `origin/develop` there is
 /// no such point, and the report says it read HEAD rather than call it develop.
 pub fn engine_sha(merge_base: Option<&str>, head: &str) -> String {
@@ -819,6 +824,13 @@ pub struct TopSites {
 }
 
 impl TopSites {
+    pub fn from_prevalence(_file: &Value) -> Result<TopSites, String> {
+        Ok(TopSites {
+            loaded: 0,
+            sites: Vec::new(),
+        })
+    }
+
     pub fn from_census(census: &Value) -> TopSites {
         let sites: Vec<Value> = census["results"]
             .as_array()
@@ -879,6 +891,8 @@ pub struct ValueRow {
     pub engine_computed: String,
     pub probes_off: usize,
     pub geometry_ok: bool,
+    /// How far this row's control already was from Chrome's.
+    pub control_off: usize,
 }
 
 #[derive(Debug, Clone)]

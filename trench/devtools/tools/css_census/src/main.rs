@@ -305,6 +305,7 @@ fn run() -> Result<(), String> {
                 engine_computed: read(&m.rust_value),
                 probes_off: off,
                 geometry_ok: geometry_matches(&m),
+                control_off: 0,
             });
             verdicts.push(verdict);
         }
