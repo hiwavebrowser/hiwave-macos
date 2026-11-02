@@ -62,6 +62,7 @@ sync not run, negative control did not go red).
 """
 
 import argparse
+import collections
 import concurrent.futures
 import json
 import math
@@ -832,14 +833,15 @@ def recheck_small_fails(cases, entries, viewport, oracle=chromium_pair_diffs):
             )
 
 
+def is_area_probe_demotion(case) -> bool:
+    return case["status"] == "UNPROVEN" and case["reason"].startswith(area_probe_reason_prefix(case["area"]))
+
+
 def recheck_area_probes(cases, entries, viewport, oracle=chromium_pair_diffs):
     """A match demoted by its area probe, on a page Chromium's own test and reference
     do not match on: the page is no evidence for the engine or against it. It stays
     UNPROVEN and its reason says so."""
-    probed = [
-        c for c in cases
-        if c["status"] == "UNPROVEN" and c["reason"].startswith(area_probe_reason_prefix(c["area"]))
-    ]
+    probed = [c for c in cases if is_area_probe_demotion(c)]
     if not probed:
         return
     version = _ask_chromium(probed, entries, viewport, oracle)
@@ -853,15 +855,23 @@ def recheck_area_probes(cases, entries, viewport, oracle=chromium_pair_diffs):
 
 def area_probe_chromium_counts(cases):
     """What Chromium said about the area-probe demotions, as one count per answer."""
-    return {"asked": 0, "differ": 0, "match": 0, "not_measured": 0}
+    probed = [c for c in cases if is_area_probe_demotion(c)]
+    pixels = [c["chromium_diff_pixels"] for c in probed]
+    return {
+        "asked": len(probed),
+        "differ": sum(1 for p in pixels if p),
+        "match": sum(1 for p in pixels if p == 0),
+        "not_measured": sum(1 for p in pixels if p is None),
+    }
 
 
 def chromium_gap_lines(cases):
     """One console line per question Chromium did not answer, and why."""
-    return [
-        f"small FAIL not checked in Chromium: {why}"
-        for why in sorted({c["chromium_not_measured"] for c in cases if c["chromium_not_measured"]})
-    ]
+    gaps = collections.Counter(
+        ("area probe" if is_area_probe_demotion(c) else "small FAIL", c["chromium_not_measured"])
+        for c in cases if c["chromium_not_measured"]
+    )
+    return [f"{question} not checked in Chromium: {why} ({n})" for (question, why), n in sorted(gaps.items())]
 
 
 def remove_staged():
