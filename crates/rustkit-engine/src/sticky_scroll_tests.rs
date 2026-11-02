@@ -496,3 +496,150 @@ fn a_child_of_the_stuck_box_is_hit_over_the_bar() {
 fn a_sticky_box_not_yet_at_the_bar_changes_nothing() {
     over_a_bar("", BAR_FIRST, "hit(10, 10)", "bar");
 }
+
+/// A stuck header (`h`, 300 wide) under a fixed box (`m`, 400 wide): the
+/// stacking contexts on each path decide, from where the paths part
+/// (`trench/z/tools/c2/sticky_ctx_probe.mjs`, Chromium 143 at scroll 500).
+fn ctx_header(z: i32) -> String {
+    format!("<div style=\"height:400px\"></div><div id=h style=\"position:sticky;top:0;width:300px;height:30px;z-index:{z}\"></div>")
+}
+
+fn ctx_wrap(style: &str, inner: &str) -> String {
+    format!("<div style=\"height:2000px;{style}\">{inner}</div>")
+}
+
+fn ctx_modal(z: i32) -> String {
+    format!("<div id=m style=\"position:fixed;left:0;top:0;width:400px;height:40px;z-index:{z}\"></div>")
+}
+
+fn ctx_page(body: &str) -> String {
+    format!("<!doctype html><style>body{{margin:0;height:3000px}}</style>{body}<div style=\"height:3000px\"></div>")
+}
+
+fn ctx_hit(body: &str) -> String {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, &ctx_page(body)).expect("load");
+    let got = engine
+        .execute_script(view, &format!("{AT} window.scrollTo(0, 500); hit(10, 10)"))
+        .expect("script");
+    got.trim_start_matches("String(\"").trim_end_matches("\")").to_string()
+}
+
+#[track_caller]
+fn check_ctx(cases: &[(&str, String, &str)]) {
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, body, want)| {
+            let got = ctx_hit(body);
+            (got != *want).then(|| format!("{name}: {got}, Chromium {want}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{} of {} wrong:\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+}
+
+#[test]
+fn a_z_index_wrapper_places_the_stuck_box_against_a_fixed_box() {
+    let rel = |z: i32| format!("position:relative;z-index:{z}");
+    check_ctx(&[
+        ("no wrapper", ctx_wrap("", &ctx_header(10)) + &ctx_modal(5), "h"),
+        ("z0, modal after", ctx_wrap(&rel(0), &ctx_header(10)) + &ctx_modal(5), "m"),
+        ("z0, modal before", ctx_modal(5) + &ctx_wrap(&rel(0), &ctx_header(10)), "m"),
+        ("z1, 100 over 50", ctx_wrap(&rel(1), &ctx_header(100)) + &ctx_modal(50), "m"),
+        ("z60, 1 under 50", ctx_wrap(&rel(60), &ctx_header(1)) + &ctx_modal(50), "h"),
+        ("equal z, modal after", ctx_wrap(&rel(5), &ctx_header(10)) + &ctx_modal(5), "m"),
+        ("equal z, modal before", ctx_modal(5) + &ctx_wrap(&rel(5), &ctx_header(10)), "h"),
+        ("relative, z auto", ctx_wrap("position:relative", &ctx_header(10)) + &ctx_modal(5), "h"),
+        ("static with a z-index", ctx_wrap("z-index:0", &ctx_header(10)) + &ctx_modal(5), "h"),
+        (
+            "absolute z0",
+            ctx_wrap("position:absolute;left:0;top:0;width:100%;z-index:0", &ctx_header(10)) + &ctx_modal(5),
+            "m",
+        ),
+        ("negative wrapper", ctx_wrap(&rel(-1), &ctx_header(10)) + &ctx_modal(0), "m"),
+    ]);
+}
+
+#[test]
+fn the_comparison_starts_where_the_paths_part() {
+    let rel = |z: i32| format!("position:relative;z-index:{z}");
+    let held = |z: i32, m: i32| format!("<div style=\"{}\">{}</div>", rel(z), ctx_modal(m));
+    check_ctx(&[
+        ("outer 20, inner 1", ctx_wrap(&rel(20), &ctx_wrap(&rel(1), &ctx_header(1))) + &ctx_modal(5), "h"),
+        ("outer 1, inner 20", ctx_wrap(&rel(1), &ctx_wrap(&rel(20), &ctx_header(10))) + &ctx_modal(5), "m"),
+        ("shared, 10 over 5", ctx_wrap(&rel(0), &(ctx_header(10) + &ctx_modal(5))), "h"),
+        ("shared, 1 under 5", ctx_wrap(&rel(0), &(ctx_header(1) + &ctx_modal(5))), "m"),
+        ("modal in 20, app 10", ctx_wrap(&rel(10), &ctx_header(1)) + &held(20, 1), "m"),
+        ("modal in 1, app 10", ctx_wrap(&rel(10), &ctx_header(1)) + &held(1, 50), "h"),
+    ]);
+}
+
+#[test]
+fn a_flex_item_with_a_z_index_is_a_stacking_context() {
+    let flex = |item: &str| format!("<div style=\"display:flex\">{}</div>", ctx_wrap(item, &ctx_header(10)));
+    check_ctx(&[
+        ("z0", flex("flex:1;z-index:0") + &ctx_modal(5), "m"),
+        ("z auto", flex("flex:1") + &ctx_modal(5), "h"),
+    ]);
+}
+
+#[test]
+fn what_makes_a_stacking_context_without_a_z_index() {
+    let cases: Vec<(&str, String, &str)> = [
+        ("transform:translateX(0)", "m"),
+        ("translate:0px", "m"),
+        ("scale:1", "m"),
+        ("rotate:0deg", "m"),
+        ("opacity:.9", "m"),
+        ("filter:blur(0px)", "m"),
+        ("backdrop-filter:blur(0px)", "m"),
+        ("clip-path:inset(0)", "m"),
+        ("mask-image:linear-gradient(#000,#000)", "m"),
+        ("isolation:isolate", "m"),
+        ("mix-blend-mode:multiply", "m"),
+        ("perspective:100px", "m"),
+        ("transform-style:preserve-3d", "m"),
+        ("contain:paint", "m"),
+        ("contain:layout", "m"),
+        ("will-change:transform", "m"),
+        ("will-change:opacity", "m"),
+        ("will-change:clip-path", "m"),
+        ("will-change:mask", "m"),
+        ("will-change:isolation", "m"),
+        ("will-change:mix-blend-mode", "m"),
+        ("will-change:z-index", "m"),
+        ("will-change:position", "m"),
+        ("will-change:top", "h"),
+        ("container-type:size", "h"),
+        ("opacity:1", "h"),
+        ("transform:none", "h"),
+        ("isolation:auto", "h"),
+        ("mix-blend-mode:normal", "h"),
+        ("contain:style", "h"),
+        ("contain:size", "h"),
+    ]
+    .into_iter()
+    .map(|(style, want)| (style, ctx_wrap(style, &ctx_header(10)) + &ctx_modal(5), want))
+    .collect();
+    check_ctx(&cases);
+}
+
+/// A pointer in the window reaches the same rule as script does: the fixed
+/// modal is 400 wide, the header 300.
+#[test]
+fn a_click_over_a_stuck_header_in_a_wrapper_goes_to_the_modal() {
+    let width_at = |body: String| {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+            .expect("view");
+        engine.load_html(view, &ctx_page(&body)).expect("load");
+        engine.set_scroll_offset(view, 0.0, 500.0).expect("scroll");
+        Engine::hit_at(&engine.views[&view], 10.0, 10.0).expect("hit").border_box.width
+    };
+    let wrapper = "position:relative;z-index:0";
+    assert_eq!(width_at(ctx_wrap(wrapper, &ctx_header(10)) + &ctx_modal(5)), 400.0, "the modal");
+    assert_eq!(width_at(ctx_wrap("", &ctx_header(10)) + &ctx_modal(5)), 300.0, "no wrapper: the header");
+}
