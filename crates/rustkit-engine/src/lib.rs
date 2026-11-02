@@ -513,6 +513,8 @@ mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sticky_scroll_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
@@ -3736,6 +3738,7 @@ impl Engine {
     /// clicked is what is seen.
     fn hit_at(view: &ViewState, viewport_x: f32, viewport_y: f32) -> Option<rustkit_layout::HitTestResult> {
         let layout = view.layout.as_ref()?;
+        layout.stamp_sticky_shifts(view.scroll_offset);
         let page_point = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
         // Every pointer move asks here, and finding the fixed boxes visits
         // the whole tree: it is done once, when the layout is stored.
@@ -8019,6 +8022,8 @@ impl Engine {
         // Element scroll offsets carry over to the new boxes, clamped to them.
         if let Some(view) = self.views.get(&id) {
             stamp_element_scrolls(&root_box, &view.lay.element_scrolls);
+            root_box.stamp_sticky((bounds.width as f32, bounds.height as f32));
+            root_box.stamp_sticky_shifts(view.scroll_offset);
         }
 
         // Generate display list
@@ -13284,6 +13289,23 @@ impl layout_ctx::LayoutCtx {
                 let value = value.trim().to_ascii_lowercase();
                 style.filter = if value == "none" { String::new() } else { value };
             }
+            "will-change" => {
+                if let Some(holds) = will_change_holds_fixed(value) {
+                    style.will_change_holds_fixed = holds;
+                    set_stacks(style, rustkit_css::STACKS_WILL_CHANGE, will_change_stacks(value));
+                }
+            }
+            "isolation" | "mix-blend-mode" | "perspective" | "transform-style" | "backdrop-filter"
+            | "content-visibility" | "view-transition-name" => {
+                if let Some((bit, on)) = stacks_declaration(property, value) {
+                    set_stacks(style, bit, on);
+                }
+            }
+            "contain" => {
+                if let Some(holds) = contain_holds_fixed(value) {
+                    style.contain_holds_fixed = holds;
+                }
+            }
             "object-fit" => {
                 // Layout and paint already honour every keyword; only this
                 // arm was missing, so every `object-fit: cover` painted as
@@ -14011,6 +14033,18 @@ impl layout_ctx::LayoutCtx {
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
             "filter" | "-webkit-filter" => style.filter.clear(),
+            "will-change" => {
+                style.will_change_holds_fixed = false;
+                style.stacks &= !rustkit_css::STACKS_WILL_CHANGE;
+            }
+            "isolation" => style.stacks &= !rustkit_css::STACKS_ISOLATION,
+            "mix-blend-mode" => style.stacks &= !rustkit_css::STACKS_BLEND,
+            "perspective" => style.stacks &= !rustkit_css::STACKS_PERSPECTIVE,
+            "transform-style" => style.stacks &= !rustkit_css::STACKS_PRESERVE_3D,
+            "backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
+            "content-visibility" => style.stacks &= !rustkit_css::STACKS_CONTENT_VISIBILITY,
+            "view-transition-name" => style.stacks &= !rustkit_css::STACKS_VIEW_TRANSITION,
+            "contain" => style.contain_holds_fixed = false,
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
                 style.object_position = (0.5, 0.5);
@@ -18327,6 +18361,8 @@ impl Engine {
                 Cmd::PopFilter => serde_json::json!({ "op": "pop_filter" }),
                 Cmd::PushViewportFixed => serde_json::json!({ "op": "push_viewport_fixed" }),
                 Cmd::PopViewportFixed => serde_json::json!({ "op": "pop_viewport_fixed" }),
+                Cmd::PushWindowSticky(_) => serde_json::json!({ "op": "push_window_sticky" }),
+                Cmd::PopWindowSticky => serde_json::json!({ "op": "pop_window_sticky" }),
                 // Not yet modelled: form controls, carets, focus rings, and
                 // the SVG primitives. Named and dumped rather than dropped.
                 other => serde_json::json!({
@@ -18860,6 +18896,7 @@ impl Engine {
             return;
         };
         stamp_element_scrolls(&layout, &view.lay.element_scrolls);
+        layout.stamp_sticky_shifts(view.scroll_offset);
         let display_list = self.display_list_for(id, &layout);
         if let Some(view) = self.views.get_mut(&id) {
             view.display_list = Some(Arc::new(display_list));
@@ -19011,6 +19048,7 @@ impl Engine {
             );
             drop(memo_aside);
             stamp_element_scrolls(&built, &lay.element_scrolls);
+            built.stamp_sticky((bounds.0 as f32, bounds.1 as f32));
             let root_element = document.document_element().map(|e| e.id.raw());
             // As the engine's relayout sets `max_scroll_offset`.
             let content_height = scrollable_bottom(&built, lay.html_clips.get());
@@ -21232,6 +21270,146 @@ fn parse_transform(value: &str) -> Option<rustkit_css::TransformList> {
 /// `translate: none | <length-percentage> [<length-percentage> <length>?]?`.
 /// `Some(None)` is `none`; `None` is invalid. The painter is 2D: with no
 /// perspective a z moves nothing on the page's plane.
+/// Whether a `will-change` value names a property that holds a fixed box.
+/// `None` is an invalid value, which leaves the earlier declaration in place.
+fn will_change_holds_fixed(value: &str) -> Option<bool> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "auto" {
+        return Some(false);
+    }
+    let mut holds = false;
+    for name in value.split(',').map(str::trim) {
+        if name.is_empty() || name.contains(char::is_whitespace) || name == "auto" {
+            return None;
+        }
+        holds |= matches!(
+            name,
+            "transform"
+                | "-webkit-transform"
+                | "translate"
+                | "scale"
+                | "rotate"
+                | "perspective"
+                | "filter"
+                | "backdrop-filter"
+                | "contain"
+                | "transform-style"
+        );
+    }
+    Some(holds)
+}
+
+/// Whether a valid `will-change` value names a property that makes a stacking
+/// context and no containing block (Chromium 143, `sticky_ctx_probe.mjs`).
+fn will_change_stacks(value: &str) -> bool {
+    value.to_ascii_lowercase().split(',').map(str::trim).any(|name| {
+        matches!(
+            name,
+            "opacity"
+                | "clip-path"
+                | "-webkit-clip-path"
+                | "mask"
+                | "-webkit-mask"
+                | "mask-image"
+                | "-webkit-mask-image"
+                | "isolation"
+                | "mix-blend-mode"
+                | "view-transition-name"
+                | "z-index"
+                | "position"
+        )
+    })
+}
+
+fn set_stacks(style: &mut ComputedStyle, bit: u8, on: bool) {
+    if on {
+        style.stacks |= bit;
+    } else {
+        style.stacks &= !bit;
+    }
+}
+
+/// The `ComputedStyle::stacks` bit of a declaration and whether it is set.
+/// `None` is an invalid value, which leaves the earlier declaration in place.
+fn stacks_declaration(property: &str, value: &str) -> Option<(u8, bool)> {
+    let value = value.trim().to_ascii_lowercase();
+    match property {
+        "isolation" => match value.as_str() {
+            "isolate" => Some((rustkit_css::STACKS_ISOLATION, true)),
+            "auto" => Some((rustkit_css::STACKS_ISOLATION, false)),
+            _ => None,
+        },
+        "mix-blend-mode" => match value.as_str() {
+            "normal" => Some((rustkit_css::STACKS_BLEND, false)),
+            "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge" | "color-burn" | "hard-light"
+            | "soft-light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity"
+            | "plus-lighter" => Some((rustkit_css::STACKS_BLEND, true)),
+            _ => None,
+        },
+        "perspective" => {
+            if value == "none" {
+                Some((rustkit_css::STACKS_PERSPECTIVE, false))
+            } else if !value.starts_with('-') && parse_length(&value).is_some() {
+                Some((rustkit_css::STACKS_PERSPECTIVE, true))
+            } else {
+                None
+            }
+        }
+        "transform-style" => match value.as_str() {
+            "preserve-3d" => Some((rustkit_css::STACKS_PRESERVE_3D, true)),
+            "flat" => Some((rustkit_css::STACKS_PRESERVE_3D, false)),
+            _ => None,
+        },
+        "backdrop-filter" => {
+            if value == "none" {
+                Some((rustkit_css::STACKS_BACKDROP, false))
+            } else if value.ends_with(')') {
+                Some((rustkit_css::STACKS_BACKDROP, true))
+            } else {
+                None
+            }
+        }
+        "content-visibility" => match value.as_str() {
+            "auto" | "hidden" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, true)),
+            "visible" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, false)),
+            _ => None,
+        },
+        "view-transition-name" => {
+            let starts_as_ident = value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-' || c == '_');
+            if value == "none" || value == "auto" {
+                Some((rustkit_css::STACKS_VIEW_TRANSITION, false))
+            } else if starts_as_ident && !value.contains(char::is_whitespace) {
+                Some((rustkit_css::STACKS_VIEW_TRANSITION, true))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `contain` value holds a fixed box. `None` is an invalid value:
+/// a keyword it does not know, or one given twice.
+fn contain_holds_fixed(value: &str) -> Option<bool> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "none" {
+        return Some(false);
+    }
+    if matches!(value.as_str(), "strict" | "content") {
+        return Some(true);
+    }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    for (i, word) in words.iter().enumerate() {
+        if !matches!(*word, "size" | "inline-size" | "layout" | "style" | "paint") || words[..i].contains(word) {
+            return None;
+        }
+    }
+    if words.is_empty() || (words.contains(&"size") && words.contains(&"inline-size")) {
+        return None;
+    }
+    Some(words.contains(&"paint") || words.contains(&"layout"))
+}
+
 fn parse_individual_translate(value: &str) -> Option<Option<rustkit_css::TransformOp>> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") {
@@ -22213,10 +22391,29 @@ pub(crate) fn scrolled_commands(
         origin: (0.0, 0.0),
     };
     let mut scrolled = Vec::with_capacity(commands.len() + 2);
+    // What the open sticky runs have moved things by, innermost last.
+    let mut sticky: Vec<(f32, f32)> = Vec::new();
     scrolled.push(translate(-scroll_offset.0, -scroll_offset.1));
     scrolled.extend(commands.iter().map(|command| match command {
-        DisplayCommand::PushViewportFixed => translate(scroll_offset.0, scroll_offset.1),
-        DisplayCommand::PopViewportFixed => DisplayCommand::PopTransform,
+        DisplayCommand::PushViewportFixed => {
+            let around = *sticky.last().unwrap_or(&(0.0, 0.0));
+            sticky.push((0.0, 0.0));
+            translate(scroll_offset.0 - around.0, scroll_offset.1 - around.1)
+        }
+        DisplayCommand::PopViewportFixed => {
+            sticky.pop();
+            DisplayCommand::PopTransform
+        }
+        DisplayCommand::PushWindowSticky(rule) => {
+            let around = *sticky.last().unwrap_or(&(0.0, 0.0));
+            let (x, y) = rule.shift(scroll_offset, around);
+            sticky.push((around.0 + x, around.1 + y));
+            translate(x, y)
+        }
+        DisplayCommand::PopWindowSticky => {
+            sticky.pop();
+            DisplayCommand::PopTransform
+        }
         other => other.clone(),
     }));
     scrolled.push(DisplayCommand::PopTransform);
@@ -22472,6 +22669,7 @@ fn layout_hit_tester(
             stamp_element_scrolls(&layout, &scrolls);
             stamped.set(generation);
         }
+        layout.stamp_sticky_shifts(scroll);
         let hit = layout.hit_test_scrolled(x, y, scroll);
         if let Some(id) = hit.as_ref().and_then(|hit| hit.node_id) {
             return Some(id);
@@ -22606,10 +22804,13 @@ fn geometry_snapshot(
         flow: Option<usize>,
         absolute: Option<usize>,
         fixed: Option<usize>,
-        /// Under a fixed box the scroll does not move, and under a transform,
-        /// which holds a fixed box to the page.
+        /// Under a fixed box the scroll does not move, and under a containing
+        /// block for fixed boxes, which holds one to the page: a transform,
+        /// a filter, `will-change` or `contain`. Chromium's others
+        /// (`perspective`, `backdrop-filter`, `transform-style`,
+        /// `content-visibility`) are not read here.
         held: bool,
-        transformed: bool,
+        holds_fixed: bool,
     }
     fn walk(
         b: &LayoutBox,
@@ -22632,6 +22833,7 @@ fn geometry_snapshot(
             _ => scrollers.flow,
         };
         let scrolls = b.is_element_scroller();
+        let sticky = b.sticky_rule.get();
         // A transform does not apply to a plain inline box, as in Chrome.
         let transform = match b.box_type {
             BoxType::Inline => None,
@@ -22639,15 +22841,19 @@ fn geometry_snapshot(
             _ => own_transform_affine(b),
         };
         let transformed = transform.is_some();
-        let inner = if scrolls || transformed { b.node_id } else { scroller };
+        let inner = if scrolls || transformed || sticky.is_some() { b.node_id } else { scroller };
         let positioned = b.position != Position::Static || b.style.position != rustkit_css::Position::Static;
-        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.transformed);
+        let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
+        let holds_fixed = transformed
+            || !b.style.filter.is_empty()
+            || b.style.will_change_holds_fixed
+            || b.style.contain_holds_fixed;
         let under = Scrollers {
             flow: inner,
-            absolute: if positioned || transformed { inner } else { scrollers.absolute },
-            fixed: if transformed { inner } else { scrollers.fixed },
+            absolute: if positioned || holds_fixed { inner } else { scrollers.absolute },
+            fixed: if holds_fixed { inner } else { scrollers.fixed },
             held,
-            transformed: scrollers.transformed || transformed,
+            holds_fixed: scrollers.holds_fixed || holds_fixed,
         };
         // What the children reach, without this box's own border: that is
         // not scrollable overflow.
@@ -22710,6 +22916,7 @@ fn geometry_snapshot(
                 scroller,
                 transform,
                 scrolls,
+                sticky,
                 held,
             };
             styles.entry(node).or_insert_with(|| {
@@ -22740,7 +22947,7 @@ fn geometry_snapshot(
     }
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
-    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, transformed: false };
+    let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, holds_fixed: false };
     walk(root, &mut out, &mut styles, None, none);
     (out, styles)
 }
@@ -22812,6 +23019,7 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         scroller: None,
         transform: None,
         scrolls: false,
+        sticky: None,
         held: false,
     }
 }

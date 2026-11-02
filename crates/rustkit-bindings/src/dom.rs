@@ -64,9 +64,23 @@ pub struct BoxGeometry {
     pub transform: Option<[f32; 6]>,
     /// Whether this box is an element scroller itself.
     pub scrolls: bool,
+    /// `position: sticky`: where it moves to. A sticky box is on the
+    /// `scroller` chain of the boxes under it, since it moves them too.
+    pub sticky: Option<rustkit_css::StickyRule>,
     /// In a fixed box the window's scroll does not move: its rect is where
     /// layout put it, wherever the page is.
     pub held: bool,
+}
+
+/// What moves a box from where layout put it (`DomHost::moved_by`).
+#[derive(Clone, Copy, Default)]
+struct MovedBy {
+    /// By the element scrollers above it.
+    scrolled: (f32, f32),
+    /// By sticky boxes: its own shift and those above it.
+    stuck: (f32, f32),
+    /// The part of `stuck` from inside the nearest scroller.
+    above: (f32, f32),
 }
 
 /// The offsets script scrolled a view's elements to, by raw NodeId: one table
@@ -226,36 +240,46 @@ impl DomHost {
     }
 
     /// The rect of a box under a transform, its own or one above it, as x, y,
-    /// width, height: the bounding box of its corners taken up the chain, each
-    /// scroller's scroll inside that scroller's own transform. `None` when no
-    /// transform is on the chain, and `element_scroll_over` is the whole answer.
+    /// width, height: the bounding box of its corners taken up the chain. At
+    /// each box its transform, about where layout put it, then its sticky
+    /// shift, which carries the transform's origin along; then the scroll of
+    /// the scroller above, inside that scroller's own transform. `None` when
+    /// no transform is on the chain, and `moved_by` is the whole answer.
     fn transformed_rect(&self, geometry: &BoxGeometry) -> Option<(f32, f32, f32, f32)> {
+        let mut chain = vec![(None, geometry)];
+        let mut at = geometry.scroller;
+        while let Some((node, above)) = at.and_then(|node| Some((node, self.geometry.get(&node)?))) {
+            chain.push((Some(node), above));
+            at = above.scroller;
+        }
+        if chain.iter().all(|(_, g)| g.transform.is_none()) {
+            return None;
+        }
+        let scrolls = self.element_scrolls.borrow();
+        // Each shift depends on those above it, so these go from the top.
+        let mut shifts = vec![(0.0, 0.0); chain.len()];
+        let mut moved = MovedBy::default();
+        for (i, (node, g)) in chain.iter().enumerate().rev() {
+            let before = moved.stuck;
+            self.add_sticky(g, &scrolls.offsets, &mut moved);
+            shifts[i] = (moved.stuck.0 - before.0, moved.stuck.1 - before.1);
+            if node.is_some() && g.scrolls {
+                moved.above = (0.0, 0.0);
+            }
+        }
         let (x, y, r, b) = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height);
         let mut corners = [(x, y), (r, y), (x, b), (r, b)];
-        let mut any = false;
-        let mut apply = |corners: &mut [(f32, f32); 4], m: Option<[f32; 6]>| {
-            if let Some(m) = m {
-                any = true;
-                for c in corners.iter_mut() {
-                    *c = (m[0] * c.0 + m[2] * c.1 + m[4], m[1] * c.0 + m[3] * c.1 + m[5]);
-                }
+        for (i, (node, g)) in chain.iter().enumerate() {
+            let scroll = node.filter(|_| g.scrolls).and_then(|node| scrolls.offsets.get(&node));
+            let (dx, dy) = scroll.copied().unwrap_or((0.0, 0.0));
+            for c in corners.iter_mut() {
+                let (px, py) = (c.0 - dx, c.1 - dy);
+                let (tx, ty) = match g.transform {
+                    Some(m) => (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]),
+                    None => (px, py),
+                };
+                *c = (tx + shifts[i].0, ty + shifts[i].1);
             }
-        };
-        apply(&mut corners, geometry.transform);
-        let scrolls = self.element_scrolls.borrow();
-        let mut at = geometry.scroller;
-        while let Some(node) = at {
-            if let Some((dx, dy)) = scrolls.offsets.get(&node) {
-                for c in corners.iter_mut() {
-                    *c = (c.0 - dx, c.1 - dy);
-                }
-            }
-            let above = self.geometry.get(&node);
-            apply(&mut corners, above.and_then(|g| g.transform));
-            at = above.and_then(|g| g.scroller);
-        }
-        if !any {
-            return None;
         }
         let (mut left, mut top) = corners[0];
         let (mut right, mut bottom) = corners[0];
@@ -274,22 +298,50 @@ impl DomHost {
         (state.x, state.y)
     }
 
-    /// What the element scrollers above a box have moved it by.
-    fn element_scroll_over(&self, geometry: &BoxGeometry) -> (f32, f32) {
+    /// What the scrollers and sticky boxes above a box, and the box itself
+    /// when it is sticky, have moved it by. Live: script reads a rect right
+    /// after a scroll, before the engine hears of it.
+    fn moved_by(&self, geometry: &BoxGeometry) -> MovedBy {
         let scrolls = self.element_scrolls.borrow();
-        let (mut x, mut y) = (0.0, 0.0);
-        if scrolls.offsets.is_empty() {
-            return (x, y);
-        }
-        let mut at = geometry.scroller;
-        while let Some(scroller) = at {
-            if let Some((dx, dy)) = scrolls.offsets.get(&scroller) {
-                x += dx;
-                y += dy;
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, &scrolls.offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, &scrolls.offsets, &mut moved);
+        moved
+    }
+
+    /// `moved_by` for what is under the box `node`, its own scroll included.
+    fn moved_by_chain(&self, node: usize, offsets: &HashMap<usize, (f32, f32)>) -> MovedBy {
+        let Some(geometry) = self.geometry.get(&node) else {
+            return MovedBy::default();
+        };
+        let mut moved = match geometry.scroller {
+            Some(above) => self.moved_by_chain(above, offsets),
+            None => MovedBy::default(),
+        };
+        self.add_sticky(geometry, offsets, &mut moved);
+        if geometry.scrolls {
+            if let Some((dx, dy)) = offsets.get(&node) {
+                moved.scrolled = (moved.scrolled.0 + dx, moved.scrolled.1 + dy);
             }
-            at = self.geometry.get(&scroller).and_then(|g| g.scroller);
+            moved.above = (0.0, 0.0);
         }
-        (x, y)
+        moved
+    }
+
+    fn add_sticky(&self, geometry: &BoxGeometry, offsets: &HashMap<usize, (f32, f32)>, moved: &mut MovedBy) {
+        let Some(rule) = geometry.sticky else {
+            return;
+        };
+        let scroll = match rule.port {
+            rustkit_css::StickyPort::Window => self.window_scroll(),
+            rustkit_css::StickyPort::Still => (0.0, 0.0),
+            rustkit_css::StickyPort::Element(node) => offsets.get(&node).copied().unwrap_or((0.0, 0.0)),
+        };
+        let (x, y) = rule.shift(scroll, moved.above);
+        moved.stuck = (moved.stuck.0 + x, moved.stuck.1 + y);
+        moved.above = (moved.above.0 + x, moved.above.1 + y);
     }
 
     /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
@@ -1571,19 +1623,21 @@ pub(crate) fn install(
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
                         // The first two and the last two are for rects: where
-                        // the scrollers and transforms put the box. The rest,
-                        // `offsetTop` among them, are where layout did.
-                        let (rx, ry, rw, rh) = host.transformed_rect(g).unwrap_or_else(|| {
-                            let (dx, dy) = host.element_scroll_over(g);
-                            (g.x - dx, g.y - dy, g.width, g.height)
-                        });
+                        // the scrollers, sticky boxes and transforms put the
+                        // box. The rest, `offsetTop` among them, leave the
+                        // scrollers and transforms out.
+                        let moved = host.moved_by(g);
+                        let (x, y) = (g.x + moved.stuck.0, g.y + moved.stuck.1);
+                        let (rx, ry, rw, rh) = host
+                            .transformed_rect(g)
+                            .unwrap_or((x - moved.scrolled.0, y - moved.scrolled.1, g.width, g.height));
                         // The rect's reader takes the window's scroll off.
                         let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
                             "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                             n(rx + page.0), n(ry + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
                             n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
-                            n(g.x), n(g.y), n(rw), n(rh)
+                            n(x), n(y), n(rw), n(rh)
                         ))
                     }
                     None => JsValue::String(String::new()),
@@ -1614,8 +1668,8 @@ pub(crate) fn install(
                         let mut at = g.scroller;
                         while let Some(scroller) = at {
                             let above = host.geometry.get(&scroller);
-                            // A transformed box on the chain moves the box,
-                            // but cannot be scrolled.
+                            // A sticky or transformed box on the chain moves
+                            // the box, but cannot be scrolled.
                             if above.is_some_and(|g| g.scrolls) {
                                 chain.push_str(&format!(" {scroller}"));
                             }
@@ -1666,7 +1720,7 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             if let Some(tester) = host.hit_tester.clone() {
-                return tester(x, y, host.scroll)
+                return tester(x, y, host.window_scroll())
                     .map_or(JsValue::Null, |id| JsValue::Number(id as f64));
             }
             box_hit(&host, x, y).map_or(JsValue::Null, |id| JsValue::Number(id as f64))

@@ -222,6 +222,144 @@ fn an_absolute_box_held_by_a_transformed_scroller_scrolls_with_it() {
     check(HOLDS, "$('sc').scrollTop = 30; box('sabs')", "2 223 10 10");
 }
 
+/// How far a window scroll of 500 moves a fixed box under a wrapper with this
+/// style. Only the move: where layout places a fixed box under its containing
+/// block is row C10 (m).
+#[track_caller]
+fn fixed_moves_by(wrapper: &str, want: &str) {
+    let page = format!(
+        "<!doctype html><style>body{{margin:0;height:3000px}}</style><div style=\"height:100px\"></div>\
+         <div id=w style=\"width:200px;height:50px;{wrapper}\">\
+         <div id=f style=\"position:fixed;left:3px;top:4px;width:10px;height:10px\"></div></div>"
+    );
+    check(
+        &page,
+        "var a = $('f').getBoundingClientRect().y; window.scrollTo(0, 500); String($('f').getBoundingClientRect().y - a)",
+        want,
+    );
+}
+
+/// A filter is a containing block for fixed boxes, so the page takes them along.
+#[test]
+fn a_filter_holds_a_fixed_box_to_the_page() {
+    fixed_moves_by("filter:blur(1px)", "-500");
+}
+
+#[test]
+fn what_is_no_containing_block_leaves_a_fixed_box_alone() {
+    for wrapper in ["", "filter:none", "opacity:0.5", "isolation:isolate"] {
+        fixed_moves_by(wrapper, "0");
+    }
+}
+
+/// `will-change` holds a fixed box when it names a property that would.
+/// Chromium 143, `held2_probe.mjs`.
+#[test]
+fn will_change_holds_a_fixed_box_to_the_page() {
+    for wrapper in [
+        "will-change:transform",
+        "will-change:TRANSFORM",
+        "will-change:top, transform",
+        "will-change:translate",
+        "will-change:scale",
+        "will-change:rotate",
+        "will-change:perspective",
+        "will-change:filter",
+        "will-change:backdrop-filter",
+        "will-change:contain",
+        "will-change:transform-style",
+        "will-change:-webkit-transform",
+        "will-change:transform;will-change:bogus,",
+    ] {
+        fixed_moves_by(wrapper, "-500");
+    }
+    for wrapper in [
+        "will-change:auto",
+        "will-change:position",
+        "will-change:scroll-position",
+        "will-change:contents",
+        "will-change:transform;will-change:auto",
+    ] {
+        fixed_moves_by(wrapper, "0");
+    }
+}
+
+/// `contain` holds a fixed box for paint and layout, and so for the two that imply them.
+#[test]
+fn contain_holds_a_fixed_box_to_the_page() {
+    for wrapper in [
+        "contain:paint",
+        "contain:PAINT",
+        "contain:layout",
+        "contain:strict",
+        "contain:content",
+        "contain:layout paint",
+        "contain:paint;contain:bogus",
+    ] {
+        fixed_moves_by(wrapper, "-500");
+    }
+    for wrapper in [
+        "contain:none",
+        "contain:size",
+        "contain:style",
+        "contain:inline-size",
+        "contain:size style",
+        "contain:paint;contain:none",
+        "contain:paint paint",
+    ] {
+        fixed_moves_by(wrapper, "0");
+    }
+}
+
+/// A transform that moves nothing still holds it.
+#[test]
+fn an_identity_transform_holds_a_fixed_box_to_the_page() {
+    fixed_moves_by("transform:translate(0)", "-500");
+    fixed_moves_by("transform:scale(1)", "-500");
+    fixed_moves_by("transform:none", "0");
+}
+
+/// What holds a fixed box in a scroller goes with the scroller, and takes
+/// its fixed and absolute children along. With nothing holding them, they stay.
+#[test]
+fn a_box_that_holds_a_fixed_box_scrolls_it_with_its_scroller() {
+    for (wrapper, moved) in [
+        ("", "0 0"),
+        ("filter:blur(1px)", "-40 -40"),
+        ("will-change:transform", "-40 -40"),
+        ("contain:paint", "-40 -40"),
+        ("transform:translateX(0)", "-40 -40"),
+    ] {
+        let page = format!(
+            "<!doctype html><style>body{{margin:0}}</style>\
+             <div id=s style=\"width:200px;height:100px;overflow:auto\">\
+             <div id=w style=\"width:100px;height:20px;{wrapper}\">\
+             <div id=f style=\"position:fixed;left:3px;top:4px;width:10px;height:10px\"></div>\
+             <div id=a style=\"position:absolute;left:5px;top:6px;width:10px;height:10px\"></div></div>\
+             <div style=\"height:800px\"></div></div>"
+        );
+        check(
+            &page,
+            "var y = (i) => $(i).getBoundingClientRect().y; var f = y('f'), a = y('a'); $('s').scrollTop = 40; (y('f') - f) + ' ' + (y('a') - a)",
+            moved,
+        );
+    }
+}
+
+/// Neither the window's scroll nor the scroller's moves it.
+#[test]
+fn a_fixed_box_in_an_element_scroller_stays_put() {
+    check(
+        "<!doctype html><style>body{margin:0;height:3000px}</style>\
+         <div id=s style=\"width:200px;height:100px;overflow:auto\">\
+         <div id=f style=\"position:fixed;left:3px;top:4px;width:10px;height:10px\"><div id=k style=\"height:5px\"></div></div>\
+         <div style=\"height:800px\"></div></div>",
+        "window.scrollTo(0, 500); $('s').scrollTop = 40; \
+         var r = function (i) { var b = $(i).getBoundingClientRect(); return b.x + ' ' + b.y; }; r('f') + ' | ' + r('k')",
+        "3 4 | 3 4",
+    );
+}
+
 /// The rect of a 100x50 box at (20,10) when this value follows `translate:7px`:
 /// refused reads `27 10`, as the earlier declaration stays.
 #[track_caller]
