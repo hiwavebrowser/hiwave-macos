@@ -7445,7 +7445,7 @@ impl LayoutBox {
                 break;
             };
             if step >= parted && at.child_forms_stacking_context(child) {
-                return child.style.z_index;
+                return if at.z_index_applies(child) { child.style.z_index } else { 0 };
             }
             at = child;
         }
@@ -7461,16 +7461,8 @@ impl LayoutBox {
         }
         let style = &child.style;
         let fixed_or_sticky = child.position == Position::Fixed || matches!(style.position, Css::Fixed | Css::Sticky);
-        let positioned = child.position != Position::Static || style.position != Css::Static;
-        let item = matches!(
-            self.style.display,
-            rustkit_css::Display::Flex
-                | rustkit_css::Display::InlineFlex
-                | rustkit_css::Display::Grid
-                | rustkit_css::Display::InlineGrid
-        );
         fixed_or_sticky
-            || (style.z_index_declared && (positioned || item))
+            || (style.z_index_declared && self.z_index_applies(child))
             || style.opacity < 1.0
             || !style.transform.ops.is_empty()
             || style.translate.is_some()
@@ -7482,6 +7474,20 @@ impl LayoutBox {
             || style.will_change_holds_fixed
             || style.contain_holds_fixed
             || style.stacks != 0
+    }
+
+    /// Whether a `z-index` on `child` counts: on a positioned box or an item of
+    /// this flex or grid box. Elsewhere its stacking context sits at level 0.
+    fn z_index_applies(&self, child: &LayoutBox) -> bool {
+        child.position != Position::Static
+            || child.style.position != rustkit_css::Position::Static
+            || matches!(
+                self.style.display,
+                rustkit_css::Display::Flex
+                    | rustkit_css::Display::InlineFlex
+                    | rustkit_css::Display::Grid
+                    | rustkit_css::Display::InlineGrid
+            )
     }
 
     /// The child indices from this box to the first box of `node`.

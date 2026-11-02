@@ -641,6 +641,10 @@ pub const STACKS_PRESERVE_3D: u8 = 8;
 pub const STACKS_WILL_CHANGE: u8 = 16;
 /// `ComputedStyle::stacks`: a `backdrop-filter` other than `none`.
 pub const STACKS_BACKDROP: u8 = 32;
+/// `ComputedStyle::stacks`: `content-visibility: auto` or `hidden`.
+pub const STACKS_CONTENT_VISIBILITY: u8 = 64;
+/// `ComputedStyle::stacks`: a `view-transition-name` other than `none` or `auto`.
+pub const STACKS_VIEW_TRANSITION: u8 = 128;
 
 /// A filter function that can be applied to the backdrop.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

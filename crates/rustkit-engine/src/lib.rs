@@ -13296,7 +13296,7 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "isolation" | "mix-blend-mode" | "perspective" | "transform-style" | "backdrop-filter"
-            | "-webkit-backdrop-filter" => {
+            | "content-visibility" | "view-transition-name" => {
                 if let Some((bit, on)) = stacks_declaration(property, value) {
                     set_stacks(style, bit, on);
                 }
@@ -14041,7 +14041,9 @@ impl layout_ctx::LayoutCtx {
             "mix-blend-mode" => style.stacks &= !rustkit_css::STACKS_BLEND,
             "perspective" => style.stacks &= !rustkit_css::STACKS_PERSPECTIVE,
             "transform-style" => style.stacks &= !rustkit_css::STACKS_PRESERVE_3D,
-            "backdrop-filter" | "-webkit-backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
+            "backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
+            "content-visibility" => style.stacks &= !rustkit_css::STACKS_CONTENT_VISIBILITY,
+            "view-transition-name" => style.stacks &= !rustkit_css::STACKS_VIEW_TRANSITION,
             "contain" => style.contain_holds_fixed = false,
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
@@ -21308,8 +21310,11 @@ fn will_change_stacks(value: &str) -> bool {
                 | "-webkit-clip-path"
                 | "mask"
                 | "-webkit-mask"
+                | "mask-image"
+                | "-webkit-mask-image"
                 | "isolation"
                 | "mix-blend-mode"
+                | "view-transition-name"
                 | "z-index"
                 | "position"
         )
@@ -21355,11 +21360,26 @@ fn stacks_declaration(property: &str, value: &str) -> Option<(u8, bool)> {
             "flat" => Some((rustkit_css::STACKS_PRESERVE_3D, false)),
             _ => None,
         },
-        "backdrop-filter" | "-webkit-backdrop-filter" => {
+        "backdrop-filter" => {
             if value == "none" {
                 Some((rustkit_css::STACKS_BACKDROP, false))
             } else if value.ends_with(')') {
                 Some((rustkit_css::STACKS_BACKDROP, true))
+            } else {
+                None
+            }
+        }
+        "content-visibility" => match value.as_str() {
+            "auto" | "hidden" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, true)),
+            "visible" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, false)),
+            _ => None,
+        },
+        "view-transition-name" => {
+            let starts_as_ident = value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-' || c == '_');
+            if value == "none" || value == "auto" {
+                Some((rustkit_css::STACKS_VIEW_TRANSITION, false))
+            } else if starts_as_ident && !value.contains(char::is_whitespace) {
+                Some((rustkit_css::STACKS_VIEW_TRANSITION, true))
             } else {
                 None
             }
