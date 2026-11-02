@@ -430,14 +430,20 @@ fn an_unproven_value_is_measured_red_and_said_so() {
     r.values[0].computed = true;
     r.values[0].probes_off = 915;
     let md = render_markdown(&meta(), &[r]);
-    assert!(md.contains("unproven (control-limited, 915 probes)"), "{md}");
+    assert!(
+        md.contains("unproven (control-limited, 915 probes)"),
+        "{md}"
+    );
 }
 
 #[test]
 fn the_engine_sha_never_passes_head_off_as_develop() {
     assert_eq!(engine_sha(Some("1234567890ab"), "ffffffffffff"), "12345678");
     let head = engine_sha(None, "ffffffffffff");
-    assert!(head.contains("ffffffff") && head.contains("no origin/develop"), "{head}");
+    assert!(
+        head.contains("ffffffff") && head.contains("no origin/develop"),
+        "{head}"
+    );
 }
 
 #[test]
@@ -737,7 +743,11 @@ pub fn canonical_thing(name: &str) -> Option<&'static str> {
 #[test]
 fn a_head_on_two_lines_is_read_whole() {
     let arms = extract_arms(GUARDED, HELPERS);
-    for name in ["border-top-style", "border-right-style", "border-left-style"] {
+    for name in [
+        "border-top-style",
+        "border-right-style",
+        "border-left-style",
+    ] {
         assert!(arms.contains(name), "{name} in {arms:?}");
     }
     assert!(
@@ -806,7 +816,10 @@ fn a_guard_function_with_no_names_in_it_is_named() {
 
 #[test]
 fn a_guard_with_more_arguments_is_read_too() {
-    let src = GUARDED.replace("canonical_thing(property)", "canonical_thing(property, value)");
+    let src = GUARDED.replace(
+        "canonical_thing(property)",
+        "canonical_thing(property, value)",
+    );
     assert!(extract_arms(&src, HELPERS).contains("thing-size"));
     assert_eq!(unread_guards(&src, HELPERS), Vec::<String>::new());
 }

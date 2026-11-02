@@ -110,24 +110,36 @@ fn chrome_capture(work: &Path, id: &str) -> Capture {
     }
 }
 
-fn corpus_text(root: &Path) -> String {
-    let mut text = String::new();
-    for dir in ["websuite/cases", "crates/hiwave-app/src/ui"] {
-        let mut stack = vec![root.join(dir)];
-        while let Some(d) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&d) else {
-                continue;
-            };
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.extension().is_some_and(|x| x == "html") {
-                    text.push_str(&fs::read_to_string(&p).unwrap_or_default());
-                }
+/// Every file with this extension under `dir`, joined.
+fn text_under(dir: &Path, extension: &str, text: &mut String) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == extension) {
+                text.push_str(&fs::read_to_string(&p).unwrap_or_default());
             }
         }
     }
+}
+
+fn corpus_text(root: &Path) -> String {
+    let mut text = String::new();
+    for dir in ["websuite/cases", "crates/hiwave-app/src/ui"] {
+        text_under(&root.join(dir), "html", &mut text);
+    }
+    text
+}
+
+/// Where a guard arm's function may live: any crate in the workspace.
+fn crate_sources(root: &Path) -> String {
+    let mut text = String::new();
+    text_under(&root.join("crates"), "rs", &mut text);
     text
 }
 
@@ -180,12 +192,17 @@ fn run() -> Result<(), String> {
     if spec.is_empty() {
         return Err("no properties selected".into());
     }
-    let arms = check_arms(extract_arms(
-        &fs::read_to_string(root.join("crates/rustkit-engine/src/lib.rs"))
-            .map_err(|e| e.to_string())?,
-        &fs::read_to_string(root.join("crates/rustkit-css/src/mask.rs"))
-            .map_err(|e| e.to_string())?,
-    ))?;
+    let engine_src = fs::read_to_string(root.join("crates/rustkit-engine/src/lib.rs"))
+        .map_err(|e| e.to_string())?;
+    let helpers = crate_sources(&root);
+    let unread = unread_guards(&engine_src, &helpers);
+    if !unread.is_empty() {
+        return Err(format!(
+            "arm reader cannot follow these guards: {}",
+            unread.join("; ")
+        ));
+    }
+    let arms = check_arms(extract_arms(&engine_src, &helpers))?;
 
     for dir in ["fixtures", "rustkit", "chrome"] {
         let d = work.join(dir);
@@ -243,12 +260,12 @@ fn run() -> Result<(), String> {
     let failed = failed.into_inner();
     eprintln!("engine captures done, {failed} failed");
 
-    let census: Value = serde_json::from_str(
-        &fs::read_to_string(root.join("docs/diagnostics/census-top100.json"))
+    let prevalence: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("docs/census/css_property_prevalence_top100.json"))
             .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let top = TopSites::from_census(&census);
+    let top = TopSites::from_prevalence(&prevalence)?;
     let corpus = corpus_text(&root);
 
     let mut rows = Vec::new();
@@ -267,6 +284,10 @@ fn run() -> Result<(), String> {
             let off = off_by_context.entry(p.context.clone()).or_default();
             *off = (*off).max(probe_diff(a, b));
         }
+        let control_off = match (&chrome_control.frame, &rust_control.frame) {
+            (Some(a), Some(b)) => probe_diff(a, b),
+            _ => 0,
+        };
         let mut verdicts = Vec::new();
         let mut values = Vec::new();
         for (v, value) in p.values.iter().enumerate() {
@@ -305,7 +326,7 @@ fn run() -> Result<(), String> {
                 engine_computed: read(&m.rust_value),
                 probes_off: off,
                 geometry_ok: geometry_matches(&m),
-                control_off: 0,
+                control_off,
             });
             verdicts.push(verdict);
         }
@@ -330,10 +351,11 @@ fn run() -> Result<(), String> {
 
     let date = sh(Command::new("date").args(["-u", "+%F"]))?;
     // The engine under test: where this branch left develop.
-    let merge_base = sh(Command::new("git")
-        .current_dir(&root)
-        .args(["merge-base", "HEAD", "origin/develop"]))
-    .ok();
+    let merge_base =
+        sh(Command::new("git")
+            .current_dir(&root)
+            .args(["merge-base", "HEAD", "origin/develop"]))
+        .ok();
     let head = sh(Command::new("git")
         .current_dir(&root)
         .args(["rev-parse", "HEAD"]))?;
