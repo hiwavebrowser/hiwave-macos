@@ -643,3 +643,111 @@ fn a_click_over_a_stuck_header_in_a_wrapper_goes_to_the_modal() {
     assert_eq!(width_at(ctx_wrap(wrapper, &ctx_header(10)) + &ctx_modal(5)), 400.0, "the modal");
     assert_eq!(width_at(ctx_wrap("", &ctx_header(10)) + &ctx_modal(5)), 300.0, "no wrapper: the header");
 }
+
+/// `trench/z/tools/c2/ctx_z_probe.mjs`, Chromium 143 at scroll 500.
+#[track_caller]
+fn check_ctx_styles(styles: &[(&'static str, &'static str)]) {
+    let cases: Vec<(&str, String, &str)> = styles
+        .iter()
+        .map(|&(style, want)| (style, ctx_wrap(style, &ctx_header(10)) + &ctx_modal(5), want))
+        .collect();
+    check_ctx(&cases);
+}
+
+#[test]
+fn a_z_index_counts_only_where_it_applies() {
+    check_ctx_styles(&[
+        ("opacity:.9;z-index:50", "m"),
+        ("isolation:isolate;z-index:50", "m"),
+        ("transform:translateX(0);z-index:50", "m"),
+        ("filter:blur(0px);z-index:50", "m"),
+        ("contain:paint;z-index:50", "m"),
+        ("will-change:opacity;z-index:50", "m"),
+        ("mix-blend-mode:multiply;z-index:50", "m"),
+        ("opacity:.9;z-index:-1", "m"),
+        ("opacity:.9;z-index:0", "m"),
+        ("position:relative;opacity:.9;z-index:50", "h"),
+        ("position:relative;isolation:isolate;z-index:50", "h"),
+        ("position:relative;opacity:.9;z-index:1", "m"),
+        ("position:relative;opacity:.9;z-index:-1", "m"),
+    ]);
+}
+
+#[test]
+fn a_z_index_applies_on_an_item_and_on_the_modals_side() {
+    let in_parent = |display: &str, item: &str| {
+        format!("<div style=\"display:{display}\">{}</div>", ctx_wrap(item, &ctx_header(10))) + &ctx_modal(5)
+    };
+    let app = ctx_wrap("position:relative;z-index:10", &ctx_header(1));
+    let held = |style: &str| format!("<div style=\"{style}\">{}</div>", ctx_modal(1));
+    check_ctx(&[
+        ("flex item opacity z50", in_parent("flex", "flex:1;opacity:.9;z-index:50"), "h"),
+        ("flex item opacity z1", in_parent("flex", "opacity:.9;z-index:1"), "m"),
+        ("grid item isolate z50", in_parent("grid", "isolation:isolate;z-index:50"), "h"),
+        ("modal in static z50", app.clone() + &held("opacity:.9;z-index:50"), "h"),
+        ("modal in relative z50", app + &held("position:relative;opacity:.9;z-index:50"), "m"),
+    ]);
+}
+
+#[test]
+fn only_the_unprefixed_backdrop_filter_makes_a_context() {
+    check_ctx_styles(&[
+        ("-webkit-backdrop-filter:blur(2px)", "h"),
+        ("backdrop-filter:blur(2px)", "m"),
+        ("backdrop-filter:none", "h"),
+        ("backdrop-filter:blur(2px);-webkit-backdrop-filter:none", "m"),
+        ("-webkit-backdrop-filter:blur(2px);backdrop-filter:none", "h"),
+    ]);
+}
+
+#[test]
+fn content_visibility_makes_a_context_unless_visible() {
+    check_ctx_styles(&[
+        ("content-visibility:auto", "m"),
+        ("content-visibility:hidden", "m"),
+        ("CONTENT-VISIBILITY:AUTO", "m"),
+        ("content-visibility:visible", "h"),
+        ("content-visibility:foo", "h"),
+        ("content-visibility:auto;content-visibility:visible", "h"),
+        ("content-visibility:auto;content-visibility:foo", "m"),
+    ]);
+}
+
+#[test]
+fn a_view_transition_name_makes_a_context() {
+    check_ctx_styles(&[
+        ("view-transition-name:vt", "m"),
+        ("view-transition-name:VT", "m"),
+        ("view-transition-name:match-element", "m"),
+        ("view-transition-name:none", "h"),
+        ("view-transition-name:auto", "h"),
+        ("view-transition-name:a b", "h"),
+        ("view-transition-name:1a", "h"),
+        ("view-transition-name:vt;view-transition-name:none", "h"),
+        ("view-transition-name:vt;view-transition-name:1a", "m"),
+    ]);
+}
+
+#[test]
+fn will_change_of_a_mask_image_or_transition_name_makes_a_context() {
+    check_ctx_styles(&[
+        ("will-change:mask-image", "m"),
+        ("will-change:-webkit-mask-image", "m"),
+        ("will-change:MASK-IMAGE", "m"),
+        ("will-change:top,mask-image", "m"),
+        ("will-change:view-transition-name", "m"),
+        ("will-change:mask-size", "h"),
+        ("will-change:content-visibility", "h"),
+        ("will-change:contain-intrinsic-size", "h"),
+    ]);
+}
+
+/// Tailwind's `isolate` on the root, with the cookie bar outside it.
+#[test]
+fn a_cookie_bar_is_over_a_stuck_header_in_an_isolate_root() {
+    let bar = "<div id=m style=\"position:fixed;left:0;top:0;width:400px;height:40px\"></div>";
+    check_ctx(&[
+        ("bar z40", ctx_wrap("isolation:isolate", &ctx_header(50)) + &ctx_modal(40), "m"),
+        ("bar z auto", ctx_wrap("isolation:isolate", &ctx_header(50)) + bar, "m"),
+    ]);
+}
