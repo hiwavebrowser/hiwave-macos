@@ -14,9 +14,10 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
 - <link rel="match"> inside the test file is the authority on which reference
   to use. If it disagrees with the manifest, that is an INSTRUMENT error and
   no pixels are compared — a diff against the wrong reference is not data.
-- A blank frame is never a match. Two blank frames agree with each other for
-  the worst possible reason (the engine rendered neither document), which is
-  the empty-capture-scores-100 lie wearing a reftest costume. Blank -> ERROR.
+- A frame with zero ink is never a match. Two white frames agree with each other
+  for the worst possible reason (the engine rendered neither document), which is
+  the empty-capture-scores-100 lie wearing a reftest costume. Zero ink on either
+  side -> ERROR. Any ink at all is scored: a thin frame can really match or fail.
 - A reftest that cannot reach the state it asserts about is not scored.
   The capture path does not watch for reftest-wait's completion signal, so its
   frame may precede the state under test — and upstream WPT reports TIMEOUT
@@ -34,9 +35,13 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
   status: at 15% a page with a wrong line break still passes. Where it could
   not be measured, `campaign_not_measured` says why.
 - A match has to go red when the page is broken on purpose. Every match is
-  rendered again with all its style removed, and once per `mutations` entry in
-  the manifest. If any of those still matches, the case is UNPROVEN, with the
-  reason, and is not in the pass count.
+  rendered again with all its style removed, with its area's feature forced off
+  (AREA_PROBES), and once per `mutations` entry in the manifest. If any of those
+  still matches, the case is UNPROVEN, with the reason, and is not in the pass
+  count. Style removal alone only shows that the page reacts to its style.
+- A FAIL under SMALL_FAIL_PCT is asked of Chromium under the same staging. If
+  Chromium's own test and reference differ too, the case is SKIP with the reason:
+  the page cannot tell us about the engine at this rule.
 - Root-absolute references (/fonts/ahem.css) are staged to resolve against the
   WPT root, because wptserve serves / from there and file:// does not. A
   reftest whose declared font silently fails to load is not measuring its own
@@ -69,7 +74,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from parity_lib import THRESHOLDS, analyze_frame_blankness  # noqa: E402
+from parity_lib import THRESHOLDS  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "trench" / "wpt" / "MANIFEST.json"
@@ -99,6 +104,35 @@ WPT_MAX_DIFF_PCT = 0.0
 CAMPAIGN_PIXELMATCH_THRESHOLD = 0.1  # compare_baseline.mjs, wpt_pair_diff.mjs
 
 STATUSES = ("PASS", "FAIL", "UNPROVEN", "SKIP", "ERROR")
+
+# A FAIL under this is checked against Chromium before it goes to a C row.
+SMALL_FAIL_PCT = 0.1
+
+_TRANSFORMS_OFF = (
+    "transform: none !important; translate: none !important; rotate: none !important; "
+    "scale: none !important; perspective: none !important; transform-style: flat !important"
+)
+# What each coverage area asserts, forced off. The seed's cases are too mixed for
+# one rule; they have their own `mutations`.
+AREA_PROBES = {
+    "css-overflow": "overflow: visible !important",
+    "css-position-sticky": "position: static !important",
+    "css-position-absolute": "position: static !important",
+    "css-transforms-2d": _TRANSFORMS_OFF,
+    "css-transforms-3d": _TRANSFORMS_OFF,
+    "css-masking-clip-path": "clip-path: none !important",
+    "css-masking-mask": "mask: none !important; -webkit-mask: none !important; mask-image: none !important",
+    "css-ui-outline": "outline: none !important",
+    "css-lists": "list-style: none !important; counter-reset: none !important; counter-increment: none !important",
+    "css-text-basics": (
+        "white-space: normal !important; text-align: start !important; text-indent: 0 !important; "
+        "letter-spacing: normal !important; word-spacing: normal !important; text-transform: none !important"
+    ),
+}
+
+SCRIPT_CLASS_RE = re.compile(r"""classList\b|\bclassName\b|setAttribute\(\s*["']class["']""")
+SCRIPT_ELEMENT_RE = re.compile(r"<script\b.*?</script\s*>", re.IGNORECASE | re.DOTALL)
+SCRIPT_TRANSFORM_RE = re.compile(r"""setAttribute\(\s*["']transform["']""")
 
 
 class _PageTags(HTMLParser):
@@ -208,6 +242,12 @@ def compare_frames(test_ppm: Path, ref_ppm: Path):
         if tp[i : i + 3] != rp[i : i + 3]
     )
     return diff, (diff / total * 100.0) if total else 100.0
+
+
+def has_ink(ppm: Path) -> bool:
+    """Is any pixel of this frame not white?"""
+    _width, _height, pixels = read_ppm(ppm)
+    return pixels.count(0xFF) != len(pixels)
 
 
 def rel_match_hrefs(test_file: Path):
@@ -526,17 +566,13 @@ def run_pair(test_file: Path, ref_file: Path, viewport, workdir: Path, stage: bo
         if reason:
             return {"status": "ERROR", "reason": f"{label}: {reason}"}
 
-    # Blank gate. Two blank frames "match" because the engine rendered
+    # Zero-ink gate. Two white frames "match" because the engine rendered
     # neither document — that is a refusal, not a pass.
-    blanks = []
-    for label, ppm in (("test", test_ppm), ("ref", ref_ppm)):
-        b = analyze_frame_blankness(ppm, (255, 255, 255))
-        if b.get("is_blank"):
-            blanks.append(label)
+    blanks = [label for label, ppm in (("test", test_ppm), ("ref", ref_ppm)) if not has_ink(ppm)]
     if blanks:
         return {
             "status": "ERROR",
-            "reason": f"blank frame ({'+'.join(blanks)}) — render refusal, not a match",
+            "reason": f"zero-ink frame ({'+'.join(blanks)}) — render refusal, not a match",
         }
 
     diff_pixels, diff_pct = compare_frames(test_ppm, ref_ppm)
@@ -580,12 +616,40 @@ def apply_mutation(html: str, mutation):
     return html.replace(mutation["find"], mutation["replace"])
 
 
+def area_mutated(html: str, area):
+    """The page with its area's feature forced off, or None if the area has no probe.
+    The rule goes last so a same-specificity !important on the page does not beat it."""
+    declarations = AREA_PROBES.get(area)
+    if declarations is None:
+        return None
+    rules = "".join(f"{selector} {{ {declarations} }}\n" for selector in ("*", "*::before", "*::after"))
+    return f"{html}\n<style>\n{rules}</style>\n"
+
+
+def probe_blind_spot(html: str):
+    """What on this page the probes cannot break, if anything: a reader of an
+    UNPROVEN row should know the probe may have missed the asserted feature."""
+    scripts = "\n".join(SCRIPT_ELEMENT_RE.findall(html))
+    if SCRIPT_TRANSFORM_RE.search(scripts) or any("transform" in attrs for _tag, attrs in page_tags(html).tags):
+        return "the page sets an SVG transform attribute, which removing style may not touch"
+    if SCRIPT_CLASS_RE.search(scripts):
+        return "the page toggles a class from script, so a probe may not reach what it asserts"
+    return None
+
+
 def _probe_matches(name, html, test_file, ref_ppm, viewport, workdir):
-    """(still matches the reference, why it could not tell)."""
+    """(still matches the reference, why it could not tell). The page is gone after."""
     page = test_file.with_name(f"{test_file.stem}.__probe-{name}{test_file.suffix}")
     page.write_text(html)
     frame = workdir / f"probe-{name}.ppm"
-    why = capture(stage_html(page), frame, viewport)
+    try:
+        why = capture(stage_html(page), frame, viewport)
+    finally:
+        with _STAGE_LOCK:
+            staged = _STAGED.pop(page, None)
+        page.unlink()
+        if staged:
+            staged.unlink(missing_ok=True)
     if why:
         return False, why
     return compare_frames(frame, ref_ppm)[0] == 0, None
@@ -599,6 +663,14 @@ def prove_pass(entry, test_file: Path, ref_ppm: Path, viewport, workdir: Path):
         return f"style-removed probe rendered no frame: {why}"
     if matches:
         return "still matches with all its style removed"
+    area = entry.get("area")
+    forced_off = area_mutated(html, area)
+    if forced_off is not None:
+        matches, why = _probe_matches("area", forced_off, test_file, ref_ppm, viewport, workdir)
+        if why:
+            return f"{area} probe rendered no frame: {why}"
+        if matches:
+            return f"still matches under the {area} probe ({AREA_PROBES[area]})"
     for i, mutation in enumerate(entry.get("mutations", [])):
         mutated = apply_mutation(html, mutation)
         if mutated is None:
@@ -625,6 +697,8 @@ def run_case(entry, viewport):
         "rel_match": None,
         "blocked_by": None,
         "maps_to": entry.get("maps_to"),
+        "chromium_diff_pixels": None,
+        "chromium_not_measured": None,
     }
     test_file = WPT_ROOT / entry["path"]
     ref_file = WPT_ROOT / entry["ref"] if entry.get("ref") else None
@@ -672,8 +746,70 @@ def run_case(entry, viewport):
         if case["status"] == "PASS":
             why = prove_pass(entry, test_file, Path(td) / "ref.ppm", viewport, Path(td))
             if why:
-                case.update(status="UNPROVEN", reason=why)
+                blind = probe_blind_spot(test_src)
+                case.update(status="UNPROVEN", reason=f"{why}; {blind}" if blind else why)
     return case
+
+
+def chromium_pair_diffs(pairs):
+    """Chromium's own test against its own reference, exact RGB, for each pair:
+    `(pixels differing by id, browser version, None)`, or `(None, None, why)`."""
+    if not (ORACLE_DIR / "node_modules").is_dir():
+        return None, None, "tools/parity_oracle/node_modules is missing"
+    try:
+        proc = subprocess.run(
+            ["node", "wpt_pair_chromium.mjs", "800", "600"],
+            input=json.dumps(pairs), cwd=ORACLE_DIR, capture_output=True, text=True, timeout=300,
+        )
+    except FileNotFoundError:
+        return None, None, "node not found"
+    except subprocess.TimeoutExpired:
+        return None, None, "wpt_pair_chromium.mjs timeout (300s)"
+    except OSError as e:
+        return None, None, f"node did not start: {type(e).__name__}"
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, None, f"wpt_pair_chromium.mjs exit {proc.returncode}: {tail[-1][:200] if tail else 'no output'}"
+    try:
+        answer = json.loads(proc.stdout)
+        return answer["diffs"], answer["version"], None
+    except (ValueError, KeyError, TypeError):
+        return None, None, "wpt_pair_chromium.mjs printed no usable JSON"
+
+
+def recheck_small_fails(cases, entries, oracle=chromium_pair_diffs):
+    """A FAIL under SMALL_FAIL_PCT that Chromium's own test and reference also fail
+    under the same staging says nothing about the engine: SKIP, with the reason. A
+    FAIL with no answer stays a FAIL and says why."""
+    small = [
+        c for c in cases
+        if c["status"] == "FAIL" and c["diff_pct"] is not None and c["diff_pct"] < SMALL_FAIL_PCT
+    ]
+    if not small:
+        return
+    by_id = {e["id"]: e for e in entries}
+    pairs = [
+        {
+            "id": c["id"],
+            "test": str(stage_html(WPT_ROOT / by_id[c["id"]]["path"])),
+            "ref": str(stage_html(WPT_ROOT / by_id[c["id"]]["ref"])),
+        }
+        for c in small
+    ]
+    diffs, version, why = oracle(pairs)
+    for case in small:
+        if diffs is None:
+            case["chromium_not_measured"] = why
+        elif case["id"] not in diffs:
+            case["chromium_not_measured"] = "the oracle gave no answer for this case"
+        else:
+            case["chromium_diff_pixels"] = diffs[case["id"]]
+            if diffs[case["id"]] > 0:
+                case.update(
+                    status="SKIP",
+                    reason=f"Chromium {version}'s own test and reference differ by "
+                           f"{diffs[case['id']]} px under the same staging; not an engine verdict",
+                )
 
 
 def negative_control(viewport) -> bool:
@@ -774,6 +910,11 @@ def main():
             else:
                 print(f"  {case['id']:55s} PASS", flush=True)
 
+    recheck_small_fails(cases, entries)
+    rechecked = [c for c in cases if c["chromium_diff_pixels"] is not None]
+    for case in rechecked:
+        print(f"  chromium: {case['id']} differs by {case['chromium_diff_pixels']} px -> {case['status']}")
+
     counts = count_statuses(cases)
     scored = counts["PASS"] + counts["FAIL"] + counts["UNPROVEN"]
     rate = pass_rate(counts)
@@ -860,6 +1001,8 @@ def main():
         print(f"  campaign rule not measured: {why}")
     if last_run["unproven_passes"]:
         print(f"  unproven: {len(last_run['unproven_passes'])} (see last-run.json)")
+    for why in sorted({c["chromium_not_measured"] for c in cases if c["chromium_not_measured"]}):
+        print(f"  small FAIL not checked in Chromium: {why}")
     for gap, ids in last_run["attribution"]["blocked_fails"].items():
         print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
     suspect = last_run["attribution"]["suspect_passes"]["ids"]
