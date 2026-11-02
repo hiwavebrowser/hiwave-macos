@@ -1,0 +1,8313 @@
+{
+  "counts": {
+    "computed": 8,
+    "effect": 131,
+    "parse": 61,
+    "unsupported": 144
+  },
+  "meta": {
+    "contexts_off": [
+      [
+        "bg",
+        916
+      ],
+      [
+        "blend",
+        375
+      ],
+      [
+        "check",
+        225
+      ],
+      [
+        "counter",
+        4
+      ],
+      [
+        "digits",
+        13
+      ],
+      [
+        "floats",
+        56
+      ],
+      [
+        "inline",
+        18
+      ],
+      [
+        "input",
+        54
+      ],
+      [
+        "list",
+        40
+      ],
+      [
+        "long",
+        76
+      ],
+      [
+        "lower",
+        15
+      ],
+      [
+        "multicol",
+        88
+      ],
+      [
+        "oneline",
+        21
+      ],
+      [
+        "quote",
+        8
+      ],
+      [
+        "spanned",
+        1195
+      ],
+      [
+        "table",
+        3
+      ],
+      [
+        "tabs",
+        11
+      ],
+      [
+        "text",
+        70
+      ]
+    ],
+    "date": "2026-11-02",
+    "develop_sha": "afa159da",
+    "oracle": "143.0.7499.4",
+    "sites_loaded": 68,
+    "viewport": [
+      400,
+      300
+    ]
+  },
+  "properties": [
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 479,
+      "name": "background",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204) none repeat scroll 0% 0% / auto padding-box border-box",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "#00c"
+        },
+        {
+          "chrome_computed": "rgba(0, 0, 0, 0) linear-gradient(rgb(204, 0, 0), rgb(0, 0, 204)) repeat scroll 0% 0% / auto padding-box border-box",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "linear-gradient(#c00,#00c)"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 472,
+      "name": "color",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "rgb(204, 0, 0)",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 71,
+          "value": "#c00"
+        },
+        {
+          "chrome_computed": "rgba(200, 0, 0, 0.5)",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "rgba(200, 0, 0, 0.5)",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 26,
+          "value": "rgba(200,0,0,0.5)"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 295,
+      "name": "font-size",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "24px",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "24px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 42,
+          "value": "24px"
+        },
+        {
+          "chrome_computed": "48px",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "48px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 90,
+          "value": "3em"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "box",
+      "corpus": 282,
+      "name": "display",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "inline-block",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "inline-block",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "inline-block"
+        },
+        {
+          "chrome_computed": "inline",
+          "computed": true,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "inline",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 525,
+          "value": "inline"
+        },
+        {
+          "chrome_computed": "none",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "none",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 280,
+      "name": "padding",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "5px 10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "5px 10px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 189,
+      "name": "border-radius",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "20px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        },
+        {
+          "chrome_computed": "50%",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "60px / 40px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 141,
+      "name": "width",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "200px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "200px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "200px"
+        },
+        {
+          "chrome_computed": "150px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "150px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 135,
+      "name": "height",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "150px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "150px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "150px"
+        },
+        {
+          "chrome_computed": "100px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "100px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 130,
+      "name": "border",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 113,
+      "name": "transform",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "matrix(0.984808, 0.173648, -0.173648, 0.984808, 0, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "rotate(10deg)"
+        },
+        {
+          "chrome_computed": "matrix(1, 0, 0, 1, 10, 5)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "translate(10px,5px)"
+        },
+        {
+          "chrome_computed": "matrix(0.5, 0, 0, 0.5, 0, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "scale(0.5)"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 107,
+      "name": "opacity",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "0.5",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "0.5",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0.5"
+        },
+        {
+          "chrome_computed": "0",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "0",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 106,
+      "name": "margin-bottom",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 103,
+      "name": "transition",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "opacity 1s ease 0s"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 97,
+      "name": "position",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "relative",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "relative",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "relative"
+        },
+        {
+          "chrome_computed": "absolute",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "absolute",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "absolute"
+        },
+        {
+          "chrome_computed": "fixed",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "fixed",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "fixed"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 93,
+      "name": "cursor",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "pointer",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "pointer"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 68,
+      "name": "font-weight",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "700",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "700",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 57,
+          "value": "700"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 65,
+      "name": "margin",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "5px 10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "5px 10px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "overflow",
+      "corpus": 62,
+      "name": "overflow",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "hidden"
+        },
+        {
+          "chrome_computed": "scroll",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "scroll"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 50,
+      "name": "margin-top",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "text",
+      "corpus": 48,
+      "name": "text-align",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "center",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 53,
+          "value": "center"
+        },
+        {
+          "chrome_computed": "right",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "right",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 42,
+          "value": "right"
+        },
+        {
+          "chrome_computed": "justify",
+          "computed": true,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "justify",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 80,
+          "value": "justify"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 45,
+      "name": "box-shadow",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204) 6px 6px 0px 0px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px 6px 0 #00c"
+        },
+        {
+          "chrome_computed": "rgb(0, 0, 204) 6px 6px 0px 0px inset",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 500,
+          "value": "inset 6px 6px 0 #00c"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 44,
+      "name": "border-color",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "text",
+      "corpus": 42,
+      "name": "font-family",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "Georgia",
+          "computed": true,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "Georgia",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 108,
+          "value": "Georgia"
+        },
+        {
+          "chrome_computed": "monospace",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "monospace",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 28,
+          "value": "monospace"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 37,
+      "name": "white-space",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "nowrap",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "nowrap",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 63,
+          "value": "nowrap"
+        },
+        {
+          "chrome_computed": "pre",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "pre",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 63,
+          "value": "pre"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 35,
+      "name": "left",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "20px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 30,
+      "name": "top",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "20px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        },
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "6px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 27,
+      "name": "line-height",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "60px",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "60px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 78,
+          "value": "60px"
+        },
+        {
+          "chrome_computed": "64px",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "64px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "2"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "abs",
+      "corpus": 27,
+      "name": "z-index",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "-1",
+          "computed": true,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "-1",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 96,
+          "value": "-1"
+        },
+        {
+          "chrome_computed": "5",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "5",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 26,
+      "name": "max-width",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "60px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "60px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 25,
+      "name": "content",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "\"HH\"",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "\"HH\"",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 74,
+          "value": "\"HH\""
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 25,
+      "name": "min-width",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "200px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "200px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 23,
+      "name": "right",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "20px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 20,
+      "name": "bottom",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "20px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 17,
+      "name": "box-sizing",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "border-box",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "border-box",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "border-box"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 17,
+      "name": "min-height",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "130px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "130px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 17,
+      "name": "outline",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204) solid 6px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 104,
+          "value": "6px solid #00c"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "box",
+      "corpus": 17,
+      "name": "pointer-events",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": true,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "none",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 17,
+      "name": "text-decoration",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "underline",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "underline"
+        },
+        {
+          "chrome_computed": "line-through rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 110,
+          "value": "line-through #c00"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 15,
+      "name": "max-height",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "40px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "40px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 8,
+      "name": "visibility",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "hidden",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "hidden"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 5,
+      "name": "padding-bottom",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 5,
+      "name": "padding-top",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "inline",
+      "corpus": 2,
+      "name": "vertical-align",
+      "red": true,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "top",
+          "computed": false,
+          "control_off": 18,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 17,
+          "value": "top"
+        },
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 18,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 52,
+          "value": "10px"
+        },
+        {
+          "chrome_computed": "super",
+          "computed": false,
+          "control_off": 18,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 48,
+          "value": "super"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "background-color",
+      "red": false,
+      "sites": 68,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "rgb(0, 0, 204)",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "#00c"
+        },
+        {
+          "chrome_computed": "rgba(0, 0, 200, 0.5)",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "rgba(0, 0, 200, 0.5)",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "rgba(0,0,200,0.5)"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexc",
+      "corpus": 143,
+      "name": "align-items",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        },
+        {
+          "chrome_computed": "flex-end",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "flex-end"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexc",
+      "corpus": 87,
+      "name": "justify-content",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        },
+        {
+          "chrome_computed": "space-between",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "space-between"
+        },
+        {
+          "chrome_computed": "flex-end",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "flex-end"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "flexc",
+      "corpus": 55,
+      "name": "flex-direction",
+      "red": true,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "column",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "column",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "column"
+        },
+        {
+          "chrome_computed": "row-reverse",
+          "computed": true,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "row-reverse",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 856,
+          "value": "row-reverse"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 27,
+      "name": "margin-left",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        },
+        {
+          "chrome_computed": "180px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "180px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "auto"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 24,
+      "name": "margin-right",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "oneline",
+      "corpus": 20,
+      "name": "text-overflow",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "ellipsis",
+          "computed": false,
+          "control_off": 21,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 21,
+          "value": "ellipsis"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 7,
+      "name": "padding-left",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "bg",
+      "corpus": 4,
+      "name": "background-repeat",
+      "red": true,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "no-repeat",
+          "computed": false,
+          "control_off": 916,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 82,
+          "value": "no-repeat"
+        },
+        {
+          "chrome_computed": "repeat-x",
+          "computed": false,
+          "control_off": 916,
+          "effect": "unproven",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 302,
+          "value": "repeat-x"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 3,
+      "name": "outline-offset",
+      "red": true,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 51,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 3,
+      "name": "padding-right",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "12px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "svg",
+      "corpus": 2,
+      "name": "fill",
+      "red": true,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 0,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 0,
+      "name": "font",
+      "red": false,
+      "sites": 67,
+      "values": [
+        {
+          "chrome_computed": "italic 700 24px / 30px Georgia",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 17,
+          "value": "italic 700 24px/30px Georgia"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 63,
+      "name": "flex",
+      "red": false,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "1 1 0%",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "1"
+        },
+        {
+          "chrome_computed": "0 0 90px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0 0 90px"
+        },
+        {
+          "chrome_computed": "1 1 0px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "1 1 0"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 40,
+      "name": "border-bottom",
+      "red": false,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 32,
+      "name": "animation",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "0s ease 0s 1 normal none paused none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "k 2s linear 1s infinite"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "text",
+      "corpus": 20,
+      "name": "letter-spacing",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "4px",
+          "computed": true,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "4px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 92,
+          "value": "4px"
+        },
+        {
+          "chrome_computed": "6.4px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "normal",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 76,
+          "value": "0.2em"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "bg",
+      "corpus": 12,
+      "name": "background-position",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "20px 10px",
+          "computed": false,
+          "control_off": 916,
+          "effect": "unproven",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 756,
+          "value": "20px 10px"
+        },
+        {
+          "chrome_computed": "50% 50%",
+          "computed": false,
+          "control_off": 916,
+          "effect": "unproven",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 765,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexc",
+      "corpus": 6,
+      "name": "flex-wrap",
+      "red": false,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "wrap",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "wrap"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 3,
+      "name": "filter",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "blur(4px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 204,
+          "value": "blur(4px)"
+        },
+        {
+          "chrome_computed": "grayscale(1)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "grayscale(1)"
+        },
+        {
+          "chrome_computed": "drop-shadow(rgb(0, 0, 204) 6px 6px 0px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 96,
+          "value": "drop-shadow(6px 6px 0 #00c)"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "overflow",
+      "corpus": 3,
+      "name": "overflow-x",
+      "red": false,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "hidden",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "hidden"
+        },
+        {
+          "chrome_computed": "scroll",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "scroll",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "scroll"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 1,
+      "name": "align-self",
+      "red": false,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        },
+        {
+          "chrome_computed": "flex-end",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "flex-end"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 1,
+      "name": "background-image",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(90deg, rgb(204, 0, 0), rgb(0, 0, 204))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "linear-gradient(90deg,#c00,#00c)"
+        },
+        {
+          "chrome_computed": "radial-gradient(rgb(204, 0, 0), rgb(0, 0, 204))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "radial-gradient(#c00,#00c)"
+        },
+        {
+          "chrome_computed": "conic-gradient(rgb(204, 0, 0), rgb(0, 0, 204))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 500,
+          "value": "conic-gradient(#c00,#00c)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "input",
+      "corpus": 0,
+      "name": "-webkit-appearance",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 54,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 57,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "img",
+      "corpus": 0,
+      "name": "object-fit",
+      "red": true,
+      "sites": 66,
+      "values": [
+        {
+          "chrome_computed": "cover",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 456,
+          "value": "cover"
+        },
+        {
+          "chrome_computed": "contain",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "contain"
+        },
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexc",
+      "corpus": 117,
+      "name": "gap",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 23,
+      "name": "flex-shrink",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "0",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "overflow",
+      "corpus": 21,
+      "name": "overflow-y",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "hidden",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "hidden"
+        },
+        {
+          "chrome_computed": "scroll",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "scroll",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "scroll"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 15,
+      "name": "font-style",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "italic",
+          "computed": true,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "italic",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 9,
+          "value": "italic"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "bg",
+      "corpus": 12,
+      "name": "background-size",
+      "red": true,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "30px 30px",
+          "computed": false,
+          "control_off": 916,
+          "effect": "unproven",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 915,
+          "value": "30px 30px"
+        },
+        {
+          "chrome_computed": "cover",
+          "computed": false,
+          "control_off": 916,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 100,
+          "value": "cover"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "long",
+      "corpus": 2,
+      "name": "word-break",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "break-all",
+          "computed": false,
+          "control_off": 76,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 79,
+          "value": "break-all"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "list",
+      "corpus": 1,
+      "name": "list-style",
+      "red": true,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "inside none square",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 18,
+          "value": "square inside"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-width",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "3px 6px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "3px 6px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 0,
+      "name": "flex-grow",
+      "red": false,
+      "sites": 65,
+      "values": [
+        {
+          "chrome_computed": "1",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "class": "computed",
+      "context": "lower",
+      "corpus": 18,
+      "name": "text-transform",
+      "red": true,
+      "sites": 64,
+      "values": [
+        {
+          "chrome_computed": "uppercase",
+          "computed": true,
+          "control_off": 15,
+          "effect": "mismatch",
+          "engine_computed": "uppercase",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 29,
+          "value": "uppercase"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 7,
+      "name": "border-top",
+      "red": false,
+      "sites": 64,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 8,
+      "name": "user-select",
+      "red": true,
+      "sites": 63,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 1,
+      "name": "border-style",
+      "red": true,
+      "sites": 63,
+      "values": [
+        {
+          "chrome_computed": "dashed",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dashed"
+        },
+        {
+          "chrome_computed": "double",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "double"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "abs",
+      "corpus": 0,
+      "name": "clip",
+      "red": true,
+      "sites": 63,
+      "values": [
+        {
+          "chrome_computed": "rect(5px, 20px, 20px, 5px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 80,
+          "value": "rect(5px,20px,20px,5px)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "-webkit-font-smoothing",
+      "red": true,
+      "sites": 62,
+      "values": [
+        {
+          "chrome_computed": "antialiased",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 24,
+          "value": "antialiased"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 8,
+      "name": "border-left",
+      "red": false,
+      "sites": 61,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "input",
+      "corpus": 1,
+      "name": "appearance",
+      "red": true,
+      "sites": 61,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 54,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 57,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-top-left-radius",
+      "red": false,
+      "sites": 61,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "30px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-top-right-radius",
+      "red": false,
+      "sites": 61,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "30px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 0,
+      "name": "order",
+      "red": false,
+      "sites": 61,
+      "values": [
+        {
+          "chrome_computed": "5",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 11,
+      "name": "grid-template-columns",
+      "red": false,
+      "sites": 60,
+      "values": [
+        {
+          "chrome_computed": "90px 210px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "90px 1fr"
+        },
+        {
+          "chrome_computed": "50px 50px 50px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "repeat(3,50px)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 2,
+      "name": "-webkit-user-select",
+      "red": true,
+      "sites": 60,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "table",
+      "corpus": 0,
+      "name": "border-collapse",
+      "red": true,
+      "sites": 60,
+      "values": [
+        {
+          "chrome_computed": "collapse",
+          "computed": false,
+          "control_off": 3,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 311,
+          "value": "collapse"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "list",
+      "corpus": 0,
+      "name": "list-style-type",
+      "red": true,
+      "sites": 60,
+      "values": [
+        {
+          "chrome_computed": "square",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 40,
+          "value": "square"
+        },
+        {
+          "chrome_computed": "decimal",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 36,
+          "value": "decimal"
+        },
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 32,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 3,
+      "name": "transition-duration",
+      "red": true,
+      "sites": 59,
+      "values": [
+        {
+          "chrome_computed": "0s",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2s"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "transition-property",
+      "red": true,
+      "sites": 59,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "opacity"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 3,
+      "name": "animation-duration",
+      "red": true,
+      "sites": 58,
+      "values": [
+        {
+          "chrome_computed": "0s",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2s"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 2,
+      "name": "transform-origin",
+      "red": true,
+      "sites": 58,
+      "values": [
+        {
+          "chrome_computed": "0px 0px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 56,
+          "value": "0 0"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "floats",
+      "corpus": 1,
+      "name": "float",
+      "red": false,
+      "sites": 58,
+      "values": [
+        {
+          "chrome_computed": "left",
+          "computed": true,
+          "control_off": 56,
+          "effect": "match",
+          "engine_computed": "left",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 52,
+          "value": "left"
+        },
+        {
+          "chrome_computed": "right",
+          "computed": true,
+          "control_off": 56,
+          "effect": "match",
+          "engine_computed": "right",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 52,
+          "value": "right"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 4,
+      "name": "aspect-ratio",
+      "red": false,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "2 / 1",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2 / 1"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 4,
+      "name": "inset",
+      "red": false,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        },
+        {
+          "chrome_computed": "10px 30px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10px 30px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "animation-name",
+      "red": true,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "k"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-bottom-right-radius",
+      "red": false,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "30px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexi",
+      "corpus": 0,
+      "name": "flex-basis",
+      "red": false,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "90px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "90px"
+        },
+        {
+          "chrome_computed": "50%",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "long",
+      "corpus": 0,
+      "name": "overflow-wrap",
+      "red": false,
+      "sites": 57,
+      "values": [
+        {
+          "chrome_computed": "break-word",
+          "computed": false,
+          "control_off": 76,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 79,
+          "value": "break-word"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 1,
+      "name": "resize",
+      "red": true,
+      "sites": 56,
+      "values": [
+        {
+          "chrome_computed": "both",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 1,
+          "value": "both"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "-webkit-tap-highlight-color",
+      "red": true,
+      "sites": 56,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "animation-timing-function",
+      "red": true,
+      "sites": 56,
+      "values": [
+        {
+          "chrome_computed": "ease",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "linear"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-bottom-left-radius",
+      "red": false,
+      "sites": 56,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "30px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 6,
+      "name": "border-right",
+      "red": false,
+      "sites": 55,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 1,
+      "name": "column-gap",
+      "red": false,
+      "sites": 55,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "long",
+      "corpus": 1,
+      "name": "word-wrap",
+      "red": false,
+      "sites": 55,
+      "values": [
+        {
+          "chrome_computed": "break-word",
+          "computed": false,
+          "control_off": 76,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 79,
+          "value": "break-word"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "-webkit-box-orient",
+      "red": true,
+      "sites": 55,
+      "values": [
+        {
+          "chrome_computed": "vertical",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "vertical"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 4,
+      "name": "scrollbar-width",
+      "red": true,
+      "sites": 54,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "none"
+        },
+        {
+          "chrome_computed": "thin",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "thin"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 1,
+      "name": "outline-color",
+      "red": true,
+      "sites": 54,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 104,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 104,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "clip-path",
+      "red": true,
+      "sites": 54,
+      "values": [
+        {
+          "chrome_computed": "circle(30px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "circle(30px)"
+        },
+        {
+          "chrome_computed": "inset(10px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "inset(10px)"
+        },
+        {
+          "chrome_computed": "polygon(0px 0px, 100% 0px, 0px 100%)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 272,
+          "value": "polygon(0 0,100% 0,0 100%)"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "table",
+      "corpus": 0,
+      "name": "border-spacing",
+      "red": true,
+      "sites": 53,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 3,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 3,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-template-rows",
+      "red": false,
+      "sites": 53,
+      "values": [
+        {
+          "chrome_computed": "80px 80px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "80px 1fr"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "transition-timing-function",
+      "red": true,
+      "sites": 53,
+      "values": [
+        {
+          "chrome_computed": "ease",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "linear"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "row-gap",
+      "red": false,
+      "sites": 52,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "bg",
+      "corpus": 5,
+      "name": "background-clip",
+      "red": true,
+      "sites": 51,
+      "values": [
+        {
+          "chrome_computed": "content-box",
+          "computed": false,
+          "control_off": 916,
+          "effect": "unproven",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 450,
+          "value": "content-box"
+        },
+        {
+          "chrome_computed": "text",
+          "computed": false,
+          "control_off": 916,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "text"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "flexc",
+      "corpus": 1,
+      "name": "align-content",
+      "red": false,
+      "sites": 51,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        },
+        {
+          "chrome_computed": "space-between",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "space-between"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "will-change",
+      "red": true,
+      "sites": 51,
+      "values": [
+        {
+          "chrome_computed": "transform",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "transform"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 2,
+      "name": "border-top-color",
+      "red": false,
+      "sites": 50,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 2,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "cleared",
+      "corpus": 2,
+      "name": "clear",
+      "red": false,
+      "sites": 50,
+      "values": [
+        {
+          "chrome_computed": "left",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "left"
+        },
+        {
+          "chrome_computed": "both",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "both"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke",
+      "red": true,
+      "sites": 50,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 43,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "transition-delay",
+      "red": true,
+      "sites": 50,
+      "values": [
+        {
+          "chrome_computed": "0s",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "1s"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 1,
+      "name": "border-bottom-color",
+      "red": false,
+      "sites": 49,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 1,
+      "name": "direction",
+      "red": true,
+      "sites": 49,
+      "values": [
+        {
+          "chrome_computed": "rtl",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 112,
+          "value": "rtl"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 0,
+      "name": "-webkit-line-clamp",
+      "red": false,
+      "sites": 49,
+      "values": [
+        {
+          "chrome_computed": "1",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 55,
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 4,
+      "name": "grid-column",
+      "red": false,
+      "sites": 48,
+      "values": [
+        {
+          "chrome_computed": "2 / 4",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2 / 4"
+        },
+        {
+          "chrome_computed": "span 2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "span 2"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 2,
+      "name": "backdrop-filter",
+      "red": true,
+      "sites": 48,
+      "values": [
+        {
+          "chrome_computed": "blur(4px)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "blur(4px)"
+        },
+        {
+          "chrome_computed": "invert(1)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 500,
+          "value": "invert(1)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "flexc",
+      "corpus": 0,
+      "name": "flex-flow",
+      "red": true,
+      "sites": 47,
+      "values": [
+        {
+          "chrome_computed": "column wrap",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 685,
+          "value": "column wrap"
+        },
+        {
+          "chrome_computed": "row wrap",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 670,
+          "value": "row wrap"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "img",
+      "corpus": 0,
+      "name": "object-position",
+      "red": false,
+      "sites": 47,
+      "values": [
+        {
+          "chrome_computed": "0% 0%",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "left top"
+        },
+        {
+          "chrome_computed": "20px 10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px 10px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 1,
+      "name": "text-shadow",
+      "red": true,
+      "sites": 46,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0) 4px 4px 0px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 246,
+          "value": "4px 4px 0 #c00"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-bottom-width",
+      "red": false,
+      "sites": 46,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "6px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "outline-style",
+      "red": true,
+      "sites": 46,
+      "values": [
+        {
+          "chrome_computed": "dashed",
+          "computed": false,
+          "control_off": 104,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 72,
+          "value": "dashed"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 34,
+      "name": "animation-delay",
+      "red": true,
+      "sites": 45,
+      "values": [
+        {
+          "chrome_computed": "0s",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "1s"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-indent",
+      "red": true,
+      "sites": 45,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 125,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "grid-area",
+      "red": false,
+      "sites": 44,
+      "values": [
+        {
+          "chrome_computed": "2 / 2 / 3 / 4",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2 / 2 / 3 / 4"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-wrap",
+      "red": true,
+      "sites": 44,
+      "values": [
+        {
+          "chrome_computed": "nowrap",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 210,
+          "value": "nowrap"
+        },
+        {
+          "chrome_computed": "balance",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 92,
+          "value": "balance"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "touch-action",
+      "red": true,
+      "sites": 44,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-inline-start",
+      "red": false,
+      "sites": 43,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "outline-width",
+      "red": true,
+      "sites": 43,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 51,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 104,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-inline-start",
+      "red": false,
+      "sites": 43,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-inline",
+      "red": false,
+      "sites": 42,
+      "values": [
+        {
+          "chrome_computed": "12px 24px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px 24px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "gridi",
+      "corpus": 1,
+      "name": "grid-row",
+      "red": true,
+      "sites": 41,
+      "values": [
+        {
+          "chrome_computed": "2 / 3",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 653,
+          "value": "2 / 3"
+        },
+        {
+          "chrome_computed": "span 2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "span 2"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 1,
+      "name": "animation-fill-mode",
+      "red": true,
+      "sites": 40,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "both"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-left-color",
+      "red": false,
+      "sites": 40,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 1,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-inline",
+      "red": false,
+      "sites": 40,
+      "values": [
+        {
+          "chrome_computed": "12px 24px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px 24px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-top-width",
+      "red": false,
+      "sites": 39,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "6px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-inline-end",
+      "red": false,
+      "sites": 39,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 2,
+      "name": "animation-iteration-count",
+      "red": true,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "1",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "-webkit-mask-image",
+      "red": true,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 510,
+          "value": "linear-gradient(#000,transparent)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "backface-visibility",
+      "red": true,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 600,
+          "value": "hidden"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "justify-self",
+      "red": false,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-block",
+      "red": false,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "12px 24px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px 24px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke-width",
+      "red": true,
+      "sites": 38,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 47,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 58,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-inline-start",
+      "red": false,
+      "sites": 37,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "blend",
+      "corpus": 0,
+      "name": "isolation",
+      "red": true,
+      "sites": 37,
+      "values": [
+        {
+          "chrome_computed": "isolate",
+          "computed": false,
+          "control_off": 375,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "isolate"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-image",
+      "red": true,
+      "sites": 37,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 510,
+          "value": "linear-gradient(#000,transparent)"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-decoration-line",
+      "red": true,
+      "sites": 36,
+      "values": [
+        {
+          "chrome_computed": "underline",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "underline"
+        },
+        {
+          "chrome_computed": "overline",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 194,
+          "value": "overline"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-bottom-style",
+      "red": false,
+      "sites": 35,
+      "values": [
+        {
+          "chrome_computed": "dotted",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dotted"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-right-color",
+      "red": false,
+      "sites": 35,
+      "values": [
+        {
+          "chrome_computed": "rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 1,
+          "value": "#00c"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-block",
+      "red": false,
+      "sites": 35,
+      "values": [
+        {
+          "chrome_computed": "12px 24px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px 24px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "scroll-behavior",
+      "red": true,
+      "sites": 35,
+      "values": [
+        {
+          "chrome_computed": "auto",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "smooth"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-auto-flow",
+      "red": false,
+      "sites": 34,
+      "values": [
+        {
+          "chrome_computed": "column",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "column"
+        },
+        {
+          "chrome_computed": "dense",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dense"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "lower",
+      "corpus": 0,
+      "name": "font-feature-settings",
+      "red": true,
+      "sites": 33,
+      "values": [
+        {
+          "chrome_computed": "\"smcp\"",
+          "computed": false,
+          "control_off": 15,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 15,
+          "value": "\"smcp\" 1"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "justify-items",
+      "red": false,
+      "sites": 33,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "mix-blend-mode",
+      "red": true,
+      "sites": 33,
+      "values": [
+        {
+          "chrome_computed": "multiply",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 600,
+          "value": "multiply"
+        },
+        {
+          "chrome_computed": "difference",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 600,
+          "value": "difference"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-inline-end",
+      "red": false,
+      "sites": 33,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "container-type",
+      "red": true,
+      "sites": 32,
+      "values": [
+        {
+          "chrome_computed": "size",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "size"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "scroll-snap-type",
+      "red": true,
+      "sites": 32,
+      "values": [
+        {
+          "chrome_computed": "y mandatory",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "y mandatory"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 5,
+      "name": "-webkit-text-fill-color",
+      "red": true,
+      "sites": 31,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 266,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 4,
+      "name": "scrollbar-color",
+      "red": true,
+      "sites": 31,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0) rgb(0, 0, 204)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "#c00 #00c"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-inline-end",
+      "red": false,
+      "sites": 31,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "scroll-snap-align",
+      "red": true,
+      "sites": 31,
+      "values": [
+        {
+          "chrome_computed": "start",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "start"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "all",
+      "red": true,
+      "sites": 30,
+      "values": [
+        {
+          "chrome_computed": "",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 575,
+          "value": "unset"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-left-width",
+      "red": false,
+      "sites": 30,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "6px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-template-areas",
+      "red": true,
+      "sites": 30,
+      "values": [
+        {
+          "chrome_computed": "\"a b\" \"c c\"",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "\"a b\" \"c c\""
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "place-items",
+      "red": false,
+      "sites": 30,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "table",
+      "corpus": 0,
+      "name": "table-layout",
+      "red": true,
+      "sites": 30,
+      "values": [
+        {
+          "chrome_computed": "fixed",
+          "computed": false,
+          "control_off": 3,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 3,
+          "value": "fixed"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "place-content",
+      "red": false,
+      "sites": 29,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-rendering",
+      "red": true,
+      "sites": 29,
+      "values": [
+        {
+          "chrome_computed": "geometricprecision",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 24,
+          "value": "geometricPrecision"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 1,
+      "name": "overscroll-behavior",
+      "red": true,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "contain",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "contain"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-right-width",
+      "red": false,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": true,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "6px",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "font-variation-settings",
+      "red": true,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "\"wght\" 700",
+          "computed": false,
+          "control_off": 70,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "\"wght\" 700"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "list",
+      "corpus": 0,
+      "name": "list-style-position",
+      "red": true,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "inside",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 16,
+          "value": "inside"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-block-end",
+      "red": false,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "margin-block-start",
+      "red": false,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "scale",
+      "red": false,
+      "sites": 28,
+      "values": [
+        {
+          "chrome_computed": "0.5",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0.5"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "animation-play-state",
+      "red": true,
+      "sites": 27,
+      "values": [
+        {
+          "chrome_computed": "paused",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "paused"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-auto-rows",
+      "red": false,
+      "sites": 27,
+      "values": [
+        {
+          "chrome_computed": "70px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "70px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "input",
+      "corpus": 0,
+      "name": "color-scheme",
+      "red": true,
+      "sites": 26,
+      "values": [
+        {
+          "chrome_computed": "dark",
+          "computed": false,
+          "control_off": 54,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 356,
+          "value": "dark"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "font-stretch",
+      "red": true,
+      "sites": 26,
+      "values": [
+        {
+          "chrome_computed": "75%",
+          "computed": false,
+          "control_off": 70,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "75%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-auto-columns",
+      "red": false,
+      "sites": 26,
+      "values": [
+        {
+          "chrome_computed": "70px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "70px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "grid-column-start",
+      "red": false,
+      "sites": 26,
+      "values": [
+        {
+          "chrome_computed": "2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "2"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-top-style",
+      "red": false,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "dotted",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dotted"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "long",
+      "corpus": 0,
+      "name": "hyphens",
+      "red": true,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 76,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 76,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask",
+      "red": true,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 510,
+          "value": "linear-gradient(#000,transparent)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke-dashoffset",
+      "red": true,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "5px",
+          "computed": false,
+          "control_off": 75,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 74,
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-decoration-color",
+      "red": false,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 70,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-underline-offset",
+      "red": true,
+      "sites": 25,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 183,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "digits",
+      "corpus": 0,
+      "name": "font-variant-numeric",
+      "red": true,
+      "sites": 24,
+      "values": [
+        {
+          "chrome_computed": "tabular-nums",
+          "computed": false,
+          "control_off": 13,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 13,
+          "value": "tabular-nums"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-size",
+      "red": true,
+      "sites": 24,
+      "values": [
+        {
+          "chrome_computed": "50px 50px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 431,
+          "value": "50px 50px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "translate",
+      "red": false,
+      "sites": 24,
+      "values": [
+        {
+          "chrome_computed": "10px 5px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10px 5px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-end-end-radius",
+      "red": false,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "input",
+      "corpus": 0,
+      "name": "caret-color",
+      "red": true,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "rgba(0, 0, 0, 0)",
+          "computed": false,
+          "control_off": 54,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 54,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "contain",
+      "red": true,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "paint",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 1849,
+          "value": "paint"
+        },
+        {
+          "chrome_computed": "size",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "size"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "scroll-margin-top",
+      "red": true,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke-dasharray",
+      "red": true,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "10px, 6px",
+          "computed": false,
+          "control_off": 58,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 75,
+          "value": "10 6"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "transform-style",
+      "red": true,
+      "sites": 23,
+      "values": [
+        {
+          "chrome_computed": "preserve-3d",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "preserve-3d"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-repeat",
+      "red": true,
+      "sites": 22,
+      "values": [
+        {
+          "chrome_computed": "no-repeat",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 431,
+          "value": "no-repeat"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "persp",
+      "corpus": 0,
+      "name": "perspective",
+      "red": true,
+      "sites": 22,
+      "values": [
+        {
+          "chrome_computed": "100px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 140,
+          "value": "100px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-start-start-radius",
+      "red": false,
+      "sites": 21,
+      "values": [
+        {
+          "chrome_computed": "30px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "30px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-position",
+      "red": true,
+      "sites": 21,
+      "values": [
+        {
+          "chrome_computed": "20px 10px",
+          "computed": false,
+          "control_off": 431,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 431,
+          "value": "20px 10px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "lower",
+      "corpus": 1,
+      "name": "font-variant",
+      "red": true,
+      "sites": 20,
+      "values": [
+        {
+          "chrome_computed": "small-caps",
+          "computed": false,
+          "control_off": 15,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 91,
+          "value": "small-caps"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-left-style",
+      "red": false,
+      "sites": 20,
+      "values": [
+        {
+          "chrome_computed": "dotted",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dotted"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-inline",
+      "red": false,
+      "sites": 20,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "zoom",
+      "red": true,
+      "sites": 20,
+      "values": [
+        {
+          "chrome_computed": "2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 2114,
+          "value": "2"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-block-end",
+      "red": false,
+      "sites": 19,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "padding-block-start",
+      "red": false,
+      "sites": 19,
+      "values": [
+        {
+          "chrome_computed": "12px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "12px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-right-style",
+      "red": false,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "dotted",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "dotted"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "counter",
+      "corpus": 0,
+      "name": "counter-reset",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "c 5",
+          "computed": false,
+          "control_off": 4,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 5,
+          "value": "c 5"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "grid-column-end",
+      "red": false,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "span 2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "span 2"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "grid-row-start",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 653,
+          "value": "2"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-block-start",
+      "red": false,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-composite",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "exclude, exclude",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 540,
+          "value": "exclude"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "place-self",
+      "red": false,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "center",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "center"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "quote",
+      "corpus": 0,
+      "name": "quotes",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "\"HH\" \"II\"",
+          "computed": false,
+          "control_off": 8,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 12,
+          "value": "\"HH\" \"II\""
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "rotate",
+      "red": false,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "10deg",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "10deg"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "tabs",
+      "corpus": 0,
+      "name": "tab-size",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "16",
+          "computed": false,
+          "control_off": 11,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 17,
+          "value": "16"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-decoration-thickness",
+      "red": true,
+      "sites": 18,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "bg",
+      "corpus": 0,
+      "name": "background-origin",
+      "red": true,
+      "sites": 17,
+      "values": [
+        {
+          "chrome_computed": "content-box",
+          "computed": false,
+          "control_off": 916,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 732,
+          "value": "content-box"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "block-size",
+      "red": true,
+      "sites": 17,
+      "values": [
+        {
+          "chrome_computed": "150px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 585,
+          "value": "150px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "scroll-snap-stop",
+      "red": true,
+      "sites": 17,
+      "values": [
+        {
+          "chrome_computed": "always",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "always"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-size-adjust",
+      "red": true,
+      "sites": 17,
+      "values": [
+        {
+          "chrome_computed": "50%",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridc",
+      "corpus": 0,
+      "name": "grid-template",
+      "red": false,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "40px 40px / 90px 90px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "40px 40px / 90px 90px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "inline-size",
+      "red": true,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "200px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 380,
+          "value": "200px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-block",
+      "red": false,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "overscroll-behavior-x",
+      "red": true,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "contain",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "contain"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "scroll-padding",
+      "red": true,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "scroll-padding-top",
+      "red": true,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-decoration-style",
+      "red": true,
+      "sites": 16,
+      "values": [
+        {
+          "chrome_computed": "wavy",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 100,
+          "value": "wavy"
+        },
+        {
+          "chrome_computed": "double",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "double"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "multicol",
+      "corpus": 1,
+      "name": "column-count",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "2",
+          "computed": false,
+          "control_off": 88,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 166,
+          "value": "2"
+        },
+        {
+          "chrome_computed": "3",
+          "computed": false,
+          "control_off": 88,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 224,
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "break-inside",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "avoid",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "avoid"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "container-name",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "c",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "c"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "counter",
+      "corpus": 0,
+      "name": "counter-increment",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "c 7",
+          "computed": false,
+          "control_off": 4,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 2,
+          "value": "c 7"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "overflow-anchor",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "scrollbar-gutter",
+      "red": true,
+      "sites": 15,
+      "values": [
+        {
+          "chrome_computed": "stable",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "stable"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "animation-direction",
+      "red": true,
+      "sites": 14,
+      "values": [
+        {
+          "chrome_computed": "normal",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "reverse"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "bg",
+      "corpus": 0,
+      "name": "background-position-x",
+      "red": true,
+      "sites": 14,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 916,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 668,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-inline-start",
+      "red": false,
+      "sites": 14,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "container",
+      "red": true,
+      "sites": 14,
+      "values": [
+        {
+          "chrome_computed": "c / inline-size",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "c / inline-size"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "content-visibility",
+      "red": true,
+      "sites": 14,
+      "values": [
+        {
+          "chrome_computed": "hidden",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 90,
+          "value": "hidden"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "bg",
+      "corpus": 0,
+      "name": "background-blend-mode",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "multiply",
+          "computed": false,
+          "control_off": 916,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 1725,
+          "value": "multiply"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-inline-end",
+      "red": false,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "forced-color-adjust",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "min-block-size",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "130px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 435,
+          "value": "130px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "min-inline-size",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "200px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 380,
+          "value": "200px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "unicode-bidi",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "bidi-override",
+          "computed": false,
+          "control_off": 112,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 112,
+          "value": "bidi-override"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 0,
+      "name": "word-spacing",
+      "red": true,
+      "sites": 13,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 92,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "input",
+      "corpus": 0,
+      "name": "field-sizing",
+      "red": true,
+      "sites": 12,
+      "values": [
+        {
+          "chrome_computed": "content",
+          "computed": false,
+          "control_off": 54,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 54,
+          "value": "content"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "max-inline-size",
+      "red": true,
+      "sites": 12,
+      "values": [
+        {
+          "chrome_computed": "60px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 240,
+          "value": "60px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "svg",
+      "corpus": 0,
+      "name": "fill-opacity",
+      "red": true,
+      "sites": 11,
+      "values": [
+        {
+          "chrome_computed": "0.5",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 0,
+          "value": "0.5"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "lower",
+      "corpus": 0,
+      "name": "font-kerning",
+      "red": true,
+      "sites": 11,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 15,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 60,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-underline-position",
+      "red": true,
+      "sites": 11,
+      "values": [
+        {
+          "chrome_computed": "under",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 183,
+          "value": "under"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "contain-intrinsic-size",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "100px 30px",
+          "computed": false,
+          "control_off": 375,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 162,
+          "value": "100px 30px"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "gridi",
+      "corpus": 0,
+      "name": "grid-row-end",
+      "red": false,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "span 2",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "span 2"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "max-block-size",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "40px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 354,
+          "value": "40px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "overscroll-behavior-y",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "contain",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "contain"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "page-break-inside",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "avoid",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "avoid"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke-linejoin",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "round",
+          "computed": false,
+          "control_off": 180,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 178,
+          "value": "round"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "transform-box",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "content-box",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "content-box"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 0,
+      "name": "writing-mode",
+      "red": true,
+      "sites": 10,
+      "values": [
+        {
+          "chrome_computed": "vertical-rl",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 285,
+          "value": "vertical-rl"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "bg",
+      "corpus": 0,
+      "name": "background-attachment",
+      "red": true,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "fixed",
+          "computed": false,
+          "control_off": 916,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 235,
+          "value": "fixed"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "bg",
+      "corpus": 0,
+      "name": "background-position-y",
+      "red": true,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 916,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 879,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "columns",
+      "red": true,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "2",
+          "computed": false,
+          "control_off": 88,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 192,
+          "value": "2"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "abs",
+      "corpus": 0,
+      "name": "inset-block-end",
+      "red": false,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "20px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "20px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "print-color-adjust",
+      "red": true,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "exact",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "exact"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "svg",
+      "corpus": 0,
+      "name": "stroke-opacity",
+      "red": true,
+      "sites": 9,
+      "values": [
+        {
+          "chrome_computed": "0.5",
+          "computed": false,
+          "control_off": 58,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 76,
+          "value": "0.5"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "anchor-name",
+      "red": true,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "--a",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "--a"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-inline",
+      "red": false,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "table",
+      "corpus": 0,
+      "name": "caption-side",
+      "red": true,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "bottom",
+          "computed": false,
+          "control_off": 3,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 879,
+          "value": "bottom"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "lower",
+      "corpus": 0,
+      "name": "font-variant-ligatures",
+      "red": true,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 15,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 15,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "abs",
+      "corpus": 0,
+      "name": "position-anchor",
+      "red": true,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "--a",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "--a"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "view-transition-name",
+      "red": true,
+      "sites": 8,
+      "values": [
+        {
+          "chrome_computed": "v",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "v"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "check",
+      "corpus": 1,
+      "name": "accent-color",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 225,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 225,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-block",
+      "red": false,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-block-end",
+      "red": false,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "font-optical-sizing",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "font-synthesis",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 11,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 11,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-clip",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "content-box",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 275,
+          "value": "content-box"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "overflow",
+      "corpus": 0,
+      "name": "overflow-clip-margin",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 108,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "scroll-margin",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "transition-behavior",
+      "red": true,
+      "sites": 7,
+      "values": [
+        {
+          "chrome_computed": "normal",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "allow-discrete"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "-webkit-text-stroke",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "2px rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 263,
+          "value": "2px #c00"
+        }
+      ]
+    },
+    {
+      "class": "effect",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-block-start",
+      "red": false,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "6px solid rgb(0, 102, 0)",
+          "computed": false,
+          "control_off": 0,
+          "effect": "match",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 0,
+          "value": "6px solid #060"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(204, 0, 0), rgb(0, 0, 204)) 1 / 1 / 0 stretch",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 336,
+          "value": "linear-gradient(#c00,#00c) 1"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "text",
+      "corpus": 0,
+      "name": "line-break",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "anywhere",
+          "computed": false,
+          "control_off": 70,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 70,
+          "value": "anywhere"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-mode",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "luminance",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 510,
+          "value": "luminance"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "box",
+      "corpus": 0,
+      "name": "mask-origin",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "content-box",
+          "computed": false,
+          "control_off": 706,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": true,
+          "probes_off": 706,
+          "value": "content-box"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "persp",
+      "corpus": 0,
+      "name": "perspective-origin",
+      "red": true,
+      "sites": 6,
+      "values": [
+        {
+          "chrome_computed": "0px 0px",
+          "computed": false,
+          "control_off": 140,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 223,
+          "value": "0 0"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "page-break-after",
+      "red": true,
+      "sites": 5,
+      "values": [
+        {
+          "chrome_computed": "always",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 1195,
+          "value": "always"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-align-last",
+      "red": true,
+      "sites": 5,
+      "values": [
+        {
+          "chrome_computed": "right",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 108,
+          "value": "right"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "svg",
+      "corpus": 0,
+      "name": "vector-effect",
+      "red": true,
+      "sites": 5,
+      "values": [
+        {
+          "chrome_computed": "non-scaling-stroke",
+          "computed": false,
+          "control_off": 0,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 0,
+          "value": "non-scaling-stroke"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "widows",
+      "red": true,
+      "sites": 5,
+      "values": [
+        {
+          "chrome_computed": "3",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "gridc",
+      "corpus": 4,
+      "name": "grid",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "40px 40px / 90px 90px / none / row / auto / auto",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 112,
+          "value": "40px 40px / 90px 90px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image-source",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(204, 0, 0), rgb(0, 0, 204))",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 286,
+          "value": "linear-gradient(#c00,#00c)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image-width",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "4px",
+          "computed": false,
+          "control_off": 336,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 285,
+          "value": "4px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-rule",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "4px solid rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 166,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 206,
+          "value": "4px solid #c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "img",
+      "corpus": 0,
+      "name": "image-rendering",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "pixelated",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "pixelated"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "list",
+      "corpus": 0,
+      "name": "list-style-image",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "linear-gradient(rgb(204, 0, 0), rgb(0, 0, 204))",
+          "computed": false,
+          "control_off": 40,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 50,
+          "value": "linear-gradient(#c00,#00c)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "orphans",
+      "red": true,
+      "sites": 4,
+      "values": [
+        {
+          "chrome_computed": "3",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "-webkit-text-stroke-width",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "2px",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 263,
+          "value": "2px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image-slice",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "1",
+          "computed": false,
+          "control_off": 286,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 336,
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "table",
+      "corpus": 0,
+      "name": "empty-cells",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "hide",
+          "computed": false,
+          "control_off": 3,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 85,
+          "value": "hide"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "font-size-adjust",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "0.8",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 451,
+          "value": "0.8"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "lower",
+      "corpus": 0,
+      "name": "font-variant-caps",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "small-caps",
+          "computed": false,
+          "control_off": 15,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 91,
+          "value": "small-caps"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "white-space-collapse",
+      "red": true,
+      "sites": 3,
+      "values": [
+        {
+          "chrome_computed": "preserve",
+          "computed": false,
+          "control_off": 70,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "preserve"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "-webkit-text-stroke-color",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 20,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 263,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image-outset",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "8px",
+          "computed": false,
+          "control_off": 336,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 383,
+          "value": "8px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "border-image-repeat",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "round",
+          "computed": false,
+          "control_off": 336,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 336,
+          "value": "round"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "break-after",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "column",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "column"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "break-before",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "column",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 2280,
+          "value": "column"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-fill",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "auto",
+          "computed": false,
+          "control_off": 166,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 165,
+          "value": "auto"
+        }
+      ]
+    },
+    {
+      "class": "parse",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-width",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "80px",
+          "computed": false,
+          "control_off": 88,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": true,
+          "probes_off": 145,
+          "value": "80px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "offset-distance",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "50%",
+          "computed": false,
+          "control_off": 451,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 160,
+          "value": "50%"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "page-break-before",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "always",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 1195,
+          "value": "always"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "floats",
+      "corpus": 0,
+      "name": "shape-margin",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "10px",
+          "computed": false,
+          "control_off": 118,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 52,
+          "value": "10px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-orientation",
+      "red": true,
+      "sites": 2,
+      "values": [
+        {
+          "chrome_computed": "upright",
+          "computed": false,
+          "control_off": 285,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 367,
+          "value": "upright"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "spanned",
+      "corpus": 0,
+      "name": "column-span",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "all",
+          "computed": false,
+          "control_off": 1195,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 1752,
+          "value": "all"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "counter",
+      "corpus": 0,
+      "name": "counter-set",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "c 9",
+          "computed": false,
+          "control_off": 4,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 5,
+          "value": "c 9"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "img",
+      "corpus": 0,
+      "name": "image-orientation",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "none",
+          "computed": false,
+          "control_off": 0,
+          "effect": "unexercised",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 0,
+          "value": "none"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "offset-path",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "path(\"M 0 0 L 100 50\")",
+          "computed": false,
+          "control_off": 0,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 451,
+          "value": "path(\"M0 0L100 50\")"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "ruby-position",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "under",
+          "computed": false,
+          "control_off": 70,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 70,
+          "value": "under"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "floats",
+      "corpus": 0,
+      "name": "shape-image-threshold",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "0.5",
+          "computed": false,
+          "control_off": 52,
+          "effect": "not-visual",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 52,
+          "value": "0.5"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "floats",
+      "corpus": 0,
+      "name": "shape-outside",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "circle(30px)",
+          "computed": false,
+          "control_off": 52,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": true,
+          "parse": false,
+          "probes_off": 118,
+          "value": "circle(30px)"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-combine-upright",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "all",
+          "computed": false,
+          "control_off": 285,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 238,
+          "value": "all"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-emphasis",
+      "red": true,
+      "sites": 1,
+      "values": [
+        {
+          "chrome_computed": "circle rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 342,
+          "value": "filled circle #c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-rule-color",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 206,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 206,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-rule-style",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "dashed",
+          "computed": false,
+          "control_off": 206,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 190,
+          "value": "dashed"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "multicol",
+      "corpus": 0,
+      "name": "column-rule-width",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "6px",
+          "computed": false,
+          "control_off": 166,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 206,
+          "value": "6px"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "box",
+      "corpus": 0,
+      "name": "offset-rotate",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "0deg",
+          "computed": false,
+          "control_off": 160,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 177,
+          "value": "0deg"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-emphasis-color",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "rgb(204, 0, 0)",
+          "computed": false,
+          "control_off": 340,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 342,
+          "value": "#c00"
+        }
+      ]
+    },
+    {
+      "class": "unsupported",
+      "context": "text",
+      "corpus": 0,
+      "name": "text-emphasis-style",
+      "red": true,
+      "sites": 0,
+      "values": [
+        {
+          "chrome_computed": "circle",
+          "computed": false,
+          "control_off": 70,
+          "effect": "mismatch",
+          "engine_computed": "",
+          "geometry_ok": false,
+          "parse": false,
+          "probes_off": 340,
+          "value": "filled circle"
+        }
+      ]
+    }
+  ],
+  "red": [
+    "display",
+    "transition",
+    "cursor",
+    "text-align",
+    "box-shadow",
+    "font-family",
+    "z-index",
+    "outline",
+    "text-decoration",
+    "vertical-align",
+    "flex-direction",
+    "background-repeat",
+    "outline-offset",
+    "fill",
+    "animation",
+    "letter-spacing",
+    "background-position",
+    "filter",
+    "background-image",
+    "-webkit-appearance",
+    "object-fit",
+    "background-size",
+    "list-style",
+    "text-transform",
+    "user-select",
+    "border-style",
+    "clip",
+    "-webkit-font-smoothing",
+    "appearance",
+    "-webkit-user-select",
+    "border-collapse",
+    "list-style-type",
+    "transition-duration",
+    "transition-property",
+    "animation-duration",
+    "transform-origin",
+    "animation-name",
+    "resize",
+    "-webkit-tap-highlight-color",
+    "animation-timing-function",
+    "-webkit-box-orient",
+    "scrollbar-width",
+    "outline-color",
+    "clip-path",
+    "border-spacing",
+    "transition-timing-function",
+    "background-clip",
+    "will-change",
+    "stroke",
+    "transition-delay",
+    "direction",
+    "backdrop-filter",
+    "flex-flow",
+    "text-shadow",
+    "outline-style",
+    "animation-delay",
+    "text-indent",
+    "text-wrap",
+    "touch-action",
+    "outline-width",
+    "grid-row",
+    "animation-fill-mode",
+    "animation-iteration-count",
+    "-webkit-mask-image",
+    "backface-visibility",
+    "stroke-width",
+    "isolation",
+    "mask-image",
+    "text-decoration-line",
+    "scroll-behavior",
+    "font-feature-settings",
+    "mix-blend-mode",
+    "container-type",
+    "scroll-snap-type",
+    "-webkit-text-fill-color",
+    "scrollbar-color",
+    "scroll-snap-align",
+    "all",
+    "grid-template-areas",
+    "table-layout",
+    "text-rendering",
+    "overscroll-behavior",
+    "font-variation-settings",
+    "list-style-position",
+    "animation-play-state",
+    "color-scheme",
+    "font-stretch",
+    "hyphens",
+    "mask",
+    "stroke-dashoffset",
+    "text-underline-offset",
+    "font-variant-numeric",
+    "mask-size",
+    "caret-color",
+    "contain",
+    "scroll-margin-top",
+    "stroke-dasharray",
+    "transform-style",
+    "mask-repeat",
+    "perspective",
+    "mask-position",
+    "font-variant",
+    "zoom",
+    "counter-reset",
+    "grid-row-start",
+    "mask-composite",
+    "quotes",
+    "tab-size",
+    "text-decoration-thickness",
+    "background-origin",
+    "block-size",
+    "scroll-snap-stop",
+    "text-size-adjust",
+    "inline-size",
+    "overscroll-behavior-x",
+    "scroll-padding",
+    "scroll-padding-top",
+    "text-decoration-style",
+    "column-count",
+    "break-inside",
+    "container-name",
+    "counter-increment",
+    "overflow-anchor",
+    "scrollbar-gutter",
+    "animation-direction",
+    "background-position-x",
+    "container",
+    "content-visibility",
+    "background-blend-mode",
+    "forced-color-adjust",
+    "min-block-size",
+    "min-inline-size",
+    "unicode-bidi",
+    "word-spacing",
+    "field-sizing",
+    "max-inline-size",
+    "fill-opacity",
+    "font-kerning",
+    "text-underline-position",
+    "contain-intrinsic-size",
+    "max-block-size",
+    "overscroll-behavior-y",
+    "page-break-inside",
+    "stroke-linejoin",
+    "transform-box",
+    "writing-mode",
+    "background-attachment",
+    "background-position-y",
+    "columns",
+    "print-color-adjust",
+    "stroke-opacity",
+    "anchor-name",
+    "caption-side",
+    "font-variant-ligatures",
+    "position-anchor",
+    "view-transition-name",
+    "accent-color",
+    "font-optical-sizing",
+    "font-synthesis",
+    "mask-clip",
+    "overflow-clip-margin",
+    "scroll-margin",
+    "transition-behavior",
+    "-webkit-text-stroke",
+    "border-image",
+    "line-break",
+    "mask-mode",
+    "mask-origin",
+    "perspective-origin",
+    "page-break-after",
+    "text-align-last",
+    "vector-effect",
+    "widows",
+    "grid",
+    "border-image-source",
+    "border-image-width",
+    "column-rule",
+    "image-rendering",
+    "list-style-image",
+    "orphans",
+    "-webkit-text-stroke-width",
+    "border-image-slice",
+    "empty-cells",
+    "font-size-adjust",
+    "font-variant-caps",
+    "white-space-collapse",
+    "-webkit-text-stroke-color",
+    "border-image-outset",
+    "border-image-repeat",
+    "break-after",
+    "break-before",
+    "column-fill",
+    "column-width",
+    "offset-distance",
+    "page-break-before",
+    "shape-margin",
+    "text-orientation",
+    "column-span",
+    "counter-set",
+    "image-orientation",
+    "offset-path",
+    "ruby-position",
+    "shape-image-threshold",
+    "shape-outside",
+    "text-combine-upright",
+    "text-emphasis",
+    "column-rule-color",
+    "column-rule-style",
+    "column-rule-width",
+    "offset-rotate",
+    "text-emphasis-color",
+    "text-emphasis-style"
+  ]
+}
