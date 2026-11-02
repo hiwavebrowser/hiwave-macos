@@ -7397,7 +7397,7 @@ impl LayoutBox {
             Some((z_index, hit)) if z_index >= 0 => {
                 // Pages with no sticky box pay for nothing here.
                 if !self.sticky_paths.borrow().is_empty() {
-                    if let Some(over) = page().filter(|p| self.sticky_is_over(p, z_index, &hit)) {
+                    if let Some(over) = page().filter(|p| self.sticky_is_over(p, &hit)) {
                         return Some(over);
                     }
                 }
@@ -7409,10 +7409,11 @@ impl LayoutBox {
     }
 
     /// Whether the page's hit `page` is in a sticky box painted over the held
-    /// fixed box `fixed` with this `z-index`: one with a higher `z-index`, or
-    /// the same one later in the tree. A sticky box is positioned, so the page
-    /// can be over a fixed box, and it moves to where the fixed box is.
-    fn sticky_is_over(&self, page: &HitTestResult, z_index: i32, fixed: &HitTestResult) -> bool {
+    /// fixed box `fixed`. From where their paths part, each side is placed by
+    /// the first stacking context on its way down: a higher `z-index` wins,
+    /// then the later in the tree. A sticky box is positioned, so the page can
+    /// be over a fixed box, and it moves to where the fixed box is.
+    fn sticky_is_over(&self, page: &HitTestResult, fixed: &HitTestResult) -> bool {
         let (Some(page_node), Some(fixed_node)) = (page.node_id, fixed.node_id) else {
             return false;
         };
@@ -7423,11 +7424,64 @@ impl LayoutBox {
             let Some(sticky) = path.iter().try_fold(self, |at, &index| at.children.get(index)) else {
                 return false;
             };
-            let z = sticky.style.z_index;
-            (z > z_index || (z == z_index && path.as_slice() > fixed_path.as_slice()))
-                && !fixed_path.starts_with(path)
+            // A sticky box in the fixed box, or the fixed box in it, is one
+            // stacking context with it.
+            if fixed_path.starts_with(path) || path.starts_with(&fixed_path) {
+                return false;
+            }
+            let parted = path.iter().zip(&fixed_path).take_while(|(a, b)| a == b).count();
+            let (z, fixed_z) = (self.context_z(path, parted), self.context_z(&fixed_path, parted));
+            (z > fixed_z || (z == fixed_z && path.as_slice() > fixed_path.as_slice()))
                 && sticky.path_to_node(page_node).is_some()
         })
+    }
+
+    /// The `z-index` of the first stacking context on `path` below its first
+    /// `parted` steps. The path ends at a sticky or fixed box, which is one.
+    fn context_z(&self, path: &[usize], parted: usize) -> i32 {
+        let mut at = self;
+        for (step, &index) in path.iter().enumerate() {
+            let Some(child) = at.children.get(index) else {
+                break;
+            };
+            if step >= parted && at.child_forms_stacking_context(child) {
+                return child.style.z_index;
+            }
+            at = child;
+        }
+        0
+    }
+
+    /// Whether `child` is a stacking context. Only an element box can be: a
+    /// text run copies its parent's style and an anonymous box is no element.
+    fn child_forms_stacking_context(&self, child: &LayoutBox) -> bool {
+        use rustkit_css::Position as Css;
+        if matches!(child.box_type, BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak) {
+            return false;
+        }
+        let style = &child.style;
+        let fixed_or_sticky = child.position == Position::Fixed || matches!(style.position, Css::Fixed | Css::Sticky);
+        let positioned = child.position != Position::Static || style.position != Css::Static;
+        let item = matches!(
+            self.style.display,
+            rustkit_css::Display::Flex
+                | rustkit_css::Display::InlineFlex
+                | rustkit_css::Display::Grid
+                | rustkit_css::Display::InlineGrid
+        );
+        fixed_or_sticky
+            || (style.z_index_declared && (positioned || item))
+            || style.opacity < 1.0
+            || !style.transform.ops.is_empty()
+            || style.translate.is_some()
+            || style.rotate.is_some()
+            || style.scale.is_some()
+            || !style.filter.is_empty()
+            || !style.clip_path.is_empty()
+            || style.mask.images.iter().any(|image| *image != rustkit_css::BackgroundImage::None)
+            || style.will_change_holds_fixed
+            || style.contain_holds_fixed
+            || style.stacks != 0
     }
 
     /// The child indices from this box to the first box of `node`.

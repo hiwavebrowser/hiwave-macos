@@ -629,6 +629,19 @@ impl BoxShadow {
     }
 }
 
+/// `ComputedStyle::stacks`: `isolation: isolate`.
+pub const STACKS_ISOLATION: u8 = 1;
+/// `ComputedStyle::stacks`: a `mix-blend-mode` other than `normal`.
+pub const STACKS_BLEND: u8 = 2;
+/// `ComputedStyle::stacks`: a `perspective` other than `none`.
+pub const STACKS_PERSPECTIVE: u8 = 4;
+/// `ComputedStyle::stacks`: `transform-style: preserve-3d`.
+pub const STACKS_PRESERVE_3D: u8 = 8;
+/// `ComputedStyle::stacks`: `will-change` names a property that makes one.
+pub const STACKS_WILL_CHANGE: u8 = 16;
+/// `ComputedStyle::stacks`: a `backdrop-filter` other than `none`.
+pub const STACKS_BACKDROP: u8 = 32;
+
 /// A filter function that can be applied to the backdrop.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BackdropFilter {
@@ -2894,6 +2907,9 @@ pub struct ComputedStyle {
     /// `contain` has `paint` or `layout`, alone or through `strict` or
     /// `content`: a containing block for fixed boxes. Not inherited.
     pub contain_holds_fixed: bool,
+    /// Declarations read only to tell a stacking context, one `STACKS_*` bit
+    /// each: nothing paints or lays out by them. Not inherited.
+    pub stacks: u8,
 
     // Image/replaced element
     pub image_url: Option<String>,

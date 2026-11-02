@@ -13292,6 +13292,13 @@ impl layout_ctx::LayoutCtx {
             "will-change" => {
                 if let Some(holds) = will_change_holds_fixed(value) {
                     style.will_change_holds_fixed = holds;
+                    set_stacks(style, rustkit_css::STACKS_WILL_CHANGE, will_change_stacks(value));
+                }
+            }
+            "isolation" | "mix-blend-mode" | "perspective" | "transform-style" | "backdrop-filter"
+            | "-webkit-backdrop-filter" => {
+                if let Some((bit, on)) = stacks_declaration(property, value) {
+                    set_stacks(style, bit, on);
                 }
             }
             "contain" => {
@@ -14026,7 +14033,15 @@ impl layout_ctx::LayoutCtx {
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
             "filter" | "-webkit-filter" => style.filter.clear(),
-            "will-change" => style.will_change_holds_fixed = false,
+            "will-change" => {
+                style.will_change_holds_fixed = false;
+                style.stacks &= !rustkit_css::STACKS_WILL_CHANGE;
+            }
+            "isolation" => style.stacks &= !rustkit_css::STACKS_ISOLATION,
+            "mix-blend-mode" => style.stacks &= !rustkit_css::STACKS_BLEND,
+            "perspective" => style.stacks &= !rustkit_css::STACKS_PERSPECTIVE,
+            "transform-style" => style.stacks &= !rustkit_css::STACKS_PRESERVE_3D,
+            "backdrop-filter" | "-webkit-backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
             "contain" => style.contain_holds_fixed = false,
             "object-fit" => style.object_fit = "fill".to_string(),
             "object-position" => {
@@ -21280,6 +21295,77 @@ fn will_change_holds_fixed(value: &str) -> Option<bool> {
         );
     }
     Some(holds)
+}
+
+/// Whether a valid `will-change` value names a property that makes a stacking
+/// context and no containing block (Chromium 143, `sticky_ctx_probe.mjs`).
+fn will_change_stacks(value: &str) -> bool {
+    value.to_ascii_lowercase().split(',').map(str::trim).any(|name| {
+        matches!(
+            name,
+            "opacity"
+                | "clip-path"
+                | "-webkit-clip-path"
+                | "mask"
+                | "-webkit-mask"
+                | "isolation"
+                | "mix-blend-mode"
+                | "z-index"
+                | "position"
+        )
+    })
+}
+
+fn set_stacks(style: &mut ComputedStyle, bit: u8, on: bool) {
+    if on {
+        style.stacks |= bit;
+    } else {
+        style.stacks &= !bit;
+    }
+}
+
+/// The `ComputedStyle::stacks` bit of a declaration and whether it is set.
+/// `None` is an invalid value, which leaves the earlier declaration in place.
+fn stacks_declaration(property: &str, value: &str) -> Option<(u8, bool)> {
+    let value = value.trim().to_ascii_lowercase();
+    match property {
+        "isolation" => match value.as_str() {
+            "isolate" => Some((rustkit_css::STACKS_ISOLATION, true)),
+            "auto" => Some((rustkit_css::STACKS_ISOLATION, false)),
+            _ => None,
+        },
+        "mix-blend-mode" => match value.as_str() {
+            "normal" => Some((rustkit_css::STACKS_BLEND, false)),
+            "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge" | "color-burn" | "hard-light"
+            | "soft-light" | "difference" | "exclusion" | "hue" | "saturation" | "color" | "luminosity"
+            | "plus-lighter" => Some((rustkit_css::STACKS_BLEND, true)),
+            _ => None,
+        },
+        "perspective" => {
+            if value == "none" {
+                Some((rustkit_css::STACKS_PERSPECTIVE, false))
+            } else if !value.starts_with('-') && parse_length(&value).is_some() {
+                Some((rustkit_css::STACKS_PERSPECTIVE, true))
+            } else {
+                None
+            }
+        }
+        "transform-style" => match value.as_str() {
+            "preserve-3d" => Some((rustkit_css::STACKS_PRESERVE_3D, true)),
+            "flat" => Some((rustkit_css::STACKS_PRESERVE_3D, false)),
+            _ => None,
+        },
+        "backdrop-filter" | "-webkit-backdrop-filter" => {
+            if value == "none" {
+                Some((rustkit_css::STACKS_BACKDROP, false))
+            } else if value.ends_with(')') {
+                Some((rustkit_css::STACKS_BACKDROP, true))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Whether a `contain` value holds a fixed box. `None` is an invalid value:
