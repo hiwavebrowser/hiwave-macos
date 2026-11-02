@@ -79,6 +79,21 @@ const THROUGH: &[(&str, &str, &str)] = &[
     ("only child of a parent", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=p style=\"margin:5px 0\"><div id=e style=\"margin:12px 0\"></div></div><div id=n style=\"height:10px;\"></div>", "50 50 0"),
     ("then a float", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"float:left;width:50px;height:50px;margin-top:10px\"></div>", "50 60 -"),
     ("then text", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n>x</div>", "50 50 -"),
+    ("first in a parent, next has a larger mt", "<div id=p style=\"margin-top:7px\"><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;margin-top:40px\"></div></div>", "40 40 10"),
+    ("first in a parent, then text then a block", "<div id=p style=\"margin-top:7px\"><div id=e style=\"margin:12px 0\"></div>x<div id=n style=\"height:10px;margin-top:40px\"></div></div>", "12 70 68"),
+    ("first in a parent, then a float then a block", "<div id=p style=\"margin-top:7px\"><div id=e style=\"margin:12px 0\"></div><div style=\"float:left;width:5px;height:5px\"></div><div id=n style=\"height:10px;margin-top:40px\"></div></div>", "40 40 10"),
+    ("clearance past a float", "<div style=\"float:left;width:50px;height:100px\"></div><div style=\"height:20px;margin-bottom:0\"></div><div id=e style=\"margin:12px 0;clear:both\"></div><div id=n style=\"height:10px;\"></div>", "100 100 -"),
+    ("clearance past a float, block before, next has mt", "<div style=\"float:left;width:50px;height:100px\"></div><div style=\"height:20px;margin-bottom:0\"></div><div id=e style=\"margin:12px 0;clear:left\"></div><div id=n style=\"height:10px;margin-top:30px\"></div>", "100 118 -"),
+    ("clear none beside a float", "<div style=\"float:left;width:50px;height:100px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div>", "12 12 -"),
+    ("holds a float", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"><div style=\"float:left;width:5px;height:5px\"></div></div><div id=n style=\"height:10px;\"></div>", "50 50 -"),
+    ("percent margin", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:1% 0\"></div><div id=n style=\"height:10px;\"></div>", "50 50 -"),
+    ("relative with an offset", "<div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0;position:relative;top:5px\"></div><div id=n style=\"height:10px;\"></div>", "55 50 -"),
+    ("in an inline-block parent", "<div id=p style=\"display:inline-block;width:100px\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div></div><div id=n style=\"height:10px;\"></div>", "50 54 50"),
+    ("in a flex item", "<div style=\"display:flex\"><div id=p style=\"width:100px\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></div></div>", "50 50 60"),
+    ("a flex container child", "<div id=p style=\"display:flex;flex-direction:column\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></div>", "62 74 84"),
+    ("in a table cell", "<table style=\"border-spacing:0\"><tr><td id=p style=\"padding:0\"><div style=\"height:20px;margin-bottom:30px\"></div><div id=e style=\"margin:12px 0\"></div><div id=n style=\"height:10px;\"></div></td></tr></table>", "50 50 60"),
+    ("a list item", "<ul style=\"margin:0;padding:0;list-style:none\"><li id=e style=\"margin:12px 0\"></li><div id=n style=\"height:10px;\"></div></ul>", "12 12 -"),
+    ("an empty paragraph", "<div style=\"height:20px;margin-bottom:30px\"></div><p id=e></p><div id=n style=\"height:10px;\"></div>", "50 50 -"),
 ];
 
 #[test]

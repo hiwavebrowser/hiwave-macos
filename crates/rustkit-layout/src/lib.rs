@@ -1146,6 +1146,10 @@ pub struct MarginCollapseContext {
     /// in the context on return so the owner can adjoin it to its own bottom
     /// margin, instead of being materialized into the content height.
     pub last_child_collapses_through: bool,
+    /// The box just laid out against this context has no height and nothing
+    /// between its margins, so they stay pending here with the ones before it
+    /// and the flow does not advance past it (CSS 2.1 §8.3.1).
+    pub child_collapsed_through: bool,
 }
 
 impl MarginCollapseContext {
@@ -4015,6 +4019,23 @@ impl LayoutBox {
             (containing_block.content.height > 0.0).then_some(containing_block.content.height)
         }));
 
+        // An empty block: its margins and whatever is pending collapse as one,
+        // with the next box's too. When the parent's chain already took them,
+        // the next in-flow block's top margin is in that chain as well.
+        if in_flow
+            && !is_formatting_root
+            && self.dimensions.content.height <= 0.0
+            && self.collapses_through(self.dimensions.content.width)
+        {
+            if top_adjoined_by_parent && self.style.clear == rustkit_css::Clear::None {
+                margin_context.first_child_top_adjoined = true;
+            } else {
+                margin_context.add_margin(self.dimensions.margin.bottom);
+            }
+            margin_context.child_collapsed_through = true;
+            return;
+        }
+
         // Reset margin context for next sibling, add bottom margin — and the
         // last child's bottom margin that collapsed through our open bottom
         // edge (it was left pending by layout_block_children_with_collapse).
@@ -4023,6 +4044,41 @@ impl LayoutBox {
         if child_margin_context.last_child_collapses_through {
             margin_context.absorb(&child_margin_context);
         }
+    }
+
+    /// CSS 2.1 §8.3.1: a block whose own margins adjoin: no height, border,
+    /// padding or formatting context, and no in-flow content but blocks of the
+    /// same kind. `width` is the percentage base, as in
+    /// `first_child_top_margin_chain`.
+    fn collapses_through(&self, width: f32) -> bool {
+        matches!(self.box_type, BoxType::Block)
+            && self.style.display != rustkit_css::Display::Inline
+            && !self.style.display.is_atomic_inline()
+            && !matches!(self.position, Position::Absolute | Position::Fixed)
+            && is_margin_collapsible_through(
+                &self.style,
+                self.float,
+                false,
+                self.length_to_px(&self.style.border_top_width, width),
+                self.length_to_px(&self.style.border_bottom_width, width),
+                self.length_to_px(&self.style.padding_top, width),
+                self.length_to_px(&self.style.padding_bottom, width),
+                false,
+            )
+            && self.children.iter().all(|c| !c.is_in_flow_child() || c.collapses_through(width))
+    }
+
+    fn is_in_flow_child(&self) -> bool {
+        !matches!(self.position, Position::Absolute | Position::Fixed) && self.float == Float::None
+    }
+
+    /// Every margin of a box that `collapses_through`, in order.
+    fn through_margins(&self, width: f32, out: &mut Vec<f32>) {
+        out.push(self.length_to_px(&self.style.margin_top, width));
+        for c in self.children.iter().filter(|c| c.is_in_flow_child()) {
+            c.through_margins(width, out);
+        }
+        out.push(self.length_to_px(&self.style.margin_bottom, width));
     }
 
     /// CSS 2.1 §8.3.1: the top margins that collapse THROUGH this box's top
@@ -4043,11 +4099,17 @@ impl LayoutBox {
                 break;
             }
             // First in-flow child: out-of-flow boxes are skipped; anything
-            // inline-level opens a line box and ends the chain.
-            let first = node.children.iter().find(|c| {
-                !matches!(c.position, Position::Absolute | Position::Fixed)
-                    && c.float == Float::None
-            });
+            // inline-level opens a line box and ends the chain. An empty block
+            // adds its margins and the chain carries on to the next one.
+            // Not past a `clear`: clearance may yet part it from what follows.
+            let mut first = None;
+            for c in node.children.iter().filter(|c| c.is_in_flow_child()) {
+                if !c.collapses_through(width) || c.style.clear != rustkit_css::Clear::None {
+                    first = Some(c);
+                    break;
+                }
+                c.through_margins(width, &mut chain);
+            }
             let Some(child) = first else { break };
             if !matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
                 || child.style.display.is_atomic_inline()
@@ -6114,7 +6176,10 @@ impl LayoutBox {
                 // and 8: it may not overlap the line's content).
                 let (old_left, old_width) =
                     floats.line_band(cursor_y, empty_line_height, container_width);
-                let mut start_y = cursor_y.max(last_float_top);
+                // The block before it keeps its margin: the float starts past
+                // the pending margin, and its own does not collapse with it
+                // (CSS 2.1 §8.3.1). The context stays for the next block.
+                let mut start_y = (cursor_y + margin_context.resolve()).max(last_float_top);
                 if cursor_x > 0.0
                     && cursor_x + child.dimensions.margin_box().width > old_width + 0.01
                 {
@@ -6157,6 +6222,8 @@ impl LayoutBox {
             if is_inline_level {
                 cursor_y += margin_context.resolve();
                 margin_context.reset();
+                // A line box ends a chain an empty first child had carried on.
+                margin_context.first_child_top_adjoined = false;
             }
 
             // `<br>`: forced line break (see layout_block_children).
@@ -6559,7 +6626,18 @@ impl LayoutBox {
                     ));
                 }
 
-                if child.float == Float::None {
+                // An empty block leaves the flow where it was, its margins all
+                // pending. If clearance moved it, the flow resumes one bottom
+                // margin above it, with only that margin pending, so the next
+                // box's margin still collapses with it (Chromium 143).
+                let through = std::mem::take(&mut margin_context.child_collapsed_through);
+                if through && shift > 0.0 {
+                    let bottom = child.dimensions.margin.bottom;
+                    margin_context.reset();
+                    margin_context.add_margin(bottom);
+                    cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y - bottom;
+                }
+                if child.float == Float::None && !through {
                     cursor_y = child.dimensions.border_box().bottom() - self.dimensions.content.y;
                     // An inline image on the baseline leaves the strut's
                     // descent + half-leading below it (see inline_strut_descent).
