@@ -12331,6 +12331,7 @@ impl Engine {
     ) -> bool {
         match property {
             "color" => style.color = parent.color,
+            "opacity" => style.opacity = parent.opacity,
             "font-family" => style.font_family = parent.font_family.clone(),
             "font-size" => style.font_size = parent.font_size.clone(),
             "font-weight" => style.font_weight = parent.font_weight,
@@ -13270,8 +13271,8 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "opacity" => {
-                if let Ok(opacity) = value.parse::<f32>() {
-                    style.opacity = opacity.clamp(0.0, 1.0);
+                if let Some(opacity) = rustkit_css::parse_opacity(value) {
+                    style.opacity = opacity;
                 }
             }
             "clip-path" | "-webkit-clip-path" => {
