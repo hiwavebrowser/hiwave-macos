@@ -26,8 +26,8 @@ That syncs (`scripts/wpt_sync.sh`), builds (`cargo build --profile parity -p par
 (`scripts/wpt_tier1.py`), and ends on the per-area table. About 2 minutes after the build, at 4 cases at a time
 (`--jobs`). `--area <name>` runs one area and `--case <id>` one case; neither writes `last-run.json`.
 
-No Chrome is involved: a case passes when its test frame and reference frame match exactly. `status` uses
-that rule alone. The campaign's rule (pixelmatch 0.1, 15%) is reported beside it as `campaign_diff_pct` and
+A case passes when its test frame and reference frame match exactly, both through the engine. `status` uses that
+rule alone, with one exception: Chromium decides whether a small FAIL is a SKIP (below). The campaign's rule (pixelmatch 0.1, 15%) is reported beside it as `campaign_diff_pct` and
 `campaign_rule_counts`, and never sets a status; it needs `tools/parity_oracle/node_modules`, and a case it
 could not measure says why in `campaign_not_measured`.
 
@@ -51,6 +51,10 @@ A FAIL under 0.1% is asked of Chromium before it goes to a C row: the same stage
 RGB (`tools/parity_oracle/wpt_pair_chromium.mjs`, Playwright's Chromium). If Chromium's own test and reference
 differ too, the case is SKIP with the pixel count. `chromium_diff_pixels` carries the answer, and a FAIL with no
 answer stays a FAIL and says why in `chromium_not_measured`.
+
+A match demoted by its area probe is asked the same question. If Chromium's own test and reference differ, the
+page is no evidence either way and its reason says so. The case stays UNPROVEN, and no status moves on this answer.
+A run removes its `.__staged` copies when it ends, and any an interrupted run left.
 
 ## Layout
 

@@ -42,6 +42,8 @@ W0b of WPT Phase 0.5. The contract (docs/WPT_W0B_IMPLEMENT_PIN_2026-07-29.md):
 - A FAIL under SMALL_FAIL_PCT is asked of Chromium under the same staging. If
   Chromium's own test and reference differ too, the case is SKIP with the reason:
   the page cannot tell us about the engine at this rule.
+- A match demoted by its area probe is asked the same. If Chromium's own test and
+  reference differ, its row says the page is no evidence either way. It stays UNPROVEN.
 - Root-absolute references (/fonts/ahem.css) are staged to resolve against the
   WPT root, because wptserve serves / from there and file:// does not. A
   reftest whose declared font silently fails to load is not measuring its own
@@ -107,6 +109,7 @@ STATUSES = ("PASS", "FAIL", "UNPROVEN", "SKIP", "ERROR")
 
 # A FAIL under this is checked against Chromium before it goes to a C row.
 SMALL_FAIL_PCT = 0.1
+CHROMIUM_TIMEOUT_S = 600
 
 _TRANSFORMS_OFF = (
     "transform: none !important; translate: none !important; rotate: none !important; "
@@ -530,7 +533,8 @@ def per_area(cases):
 
 
 def oracle_record():
-    """What decided each case: the reftest's own reference, no Chrome involved."""
+    """What decided each case: the reftest's own reference. Chromium only decides
+    whether a small FAIL is a SKIP."""
     return {
         "kind": "reftest: test frame vs reference frame, both through parity-capture",
         "status_rule": {"name": "exact RGB match", "max_diff_pct": WPT_MAX_DIFF_PCT},
@@ -538,6 +542,10 @@ def oracle_record():
             "name": "pixelmatch, reported only, never sets a status",
             "pixelmatch_threshold": CAMPAIGN_PIXELMATCH_THRESHOLD,
             "threshold_pct": THRESHOLDS["default"],
+        },
+        "small_fail_rule": {
+            "name": "Chromium's own test vs reference, exact RGB; a difference makes the FAIL a SKIP",
+            "under_pct": SMALL_FAIL_PCT,
         },
     }
 
@@ -626,6 +634,10 @@ def area_mutated(html: str, area):
     return f"{html}\n<style>\n{rules}</style>\n"
 
 
+def area_probe_reason_prefix(area) -> str:
+    return f"still matches under the {area} probe"
+
+
 def probe_blind_spot(html: str):
     """What on this page the probes cannot break, if anything: a reader of an
     UNPROVEN row should know the probe may have missed the asserted feature."""
@@ -670,7 +682,7 @@ def prove_pass(entry, test_file: Path, ref_ppm: Path, viewport, workdir: Path):
         if why:
             return f"{area} probe rendered no frame: {why}"
         if matches:
-            return f"still matches under the {area} probe ({AREA_PROBES[area]})"
+            return f"{area_probe_reason_prefix(area)} ({AREA_PROBES[area]})"
     for i, mutation in enumerate(entry.get("mutations", [])):
         mutated = apply_mutation(html, mutation)
         if mutated is None:
@@ -751,20 +763,20 @@ def run_case(entry, viewport):
     return case
 
 
-def chromium_pair_diffs(pairs):
+def chromium_pair_diffs(pairs, viewport):
     """Chromium's own test against its own reference, exact RGB, for each pair:
     `(pixels differing by id, browser version, None)`, or `(None, None, why)`."""
     if not (ORACLE_DIR / "node_modules").is_dir():
         return None, None, "tools/parity_oracle/node_modules is missing"
     try:
         proc = subprocess.run(
-            ["node", "wpt_pair_chromium.mjs", "800", "600"],
-            input=json.dumps(pairs), cwd=ORACLE_DIR, capture_output=True, text=True, timeout=300,
+            ["node", "wpt_pair_chromium.mjs", str(viewport["width"]), str(viewport["height"])],
+            input=json.dumps(pairs), cwd=ORACLE_DIR, capture_output=True, text=True, timeout=CHROMIUM_TIMEOUT_S,
         )
     except FileNotFoundError:
         return None, None, "node not found"
     except subprocess.TimeoutExpired:
-        return None, None, "wpt_pair_chromium.mjs timeout (300s)"
+        return None, None, f"wpt_pair_chromium.mjs timeout ({CHROMIUM_TIMEOUT_S}s)"
     except OSError as e:
         return None, None, f"node did not start: {type(e).__name__}"
     if proc.returncode != 0:
@@ -777,7 +789,30 @@ def chromium_pair_diffs(pairs):
         return None, None, "wpt_pair_chromium.mjs printed no usable JSON"
 
 
-def recheck_small_fails(cases, entries, oracle=chromium_pair_diffs):
+def _ask_chromium(asked, entries, viewport, oracle):
+    """Put Chromium's answer on each case asked about; returns its version. A case
+    with no answer says why in `chromium_not_measured`."""
+    by_id = {e["id"]: e for e in entries}
+    pairs = [
+        {
+            "id": c["id"],
+            "test": str(stage_html(WPT_ROOT / by_id[c["id"]]["path"])),
+            "ref": str(stage_html(WPT_ROOT / by_id[c["id"]]["ref"])),
+        }
+        for c in asked
+    ]
+    diffs, version, why = oracle(pairs, viewport)
+    for case in asked:
+        if diffs is None:
+            case["chromium_not_measured"] = why
+        elif case["id"] not in diffs:
+            case["chromium_not_measured"] = "the oracle gave no answer for this case"
+        else:
+            case["chromium_diff_pixels"] = diffs[case["id"]]
+    return version
+
+
+def recheck_small_fails(cases, entries, viewport, oracle=chromium_pair_diffs):
     """A FAIL under SMALL_FAIL_PCT that Chromium's own test and reference also fail
     under the same staging says nothing about the engine: SKIP, with the reason. A
     FAIL with no answer stays a FAIL and says why."""
@@ -787,29 +822,62 @@ def recheck_small_fails(cases, entries, oracle=chromium_pair_diffs):
     ]
     if not small:
         return
-    by_id = {e["id"]: e for e in entries}
-    pairs = [
-        {
-            "id": c["id"],
-            "test": str(stage_html(WPT_ROOT / by_id[c["id"]]["path"])),
-            "ref": str(stage_html(WPT_ROOT / by_id[c["id"]]["ref"])),
-        }
-        for c in small
-    ]
-    diffs, version, why = oracle(pairs)
+    version = _ask_chromium(small, entries, viewport, oracle)
     for case in small:
-        if diffs is None:
-            case["chromium_not_measured"] = why
-        elif case["id"] not in diffs:
-            case["chromium_not_measured"] = "the oracle gave no answer for this case"
-        else:
-            case["chromium_diff_pixels"] = diffs[case["id"]]
-            if diffs[case["id"]] > 0:
-                case.update(
-                    status="SKIP",
-                    reason=f"Chromium {version}'s own test and reference differ by "
-                           f"{diffs[case['id']]} px under the same staging; not an engine verdict",
-                )
+        if case.get("chromium_diff_pixels"):
+            case.update(
+                status="SKIP",
+                reason=f"Chromium {version}'s own test and reference differ by "
+                       f"{case['chromium_diff_pixels']} px under the same staging; not an engine verdict",
+            )
+
+
+def recheck_area_probes(cases, entries, viewport, oracle=chromium_pair_diffs):
+    """A match demoted by its area probe, on a page Chromium's own test and reference
+    do not match on: the page is no evidence for the engine or against it. It stays
+    UNPROVEN and its reason says so."""
+    probed = [
+        c for c in cases
+        if c["status"] == "UNPROVEN" and c["reason"].startswith(area_probe_reason_prefix(c["area"]))
+    ]
+    if not probed:
+        return
+    version = _ask_chromium(probed, entries, viewport, oracle)
+    for case in probed:
+        if case["chromium_diff_pixels"]:
+            case["reason"] += (
+                f"; Chromium {version}'s own test and reference differ by {case['chromium_diff_pixels']} px "
+                "under the same staging, so this page is not evidence either way"
+            )
+
+
+def remove_staged():
+    """Every staged copy under the WPT root, this run's and any an interrupted run
+    left. The fixtures on disk stay verbatim."""
+    with _STAGE_LOCK:
+        _STAGED.clear()
+    for staged in WPT_ROOT.rglob(f"*{STAGED_SUFFIX}*"):
+        if staged.is_file():
+            staged.unlink()
+
+
+def run_cases(entries, viewport, jobs, verbose):
+    """Every entry to its final row. The rechecks read staged pages, so those go last."""
+    cases = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            for case in pool.map(lambda entry: run_case(entry, viewport), entries):
+                cases.append(case)
+                if verbose or case["status"] != "PASS":
+                    detail = case["reason"] or f"diff {case['diff_pct']}%"
+                    print(f"  {case['id']:55s} {case['status']:8s} {detail}", flush=True)
+                else:
+                    print(f"  {case['id']:55s} PASS", flush=True)
+        recheck_small_fails(cases, entries, viewport)
+        recheck_area_probes(cases, entries, viewport)
+    finally:
+        remove_staged()
+    return cases
 
 
 def negative_control(viewport) -> bool:
@@ -900,17 +968,7 @@ def main():
         capture_output=True, text=True,
     ).stdout.strip()
 
-    cases = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        for case in pool.map(lambda entry: run_case(entry, viewport), entries):
-            cases.append(case)
-            if args.verbose or case["status"] != "PASS":
-                detail = case["reason"] or f"diff {case['diff_pct']}%"
-                print(f"  {case['id']:55s} {case['status']:8s} {detail}", flush=True)
-            else:
-                print(f"  {case['id']:55s} PASS", flush=True)
-
-    recheck_small_fails(cases, entries)
+    cases = run_cases(entries, viewport, args.jobs, args.verbose)
     rechecked = [c for c in cases if c["chromium_diff_pixels"] is not None]
     for case in rechecked:
         print(f"  chromium: {case['id']} differs by {case['chromium_diff_pixels']} px -> {case['status']}")

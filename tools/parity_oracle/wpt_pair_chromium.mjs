@@ -5,8 +5,8 @@
  *   node wpt_pair_chromium.mjs <width> <height>  < pairs.json
  *
  * stdin is [{"id", "test", "ref"}], absolute paths to the staged pages. Each
- * page is rendered file:// at the given viewport, and the two frames compared
- * at scripts/wpt_tier1.py's rule, exact RGB. Prints
+ * page is rendered file:// at the given viewport, once its fonts are ready, and the
+ * two frames compared at scripts/wpt_tier1.py's rule, exact RGB. Prints
  * {"version": V, "diffs": {id: pixels differing}}. A size mismatch is a full-frame diff.
  */
 
@@ -24,6 +24,7 @@ const page = await context.newPage();
 
 async function frame(path) {
   await page.goto('file://' + path, { waitUntil: 'load' });
+  await page.evaluate(() => document.fonts.ready.then(() => {}));
   return PNG.sync.read(await page.screenshot());
 }
 
