@@ -437,13 +437,14 @@ class ChromiumRecheck(unittest.TestCase):
     test and ref. A small FAIL Chromium cannot match either is not an engine verdict."""
 
     ENTRIES = [{"id": "small", "path": "a/small.html", "ref": "a/small-ref.html"}]
+    VIEWPORT = {"width": 1024, "height": 768}
 
     def case(self, status="FAIL", diff_pct=0.05, id_="small"):
         return {"id": id_, "status": status, "diff_pct": diff_pct, "reason": None}
 
     def recheck(self, cases, answer):
         with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p):
-            wpt_tier1.recheck_small_fails(cases, self.ENTRIES, lambda pairs: answer)
+            wpt_tier1.recheck_small_fails(cases, self.ENTRIES, self.VIEWPORT, lambda pairs, viewport: answer)
         return cases
 
     def test_a_small_fail_chromium_also_differs_on_becomes_skip_with_the_reason(self):
@@ -465,7 +466,9 @@ class ChromiumRecheck(unittest.TestCase):
             self.case(diff_pct=5.0, id_="big"),
             self.case(status="PASS", diff_pct=0.0, id_="pass"),
         ]
-        wpt_tier1.recheck_small_fails(cases, self.ENTRIES, lambda pairs: asked.extend(pairs) or ({}, "v", None))
+        wpt_tier1.recheck_small_fails(
+            cases, self.ENTRIES, self.VIEWPORT, lambda pairs, viewport: asked.extend(pairs) or ({}, "v", None)
+        )
         self.assertEqual(asked, [])
         self.assertEqual([c["status"] for c in cases], ["FAIL", "FAIL", "PASS"])
 
@@ -473,7 +476,10 @@ class ChromiumRecheck(unittest.TestCase):
         asked = []
         with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p.with_suffix(".s")):
             wpt_tier1.recheck_small_fails(
-                [self.case()], self.ENTRIES, lambda pairs: asked.extend(pairs) or ({"small": 0}, "v", None)
+                [self.case()],
+                self.ENTRIES,
+                self.VIEWPORT,
+                lambda pairs, viewport: asked.extend(pairs) or ({"small": 0}, "v", None),
             )
         self.assertEqual(asked[0]["test"], str(wpt_tier1.WPT_ROOT / "a/small.s"))
         self.assertEqual(asked[0]["ref"], str(wpt_tier1.WPT_ROOT / "a/small-ref.s"))
@@ -498,7 +504,7 @@ class ChromiumRecheck(unittest.TestCase):
             with mock.patch.object(wpt_tier1.subprocess, "run", return_value=proc), mock.patch.object(
                 pathlib.Path, "is_dir", return_value=True
             ):
-                diffs, _version, why = wpt_tier1.chromium_pair_diffs(pairs)
+                diffs, _version, why = wpt_tier1.chromium_pair_diffs(pairs, self.VIEWPORT)
             self.assertIsNone(diffs)
             self.assertIn(word, why)
 
@@ -508,7 +514,190 @@ class ChromiumRecheck(unittest.TestCase):
         with mock.patch.object(wpt_tier1.subprocess, "run", return_value=proc), mock.patch.object(
             pathlib.Path, "is_dir", return_value=True
         ):
-            self.assertEqual(wpt_tier1.chromium_pair_diffs([]), ({"a": 7}, "143.0", None))
+            self.assertEqual(wpt_tier1.chromium_pair_diffs([], self.VIEWPORT), ({"a": 7}, "143.0", None))
+
+    def test_chromium_is_asked_at_the_runs_viewport(self):
+        """T15c (#857 R1): the call hard-coded 800x600 whatever the manifest said."""
+        out = json.dumps({"version": "143.0", "diffs": {}})
+        proc = mock.Mock(returncode=0, stdout=out, stderr="")
+        with mock.patch.object(wpt_tier1.subprocess, "run", return_value=proc) as run, mock.patch.object(
+            pathlib.Path, "is_dir", return_value=True
+        ):
+            wpt_tier1.chromium_pair_diffs([], self.VIEWPORT)
+        self.assertEqual(run.call_args.args[0][-2:], ["1024", "768"])
+
+    def test_the_recheck_passes_on_the_runs_viewport(self):
+        seen = []
+        with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p):
+            wpt_tier1.recheck_small_fails(
+                [self.case()],
+                self.ENTRIES,
+                self.VIEWPORT,
+                lambda pairs, viewport: seen.append(viewport) or ({"small": 0}, "v", None),
+            )
+        self.assertEqual(seen, [self.VIEWPORT])
+
+
+class ChromiumFonts(unittest.TestCase):
+    """T15c (#857 R1): the frame was taken on `load`, so a font still arriving was not
+    in it. The page answers `document.fonts.ready` late and paints only then."""
+
+    PAGE = """<!doctype html><style>html { background: white }</style><script>
+      const late = new Promise(done => setTimeout(() => {
+        document.documentElement.style.background = "rgb(0, 128, 0)";
+        done();
+      }, 400));
+      Object.defineProperty(document.fonts, "ready", { get: () => late });
+    </script>"""
+    REF = '<!doctype html><style>html { background: rgb(0, 128, 0) }</style>'
+
+    @unittest.skipUnless((wpt_tier1.ORACLE_DIR / "node_modules").is_dir(), "no tools/parity_oracle/node_modules")
+    def test_the_frame_waits_for_fonts_ready(self):
+        with tempfile.TemporaryDirectory() as td:
+            test, ref = pathlib.Path(td) / "t.html", pathlib.Path(td) / "r.html"
+            test.write_text(self.PAGE)
+            ref.write_text(self.REF)
+            pairs = [{"id": "fonts", "test": str(test), "ref": str(ref)}]
+            diffs, _version, why = wpt_tier1.chromium_pair_diffs(pairs, {"width": 200, "height": 100})
+        self.assertIsNone(why)
+        self.assertEqual(diffs, {"fonts": 0})
+
+
+class ChromiumOnAreaProbes(unittest.TestCase):
+    """T15c (#857 R1): 11 of the 47 area-probe demotions differ in Chromium's own test and
+    reference. Such a page says nothing either way, and its row has to say that."""
+
+    ENTRIES = [{"id": "probed", "path": "a/p.html", "ref": "a/p-ref.html", "area": "css-ui-outline"}]
+    VIEWPORT = {"width": 1024, "height": 768}
+    WHY = "still matches under the css-ui-outline probe (outline: none !important)"
+
+    def case(self, reason=WHY, status="UNPROVEN", id_="probed"):
+        return {
+            "id": id_, "area": "css-ui-outline", "status": status, "reason": reason,
+            "chromium_diff_pixels": None, "chromium_not_measured": None,
+        }
+
+    def recheck(self, cases, answer):
+        asked = []
+
+        def oracle(pairs, viewport):
+            asked.append((pairs, viewport))
+            return answer
+
+        with mock.patch.object(wpt_tier1, "stage_html", side_effect=lambda p: p):
+            wpt_tier1.recheck_area_probes(cases, self.ENTRIES, self.VIEWPORT, oracle)
+        return asked
+
+    def test_a_page_chromium_cannot_match_says_it_is_no_evidence(self):
+        case = self.case()
+        self.recheck([case], ({"probed": 12}, "143.0", None))
+        self.assertEqual(case["status"], "UNPROVEN")
+        self.assertEqual(case["chromium_diff_pixels"], 12)
+        self.assertIn(self.WHY, case["reason"])
+        self.assertIn("143.0", case["reason"])
+        self.assertIn("12 px", case["reason"])
+        self.assertIn("evidence either way", case["reason"])
+
+    def test_a_page_chromium_matches_keeps_its_reason_and_records_zero(self):
+        case = self.case()
+        self.recheck([case], ({"probed": 0}, "143.0", None))
+        self.assertEqual((case["status"], case["reason"]), ("UNPROVEN", self.WHY))
+        self.assertEqual(case["chromium_diff_pixels"], 0)
+
+    def test_only_area_probe_demotions_are_asked_about(self):
+        cases = [
+            self.case("still matches with all its style removed", id_="unstyled"),
+            self.case(None, status="PASS", id_="pass"),
+            self.case("zero-ink frame (test)", status="ERROR", id_="error"),
+        ]
+        self.assertEqual(self.recheck(cases, ({}, "v", None)), [])
+
+    def test_the_question_is_at_the_runs_viewport(self):
+        asked = self.recheck([self.case()], ({"probed": 0}, "v", None))
+        self.assertEqual(asked[0][1], self.VIEWPORT)
+
+    def test_when_chromium_cannot_answer_the_row_says_why(self):
+        case = self.case()
+        self.recheck([case], (None, None, "no chromium"))
+        self.assertEqual((case["reason"], case["chromium_not_measured"]), (self.WHY, "no chromium"))
+
+
+class StagedCopies(unittest.TestCase):
+    """T15c (#857 R1): one run left 602 `.__staged` copies in third_party/wpt."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = pathlib.Path(td.name)
+        (self.root / "a").mkdir()
+        self.page = self.root / "a" / "t.html"
+        self.page.write_text("<p>x</p>")
+        self.entries = [{"id": "t"}]
+        patcher = mock.patch.object(wpt_tier1, "WPT_ROOT", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(wpt_tier1._STAGED.clear)
+
+    def left_over(self):
+        return sorted(p.name for p in self.root.rglob("*") if p.is_file() and wpt_tier1.STAGED_SUFFIX in p.name)
+
+    def staging_case(self, entry, viewport):
+        wpt_tier1.stage_html(self.page)
+        return {"id": entry["id"], "status": "PASS", "reason": None, "diff_pct": 0.0, "chromium_diff_pixels": None}
+
+    def test_removal_takes_staged_copies_and_leaves_the_fixtures(self):
+        stale = self.root / "a" / "old.__staged.css"
+        stale.write_text("a {}")
+        staged = wpt_tier1.stage_html(self.page)
+        self.assertTrue(staged.is_file())
+        wpt_tier1.remove_staged()
+        self.assertEqual(self.left_over(), [])
+        self.assertTrue(self.page.is_file())
+
+    def test_a_page_staged_after_removal_is_written_again(self):
+        wpt_tier1.stage_html(self.page)
+        wpt_tier1.remove_staged()
+        self.assertTrue(wpt_tier1.stage_html(self.page).is_file())
+
+    def test_a_run_leaves_none(self):
+        with mock.patch.object(wpt_tier1, "run_case", side_effect=self.staging_case):
+            cases = wpt_tier1.run_cases(self.entries, {}, jobs=1, verbose=False)
+        self.assertEqual([c["id"] for c in cases], ["t"])
+        self.assertEqual(self.left_over(), [])
+
+    def test_the_recheck_still_has_its_staged_pages(self):
+        seen = []
+
+        def recheck(*_):
+            seen.append(self.left_over())
+
+        with mock.patch.object(wpt_tier1, "run_case", side_effect=self.staging_case), mock.patch.object(
+            wpt_tier1, "recheck_small_fails", side_effect=recheck
+        ), mock.patch.object(wpt_tier1, "recheck_area_probes"):
+            wpt_tier1.run_cases(self.entries, {}, jobs=1, verbose=False)
+        self.assertEqual(seen, [["t.__staged.html"]])
+        self.assertEqual(self.left_over(), [])
+
+    def test_a_run_that_dies_leaves_none(self):
+        def dies(entry, viewport):
+            self.staging_case(entry, viewport)
+            raise RuntimeError("boom")
+
+        with mock.patch.object(wpt_tier1, "run_case", side_effect=dies), self.assertRaises(RuntimeError):
+            wpt_tier1.run_cases(self.entries, {}, jobs=1, verbose=False)
+        self.assertEqual(self.left_over(), [])
+
+
+class ReadmeSaysWhatDecides(unittest.TestCase):
+    """T15c (#857 R1): the README said no Chrome is involved, and Chromium decides SKIP."""
+
+    def test_the_readme_names_chromium_for_small_fails(self):
+        text = (wpt_tier1.REPO_ROOT / "trench" / "wpt" / "README.md").read_text()
+        self.assertNotIn("No Chrome is involved", text)
+        self.assertRegex(text, r"Chromium[^.]*\bSKIP\b")
+
+    def test_the_run_record_names_it_too(self):
+        self.assertIn("Chromium", json.dumps(wpt_tier1.oracle_record()))
 
 
 class BlindSpots(unittest.TestCase):
