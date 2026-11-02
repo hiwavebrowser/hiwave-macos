@@ -24,7 +24,7 @@
 use crate::{inner_text, DomDirty, MutationKind, MutationLog, MutationRecord, ScriptMutations};
 use rustkit_dom::{Document, Node, NodeId, NodeType, QuerySelector};
 use rustkit_js::{JsError, JsRuntime, JsValue};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -55,7 +55,45 @@ pub struct BoxGeometry {
     pub scroll_height: f32,
     /// 0 static, 1 positioned (relative, absolute, sticky), 2 fixed.
     pub position: u8,
+    /// The nearest element scroller or transformed box that moves this box
+    /// (`x`, `y` are where layout put it, before any of them). Follow it up
+    /// to add them up.
+    pub scroller: Option<usize>,
+    /// This box's own transform, about its origin, in layout coordinates, as
+    /// `[a, b, c, d, e, f]`.
+    pub transform: Option<[f32; 6]>,
+    /// Whether this box is an element scroller itself.
+    pub scrolls: bool,
+    /// In a fixed box the window's scroll does not move: its rect is where
+    /// layout put it, wherever the page is.
+    pub held: bool,
 }
+
+/// The offsets script scrolled a view's elements to, by raw NodeId: one table
+/// the bindings and the engine share. Script writes it and reads it back at
+/// once; the engine applies it when script settles (paint) and on a hit test.
+/// It outlives the boxes: an element that goes `display: none` has its offset
+/// back when it returns.
+#[derive(Debug, Default)]
+pub struct ElementScrolls {
+    pub offsets: HashMap<usize, (f32, f32)>,
+    /// Bumped by each write, so a layout tree knows it is behind.
+    pub generation: u64,
+    /// Whether a write has not been painted yet.
+    pub unpainted: bool,
+}
+
+impl ElementScrolls {
+    /// A new document: node ids restart.
+    pub fn clear(&mut self) {
+        self.offsets.clear();
+        self.generation += 1;
+        self.unpainted = false;
+    }
+}
+
+/// What `DomBindings::share_element_scrolls` takes.
+pub type SharedElementScrolls = Rc<std::cell::RefCell<ElementScrolls>>;
 
 /// Builds the geometry and computed-style maps of the layout it was made
 /// for (`DomBindings::set_geometry_source`).
@@ -65,6 +103,40 @@ pub type GeometrySource =
 /// The node under a viewport point, from the layout's hit test. `scroll`
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
+
+/// Control writes script made that the engine has not taken yet. A forced
+/// layout copies them into the engine's edit state before it builds, and
+/// drains what it applied (`ForcedLayout`).
+#[derive(Default)]
+pub struct ControlWrites {
+    pub values: Vec<(usize, String)>,
+    pub checked: Vec<(usize, Option<bool>)>,
+}
+
+/// A layout of the DOM as it is now: what a forced layout publishes.
+pub struct ForcedGeometry {
+    /// Builds the geometry and computed-style maps of this layout, on the
+    /// first read that needs them (as `DomBindings::set_geometry_source`).
+    pub source: GeometrySource,
+    pub hit_tester: Option<HitTester>,
+    /// The furthest the view can scroll over this layout, as
+    /// `DomBindings::set_scroll_state` takes it.
+    pub max_scroll: (f32, f32),
+}
+
+/// Lays the page out again for a read of geometry or computed style that
+/// follows a script write in the same task (forced layout,
+/// `DomBindings::set_forced_layout`). `None` when it cannot now: the read
+/// answers from the last layout published.
+pub type ForcedLayout = Rc<dyn Fn(&mut ControlWrites) -> Option<ForcedGeometry>>;
+
+/// How many forced layouts one script task gets before its reads answer
+/// from the last layout (Prometheus, #812 review): a write-read loop that
+/// never settles cannot hold the page thread forever. cnn's header loop
+/// needs 8. A count, not a time: a time limit made the page's answer depend
+/// on the machine's load (at 1 s, cnn's loop ran out on a loaded seat and
+/// laid the header out as before forced layout).
+pub(crate) const FORCED_LAYOUTS_PER_TASK: u64 = 256;
 
 /// The document the host functions read, and its generation.
 #[derive(Default)]
@@ -84,9 +156,27 @@ pub(crate) struct DomHost {
     pub(crate) geometry_source: Option<GeometrySource>,
     /// How many times a pending source was built (`DomBindings::geometry_builds`).
     pub(crate) geometry_builds: u64,
+    /// Lays out the document the engine last published a layout of.
+    pub(crate) forced_layout: Option<ForcedLayout>,
+    /// Forced layouts since the engine last took the count
+    /// (`DomBindings::take_forced_layouts`).
+    pub(crate) forced_layouts: u64,
+    /// The forced layouts against this task's budget, and their time (ms,
+    /// for the decline log), since the engine last published a layout or
+    /// took the count.
+    forced_in_task: u64,
+    forced_ms: f64,
+    /// Whether a read since the count was taken answered from the last
+    /// layout instead (budget spent, or the build state busy): logged once.
+    forced_declined: bool,
     /// The view's scroll, in the same coordinates as `geometry`, so a
     /// viewport point can be turned into a document point.
     scroll: (f32, f32),
+    /// The view's element scroll offsets (web_scroll.js).
+    pub(crate) element_scrolls: SharedElementScrolls,
+    /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
+    /// a forced layout moves its maximum.
+    pub(crate) scroll_state: crate::web_scroll::SharedScroll,
     /// Layout hit test `(viewport x, viewport y, scroll) -> node id`,
     /// installed with a layout. Absent until then: a point answers null.
     hit_tester: Option<HitTester>,
@@ -135,6 +225,169 @@ impl DomHost {
         }
     }
 
+    /// The rect of a box under a transform, its own or one above it, as x, y,
+    /// width, height: the bounding box of its corners taken up the chain, each
+    /// scroller's scroll inside that scroller's own transform. `None` when no
+    /// transform is on the chain, and `element_scroll_over` is the whole answer.
+    fn transformed_rect(&self, geometry: &BoxGeometry) -> Option<(f32, f32, f32, f32)> {
+        let (x, y, r, b) = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height);
+        let mut corners = [(x, y), (r, y), (x, b), (r, b)];
+        let mut any = false;
+        let mut apply = |corners: &mut [(f32, f32); 4], m: Option<[f32; 6]>| {
+            if let Some(m) = m {
+                any = true;
+                for c in corners.iter_mut() {
+                    *c = (m[0] * c.0 + m[2] * c.1 + m[4], m[1] * c.0 + m[3] * c.1 + m[5]);
+                }
+            }
+        };
+        apply(&mut corners, geometry.transform);
+        let scrolls = self.element_scrolls.borrow();
+        let mut at = geometry.scroller;
+        while let Some(node) = at {
+            if let Some((dx, dy)) = scrolls.offsets.get(&node) {
+                for c in corners.iter_mut() {
+                    *c = (c.0 - dx, c.1 - dy);
+                }
+            }
+            let above = self.geometry.get(&node);
+            apply(&mut corners, above.and_then(|g| g.transform));
+            at = above.and_then(|g| g.scroller);
+        }
+        if !any {
+            return None;
+        }
+        let (mut left, mut top) = corners[0];
+        let (mut right, mut bottom) = corners[0];
+        for c in &corners[1..] {
+            left = left.min(c.0);
+            top = top.min(c.1);
+            right = right.max(c.0);
+            bottom = bottom.max(c.1);
+        }
+        Some((left, top, right - left, bottom - top))
+    }
+
+    /// Where the window is now, script's own scroll included.
+    fn window_scroll(&self) -> (f32, f32) {
+        let state = self.scroll_state.borrow();
+        (state.x, state.y)
+    }
+
+    /// What the element scrollers above a box have moved it by.
+    fn element_scroll_over(&self, geometry: &BoxGeometry) -> (f32, f32) {
+        let scrolls = self.element_scrolls.borrow();
+        let (mut x, mut y) = (0.0, 0.0);
+        if scrolls.offsets.is_empty() {
+            return (x, y);
+        }
+        let mut at = geometry.scroller;
+        while let Some(scroller) = at {
+            if let Some((dx, dy)) = scrolls.offsets.get(&scroller) {
+                x += dx;
+                y += dy;
+            }
+            at = self.geometry.get(&scroller).and_then(|g| g.scroller);
+        }
+        (x, y)
+    }
+
+    /// What `ensure_geometry` gives, from a layout of the DOM as it is now:
+    /// when script wrote to the DOM since the last layout was published, the
+    /// page is laid out again first (forced layout), as in a browser.
+    pub(crate) fn ensure_fresh_geometry(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        Self::force_layout_if_written(host, dirty);
+        host.borrow_mut().ensure_geometry();
+    }
+
+    /// The forced layout half of `ensure_fresh_geometry`, for reads that
+    /// need the layout current but not the geometry maps (the scroll
+    /// maximum).
+    pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark) {
+        if !dirty.written_since_layout() {
+            return;
+        }
+        let forced = {
+            let mut h = host.borrow_mut();
+            let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
+            match (h.forced_layout.clone(), spent) {
+                (Some(_), true) => {
+                    h.note_forced_decline("budget spent");
+                    None
+                }
+                (forced, _) => forced,
+            }
+        };
+        let Some(forced) = forced else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        // Outside the host borrow: the build does not read the host, and
+        // runs no script.
+        let mut writes = {
+            let mut h = host.borrow_mut();
+            ControlWrites {
+                values: std::mem::take(&mut h.value_writes),
+                checked: std::mem::take(&mut h.checked_writes),
+            }
+        };
+        let laid = forced(&mut writes);
+        let mut h = host.borrow_mut();
+        h.forced_ms += started.elapsed().as_secs_f64() * 1000.0;
+        // What the layout did not apply stays for the engine's flush.
+        writes.values.append(&mut h.value_writes);
+        h.value_writes = writes.values;
+        writes.checked.append(&mut h.checked_writes);
+        h.checked_writes = writes.checked;
+        let Some(laid) = laid else {
+            h.note_forced_decline("build state in use");
+            return;
+        };
+        h.geometry.clear();
+        h.computed.clear();
+        h.geometry_source = Some(laid.source);
+        h.hit_tester = laid.hit_tester;
+        // The document may have grown or shrunk: scrollTo clamps to the new
+        // end, and an offset past it comes back to it.
+        let scroll = h.scroll_state.clone();
+        let mut s = scroll.borrow_mut();
+        (s.max_x, s.max_y) = laid.max_scroll;
+        s.x = s.x.min(s.max_x.max(0.0));
+        s.y = s.y.min(s.max_y.max(0.0));
+        h.scroll = (s.x, s.y);
+        h.forced_layouts += 1;
+        h.forced_in_task += 1;
+        dirty.laid_out();
+    }
+
+    /// A read that wanted a forced layout answers from the last layout:
+    /// one log line per script task (until `take_forced_layouts`).
+    fn note_forced_decline(&mut self, why: &'static str) {
+        if !std::mem::replace(&mut self.forced_declined, true) {
+            tracing::info!(
+                why,
+                forced_layouts = self.forced_in_task,
+                forced_ms = self.forced_ms,
+                "Forced layout declined; reads answer from the last layout"
+            );
+        }
+    }
+
+    /// A new budget for forced layouts: the engine took the task's count,
+    /// or published a layout of its own.
+    pub(crate) fn renew_forced_budget(&mut self) {
+        self.forced_in_task = 0;
+        self.forced_ms = 0.0;
+        self.forced_declined = false;
+    }
+
+    /// The forced layouts since the last call, which starts a new task's
+    /// count and budget.
+    pub(crate) fn take_forced_layouts(&mut self) -> u64 {
+        self.renew_forced_budget();
+        std::mem::take(&mut self.forced_layouts)
+    }
+
     pub(crate) fn note_scroll(&mut self, offset: (f32, f32)) {
         self.scroll = offset;
     }
@@ -150,6 +403,8 @@ impl DomHost {
         adopt_template_contents(&document, document.root(), templates);
         self.document = Some(document);
         self.generation += 1;
+        // The engine installs one for the new document with its first layout.
+        self.forced_layout = None;
         self.values.clear();
         self.value_writes.clear();
         self.checked_writes.clear();
@@ -269,15 +524,17 @@ fn is_child_of(node: &Rc<Node>, parent: &Rc<Node>) -> bool {
 
 /// DOM §4.2.3 "pre-insert" `node` into `parent` before `child` (`None`
 /// appends). Returns the DOMException name on a failed validity check,
-/// before anything is touched.
+/// before anything is touched. `replacing`: the caller takes `child` out
+/// next (replaceChild, replaceWith), so a Document is checked by the
+/// "replace" rules, which do not count `child` itself.
 fn pre_insert(
     parent: &Rc<Node>,
     node: &Rc<Node>,
     child: Option<Rc<Node>>,
+    replacing: bool,
 ) -> Result<(), &'static str> {
-    // Only elements and fragments take children here; a Document's
-    // one-element rules come with a later rung.
-    if !parent.is_element() && !is_fragment(parent) {
+    let document = matches!(parent.node_type, NodeType::Document);
+    if !document && !parent.is_element() && !is_fragment(parent) {
         return Err("HierarchyRequestError");
     }
     if is_host_including_inclusive_ancestor(node, parent) || node.is_shadow_root() {
@@ -286,11 +543,14 @@ fn pre_insert(
     if child.as_ref().is_some_and(|c| !is_child_of(c, parent)) {
         return Err("NotFoundError");
     }
-    if matches!(
-        node.node_type,
-        NodeType::Document | NodeType::DocumentType { .. }
-    ) {
-        return Err("HierarchyRequestError");
+    match node.node_type {
+        NodeType::Document => return Err("HierarchyRequestError"),
+        NodeType::DocumentType { .. } if !document => return Err("HierarchyRequestError"),
+        NodeType::Text(_) if document => return Err("HierarchyRequestError"),
+        _ => {}
+    }
+    if document {
+        document_child_check(parent, node, child.as_ref(), replacing)?;
     }
     // Inserting a node before itself inserts it before its next sibling.
     let child = match child {
@@ -311,6 +571,48 @@ fn pre_insert(
         }
     }
     Ok(())
+}
+
+/// DOM §4.2.3 step 6 of "ensure pre-insert validity" (and step 6 of
+/// "replace"): a Document has at most one element child and one doctype,
+/// the doctype before the element.
+fn document_child_check(
+    document: &Rc<Node>,
+    node: &Rc<Node>,
+    child: Option<&Rc<Node>>,
+    replacing: bool,
+) -> Result<(), &'static str> {
+    let is_doctype = |n: &Rc<Node>| matches!(n.node_type, NodeType::DocumentType { .. });
+    let kids = document.children();
+    // When replacing, `child` is about to leave and does not count.
+    let counted = |n: &&Rc<Node>| !(replacing && child.is_some_and(|c| c.id == n.id));
+    let has_element = kids.iter().filter(counted).any(|n| n.is_element());
+    let has_doctype = kids.iter().filter(counted).any(is_doctype);
+    let at = child.and_then(|c| kids.iter().position(|k| k.id == c.id));
+    let doctype_after = at.is_some_and(|i| kids[i + 1..].iter().any(is_doctype));
+    let element_before = at.is_some_and(|i| kids[..i].iter().any(|n| n.is_element()));
+    let before_doctype = !replacing && child.is_some_and(is_doctype);
+    let one_element = |elements: usize| {
+        elements == 1 && (has_element || before_doctype || doctype_after)
+    };
+    let bad = match node.node_type {
+        NodeType::DocumentFragment => {
+            let inner = node.children();
+            let elements = inner.iter().filter(|n| n.is_element()).count();
+            elements > 1
+                || inner.iter().any(|n| matches!(n.node_type, NodeType::Text(_)))
+                || one_element(elements)
+        }
+        NodeType::Element { .. } => one_element(1),
+        NodeType::DocumentType { .. } => {
+            has_doctype || element_before || (child.is_none() && has_element)
+        }
+        _ => false,
+    };
+    match bad {
+        true => Err("HierarchyRequestError"),
+        false => Ok(()),
+    }
 }
 
 fn is_fragment(node: &Node) -> bool {
@@ -362,7 +664,8 @@ fn mutate(host: &DomHost, args: &[JsValue]) -> Result<(), &'static str> {
                 None | Some(JsValue::Null) | Some(JsValue::Undefined) => None,
                 Some(_) => Some(host.node_at(args, 4).ok_or("NotFoundError")?),
             };
-            pre_insert(&parent, &node, child)
+            let replacing = matches!(args.get(5), Some(JsValue::Boolean(true)));
+            pre_insert(&parent, &node, child, replacing)
         }
         Some("remove") if is_child_of(&node, &parent) => {
             node.remove_from_parent();
@@ -545,7 +848,7 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         ("setHTML", NodeType::Element { tag_name, .. }) => {
             let html = string_arg(args, 3).unwrap_or("");
             let nodes = document
-                .parse_fragment(html, tag_name)
+                .parse_fragment_in(html, tag_name, is_in_html_content(&node), node.holds_svg_content())
                 .map_err(|_| "SyntaxError")?;
             let templates = &mut host.templates.borrow_mut();
             let target = templates
@@ -895,6 +1198,25 @@ fn is_html_element(node: &Node) -> bool {
         if namespace.is_empty() || namespace == "http://www.w3.org/1999/xhtml")
 }
 
+/// Is `node` an HTML element for the fragment parser? The parser gives an
+/// element in `<math>` the HTML namespace, so one there (and not under a
+/// `foreignObject`) is foreign by its ancestors.
+fn is_in_html_content(node: &Node) -> bool {
+    if !is_html_element(node) {
+        return false;
+    }
+    let mut up = node.parent();
+    while let Some(ancestor) = up {
+        match ancestor.tag_name().map(str::to_ascii_lowercase).as_deref() {
+            Some("foreignobject") => return true,
+            Some("svg") | Some("math") => return false,
+            _ => {}
+        }
+        up = ancestor.parent();
+    }
+    true
+}
+
 /// Is `node` a descendant of `scope` (not `scope` itself)?
 fn is_descendant(node: &Rc<Node>, scope: &Rc<Node>) -> bool {
     let mut current = node.parent();
@@ -1080,7 +1402,7 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
 pub(crate) fn install(
     runtime: &mut JsRuntime,
     host: &SharedDomHost,
-    dirty: &Rc<Cell<DomDirty>>,
+    dirty: &Rc<crate::DirtyMark>,
     mutations: &Rc<RefCell<ScriptMutations>>,
     log: &Rc<RefCell<MutationLog>>,
 ) -> Result<(), JsError> {
@@ -1226,12 +1548,13 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
-            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom")) {
-                h.borrow_mut().ensure_geometry();
+            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom" | "scroll" | "scrollChain")) {
+                DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
@@ -1247,11 +1570,58 @@ pub(crate) fn install(
                         // report NaN, and parseInt of that feeds elementFromPoint
                         // a double WebIDL rejects.
                         let n = |v: f32| if v.is_finite() { v } else { 0.0 };
+                        // The first two and the last two are for rects: where
+                        // the scrollers and transforms put the box. The rest,
+                        // `offsetTop` among them, are where layout did.
+                        let (rx, ry, rw, rh) = host.transformed_rect(g).unwrap_or_else(|| {
+                            let (dx, dy) = host.element_scroll_over(g);
+                            (g.x - dx, g.y - dy, g.width, g.height)
+                        });
+                        // The rect's reader takes the window's scroll off.
+                        let page = if g.held { host.window_scroll() } else { (0.0, 0.0) };
                         JsValue::String(format!(
-                            "{} {} {} {} {} {} {} {} {} {} {}",
-                            n(g.x), n(g.y), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
-                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position
+                            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            n(rx + page.0), n(ry + page.1), n(g.width), n(g.height), n(g.border_left), n(g.border_top),
+                            n(g.client_width), n(g.client_height), n(g.scroll_width), n(g.scroll_height), g.position,
+                            n(g.x), n(g.y), n(rw), n(rh)
                         ))
+                    }
+                    None => JsValue::String(String::new()),
+                },
+                // "x y" of an element that can scroll now, else "".
+                (Some(node), Some("scroll")) => {
+                    let raw = node.id.raw();
+                    if host.geometry.get(&raw).is_some_and(|g| g.scrolls) {
+                        let scrolls = host.element_scrolls.borrow();
+                        let (x, y) = scrolls.offsets.get(&raw).copied().unwrap_or((0.0, 0.0));
+                        JsValue::String(format!("{x} {y}"))
+                    } else {
+                        JsValue::String(String::new())
+                    }
+                }
+                // What scrolling to this element moves: "w" when the window
+                // does ("f" under a fixed box), then the scrollers, innermost
+                // first. "" when it has no box.
+                (Some(node), Some("scrollChain")) => match host.geometry.get(&node.id.raw()) {
+                    Some(g) => {
+                        let mut fixed = false;
+                        let mut up = Some(node.clone());
+                        while let (false, Some(n)) = (fixed, up) {
+                            fixed = host.geometry.get(&n.id.raw()).is_some_and(|g| g.position == 2);
+                            up = n.parent();
+                        }
+                        let mut chain = String::from(if fixed { "f" } else { "w" });
+                        let mut at = g.scroller;
+                        while let Some(scroller) = at {
+                            let above = host.geometry.get(&scroller);
+                            // A transformed box on the chain moves the box,
+                            // but cannot be scrolled.
+                            if above.is_some_and(|g| g.scrolls) {
+                                chain.push_str(&format!(" {scroller}"));
+                            }
+                            at = above.and_then(|g| g.scroller);
+                        }
+                        JsValue::String(chain)
                     }
                     None => JsValue::String(String::new()),
                 },
@@ -1261,16 +1631,34 @@ pub(crate) fn install(
         }),
     )?;
 
+    // scroll_element(gen, id, x, y): store where script scrolled an element.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_scroll_element",
+        4,
+        Box::new(move |args| {
+            let host = h.borrow();
+            if let (Some(node), Some(x), Some(y)) = (host.node(args), number_arg(args, 2), number_arg(args, 3)) {
+                let mut scrolls = host.element_scrolls.borrow_mut();
+                scrolls.offsets.insert(node.id.raw(), (x, y));
+                scrolls.generation += 1;
+                scrolls.unpainted = true;
+            }
+            JsValue::Undefined
+        }),
+    )?;
+
     // hit(x, y): the node under a viewport point, or null before a layout
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
     let h = host.clone();
+    let d = dirty.clone();
     runtime.register_host_function(
         "__rustkit_dom_hit",
         2,
         Box::new(move |args| {
-            let mut host = h.borrow_mut();
-            host.ensure_geometry();
+            DomHost::ensure_fresh_geometry(&h, &d);
+            let host = h.borrow();
             if host.geometry.is_empty() {
                 return JsValue::Null;
             }
@@ -1326,7 +1714,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                d.set(d.get().max(DomDirty::Style));
+                d.mark(DomDirty::Style);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1354,7 +1742,7 @@ pub(crate) fn install(
                 note_mutation(&m, bucket, write_kind(args), || {
                     node_label(&h.borrow(), args, 2)
                 });
-                d.set(d.get().max(bucket));
+                d.mark(bucket);
                 result
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -1386,7 +1774,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             result
         }),
     )?;
@@ -1406,7 +1794,7 @@ pub(crate) fn install(
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.set(d.get().max(bucket));
+            d.mark(bucket);
             JsValue::Null
         }),
     )?;
@@ -1457,9 +1845,35 @@ pub(crate) fn install(
                         url: url.clone(),
                         in_order,
                         inserted_by: caller,
+                        inserted_at: std::time::Instant::now(),
                     });
                 }
             }
+            JsValue::Null
+        }),
+    )?;
+
+    // `set_adopted(gen, id, json)`: CSS text of `node`'s adoptedStyleSheets,
+    // a JSON array of strings in array order. An empty string is a disabled
+    // sheet. The next layout applies them. Nothing is injected into the tree.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_adopted",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(json) = string_arg(args, 2) else {
+                return JsValue::Null;
+            };
+            let Ok(texts) = serde_json::from_str::<Vec<String>>(json) else {
+                return JsValue::Null;
+            };
+            node.set_adopted_styles(texts);
+            d.mark(DomDirty::Style);
             JsValue::Null
         }),
     )?;
@@ -1485,10 +1899,11 @@ const WRAPPERS_JS: &str = r#"
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
-        hit: __rustkit_dom_hit
+        hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        scrollElement: __rustkit_dom_scroll_element
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted', 'scroll_element'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -1565,7 +1980,7 @@ const WRAPPERS_JS: &str = r#"
             a: 'HTMLAnchorElement', area: 'HTMLAreaElement', audio: 'HTMLAudioElement', base: 'HTMLBaseElement',
             body: 'HTMLBodyElement', br: 'HTMLBRElement', button: 'HTMLButtonElement', canvas: 'HTMLCanvasElement',
             data: 'HTMLDataElement', details: 'HTMLDetailsElement', dialog: 'HTMLDialogElement', div: 'HTMLDivElement',
-            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', head: 'HTMLHeadElement',
+            dl: 'HTMLDListElement', embed: 'HTMLEmbedElement', fieldset: 'HTMLFieldSetElement', frameset: 'HTMLFrameSetElement', head: 'HTMLHeadElement',
             h1: 'HTMLHeadingElement', h2: 'HTMLHeadingElement', h3: 'HTMLHeadingElement', h4: 'HTMLHeadingElement',
             h5: 'HTMLHeadingElement', h6: 'HTMLHeadingElement', hr: 'HTMLHRElement', html: 'HTMLHtmlElement',
             iframe: 'HTMLIFrameElement', img: 'HTMLImageElement', label: 'HTMLLabelElement', legend: 'HTMLLegendElement',
@@ -1698,11 +2113,17 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Removing an absent attribute runs no attribute-change steps (DOM
+        // "remove an attribute by name"), so it must not drop an assigned
+        // on<type> handler. N.attr matches the name as the write does.
+        var changed = op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
+        if (changed) attributeChanged(o, a);
         if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
         return r;
     }
@@ -1748,7 +2169,10 @@ const WRAPPERS_JS: &str = r#"
         }
         return o[SLOT];
     }
-    function write(op, parent, node, child, method) {
+    // `replacing`: `child` is the node this call takes out (replaceChild,
+    // and replaceWith while `this` is still in place), so the Document
+    // checks do not count it.
+    function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
         function here(s) { return s.gen === gen ? s.id : -1; }
@@ -1756,7 +2180,7 @@ const WRAPPERS_JS: &str = r#"
         var c = child == null ? null : here(nodeArg(child, method));
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c);
+        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
@@ -1797,7 +2221,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var self = this;
         return batch(function () {
-            write('insert', self, node, child, 'replaceChild');
+            write('insert', self, node, child, 'replaceChild', true);
             return write('remove', self, child, null, 'replaceChild');
         });
     };
@@ -1815,8 +2239,8 @@ const WRAPPERS_JS: &str = r#"
         nodes.forEach(function (n) { var p = n.parentNode; if (p) p.removeChild(n); });
         return nodes;
     }
-    function insertAll(parent, nodes, ref, method) {
-        nodes.forEach(function (n) { write('insert', parent, n, ref, method); });
+    function insertAll(parent, nodes, ref, method, replacing) {
+        nodes.forEach(function (n) { write('insert', parent, n, ref, method, replacing); });
     }
     // DOM queues one record per call of these; they make several writes,
     // which an observer merges into one while `fn` runs.
@@ -1873,7 +2297,7 @@ const WRAPPERS_JS: &str = r#"
             var self = this, nodes = toNodes(args);
             batch(function () {
                 if (self.parentNode === p) {
-                    insertAll(p, nodes, self, 'replaceWith');
+                    insertAll(p, nodes, self, 'replaceWith', true);
                     p.removeChild(self);
                 } else {
                     insertAll(p, nodes, next, 'replaceWith');
@@ -2321,7 +2745,9 @@ const WRAPPERS_JS: &str = r#"
         // The fragment parses in the context of the element it lands in
         // (<html> parses as <body>), through a detached holder of that name.
         var ctx = spot[0].localName === 'html' ? 'body' : spot[0].localName;
-        var holder = create('element', ctx, 'insertAdjacentHTML');
+        var holder = spot[0].namespaceURI === 'http://www.w3.org/2000/svg'
+            ? document.createElementNS(spot[0].namespaceURI, ctx)
+            : create('element', ctx, 'insertAdjacentHTML');
         holder.innerHTML = String(html);
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) {
             spot[0].insertBefore(n, spot[1]);
@@ -2412,8 +2838,26 @@ const WRAPPERS_JS: &str = r#"
         var p = raw.split(' ');
         var n = [];
         for (var i = 0; i < p.length; i++) n.push(finite(p[i]));
-        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10] };
+        return { x: n[0], y: n[1], w: n[2], h: n[3], bl: n[4], bt: n[5], cw: n[6], ch: n[7], sw: n[8], sh: n[9], pos: n[10], lx: n[11], ly: n[12], rw: n[13], rh: n[14] };
     }
+    // What web_scroll.js scrolls an element with; it takes this and deletes
+    // it. read: null when the element cannot scroll now.
+    g.__rustkit_element_scroll = {
+        read: function (el) {
+            var raw = info(el, 'scroll');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { x: finite(p[0]), y: finite(p[1]) };
+        },
+        write: function (el, x, y) { var s = slotOf(el); N.scrollElement(s.gen, s.id, x, y); },
+        chain: function (el) {
+            var raw = info(el, 'scrollChain');
+            if (!raw) return null;
+            var p = raw.split(' ');
+            return { window: p[0] === 'w', scrollers: p.slice(1).map(function (id) { return wrap(+id); }) };
+        },
+        byId: function (id) { return wrap(id); }
+    };
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
         return finite(typeof v === 'number' ? v : 0);
@@ -2431,11 +2875,11 @@ const WRAPPERS_JS: &str = r#"
     Element.prototype.getBoundingClientRect = function () {
         var b = geom(this);
         if (!b) return rect(0, 0, 0, 0);
-        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h);
+        return rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh);
     };
     Element.prototype.getClientRects = function () {
         var b = geom(this);
-        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.w, b.h)] : [];
+        var out = b ? [rect(b.x - scrollOffset('x'), b.y - scrollOffset('y'), b.rw, b.rh)] : [];
         return out;
     };
     function metric(name, pick) {
@@ -2471,28 +2915,51 @@ const WRAPPERS_JS: &str = r#"
         var base = 0;
         if (parent && parent !== document.body) {
             var pb = geom(parent);
-            if (pb) base = axis === 'x' ? pb.x + pb.bl : pb.y + pb.bt;
+            if (pb) base = axis === 'x' ? pb.lx + pb.bl : pb.ly + pb.bt;
         }
-        return round((axis === 'x' ? b.x : b.y) - base);
+        return round((axis === 'x' ? b.lx : b.ly) - base);
     }
     getter(HTMLElement.prototype, 'offsetLeft', function () { return offsetFrom(this, 'x'); });
     getter(HTMLElement.prototype, 'offsetTop', function () { return offsetFrom(this, 'y'); });
-    // getComputedStyle. The engine publishes each laid-out element's computed
-    // style (`set_computed_styles`); a read answers from the last layout,
-    // with the element's own inline declarations laid over it so that
-    // `el.style.display = 'none'` is seen at once. An element with no box
-    // after a layout is not rendered (display:none, or <head>, <script>,
-    // <style>, ...): its display reads 'none'. Before any layout everything
-    // reads as the empty string.
+    // getComputedStyle. The engine publishes each styled element's computed
+    // style (`set_computed_styles`), with or without a box; a read answers
+    // from the last layout, with the element's own inline declarations laid
+    // over it so that `el.style.display = 'none'` is seen at once. An
+    // element with no published style after a layout was not styled (a
+    // descendant of display:none, or <head>, <script>, <style>, ...): its
+    // display reads 'none'. Before any layout everything reads as the empty
+    // string. Custom properties come as `custom` rows on the nearest
+    // element (self or ancestor) whose set is its own; `customVars` walks up.
     var COMPUTED_NAMES = {};
     function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
-    function computedMap(el) {
+    function customVars(el) {
+        for (var e = el; e; e = e.parentElement) {
+            var raw = info(e, 'computed');
+            if (!raw || raw.indexOf('\ncustom\t') < 0) continue;
+            var vars = {};
+            raw.split('\n').forEach(function (line) {
+                if (line.indexOf('custom\t') !== 0) return;
+                var rest = line.slice(7), j = rest.indexOf('\t');
+                if (j > 0) vars[rest.slice(0, j)] = rest.slice(j + 1);
+            });
+            return vars;
+        }
+        return null;
+    }
+    function computedMap(el, pseudo) {
         var raw = info(el, 'computed');
-        var m = {};
+        var m = {}, own = null, prefix = pseudo ? pseudo + ' ' : null;
         if (raw) {
             raw.split('\n').forEach(function (line) {
                 var i = line.indexOf('\t');
-                if (i > 0) m[line.slice(0, i)] = line.slice(i + 1);
+                if (i <= 0) return;
+                var name = line.slice(0, i);
+                if (name === 'custom') return;
+                // The element's rows, then its pseudo-elements' (`::before name`).
+                if (name.charAt(0) !== ':') m[name] = line.slice(i + 1);
+                else if (prefix && name.indexOf(prefix) === 0) {
+                    (own = own || {})[name.slice(prefix.length)] = line.slice(i + 1);
+                }
             });
         } else if (info(el, 'laidout')) {
             m.display = 'none';
@@ -2514,15 +2981,49 @@ const WRAPPERS_JS: &str = r#"
                 if (v) m[name] = v;
             }
         }
-        return m;
+        return pseudo ? pseudoMap(m, own, pseudo) : m;
     }
-    function makeComputed(el) {
-        var m = computedMap(el);
+    // What a pseudo-element reads: its own cascaded rows, or, with no rule
+    // that set `content`, the initial values and what it inherits.
+    var INHERITED = ['color', 'font-family', 'font-size', 'font-style', 'font-weight', 'letter-spacing',
+        'line-height', 'text-align', 'text-transform', 'visibility', 'white-space'];
+    function pseudoMap(m, own, pseudo) {
+        var isBox = pseudo === '::before' || pseudo === '::after';
+        if (own) {
+            if (own.content === 'normal') own.content = 'none';
+            return own;
+        }
+        if (!m.display) return {};
+        var out = { display: 'inline', position: 'static', width: 'auto', height: 'auto',
+            content: isBox ? 'none' : 'normal' };
+        INHERITED.forEach(function (n) { if (m[n]) out[n] = m[n]; });
+        return out;
+    }
+    // The canonical name of getComputedStyle's second argument, '' for the
+    // element itself, or null for one that names no pseudo-element.
+    function pseudoArgument(p) {
+        if (p === undefined || p === null) return '';
+        p = String(p).toLowerCase();
+        if (p === '') return '';
+        var named = /^(?:::?)?(before|after|first-line|first-letter)$/.exec(p);
+        if (named) return '::' + named[1];
+        return /^::(marker|selection|backdrop|placeholder)$/.test(p) ? p : null;
+    }
+    function makeComputed(el, pseudo) {
+        var m = pseudo === null ? {} : computedMap(el, pseudo);
         var names = Object.keys(m).sort();
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
+        // A custom property not set inline: the cascaded (inherited) value.
+        function customValue(n) {
+            if (pseudo === null || n.indexOf('--') !== 0) return '';
+            var vars = customVars(el);
+            return vars && Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : '';
+        }
         var own = {
-            getPropertyValue: function (n) { n = kebab(String(n)); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : ''; },
+            // A custom property name is case-sensitive (Primer's
+            // `--fgColor-*`): only a standard property is kebab-cased.
+            getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
             getPropertyPriority: function () { return ''; },
             item: function (i) { return names[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
@@ -2537,17 +3038,17 @@ const WRAPPERS_JS: &str = r#"
             get: function (t, p, r) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
                 if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
-                var n = kebab(p.indexOf('--') === 0 ? p : p);
-                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : '');
+                var n = p.indexOf('--') === 0 ? p : kebab(p);
+                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : customValue(n));
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
         });
     }
-    g.getComputedStyle = function getComputedStyle(el) {
+    g.getComputedStyle = function getComputedStyle(el, pseudo) {
         if (!el || el.nodeType !== 1) {
             throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
         }
-        return makeComputed(el);
+        return makeComputed(el, pseudoArgument(pseudo));
     };
 
     // The root element's client size is the viewport's, and its scroll size
@@ -3168,6 +3669,13 @@ const WRAPPERS_JS: &str = r#"
             signal.addEventListener('abort', function () { t.removeEventListener(type, cb, capture); }, { once: true });
         }
     };
+    // Does `target` have a listener for `type` right now? For the installs
+    // that keep a target alive only while something can hear it
+    // (web_match_media.js prunes its document list of media query lists).
+    HOOKS.hasListener = function (target, type) {
+        var all = LISTENERS.get(thisTarget(target)), list = all && all[String(type)];
+        return !!(list && list.length > 0);
+    };
     EventTarget.prototype.removeEventListener = function (type, cb, opts) {
         var all = LISTENERS.get(thisTarget(this)), list = all && all[String(type)];
         if (!list) return;
@@ -3189,33 +3697,199 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
-    // An element's on<type> handler: the property when one was assigned
-    // (`null` included, which turns the handler off), else its `on<type>`
-    // content attribute (HTML §8.1.8.1). The attribute's text is the body of
-    // `function (event)`, with the element and its document in scope,
-    // compiled on first use and again when the text changes. A body that
-    // does not compile is logged once and is no handler.
-    var INLINE = new WeakMap();
-    function handlerOf(t, type) {
-        if (PLAIN.has(t)) return undefined;
-        var h = t['on' + type];
-        if (h !== undefined || !t[SLOT] || t.nodeType !== 1) return h;
+    // An element's on<type> handler (HTML §8.1.8): the value assigned through
+    // its `on<type>` IDL attribute (`null` included, which turns the handler
+    // off), else its `on<type>` content attribute. The attribute's text is
+    // the body of `function (event)`, with the element and its document in
+    // scope, compiled on first use and again when the text changes. A body
+    // that does not compile is logged once and is no handler. Setting or
+    // removing the attribute drops the assigned value: the attribute is the
+    // handler again (§8.1.8.1 "event handler content attributes").
+    var INLINE = new WeakMap(), ASSIGNED = new WeakMap();
+    // `src` as the body of `function (event)`, with `el`'s document and
+    // then `el` in scope (§8.1.8.1 "getting the current value of the event
+    // handler", the scope chain). `this` is whatever the handler is called
+    // on: the element, or the Window for a body handler the Window owns.
+    //
+    // Known deviation (L2): for a handler the Window owns (`<body onload>`,
+    // `<frameset onresize>`), the spec's scope chain is the global only: its
+    // "element" is null, so neither the document nor the body is put in
+    // scope (§8.1.8.1 steps 10 and 12 apply to an element's handler). This
+    // compiles every attribute the same way, with the document and the
+    // element in scope, so `<body onload="getElementById(...)">` resolves
+    // where the spec would throw. Kept deliberately: nothing on the web
+    // depends on the throw, and one compile path is one place to get right.
+    function compileHandler(src, el) {
+        try {
+            return new Function('__rk_doc', '__rk_el',
+                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
+            )(el.ownerDocument || {}, el);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+            return null;
+        }
+    }
+    function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return h;
+        if (src === null) return null;
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
-        if (!c || c.src !== src) {
-            c = all[type] = { src: src, fn: null };
-            try {
-                c.fn = new Function('event',
-                    'with (this.ownerDocument || {}) { with (this) {\n' + src + '\n} }');
-            } catch (e) {
-                try { __rk.reportError(e); } catch (_) {}
-            }
-        }
+        if (!c || c.src !== src) c = all[type] = { src: src, fn: compileHandler(src, t) };
         return c.fn;
     }
+    // HTML §8.1.8.1 "determine the target of an event handler", for a
+    // Window type (WINDOW_HANDLER_TYPES) on an element:
+    //   1. not a body or frameset element: the element itself;
+    //   3. a body/frameset whose node document is not the active document
+    //      (a DOMParser body: no Window): null, so the getter answers null
+    //      and the setter does nothing;
+    //   4. else the Window: the body's or frameset's node document is the
+    //      global document, attached to it or not (`createElement('body')`
+    //      forwards too; the spec never asks whether it is THE body element).
+    function isBodyOrFrameset(t) {
+        if (t.nodeType !== 1) return false;
+        var n = t.localName;
+        return n === 'body' || n === 'frameset';
+    }
+    function windowHandlerTarget(t) {
+        return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
+    function handlerOf(t, type) {
+        if (PLAIN.has(t)) return undefined;
+        // A body or frameset has no handler of its own for a Window type,
+        // assigned or inline: the target is the Window (its handler runs
+        // when the event reaches the Window) or nothing.
+        if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
+        // A type with no accessor (a custom event) is still a data property.
+        if (!HANDLER_TYPES[type]) {
+            var h = t['on' + type];
+            if (h !== undefined) return h;
+        }
+        return inlineHandler(t, type);
+    }
+    function attributeChanged(t, name) {
+        // The native setAttr/removeAttr lowercases the name for HTML elements
+        // (`OnClick` is the `onclick` attribute), so compare the lowercased
+        // name here too. Lowercasing unconditionally is fine: SVG's on<type>
+        // attributes are lowercase already, so a case-sensitive SVG name
+        // either is lowercase or names no handler attribute at all.
+        name = String(name).toLowerCase();
+        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+            var type = name.slice(2), a = ASSIGNED.get(t);
+            if (a) delete a[type];
+            // The body's attribute for a Window type is the Window's
+            // handler: it replaces what was assigned to `window.on<type>`.
+            // Only the body element's attribute (L1): the Window's getter
+            // reads `doc.body`'s attribute lazily, so a detached body's
+            // attribute, which the spec would also compile into the
+            // Window's handler, is left alone rather than dropping the
+            // assigned handler for nothing.
+            if (WINDOW_HANDLER_TYPES[type] && t === doc.body && windowHandlerTarget(t) === g) {
+                delete WINDOW_ASSIGNED[type];
+            }
+        }
+    }
+    // HTML §8.1.8.2 GlobalEventHandlers: `on<type>` is an accessor on
+    // HTMLElement.prototype (and SVGElement.prototype), not a data property
+    // of each element. The getter answers the assigned value, else the
+    // compiled content attribute, else null; the setter keeps a function or
+    // object and makes anything else null. Script that wraps the native
+    // accessor needs the descriptor to exist: a script-retry shim takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own, and
+    // without it every later `onerror` read and write on any element threw,
+    // which stopped Next's bootstrap and webpack's chunk loader at the first
+    // `<script src>` they inserted.
+    var HANDLER_TYPES = Object.create(null);
+    ('abort animationcancel animationend animationiteration animationstart auxclick beforeinput ' +
+     'beforematch beforetoggle blur cancel canplay canplaythrough change click close contextlost ' +
+     'contextmenu contextrestored copy cuechange cut dblclick drag dragend dragenter dragleave ' +
+     'dragover dragstart drop durationchange emptied ended error focus formdata gotpointercapture ' +
+     'input invalid keydown keypress keyup load loadeddata loadedmetadata loadstart ' +
+     'lostpointercapture mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup ' +
+     'paste pause play playing pointercancel pointerdown pointerenter pointerleave pointermove ' +
+     'pointerout pointerover pointerrawupdate pointerup progress ratechange reset resize scroll ' +
+     'scrollend securitypolicyviolation seeked seeking select selectionchange selectstart ' +
+     'slotchange stalled submit suspend timeupdate toggle touchcancel touchend touchmove ' +
+     'touchstart transitioncancel transitionend transitionrun transitionstart volumechange ' +
+     'waiting wheel').split(' ').forEach(function (type) {
+        HANDLER_TYPES[type] = true;
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () { return elementHandlerGet(this, type); },
+            set: function (v) { elementHandlerSet(this, type, v); }
+        };
+        Object.defineProperty(HTMLElement.prototype, 'on' + type, desc);
+        Object.defineProperty(g.SVGElement.prototype, 'on' + type, desc);
+    });
+    function elementHandlerGet(t, type) {
+        var a = ASSIGNED.get(t);
+        if (a && type in a) return a[type];
+        return t[SLOT] && t.nodeType === 1 ? inlineHandler(t, type) : null;
+    }
+    function handlerValue(v) {
+        return typeof v === 'function' || (typeof v === 'object' && v !== null) ? v : null;
+    }
+    function elementHandlerSet(t, type, v) {
+        var a = ASSIGNED.get(t);
+        if (!a) { a = Object.create(null); ASSIGNED.set(t, a); }
+        a[type] = handlerValue(v);
+    }
+    // HTML §8.1.8.2.1, event handlers on body and frameset elements: the
+    // WindowEventHandlers set (onhashchange, onpopstate, onstorage, ...) and
+    // the Window-reflecting set (onload, onresize, onscroll, onerror,
+    // onfocus, onblur) on the body element are the Window's handlers. The
+    // IDL attributes on HTMLBodyElement.prototype (and the frameset's)
+    // forward to `window.on<type>` for any body or frameset of the global
+    // document (windowHandlerTarget), and `<body onload="...">` is the
+    // Window's `load` handler: compiled from the attribute with the
+    // document and the body in scope, the Window as `this`, and run by the
+    // Window's `load` dispatch (which is where `load` fires; older pages
+    // put their start-up there). A frameset document's body element is its
+    // frameset (§3.1.3), so `<frameset onload>` is the same. A body in
+    // another document has no Window to forward to: null, no assignment.
+    //
+    // `window.on<type>` for these types is an accessor on the Window over
+    // one slot: the value assigned (through the Window or the body), else
+    // the body element's compiled content attribute, else null. Setting or
+    // removing the body element's attribute drops the assigned value, as
+    // on elements. The Window's dispatch reads `window['on' + type]`, so it
+    // sees the slot. The other on<type> on the Window stay data properties.
+    var WINDOW_HANDLER_TYPES = Object.create(null), WINDOW_ASSIGNED = Object.create(null);
+    ('afterprint beforeprint beforeunload blur error focus hashchange languagechange load message ' +
+     'messageerror offline online pagehide pagereveal pageshow pageswap popstate rejectionhandled ' +
+     'resize scroll storage unhandledrejection unload').split(' ').forEach(function (type) {
+        WINDOW_HANDLER_TYPES[type] = true;
+        var name = 'on' + type;
+        Object.defineProperty(g, name, {
+            configurable: true, enumerable: true,
+            get: function () {
+                if (type in WINDOW_ASSIGNED) return WINDOW_ASSIGNED[type];
+                var body = doc.body;
+                return body ? inlineHandler(body, type) : null;
+            },
+            set: function (v) { WINDOW_ASSIGNED[type] = handlerValue(v); }
+        });
+        // §8.1.8.2 getter step 2 / setter step 2: a null target answers
+        // null and takes no assignment.
+        var desc = {
+            configurable: true, enumerable: true,
+            get: function () {
+                var target = windowHandlerTarget(this);
+                return target === g ? g[name] : target === null ? null : elementHandlerGet(this, type);
+            },
+            set: function (v) {
+                var target = windowHandlerTarget(this);
+                if (target === g) g[name] = v; else if (target !== null) elementHandlerSet(this, type, v);
+            }
+        };
+        Object.defineProperty(g.HTMLBodyElement.prototype, name, desc);
+        Object.defineProperty(g.HTMLFrameSetElement.prototype, name, desc);
+    });
     var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
     function invoke(t, event, phase, capture) {
         event.currentTarget = t;
@@ -3414,6 +4088,13 @@ const WRAPPERS_JS: &str = r#"
         // `document.currentScript` while an inserted inline script runs;
         // answers what it was.
         current: function (el) { var was = currentScript; currentScript = el; return was; }
+    };
+    // web_cssom.js publishes constructed-sheet text through this. The
+    // wrapper's slot is private to this closure.
+    g.__rkSetAdoptedStyles = function (node, json) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setAdopted(s.gen, s.id, String(json));
     };
 
     // For node_apis.js, which runs next and deletes it.

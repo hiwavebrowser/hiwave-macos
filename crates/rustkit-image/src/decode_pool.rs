@@ -185,6 +185,14 @@ impl DecodePool {
     }
 }
 
+/// Runs `decode` and turns a panic into [`ImageError::DecodeError`] so a
+/// hostile codec cannot unwind the pool thread or the page thread's inline
+/// path. Both call sites go through [`decode_pixels_caught`].
+pub(crate) fn catch_decode_panic<T>(decode: impl FnOnce() -> ImageResult<T>) -> ImageResult<T> {
+    catch_unwind(AssertUnwindSafe(decode))
+        .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())))
+}
+
 /// [`crate::decode_pixels`], with a codec that panics on hostile bytes
 /// failing this image instead of unwinding the thread. Both the pool and
 /// the page thread's inline decode (queue full) use it, so the two paths
@@ -193,10 +201,7 @@ pub(crate) fn decode_pixels_caught(
     bytes: &[u8],
     max_dimensions: (u32, u32),
 ) -> ImageResult<DecodedPixels> {
-    catch_unwind(AssertUnwindSafe(|| {
-        crate::decode_pixels(bytes, max_dimensions)
-    }))
-    .unwrap_or_else(|_| Err(ImageError::DecodeError("decoder panicked".into())))
+    catch_decode_panic(|| crate::decode_pixels(bytes, max_dimensions))
 }
 
 fn decode_thread(receiver: &Mutex<Receiver<DecodeJob>>, navs: &NavTable, counters: &Counters) {
@@ -241,6 +246,27 @@ mod tests {
 
     fn url(i: usize) -> Url {
         Url::parse(&format!("http://example.test/{i}.jpg")).unwrap()
+    }
+
+    #[test]
+    fn a_panicking_decode_becomes_a_decode_error() {
+        // Without the catch, a codec panic kills the pool thread (or the
+        // page thread on the inline overflow path). Both call sites share
+        // catch_decode_panic so one pin covers the contract.
+        let err = catch_decode_panic(|| -> ImageResult<()> {
+            panic!("hostile codec");
+        })
+        .expect_err("a panic must become DecodeError");
+        match err {
+            ImageError::DecodeError(msg) => {
+                assert!(msg.contains("panicked"), "{msg}");
+            }
+            other => panic!("expected DecodeError, got {other:?}"),
+        }
+        assert_eq!(
+            catch_decode_panic(|| Ok::<_, ImageError>(7)).expect("Ok passes through"),
+            7
+        );
     }
 
     #[test]

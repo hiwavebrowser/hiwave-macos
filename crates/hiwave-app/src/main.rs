@@ -55,7 +55,7 @@ mod window_stall;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
-mod shield_adapter;
+use hiwave_shield_intercept as shield_adapter;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 mod webview_rustkit_chrome;
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
@@ -2500,7 +2500,7 @@ fn main() {
                             if wheel_burst_started() {
                                 info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
                             }
-                            if view.scroll_by(scroll.dx as f32, scroll.dy as f32) {
+                            if view.scroll_at(scroll.x as f32, scroll.y as f32, scroll.dx as f32, scroll.dy as f32) {
                                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
                             }
                             }
@@ -2588,10 +2588,9 @@ fn main() {
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
                         // The page's console lines, and a new tree after it
-                        // changed; an open panel asks on its own clock.
-                        if let Some(at) = devtools.pump(view, &inspector_for_events) {
-                            live_wake.set(Some(live_wake.get().map_or(at, |wake| wake.min(at))));
-                        }
+                        // changed. No clock: the devtools thread wakes the
+                        // window when the open panel's view records (T6b).
+                        devtools.pump(view, &inspector_for_events);
                         view.render();
                     }
                 }
@@ -4731,9 +4730,7 @@ fn main() {
                     }
                     UserEvent::InspectorConsoleClear => {
                         // Clear console in inspector panel
-                        let _ = inspector_for_events.evaluate_script(
-                            "if (window.hiwaveInspector) { window.hiwaveInspector.clearConsole(); }"
-                        );
+                        devtools.clear_console(&inspector_for_events);
                     }
                     UserEvent::InspectorConsoleEval { code } => {
                         if with_rustkit_content!(content_for_events, view => devtools.eval(view, &code)) {

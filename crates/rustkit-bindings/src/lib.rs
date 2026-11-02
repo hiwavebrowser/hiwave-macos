@@ -83,6 +83,8 @@ mod meta_refresh_noscript_tests;
 #[cfg(test)]
 mod geometry_tests;
 #[cfg(test)]
+mod forced_layout_budget_tests;
+#[cfg(test)]
 mod range_tests;
 #[cfg(test)]
 mod scroll_tests;
@@ -90,6 +92,10 @@ mod scroll_tests;
 mod observers_tests;
 #[cfg(test)]
 mod shadow_tests;
+#[cfg(test)]
+mod raw_text_inner_html_tests;
+#[cfg(test)]
+mod svg_name_case_tests;
 #[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
@@ -105,14 +111,20 @@ mod document_members_tests;
 #[cfg(test)]
 mod web_intl_tests;
 #[cfg(test)]
+mod web_match_media_tests;
+#[cfg(test)]
 mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 mod web_crypto;
+mod web_match_media;
 mod web_scroll;
 mod web_url;
 
-pub use dom::{BoxGeometry, GeometrySource, HitTester, SelectorMatchFn};
+pub use dom::{
+    BoxGeometry, ControlWrites, ElementScrolls, ForcedGeometry, ForcedLayout, GeometrySource, HitTester,
+    SelectorMatchFn, SharedElementScrolls,
+};
 pub mod events;
 
 pub use events::{
@@ -167,6 +179,9 @@ pub struct InsertedScript {
     /// Where the page's script that inserted it was (its innermost frame
     /// in a named script), when the runtime could place it.
     pub inserted_by: Option<rustkit_js::ScriptPosition>,
+    /// When the page inserted it. The engine takes the queue later, at its
+    /// next drain; the gap is the script's `queued_ms` in the Inspector.
+    pub inserted_at: std::time::Instant,
 }
 
 impl ListenerId {
@@ -710,6 +725,44 @@ pub enum DomDirty {
     Style,
 }
 
+/// The pending `DomDirty` bucket, and whether script has written to the
+/// DOM since the engine last published a layout. The bucket is the
+/// engine's to take when script settles; the second is what a geometry
+/// read inside the task asks, to lay the page out first (forced layout).
+#[derive(Debug, Default)]
+pub(crate) struct DirtyMark {
+    bucket: Cell<DomDirty>,
+    since_layout: Cell<bool>,
+}
+
+impl DirtyMark {
+    /// A script write that invalidated `bucket`.
+    pub(crate) fn mark(&self, bucket: DomDirty) {
+        if bucket != DomDirty::Clean {
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.since_layout.set(true);
+        }
+    }
+
+    pub(crate) fn get(&self) -> DomDirty {
+        self.bucket.get()
+    }
+
+    fn take(&self) -> DomDirty {
+        self.bucket.replace(DomDirty::Clean)
+    }
+
+    /// Whether the published layout predates a script write.
+    pub(crate) fn written_since_layout(&self) -> bool {
+        self.since_layout.get()
+    }
+
+    /// A layout of the DOM as it is now was published.
+    pub(crate) fn laid_out(&self) {
+        self.since_layout.set(false);
+    }
+}
+
 /// Which kind of script DOM write dirtied the page. Diagnostics only: the
 /// engine logs it as the cause of the relayout that follows, and nothing
 /// decides on it.
@@ -855,7 +908,7 @@ pub struct DomBindings {
     _ipc_queue: RefCell<Vec<IpcMessage>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
-    dirty: Rc<Cell<DomDirty>>,
+    dirty: Rc<DirtyMark>,
     /// What the writes behind `dirty` were (see `ScriptMutations`).
     mutations: Rc<RefCell<ScriptMutations>>,
     /// The same writes per node (see `MutationLog`).
@@ -879,13 +932,17 @@ impl DomBindings {
         // Inject global objects
         Self::inject_globals(&mut runtime)?;
         let dom_host = dom::SharedDomHost::default();
-        let dirty = Rc::new(Cell::new(DomDirty::Clean));
+        let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
         let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
         dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // window.matchMedia over the engine's @media evaluator, MediaQueryList with
+        // change events after a resize (web_match_media.js); needs MediaQueryList and
+        // MediaQueryListEvent from web_interfaces.js.
+        web_match_media::install(&mut runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -909,7 +966,8 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_history.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
-        web_scroll::install(&mut runtime, &scroll)?;
+        dom_host.borrow_mut().scroll_state = scroll.clone();
+        web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -937,13 +995,15 @@ impl DomBindings {
     /// Record that script invalidated `bucket`. Marks combine: the pending
     /// bucket only grows until `take_dirty`.
     pub fn mark_dirty(&self, bucket: DomDirty) {
-        self.dirty.set(self.dirty.get().max(bucket));
+        // The embedder's marks are for its own flush, not script writes:
+        // they do not make a geometry read lay the page out.
+        self.dirty.bucket.set(self.dirty.get().max(bucket));
     }
 
     /// The invalidation pending since the last call, which is reset to
     /// `Clean`. The engine calls this once when script settles.
     pub fn take_dirty(&self) -> DomDirty {
-        self.dirty.replace(DomDirty::Clean)
+        self.dirty.take()
     }
 
     /// The writes that dirtied the page since the last call (what, not how
@@ -1119,9 +1179,7 @@ impl DomBindings {
                 requestAnimationFrame: function(callback) { return 0; },
                 cancelAnimationFrame: function(id) {},
                 getComputedStyle: function(element) { return {}; },
-                matchMedia: function(query) {
-                    return { matches: false, media: query, addEventListener: function() {} };
-                },
+                // matchMedia is web_match_media.rs's, over the engine's @media evaluator.
                 alert: function(msg) { console.log('[alert]', msg); },
                 confirm: function(msg) { console.log('[confirm]', msg); return false; },
                 prompt: function(msg, def) { console.log('[prompt]', msg); return def || null; }
@@ -1529,6 +1587,7 @@ impl DomBindings {
     /// `clientWidth/Height` and `scrollWidth/Height`. The engine calls this
     /// after a layout; script reads answer from the last one published.
     pub fn set_geometry(&self, geometry: std::collections::HashMap<usize, BoxGeometry>) {
+        self.dirty.laid_out();
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
         host.set_hit_tester(None);
@@ -1546,10 +1605,32 @@ impl DomBindings {
     /// script read of geometry or computed style after this call, once. The
     /// maps of the previous layout are dropped here, so no read sees them.
     pub fn set_geometry_source(&self, source: GeometrySource) {
+        // A layout is built from the live DOM, so it has every write so far.
+        self.dirty.laid_out();
         let mut host = self.dom_host.borrow_mut();
         host.geometry.clear();
         host.computed.clear();
         host.geometry_source = Some(source);
+        host.renew_forced_budget();
+    }
+
+    /// Keep element scroll offsets in the view's table.
+    pub fn share_element_scrolls(&self, scrolls: SharedElementScrolls) {
+        self.dom_host.borrow_mut().element_scrolls = scrolls;
+    }
+
+    /// How a read of geometry after a script write in the same task lays
+    /// the page out (forced layout). The engine installs one with each
+    /// layout it publishes; a new document drops it. Without one, such a
+    /// read answers from the last layout.
+    pub fn set_forced_layout(&self, forced: Option<ForcedLayout>) {
+        self.dom_host.borrow_mut().forced_layout = forced;
+    }
+
+    /// Forced layouts since the last call, which resets the count and the
+    /// per-task budget (the engine calls this when a script task settles).
+    pub fn take_forced_layouts(&self) -> u64 {
+        self.dom_host.borrow_mut().take_forced_layouts()
     }
 
     /// How many times a source from `set_geometry_source` was built.
@@ -1591,6 +1672,13 @@ impl DomBindings {
         let _ = self.evaluate("typeof __rkUserScrolled === 'function' && __rkUserScrolled()");
     }
 
+    /// Tell the page the user scrolled an element: `scroll` fires at it.
+    pub fn notify_element_scrolled(&self, node: usize) {
+        let _ = self.evaluate(&format!(
+            "typeof __rkUserScrolledElement === 'function' && __rkUserScrolledElement({node})"
+        ));
+    }
+
     /// Publish the computed style of each laid-out element (raw NodeId to
     /// `name\tvalue` lines joined by newlines), for `getComputedStyle`.
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
@@ -1604,7 +1692,8 @@ impl DomBindings {
         // Update state. Marks against the previous document are moot: the
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
-        self.dirty.set(DomDirty::Clean);
+        self.dirty.take();
+        self.dirty.laid_out();
         self.mutations.take();
         self.mutation_log.take();
 
@@ -1642,7 +1731,7 @@ impl DomBindings {
             window.location.port = {:?};
             window.location.pathname = {:?};
             window.location.search = {:?};
-            window.location.hash = {:?};
+            if (window.__rustkit_location_hash_sync) window.__rustkit_location_hash_sync({:?});
             window.location.origin = {:?};
             document.URL = {:?};
             if (window.__rustkit_history_reset) window.__rustkit_history_reset();
@@ -1703,6 +1792,24 @@ impl DomBindings {
     /// (see [`JsRuntime::set_console_handler`]).
     pub fn set_console_handler(&self, handler: rustkit_js::ConsoleHandler) {
         self.runtime.borrow_mut().set_console_handler(handler);
+    }
+
+    /// Also hand each console call to `handler` as types and lengths only
+    /// (see [`JsRuntime::set_console_shape_handler`]).
+    pub fn set_console_shape_handler(&self, handler: rustkit_js::ConsoleHandler) {
+        self.runtime.borrow_mut().set_console_shape_handler(handler);
+    }
+
+    /// Hand console calls over as they are made while `live` says so (see
+    /// [`JsRuntime::set_console_live`]).
+    pub fn set_console_live(&self, live: Option<rustkit_js::ConsoleLive>) {
+        self.runtime.borrow_mut().set_console_live(live);
+    }
+
+    /// Keep the number of console calls held for the next flush in
+    /// `counter` (see [`JsRuntime::set_console_held_counter`]).
+    pub fn set_console_held_counter(&self, counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>) {
+        self.runtime.borrow_mut().set_console_held_counter(counter);
     }
 
     /// Console arguments reach the handler as type and length only (see
@@ -1997,6 +2104,25 @@ impl DomBindings {
             target, event_type
         ))?;
         Ok(())
+    }
+
+    /// Report media query changes: every `MediaQueryList` with a `change`
+    /// listener whose answer flipped since it was last reported hears
+    /// `change` (the "evaluate media queries and report changes" step of
+    /// update the rendering, HTML §8.1.7.3). Run after
+    /// [`Self::set_dimensions`] and the `resize` event, which is the order
+    /// a browser keeps. Listener exceptions are queued, not returned; see
+    /// [`Self::take_reported_errors`]. Returns how many lists in the
+    /// document's list of media query lists flipped (a list stays there
+    /// once it has listened, as in the spec, listeners or not).
+    pub fn fire_media_query_changes(&self) -> Result<u32, BindingError> {
+        let fired = self.runtime.borrow_mut().evaluate_script(
+            "typeof window.__rustkit_media_changes === 'function' ? window.__rustkit_media_changes() : 0",
+        )?;
+        Ok(match fired {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
     }
 
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
@@ -3464,6 +3590,176 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
     }
 
+    // DOM §4.2.3 for a Document parent: one element child, at most one
+    // doctype before it, no text. A page that removes `<html>` and appends a
+    // new one gets a document whose head and body are the new tree's (yahoo
+    // threw at `document.head.appendChild` after a root swap).
+    #[test]
+    fn a_document_takes_a_new_root_once_the_old_one_is_removed() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var h = document.createElement('html'), hd = document.createElement('head'), \
+                     bd = document.createElement('body'); \
+                 h.appendChild(hd); h.appendChild(bd); \
+                 document.removeChild(document.documentElement); \
+                 var none = [document.documentElement, document.head, document.body].join(); \
+                 document.appendChild(h); \
+                 var s = document.createElement('script'); document.head.appendChild(s); \
+                 [none, document.documentElement === h, document.head === hd, document.body === bd, \
+                  s.parentNode === hd, document.lastChild === h, document.firstChild.nodeType].join()"
+            ),
+            ",,,true,true,true,true,true,10"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_the_document_root() {
+        let b = bound(PAGE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var old = document.documentElement, h = document.createElement('html'); \
+                 h.appendChild(document.createElement('body')); \
+                 var r = document.replaceChild(h, old); \
+                 [r === old, old.parentNode, document.documentElement === h, \
+                  document.body === h.firstChild, document.childNodes.length].join()"
+            ),
+            "true,,true,true,2"
+        );
+    }
+
+    #[test]
+    fn a_document_refuses_a_second_root_text_and_a_root_before_its_doctype() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name; }} }})()"
+                ),
+            )
+        };
+        // With a root: no second element, also not by replacing the doctype.
+        assert_eq!(threw("document.appendChild(document.createElement('html'))"), "HierarchyRequestError");
+        assert_eq!(
+            threw("document.replaceChild(document.createElement('html'), document.firstChild)"),
+            "HierarchyRequestError"
+        );
+        assert_eq!(threw("document.appendChild(document.createTextNode('x'))"), "HierarchyRequestError");
+        // A comment is fine anywhere in a document.
+        assert_eq!(threw("document.appendChild(document.createComment('c'))"), "no throw");
+        // replaceWith of a node that is one of its own arguments: it leaves
+        // first, so nothing is replaced and the root still counts (#804 R1).
+        assert_eq!(
+            threw(
+                "var c = document.createComment('r'); document.insertBefore(c, document.documentElement); \
+                 c.replaceWith(c, document.createElement('html'))"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "String(Array.prototype.filter.call(document.childNodes, function (n) { return n.nodeType === 1; }).length)"
+            ),
+            "1"
+        );
+        // Without a root: no element before the doctype, no two elements
+        // from one fragment.
+        assert_eq!(
+            threw(
+                "document.removeChild(document.documentElement); \
+                 document.insertBefore(document.createElement('html'), document.firstChild)"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            threw(
+                "var f = document.createDocumentFragment(); \
+                 f.appendChild(document.createElement('html')); f.appendChild(document.createElement('html')); \
+                 document.appendChild(f)"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(&b, "[document.documentElement, document.childNodes.length].join()"),
+            ",3"
+        );
+    }
+
+    // DOM §4.2.3 DocumentType half: at most one doctype, and only before the
+    // element. The real `document.doctype` is the only path that reaches
+    // `document_child_check`'s DocumentType arm — `createDocumentType` is a
+    // fake JS object and never exercises it (#804).
+    #[test]
+    fn a_document_refuses_a_doctype_after_its_root_and_takes_it_back_before() {
+        let b = bound(PAGE);
+        let threw = |script: &str| {
+            eval_string(
+                &b,
+                &format!(
+                    "(function () {{ try {{ {script}; return 'no throw'; }} \
+                          catch (e) {{ return e.name; }} }})()"
+                ),
+            )
+        };
+        // With a root: append puts the doctype after the element. DocumentType
+        // has no ChildNode.remove (only Element/CharacterData), so use
+        // removeChild. replaceChild onto a trailing comment is the same
+        // refusal; the comment is cleaned up so later asserts stay local.
+        assert_eq!(threw("document.appendChild(document.doctype)"), "HierarchyRequestError");
+        assert_eq!(
+            threw(
+                "var c = document.createComment('x'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        // Remove, then re-insert before the root: success, and the doctype is
+        // once again the first child.
+        assert_eq!(
+            eval_string(
+                &b,
+                "var dt = document.doctype, root = document.documentElement; \
+                 document.removeChild(dt); \
+                 var gone = [document.doctype, document.firstChild === root].join(); \
+                 document.insertBefore(dt, root); \
+                 [gone, document.doctype === dt, document.firstChild === dt, \
+                  document.lastChild === root, document.childNodes.length].join()"
+            ),
+            ",true,true,true,true,2"
+        );
+        // Without a root: append of the lone doctype succeeds once; a second
+        // doctype (via replaceChild onto a comment) is refused.
+        assert_eq!(
+            threw(
+                "var dt = document.doctype; document.removeChild(document.documentElement); \
+                 document.removeChild(dt); document.appendChild(dt)"
+            ),
+            "no throw"
+        );
+        assert_eq!(
+            threw(
+                "var c = document.createComment('d'); document.appendChild(c); \
+                 try { document.replaceChild(document.doctype, c); } \
+                 finally { if (c.parentNode) document.removeChild(c); }"
+            ),
+            "HierarchyRequestError"
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "[document.doctype !== null, document.documentElement, \
+                  document.firstChild === document.doctype, document.childNodes.length].join()"
+            ),
+            "true,,true,1"
+        );
+    }
+
     // DOM §4.2.3 validity: the DOMException named, and the tree untouched.
     #[test]
     fn invalid_tree_writes_throw_and_change_nothing() {
@@ -3892,6 +4188,302 @@ mod tests {
         let errors = b.take_reported_errors();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].starts_with("SyntaxError"), "{errors:?}");
+    }
+
+    // HTML §8.1.8.2 (GlobalEventHandlers): `on<type>` is an accessor on
+    // HTMLElement.prototype, not a data property of each element. The getter
+    // answers the assigned value, else the compiled content attribute, else
+    // null; a non-object assigned is null; setting the content attribute
+    // again makes the attribute the handler.
+    #[test]
+    fn on_handlers_are_accessors_on_the_element_prototype() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 var has = function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); }; \
+                 var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'); \
+                 log.push(typeof o, o && typeof o.get, o && typeof o.set, o && o.enumerable, o && o.configurable); \
+                 log.push(has(HTMLElement.prototype, 'onload'), has(HTMLElement.prototype, 'onclick'), \
+                          has(SVGElement.prototype, 'onclick'), has(Element.prototype, 'onclick')); \
+                 var s = document.createElement('script'); \
+                 log.push(String(s.onerror), String(s.onload)); \
+                 function h() {} \
+                 s.onerror = h; log.push(s.onerror === h, has(s, 'onerror')); \
+                 s.onerror = 'nope'; log.push(String(s.onerror)); \
+                 log.push(typeof i.onclick, i.onclick === i.onclick); \
+                 i.onclick = null; log.push(String(i.onclick)); \
+                 i.setAttribute('onclick', 'window.seen = 3'); i.click(); log.push(window.seen); \
+                 log.join(',')"
+            ),
+            "object,function,function,true,true,true,true,true,false,null,null,true,false,null,function,true,null,3"
+        );
+    }
+
+    // R1 L1: the native setAttr lowercases the name for HTML elements, so a
+    // mixed-case `OnClick` is the `onclick` content attribute and must drop
+    // the assigned handler just as the lowercase spelling does.
+    #[test]
+    fn a_mixed_case_on_attribute_drops_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var i = document.getElementById('i'), log = []; \
+                 window.__hit = 0; window.__f = 0; \
+                 function f() { window.__f++; } \
+                 i.onclick = f; \
+                 i.setAttribute('OnClick', 'window.__hit=(window.__hit||0)+1'); \
+                 i.click(); \
+                 log.push(window.__f, window.__hit, i.onclick === f, typeof i.onclick, \
+                          i.getAttribute('onclick') === 'window.__hit=(window.__hit||0)+1'); \
+                 log.join(',')"
+            ),
+            "0,1,false,function,true"
+        );
+    }
+
+    // R1 B1: removing an absent attribute runs no attribute-change steps
+    // (DOM "remove an attribute by name" on a missing attribute is a no-op),
+    // so `removeAttribute('onclick')` with no such attribute keeps the
+    // IDL-assigned handler, as Chrome does. Removing one that IS present
+    // still deactivates it.
+    #[test]
+    fn removing_an_absent_on_attribute_keeps_the_assigned_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = document.getElementById('o'), log = []; \
+                 var b = document.createElement('button'); o.appendChild(b); \
+                 window.__f = 0; function f() { window.__f++; } \
+                 b.onclick = f; \
+                 b.removeAttribute('onclick'); log.push(b.onclick === f); \
+                 b.removeAttribute('OnClick'); log.push(b.onclick === f); \
+                 b.removeAttributeNS(null, 'onclick'); log.push(b.onclick === f); \
+                 b.click(); log.push(window.__f); \
+                 b.setAttribute('onclick', ''); b.removeAttribute('onclick'); \
+                 log.push(String(b.onclick)); b.click(); log.push(window.__f); \
+                 log.join(',')"
+            ),
+            "true,true,true,1,null,1"
+        );
+    }
+
+    // A page's script-retry shim wraps the native accessor: it takes
+    // `Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror')` and
+    // calls `o.get.call(this)` / `o.set.call(this, fn)` from its own. The
+    // handler it stores through the original setter is the one dispatched.
+    #[test]
+    fn a_wrapped_on_handler_accessor_still_dispatches() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var o = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'onerror'), log = []; \
+                 Object.defineProperty(HTMLElement.prototype, 'onerror', { configurable: true, enumerable: true, \
+                     get: function () { var e = o.get.call(this); return (e && e.__origin) || e; }, \
+                     set: function (t) { \
+                         var i = this; \
+                         if (typeof t !== 'function') return o.set.call(this, t); \
+                         var s = function () { log.push('wrapped'); return t.apply(i, arguments); }; \
+                         s.__origin = t; o.set.call(this, s); \
+                     } }); \
+                 var s = document.createElement('script'); \
+                 s.src = 'https://example.invalid/x.js'; \
+                 s.onload = function () {}; \
+                 var n = function (e) { log.push('error:' + (this === s) + ':' + e.type); }; \
+                 s.onerror = n; \
+                 log.push(s.onerror === n); \
+                 document.body.appendChild(s); \
+                 s.dispatchEvent(new Event('error')); \
+                 s.onerror = null; log.push(String(s.onerror)); \
+                 s.dispatchEvent(new Event('error')); \
+                 log.join(',')"
+            ),
+            "true,wrapped,error:true:error,null"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // HTML §8.1.8.2.1 (event handlers on body and frameset elements): the
+    // WindowEventHandlers set and the Window-reflecting set (onload,
+    // onresize, onscroll, onerror, onfocus, onblur) on the body element are
+    // the Window's handlers. `<body onload>` compiles into the Window's
+    // `load` handler, with the document and the body in scope and the Window
+    // as `this`; the Window's `load` dispatch runs it.
+    const BODY_ONLOAD: &str = "<html><body id='b' onload=\"window.__l = [this === window, id, typeof getElementById].join(':')\">\
+         <a id='i'>x</a></body></html>";
+
+    #[test]
+    fn a_body_onload_attribute_is_the_windows_load_handler() {
+        let b = bound(BODY_ONLOAD);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = []; \
+                 log.push(typeof window.onload, document.body.onload === window.onload, String(window.__l)); \
+                 log.join(',')"
+            ),
+            "function,true,undefined"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "String(window.__l)"), "true:b:function");
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // `document.body.onload = f` is `window.onload = f`: both read the same
+    // slot, and `load` at the Window runs it with the Window as `this`.
+    #[test]
+    fn a_body_onload_assignment_is_the_windows_load_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = []; \
+                 function f() { window.__ran = (window.__ran || 0) + 1; window.__this = this === window; } \
+                 document.body.onload = f; \
+                 log.push(window.onload === f, document.body.onload === f); \
+                 var o = Object.getOwnPropertyDescriptor(HTMLBodyElement.prototype, 'onload'); \
+                 log.push(typeof o, o && typeof o.get, o && typeof o.set); \
+                 log.push(Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onhashchange'), \
+                          Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onclick')); \
+                 log.join(',')"
+            ),
+            "true,true,object,function,function,true,false"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "[window.__ran, window.__this].join(',')"), "1,true");
+        // The other direction too: a Window assignment shows on the body,
+        // and null turns the handler off on both.
+        assert_eq!(
+            eval_string(
+                &b,
+                "function h() {} window.onresize = h; var log = [document.body.onresize === h]; \
+                 document.body.onresize = null; log.push(String(window.onresize), String(document.body.onresize)); \
+                 window.onhashchange = h; log.push(document.body.onhashchange === h); \
+                 log.join(',')"
+            ),
+            "true,null,null,true"
+        );
+    }
+
+    // The body's on<type> content attribute for a Window type, set later,
+    // is the Window's handler (and replaces an assigned one, as on elements);
+    // removing it leaves no handler. A bubbling event dispatched at the body
+    // runs the handler once, at the Window, not again at the body.
+    #[test]
+    fn a_body_window_attribute_set_later_and_dispatch_once_at_window() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], body = document.body; \
+                 window.__n = 0; \
+                 function f() { log.push('assigned'); } \
+                 window.onscroll = f; \
+                 body.setAttribute('onscroll', 'window.__n++; window.__at = (this === window) + \":\" + (event.currentTarget === window)'); \
+                 log.push(window.onscroll === f, typeof window.onscroll, body.onscroll === window.onscroll); \
+                 body.dispatchEvent(new Event('scroll', { bubbles: true })); \
+                 log.push(window.__n, window.__at); \
+                 body.dispatchEvent(new Event('scroll')); \
+                 log.push(window.__n); \
+                 body.removeAttribute('onscroll'); \
+                 log.push(String(window.onscroll), String(body.onscroll)); \
+                 body.dispatchEvent(new Event('scroll', { bubbles: true })); \
+                 log.push(window.__n); \
+                 log.join(',')"
+            ),
+            "false,function,true,1,true:true,1,null,null,1"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // GlobalEventHandlers that are not in the Window-reflecting set stay the
+    // body element's own: `body.onclick` is not `window.onclick`.
+    #[test]
+    fn a_body_onclick_stays_the_elements_own_handler() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], body = document.body; \
+                 function f() { log.push('click:' + (this === body)); } \
+                 body.onclick = f; \
+                 log.push(body.onclick === f, String(window.onclick)); \
+                 body.dispatchEvent(new Event('click', { bubbles: true })); \
+                 body.setAttribute('onclick', 'window.__c = this === document.body'); \
+                 body.dispatchEvent(new Event('click', { bubbles: true })); \
+                 log.push(window.__c, String(window.onclick)); \
+                 log.join(',')"
+            ),
+            "true,undefined,click:true,true,undefined"
+        );
+    }
+
+    // HTML §8.1.8.1 "determine the target of an event handler": a body or
+    // frameset element's handler for a Window type is the Window's whenever
+    // the element's node document is the active document, attached or not
+    // (a `createElement('body')` forwards). One whose node document is
+    // another document (a DOMParser body: no Window) has no target: the
+    // getter answers null and assignment does nothing. A `load` dispatched
+    // at a body runs nothing at the body itself: the handler is the Window's.
+    #[test]
+    fn any_body_of_the_active_document_forwards_and_another_documents_body_has_no_target() {
+        let b = bound(INLINE);
+        assert_eq!(
+            eval_string(
+                &b,
+                "var log = [], d = document.createElement('body'); \
+                 function f() { window.__ran = (window.__ran || 0) + 1; } \
+                 d.onload = f; \
+                 log.push(d.onload === f, window.onload === f, document.body.onload === f); \
+                 d.onhashchange = f; log.push(window.onhashchange === f); \
+                 d.onload = null; log.push(String(window.onload), String(d.onload)); \
+                 window.onload = f; log.push(d.onload === f); \
+                 d.dispatchEvent(new Event('load')); log.push(String(window.__ran)); \
+                 var p = new DOMParser().parseFromString('<body onload=\"window.__p = 1\"></body>', 'text/html'); \
+                 log.push(p.body.ownerDocument === p, String(p.body.onload)); \
+                 p.body.onload = function () { window.__q = 1; }; \
+                 log.push(String(p.body.onload), window.onload === f); \
+                 p.body.dispatchEvent(new Event('load')); \
+                 log.join(',')"
+            ),
+            "true,true,true,true,null,null,true,undefined,true,null,null,true"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(
+            eval_string(&b, "[String(window.__ran), String(window.__p), String(window.__q)].join(',')"),
+            "1,undefined,undefined"
+        );
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
+    }
+
+    // HTML §3.1.3: a frameset document's body element is its frameset, so
+    // `<frameset onload>` is the Window's `load` handler as `<body onload>`
+    // is, and `frameset.onload` reads the Window's slot. `onpagereveal` and
+    // `onpageswap` are WindowEventHandlers members too (§8.1.8.2.1).
+    #[test]
+    fn a_frameset_onload_attribute_is_the_windows_load_handler() {
+        let b = bound(
+            "<html><head></head><frameset cols='*' onload=\"window.__f = 1\"><frame src='a'></frameset></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var fs = document.body, log = [fs && fs.localName]; \
+                 log.push(typeof window.onload, fs.onload === window.onload, String(window.__f)); \
+                 log.push(Object.prototype.hasOwnProperty.call(HTMLFrameSetElement.prototype, 'onpagereveal'), \
+                          Object.prototype.hasOwnProperty.call(HTMLBodyElement.prototype, 'onpageswap'), \
+                          Object.prototype.hasOwnProperty.call(window, 'onpagereveal')); \
+                 log.join(',')"
+            ),
+            "frameset,function,true,undefined,true,true,true"
+        );
+        b.fire_lifecycle_event(LifecycleTarget::Window, "load").unwrap();
+        assert_eq!(eval_string(&b, "String(window.__f)"), "1");
+        assert_eq!(b.take_reported_errors(), Vec::<String>::new());
     }
 
     const ROW: &str =

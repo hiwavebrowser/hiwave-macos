@@ -41,19 +41,13 @@ impl Rendered {
         let view = engine
             .create_headless_view(Bounds::new(0, 0, viewport.0, viewport.1))
             .expect("headless view");
+        // `load_html` runs the page's inline scripts, in order (T8).
         engine.load_html(view, html).expect("load_html");
-        // `load_html` runs no page script: run the inline ones now, in
-        // order. Every case keeps its scripts at the end of the body, so
-        // this is when Chromium's parser runs them too.
-        let mut rest = html;
-        while let Some(start) = rest.find("<script>") {
-            let body = &rest[start + "<script>".len()..];
-            let end = body.find("</script>").expect("</script>");
-            engine
-                .execute_script(view, &body[..end])
-                .expect("page script");
-            rest = &body[end..];
-        }
+        let log = engine.script_log(view).expect("view");
+        // What a callback threw is the page's (the acceptance page's does,
+        // as in Chromium) and is logged at the next lifecycle step.
+        let mut scripts = log.iter().filter(|r| r.source.starts_with("inline#"));
+        assert!(scripts.all(|r| r.outcome == ScriptOutcome::Ran), "page script: {log:?}");
         if let Some(script) = script {
             engine.execute_script(view, script).expect("case script");
         }

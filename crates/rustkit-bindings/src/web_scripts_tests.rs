@@ -99,3 +99,33 @@ fn clone_of_a_started_or_innerhtml_script_never_runs() {
         "once"
     );
 }
+
+/// Why the engine's inserted-script path has no unparseable branch (20:50
+/// (2) on #797's follow-ups): `web_scripts.js` resolves `src` with the URL
+/// it captured at install (the `url` crate's parser, `web_url.rs`) and
+/// fires `error` when that throws, so the queue only ever holds an `href`
+/// the engine's `Url::parse` takes. Not even a page's own `URL` reaches it.
+#[test]
+fn an_unparseable_inserted_src_never_reaches_the_engine_queue() {
+    let b = bound("<!DOCTYPE html><html><body></body></html>");
+    ev(
+        &b,
+        "var bad = document.createElement('script'); \
+         bad.src = 'https://cdn.example:99999/a.js?session=SECRET'; \
+         document.body.appendChild(bad); \
+         window.URL = function (u) { this.href = String(u); }; \
+         var forged = document.createElement('script'); \
+         forged.setAttribute('src', 'https://cdn.example:99999/b.js'); \
+         document.body.appendChild(forged); 'ok'",
+    );
+    assert!(b.take_inserted_scripts().is_empty(), "an unparseable src was queued");
+    ev(
+        &b,
+        "var good = document.createElement('script'); \
+         good.src = '/c.js'; document.body.appendChild(good); 'ok'",
+    );
+    let queued = b.take_inserted_scripts();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0].url, "https://site.test/c.js");
+    assert!(queued.iter().all(|q| Url::parse(&q.url).is_ok()));
+}

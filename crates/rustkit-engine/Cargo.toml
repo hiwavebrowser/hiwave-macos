@@ -31,7 +31,7 @@ rustkit-renderer = { path = "../rustkit-renderer" }
 wgpu = "24"
 
 # Async runtime
-tokio = { version = "1.42", features = ["sync", "time", "rt"] }
+tokio = { version = "1.42", features = ["sync", "time", "rt", "rt-multi-thread"] }
 futures = "0.3"
 
 # URL handling

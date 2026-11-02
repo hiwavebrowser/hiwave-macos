@@ -21,6 +21,7 @@ fn geom(x: f32, y: f32, w: f32, h: f32) -> BoxGeometry {
         scroll_width: w,
         scroll_height: h,
         position: 0,
+        ..Default::default()
     }
 }
 

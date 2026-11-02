@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!--
+  filter + clip-path on one element, and the #790 follow-up filter values the
+  cascade drops. 800x600, DPR 1, against Chrome 148.0.7778.216.
+  Row 1: a. invert(1) + inset(20px)          -> green/magenta inverted, clipped to 60x60
+         b. invert(1) + circle(40px) + translateX(10px)
+         c. hue-rotate(90deg) + inset(10px round 20px)
+  Row 2: d. url(#missing) grayscale(1): Chrome passes the missing url()
+         through and greys the box (rgb 51,51,51); the rest are values the
+         cascade drops, so the red box paints unfiltered:
+         e. grayscale (1)   f. grayscale(inf)
+         g. brightness(NaN)
+  RustKit vs Chrome (parity-capture vs headless CfT 148, exact RGB compare):
+    develop 4a657f08: 30344 px (e-g greyed: `name (`, inf, NaN accepted;
+                      plus 344 px antialiasing on b and c's curved edges)
+    this branch:        344 px, bbox [190,30,409,109], the curved clip
+                      edges of b and c only (as css_clip_path.html's 770).
+  Order today: filter > transform > clip, i.e. clip then filter; same
+  pixels as Chrome's filter-then-clip for colour matrices. Once blur or
+  drop-shadow paint, the clip must wrap the filter.
+-->
+<html><head><style>
+body { margin: 0; background: #fff; }
+div.b { position: absolute; width: 100px; height: 100px; background: #f0f; }
+div.b i { position: absolute; left: 25px; top: 25px; width: 50px; height: 50px; background: #0f0; }
+div.r { position: absolute; width: 100px; height: 100px; background: #e00; }
+</style></head><body>
+<div class="b" style="left:20px;top:20px;filter:invert(1);clip-path:inset(20px)"><i></i></div>
+<div class="b" style="left:170px;top:20px;filter:invert(1);clip-path:circle(40px);transform:translateX(10px)"><i></i></div>
+<div class="b" style="left:320px;top:20px;filter:hue-rotate(90deg);clip-path:inset(10px round 20px)"><i></i></div>
+<div class="r" style="left:20px;top:170px;filter:url(#missing) grayscale(1)"></div>
+<div class="r" style="left:170px;top:170px;filter:grayscale (1)"></div>
+<div class="r" style="left:320px;top:170px;filter:grayscale(inf)"></div>
+<div class="r" style="left:470px;top:170px;filter:brightness(NaN)"></div>
+</body></html>

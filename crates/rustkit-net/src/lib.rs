@@ -32,7 +32,7 @@ pub mod security;
 
 pub use cache::{cache_eligibility, CacheConfig, CacheKey, CacheStats, CachedResponse, Ineligible, MemoryCache, parse_cache_control};
 pub use download::{Download, DownloadEvent, DownloadId, DownloadManager, DownloadState};
-pub use intercept::{InterceptAction, InterceptHandler, RequestInterceptor};
+pub use intercept::{BlockReason, InterceptAction, InterceptHandler, RequestInterceptor};
 pub use security::{
     check_mixed_content, ContentSecurityPolicy, CookieAttributes, CorsChecker, CorsResult,
     CspDirective, CspSource, HashAlgorithm, MixedContentResult, MixedContentType, Origin,
@@ -54,8 +54,10 @@ pub enum NetError {
     #[error("Request cancelled")]
     Cancelled,
 
+    /// Refused by the interceptor (the shield), with its list and rule
+    /// when the handler gave them.
     #[error("Request blocked")]
-    Blocked,
+    Blocked(Option<BlockReason>),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -719,7 +721,11 @@ impl ResourceLoader {
                 InterceptAction::Allow => {}
                 InterceptAction::Block => {
                     warn!(url = %request.url, "Request blocked by interceptor");
-                    return Err(NetError::Blocked);
+                    return Err(NetError::Blocked(None));
+                }
+                InterceptAction::BlockedBy(reason) => {
+                    warn!(url = %request.url, list = %reason.list, "Request blocked by interceptor");
+                    return Err(NetError::Blocked(Some(reason)));
                 }
                 InterceptAction::Redirect(new_url) => {
                     debug!(url = %request.url, new_url = %new_url, "Request redirected");
@@ -1036,7 +1042,7 @@ impl FetchTrace {
         self.finished = true;
         let (status, disposition) = match result {
             Ok(response) => (response.status.as_u16().to_string(), "response"),
-            Err(NetError::Blocked) => ("-".to_string(), "blocked"),
+            Err(NetError::Blocked(_)) => ("-".to_string(), "blocked"),
             Err(NetError::Timeout(_)) => ("-".to_string(), "timeout"),
             Err(NetError::Cancelled) => ("-".to_string(), "cancelled"),
             Err(_) => ("-".to_string(), "error"),

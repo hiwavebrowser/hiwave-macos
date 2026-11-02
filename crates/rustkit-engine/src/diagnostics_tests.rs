@@ -755,13 +755,15 @@ fn a_removed_element_is_not_in_the_dom() {
 }
 
 #[test]
-fn a_box_inside_a_scroll_container_says_element_scroll_is_not_applied() {
-    let (engine, view) = engine_with(
+fn a_box_inside_a_scrolled_container_says_its_position_is_before_the_scroll() {
+    let (mut engine, view) = engine_with(
         "<html><body><div id=s style=\"overflow:auto;height:50px\"><div id=in style=\"height:200px\">x</div></div>\
          <div id=out style=\"height:10px\"></div></body></html>",
         800,
         600,
     );
+    assert!(!diag(&engine, view, "#in")["notes"].to_string().contains("scroll"), "not scrolled yet");
+    engine.execute_script(view, "document.getElementById('s').scrollTop = 20").expect("script");
     let notes = |sel: &str| diag(&engine, view, sel)["notes"].to_string();
     assert!(notes("#in").contains("scroll"), "{}", notes("#in"));
     assert!(!notes("#out").contains("scroll"), "{}", notes("#out"));

@@ -26,6 +26,8 @@ pub mod scroll;
 pub mod table;
 pub mod text;
 
+mod filter;
+pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
 #[cfg(test)]
 mod box_opacity_tests;
 
@@ -51,6 +53,8 @@ mod flex_item_min_height_tests;
 mod fit_content_width_tests;
 #[cfg(test)]
 mod min_max_height_unit_tests;
+#[cfg(test)]
+mod abspos_image_reanchor_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
@@ -1643,6 +1647,12 @@ pub struct LayoutBox {
     /// beside them, and hands back the context — its own descendant floats
     /// added — for the parent to carry on to the following siblings.
     pub(crate) context_floats: Option<FloatContext>,
+    /// How far this box's content is scrolled (`scrollLeft`, `scrollTop`),
+    /// when it is an element scroller. Set through a shared tree by the
+    /// engine, from its per-view table, when script scrolls. Layout never
+    /// reads it: the boxes under a scroller stay where layout put them, and
+    /// the painter, the hit test and the geometry snapshot apply the offset.
+    pub element_scroll: std::cell::Cell<(f32, f32)>,
 }
 
 impl LayoutBox {
@@ -1674,7 +1684,122 @@ impl LayoutBox {
             table_span: table::TableSpan::default(),
             table_caption_shift: None,
             context_floats: None,
+            element_scroll: std::cell::Cell::new((0.0, 0.0)),
         }
+    }
+
+    /// Whether script can scroll this box: an element whose `overflow` is
+    /// `hidden`, `scroll` or `auto` on either axis. `clip` does not make a
+    /// scroller. `body` and `html` are left out: their overflow scrolls the
+    /// viewport (a `body` that scrolls on its own, under an `html` that
+    /// clips, does not take an offset yet).
+    pub fn is_element_scroller(&self) -> bool {
+        use rustkit_css::Overflow;
+        let scrolls = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Scroll | Overflow::Auto);
+        (scrolls(self.style.overflow_x) || scrolls(self.style.overflow_y))
+            && self.node_id.is_some()
+            && !matches!(self.box_type, BoxType::Text(_) | BoxType::LineBreak)
+            && !self.identity.as_ref().is_some_and(|id| id.tag == "body" || id.tag == "html")
+    }
+
+    /// Whether what this box's content reaches past it is cut off, so it is
+    /// not overflow of a scroller around it: a scroller, or `clip` both ways.
+    pub fn clips_its_content(&self) -> bool {
+        use rustkit_css::Overflow;
+        self.is_element_scroller()
+            || (self.style.overflow_x == Overflow::Clip && self.style.overflow_y == Overflow::Clip)
+    }
+
+    /// Grow (`right`, `bottom`) to what this box reaches, its descendants
+    /// included, as overflow of a scroller around it.
+    pub fn reach_as_overflow(&self, right: &mut f32, bottom: &mut f32) {
+        let border = self.dimensions.border_box();
+        *right = right.max(border.x + border.width);
+        *bottom = bottom.max(border.y + border.height);
+        if self.clips_its_content() {
+            self.escaped_reach(right, bottom);
+        } else {
+            for child in &self.children {
+                child.reach_as_overflow(right, bottom);
+            }
+        }
+    }
+
+    /// The absolute boxes under this clipping box whose containing block is
+    /// above it: its clip does not cut them.
+    fn escaped_reach(&self, right: &mut f32, bottom: &mut f32) {
+        if self.holds_absolute_boxes() {
+            return;
+        }
+        for child in &self.children {
+            if child.position == Position::Absolute {
+                child.reach_as_overflow(right, bottom);
+            } else {
+                child.escaped_reach(right, bottom);
+            }
+        }
+    }
+
+    /// How far this box's content can scroll on each axis: what its
+    /// descendants reach, then its padding at that end, past its padding box.
+    pub fn element_scroll_max(&self) -> (f32, f32) {
+        let padding = self.dimensions.padding_box();
+        let (mut right, mut bottom) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for child in &self.children {
+            child.reach_as_overflow(&mut right, &mut bottom);
+        }
+        let own = &self.dimensions.padding;
+        (
+            (right + own.right - padding.x - padding.width).max(0.0),
+            (bottom + own.bottom - padding.y - padding.height).max(0.0),
+        )
+    }
+
+    /// Whether the wheel may move this scroller, on each axis. `hidden` scrolls
+    /// from script only. `visible` next to anything but `visible` or `clip`
+    /// computes to `auto`.
+    pub fn wheel_axes(&self) -> (bool, bool) {
+        use rustkit_css::Overflow;
+        let axis = |own: Overflow, other: Overflow| match own {
+            Overflow::Auto | Overflow::Scroll => true,
+            Overflow::Visible => !matches!(other, Overflow::Visible | Overflow::Clip),
+            _ => false,
+        };
+        (
+            axis(self.style.overflow_x, self.style.overflow_y),
+            axis(self.style.overflow_y, self.style.overflow_x),
+        )
+    }
+
+    /// A hit in `child` passing up through this box: name this box in the
+    /// hit's scroller chain, if it is one the child scrolls with.
+    fn note_scroller_of_hit(&self, child: &LayoutBox, hit: &mut HitTestResult) {
+        match child.position {
+            Position::Fixed => hit.scroller_gap = ScrollerGap::ToTransform,
+            Position::Absolute if hit.scroller_gap == ScrollerGap::None => {
+                hit.scroller_gap = ScrollerGap::ToContainingBlock;
+            }
+            _ => {}
+        }
+        match hit.scroller_gap {
+            ScrollerGap::ToContainingBlock if self.holds_absolute_boxes() => {
+                hit.scroller_gap = ScrollerGap::None;
+            }
+            ScrollerGap::ToTransform if self.transforms_descendants() => {
+                hit.scroller_gap = ScrollerGap::None;
+            }
+            _ => {}
+        }
+        if hit.scroller_gap == ScrollerGap::None && self.is_element_scroller() {
+            hit.scrollers.extend(self.node_id);
+        }
+    }
+
+    /// Whether this box is the containing block of the absolute boxes inside
+    /// it, as the painter reads it: `position: relative` is laid out as
+    /// static, so the computed style says too.
+    fn holds_absolute_boxes(&self) -> bool {
+        self.position != Position::Static || self.style.position != rustkit_css::Position::Static
     }
 
     /// Create a new layout box with positioning.
@@ -1982,8 +2107,13 @@ impl LayoutBox {
     }
 
     /// Perform layout within the given containing block.
+    /// Lay out this box as the root of a tree, then apply every `position:
+    /// relative` offset in it (`apply_relative_offsets`). Layout's own
+    /// callers lay out a child with `layout_with_definite_height`, which is
+    /// the same thing without the pass, so the pass runs once per tree.
     pub fn layout(&mut self, containing_block: &Dimensions) {
         self.layout_with_definite_height(containing_block, containing_block.content.height);
+        self.apply_relative_offsets(containing_block);
     }
 
     /// Perform layout with an explicit definite height for percentage resolution.
@@ -2159,7 +2289,7 @@ impl LayoutBox {
             cb.content.width = available_width; // Pass parent's available width
             cb.content.height = 0.0;
 
-            child.layout(&cb);
+            child.layout_with_definite_height(&cb, cb.content.height);
 
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
@@ -3622,6 +3752,10 @@ impl LayoutBox {
     }
 
     /// Perform layout with margin collapse context.
+    /// The root entry the engine uses (an initial block formatting context
+    /// whose sibling margins collapse); like `layout`, it ends with
+    /// `apply_relative_offsets`. Layout's own callers use
+    /// `layout_with_collapse_in`, which does not.
     pub fn layout_with_collapse(
         &mut self,
         containing_block: &Dimensions,
@@ -3629,6 +3763,7 @@ impl LayoutBox {
         float_context: &mut FloatContext,
     ) {
         self.layout_with_collapse_in(containing_block, margin_context, float_context, None);
+        self.apply_relative_offsets(containing_block);
     }
 
     /// `layout_with_collapse`, plus the containing block's DEFINITE content
@@ -4042,6 +4177,107 @@ impl LayoutBox {
         }
     }
 
+    /// How far a `position: relative` box moves from its static position
+    /// (CSS 2.1 section 9.4.3): `left` wins over `right` (LTR) and `top`
+    /// over `bottom`; a percentage resolves against the containing block,
+    /// and a percentage `top`/`bottom` against a containing block whose
+    /// height is not definite counts as `auto`, as Chrome resolves it.
+    pub(crate) fn relative_shift(
+        &self,
+        containing_block: &Dimensions,
+        height_definite: bool,
+    ) -> (f32, f32) {
+        let o = self.resolved_offsets(containing_block);
+        let pct = |l: &Option<Length>| matches!(l, Some(Length::Percent(_)));
+        let top = if !height_definite && pct(&self.style.top) {
+            None
+        } else {
+            o.top
+        };
+        let bottom = if !height_definite && pct(&self.style.bottom) {
+            None
+        } else {
+            o.bottom
+        };
+        let dx = o.left.or(o.right.map(|r| -r)).unwrap_or(0.0);
+        let dy = top.or(bottom.map(|b| -b)).unwrap_or(0.0);
+        (dx, dy)
+    }
+
+    /// Apply every `position: relative` offset in this tree, once the whole
+    /// layout is final (CSS 2.1 section 9.4.3): a relative box and its
+    /// subtree move by `relative_shift` (an absolutely positioned
+    /// descendant's containing block moves with it) and nothing else
+    /// moves, so the flow its siblings were laid out in is untouched.
+    ///
+    /// This is a pass after layout, not a step inside it, because layout
+    /// measures: a flex or grid container reads its items' extents, a line
+    /// box reads its members, and a shift applied inside a pass was read
+    /// back as content (a Top 10 row's titles re-wrapped at the width of
+    /// the shifted rank numbers). After the root has laid out nothing
+    /// measures again, so the offsets are only ever paint and geometry.
+    /// `layout` (the root entry) runs it; layout's own callers lay out a
+    /// child with `layout_with_definite_height`, which does not.
+    ///
+    /// The engine transfers `position: relative` as `Position::Static` (its
+    /// positioned paint path is not ready for relative boxes), so the
+    /// computed style is what says "relative", as the paint order and the
+    /// display-list builder read it; a box whose layout position is itself
+    /// `Relative` took its offsets in `apply_position_offsets` and is left
+    /// alone here. A percentage resolves against the containing block: the
+    /// parent's content box, or for a child of an inline box the inline's
+    /// own containing block. A percentage `top`/`bottom` is `auto` when the
+    /// child's percentage heights are (`percent_height_is_auto`, marked by
+    /// the parent at layout), as Chrome resolves it.
+    pub fn apply_relative_offsets(&mut self, containing_block: &Dimensions) {
+        Self::shift_relative_subtree(self, containing_block);
+    }
+
+    fn shift_relative_subtree(b: &mut LayoutBox, containing_block: &Dimensions) {
+        if b.position == Position::Static
+            && b.style.position == rustkit_css::Position::Relative
+            && !matches!(
+                b.box_type,
+                BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+            )
+        {
+            let (dx, dy) = b.relative_shift(containing_block, !b.percent_height_is_auto);
+            if dx != 0.0 || dy != 0.0 {
+                Self::shift_subtree(b, dx, dy);
+            }
+        }
+        let inner = if matches!(
+            b.box_type,
+            BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak
+        ) {
+            containing_block.clone()
+        } else {
+            b.dimensions.clone()
+        };
+        for child in &mut b.children {
+            Self::shift_relative_subtree(child, &inner);
+        }
+    }
+
+    /// `flex::translate_subtree` that also carries a sticky box's recorded
+    /// origin, so `reset_sticky_positions` puts it back where the offset
+    /// left it, not at its static position.
+    fn shift_subtree(b: &mut LayoutBox, dx: f32, dy: f32) {
+        b.dimensions.content.x += dx;
+        b.dimensions.content.y += dy;
+        if let Some(sticky) = b.sticky_state.as_mut() {
+            sticky.original_rect.x += dx;
+            sticky.original_rect.y += dy;
+            if let Some(stuck) = sticky.stuck_rect.as_mut() {
+                stuck.x += dx;
+                stuck.y += dy;
+            }
+        }
+        for child in &mut b.children {
+            Self::shift_subtree(child, dx, dy);
+        }
+    }
+
     /// Apply position offsets for positioned elements.
     fn apply_position_offsets(&mut self, containing_block: &Dimensions) {
         // Children are laid out at the pre-offset (flow) origin, then this
@@ -4060,18 +4296,14 @@ impl LayoutBox {
                 // No offsets applied
             }
             Position::Relative => {
-                // Offset from normal flow position
-                if let Some(top) = self.offsets.top {
-                    self.dimensions.content.y += top;
-                } else if let Some(bottom) = self.offsets.bottom {
-                    self.dimensions.content.y -= bottom;
-                }
-
-                if let Some(left) = self.offsets.left {
-                    self.dimensions.content.x += left;
-                } else if let Some(right) = self.offsets.right {
-                    self.dimensions.content.x -= right;
-                }
+                // Offset from normal flow position. The engine never builds
+                // this arm (it transfers `position: relative` as `Static`
+                // and `apply_relative_offsets` shifts the box after the
+                // tree is laid out); layout's own callers do.
+                let (dx, dy) =
+                    self.relative_shift(containing_block, containing_block.content.height > 0.0);
+                self.dimensions.content.x += dx;
+                self.dimensions.content.y += dy;
             }
             Position::Absolute => {
                 // Shares the full CSS2 §10.3.7/§10.6.4 implementation with
@@ -4205,6 +4437,40 @@ impl LayoutBox {
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
             self.calculate_block_height(Some(containing_block.content.height));
         }
+        // A replaced box is sized by `layout_image_in`, not by
+        // `calculate_block_height`, and on the flow path that ran with no
+        // definite percent base (the stand-in's height is the parent's
+        // cursor: `None`, or a stale cursor): `height: 100%` was `auto` and
+        // the image took its natural ratio. This is the one place that holds
+        // the real containing block, so the replaced sizing is re-run
+        // against it: width against the padding-box width, height against
+        // its height, decorations and `aspect-ratio` / min / max along with
+        // them. The static position is kept (`layout_image_in` places the
+        // box at the cursor it is handed); the offsets below move it.
+        if let BoxType::Image {
+            natural_width,
+            natural_height,
+            ..
+        } = self.box_type
+        {
+            let cb = Dimensions {
+                content: Rect::new(
+                    containing_block.content.x,
+                    containing_block.content.y,
+                    containing_block.content.width,
+                    0.0,
+                ),
+                ..Default::default()
+            };
+            self.layout_image_in(
+                natural_width,
+                natural_height,
+                &cb,
+                Some(containing_block.content.height),
+            );
+            self.dimensions.content.x = origin_x;
+            self.dimensions.content.y = origin_y;
+        }
         self.apply_position_offsets_absolute(containing_block);
         let (dx, dy) = (
             self.dimensions.content.x - origin_x,
@@ -4277,6 +4543,27 @@ impl LayoutBox {
         for child in &mut self.children {
             child.reanchor_absolute(&cb);
         }
+        // A flex container's out-of-flow children take their static
+        // position as the sole flex item (Flexbox 1 §4.1). Step 13 placed
+        // them with their pre-pass size, or never ran (only out-of-flow
+        // children, so no lines); this box is final now, so place them
+        // again in its final content box with their final size.
+        if self.style.display.is_flex()
+            && self.children.iter().any(|c| {
+                matches!(
+                    c.style.position,
+                    rustkit_css::Position::Absolute | rustkit_css::Position::Fixed
+                )
+            })
+        {
+            let content = self.dimensions.content;
+            let (main, cross) = if self.style.flex_direction.is_row() {
+                (content.width, content.height)
+            } else {
+                (content.height, content.width)
+            };
+            crate::flex::place_static_position_children(self, &cb, content, main, cross);
+        }
     }
 
     /// Apply absolute positioning offsets.
@@ -4286,6 +4573,11 @@ impl LayoutBox {
         let has_right = offsets.right.is_some();
         let has_top = offsets.top.is_some();
         let has_bottom = offsets.bottom.is_some();
+        // CSS 2.1 §10.3.8 / §10.6.5: an absolutely positioned REPLACED box
+        // with `width: auto` or `height: auto` keeps its intrinsic size; both
+        // offsets set is over-constrained and the end-side one is ignored.
+        // Only a non-replaced box stretches between its two offsets.
+        let replaced_image = matches!(self.box_type, BoxType::Image { .. });
 
         // Handle horizontal positioning
         if has_left && has_right {
@@ -4294,7 +4586,7 @@ impl LayoutBox {
             let right = offsets.right.unwrap();
 
             // Calculate stretched width if width is auto
-            if matches!(self.style.width, Length::Auto) {
+            if matches!(self.style.width, Length::Auto) && !replaced_image {
                 let available_width = containing_block.content.width
                     - left
                     - right
@@ -4336,8 +4628,12 @@ impl LayoutBox {
             // Calculate stretched height if height is auto. The subtraction
             // lives in `inset_definite_content_height` so the flex container
             // path resolves the identical number.
-            if let Some(available_height) = self.inset_definite_content_height(containing_block) {
-                self.dimensions.content.height = available_height;
+            if !replaced_image {
+                if let Some(available_height) =
+                    self.inset_definite_content_height(containing_block)
+                {
+                    self.dimensions.content.height = available_height;
+                }
             }
 
             // Position from top
@@ -4788,7 +5084,7 @@ impl LayoutBox {
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y;
-                child.layout(&cb);
+                child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
 
@@ -5795,7 +6091,7 @@ impl LayoutBox {
                 // in-flow sibling (an abspos box between two blocks must not
                 // swallow the margin between them).
                 let mut oof_margin_context = margin_context.clone();
-                child.layout_with_collapse(&cb, &mut oof_margin_context, float_context);
+                child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
             }
 
@@ -6755,16 +7051,72 @@ impl LayoutBox {
         }
     }
 
+    /// The z-index this box paints at among its siblings when it is
+    /// positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` for a box
+    /// that paints in normal flow.
+    ///
+    /// The engine transfers `position: relative` as `Position::Static`
+    /// (its geometry path is not ready), so
+    /// `self.position` alone put a relative box in normal flow, under an
+    /// earlier absolute sibling and with its `z-index` ignored: railway.com's
+    /// `relative z-10` hero text painted under its `absolute inset-0` image
+    /// (hand test 10-27, R2). Read the computed style for those. A text run
+    /// copies its parent's style and an anonymous box is not an element, so
+    /// only element boxes count. `sticky` is left in normal flow: it is
+    /// still laid out as static and scrolls with the page, so painting it
+    /// positioned would lay it over a fixed bar it never reaches in Chrome
+    /// (`render_no_clone_tests::fixed_sticky_images_and_iframes_draw_the_same_under_scroll`).
+    pub fn paint_z(&self) -> Option<i32> {
+        if self.position != Position::Static {
+            return Some(self.z_index);
+        }
+        let element = !matches!(
+            self.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        let relative = self.style.position == rustkit_css::Position::Relative;
+        (element && relative).then_some(self.style.z_index)
+    }
+
+    /// The z-index `child` paints at among this box's children when it
+    /// paints positioned (CSS 2.1 Appendix E steps 3 and 8), or `None` when
+    /// it paints in normal flow. Asks `child.paint_z()` first (positioned and
+    /// `relative` boxes), then the flex/grid item rule below.
+    ///
+    /// A flex or grid item whose `z-index` is not `auto` paints as if it
+    /// were `position: relative`, even when it is static (CSS Flexbox §4.3,
+    /// CSS Grid §9.5). netflix.com's hero text and email form are a
+    /// `static; z-index: 3` flex item after an absolute poster-collage
+    /// layer; in normal flow they painted under it (hand test 10-27, N1b).
+    /// The engine keeps `z-index: auto` as 0, so an item with an explicit
+    /// `z-index: 0` stays in normal flow here. Only element boxes count: a
+    /// text run copies its parent's style and an anonymous box is no item.
+    pub fn child_paint_z(&self, child: &LayoutBox) -> Option<i32> {
+        if let Some(z) = child.paint_z() {
+            return Some(z);
+        }
+        let item = matches!(
+            self.style.display,
+            rustkit_css::Display::Flex
+                | rustkit_css::Display::InlineFlex
+                | rustkit_css::Display::Grid
+                | rustkit_css::Display::InlineGrid
+        ) && !matches!(
+            child.box_type,
+            BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+        );
+        (item && child.style.z_index != 0).then_some(child.style.z_index)
+    }
+
     /// Get children sorted by z-index for painting.
     pub fn get_paint_order(&self) -> Vec<&LayoutBox> {
         let mut normal_flow: Vec<&LayoutBox> = Vec::new();
         let mut positioned: Vec<(&LayoutBox, i32)> = Vec::new();
 
         for child in &self.children {
-            if child.position == Position::Static {
-                normal_flow.push(child);
-            } else {
-                positioned.push((child, child.z_index));
+            match self.child_paint_z(child) {
+                None => normal_flow.push(child),
+                Some(z) => positioned.push((child, z)),
             }
         }
 
@@ -6797,7 +7149,7 @@ impl LayoutBox {
     /// Perform hit testing at the given point.
     /// Returns the hit test result with information about the element at the point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
-        self.hit_test_internal(x, y, 0, false)
+        self.hit_test_internal(x, y, (0.0, 0.0), 0, false)
     }
 
     /// Hit test a point of the window (VIEWPORT coordinates) in a page
@@ -6847,7 +7199,7 @@ impl LayoutBox {
                 .iter()
                 .find(|a| a.position == Position::Fixed)
                 .map_or(at.z_index, |outer| outer.z_index);
-            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, path.len() as u32, true) {
+            if let Some(mut hit) = at.hit_test_internal(viewport_x, viewport_y, (0.0, 0.0), path.len() as u32, true) {
                 hit.viewport_fixed = true;
                 for ancestor in ancestors.iter().rev() {
                     ancestor.add_as_ancestor(&mut hit);
@@ -6869,7 +7221,7 @@ impl LayoutBox {
     ) -> Option<HitTestResult> {
         // `max_by_key` keeps the last of equals: the box painted last.
         let top = held.into_iter().max_by_key(|(z_index, _)| *z_index);
-        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, 0, true);
+        let page = || self.hit_test_internal(viewport_x + scroll.0, viewport_y + scroll.1, (0.0, 0.0), 0, true);
         match top {
             Some((z_index, hit)) if z_index >= 0 => Some(hit),
             Some((_, hit)) => page().or(Some(hit)),
@@ -6978,7 +7330,7 @@ impl LayoutBox {
         for child in &self.children {
             let fixed = child.position == Position::Fixed;
             if fixed {
-                if let Some(mut hit) = child.hit_test_internal(x, y, depth + 1, true) {
+                if let Some(mut hit) = child.hit_test_internal(x, y, (0.0, 0.0), depth + 1, true) {
                     hit.viewport_fixed = true;
                     hits.push((outer_z.unwrap_or(child.z_index), hit));
                 }
@@ -7016,8 +7368,17 @@ impl LayoutBox {
 
     /// Internal hit test that tracks depth. `skip_held_fixed` leaves out
     /// the fixed boxes the scroll does not move (`hit_test_scrolled` tests
-    /// those with the viewport point).
-    fn hit_test_internal(&self, x: f32, y: f32, depth: u32, skip_held_fixed: bool) -> Option<HitTestResult> {
+    /// those with the viewport point). `escaped` is what static scrollers
+    /// since the nearest containing block of absolute boxes added to the
+    /// point: an absolute box under them is not in their scrolling box.
+    fn hit_test_internal(
+        &self,
+        x: f32,
+        y: f32,
+        escaped: (f32, f32),
+        depth: u32,
+        skip_held_fixed: bool,
+    ) -> Option<HitTestResult> {
         // A transformed box and its descendants are drawn moved
         // (`PushTransform`): the point is taken back to where they are
         // laid out. A box squashed flat (`scale(0)`) is drawn nowhere.
@@ -7037,11 +7398,26 @@ impl LayoutBox {
         // Check children in reverse paint order (topmost first)
         let skip_held_fixed = skip_held_fixed && !self.transforms_descendants();
         let paint_order = self.get_paint_order();
+        // What this box's own scroll adds to the point, for its children.
+        let scroll = self.element_scroll.get();
+        let (inner_x, inner_y) = (x + scroll.0, y + scroll.1);
+        let inner_escaped = if self.holds_absolute_boxes() {
+            (0.0, 0.0)
+        } else {
+            (escaped.0 + scroll.0, escaped.1 + scroll.1)
+        };
         for child in paint_order.iter().rev() {
             if skip_held_fixed && child.position == Position::Fixed {
                 continue;
             }
-            if let Some(mut result) = child.hit_test_internal(x, y, depth + 1, skip_held_fixed) {
+            let out_of_flow = matches!(child.position, Position::Absolute | Position::Fixed);
+            let (child_x, child_y, child_escaped) = if out_of_flow {
+                (inner_x - inner_escaped.0, inner_y - inner_escaped.1, (0.0, 0.0))
+            } else {
+                (inner_x, inner_y, inner_escaped)
+            };
+            if let Some(mut result) = child.hit_test_internal(child_x, child_y, child_escaped, depth + 1, skip_held_fixed) {
+                self.note_scroller_of_hit(child, &mut result);
                 // Found a hit in a child - add ourselves to the path
                 self.add_as_ancestor(&mut result);
                 return Some(result);
@@ -7079,6 +7455,8 @@ impl LayoutBox {
             link_href: self.link_href.clone(),
             node_id: self.node_id,
             viewport_fixed: false,
+            scrollers: if self.is_element_scroller() { self.node_id.into_iter().collect() } else { Vec::new() },
+            scroller_gap: ScrollerGap::None,
         }
     }
 
@@ -7154,11 +7532,14 @@ impl LayoutBox {
             link_href: self.link_href.clone(),
             node_id: self.node_id,
             viewport_fixed: false,
+            scrollers: Vec::new(),
+            scroller_gap: ScrollerGap::None,
         });
 
         // Check all children
+        let scroll = self.element_scroll.get();
         for child in &self.children {
-            child.hit_test_all_internal(x, y, depth + 1, results);
+            child.hit_test_all_internal(x + scroll.0, y + scroll.1, depth + 1, results);
         }
     }
 }
@@ -7179,9 +7560,24 @@ fn invert_affine(m: [f32; 6]) -> Option<[f32; 6]> {
     Some([a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])])
 }
 
+/// While a hit passes up the tree: which boxes above it do not scroll it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollerGap {
+    None,
+    /// An absolute box: up to its containing block.
+    ToContainingBlock,
+    /// A fixed box: up to a transform, or for good.
+    ToTransform,
+}
+
 /// Result of a hit test operation.
 #[derive(Debug, Clone)]
 pub struct HitTestResult {
+    /// The element scrollers whose scroll moves the hit box, innermost first,
+    /// the box itself first if it is one (`Engine::scroll_at`).
+    pub scrollers: Vec<usize>,
+    /// See `ScrollerGap`.
+    pub scroller_gap: ScrollerGap,
     /// The type of the hit box.
     pub box_type: BoxType,
     /// The border box of the hit element.
@@ -7747,6 +8143,13 @@ pub enum DisplayCommand {
     PushOpacity(f32),
     /// End the innermost opacity scope.
     PopOpacity,
+    /// Paint everything up to the matching `PopFilter` as one group and lay
+    /// it down through this 4x5 row-major colour matrix, applied to
+    /// unpremultiplied colour and clamped: the colour-matrix functions of
+    /// CSS `filter` (Filter Effects 1 §13), composed in order. Scopes nest.
+    PushFilter([f32; 20]),
+    /// End the innermost filter scope.
+    PopFilter,
 
     /// Start of a `position: fixed` box whose containing block is the
     /// viewport. What follows, up to the matching `PopViewportFixed`, does
@@ -8511,8 +8914,13 @@ pub struct DisplayList {
     /// absolutely positioned box whose containing block is ABOVE a static
     /// clipper is not clipped by it (css-overflow-3 §3.1 — the classic
     /// dropdown escaping an `overflow: hidden` wrapper). Such a box pops
-    /// exactly these clips before painting and re-pushes them after.
-    escapable_clips: Vec<(Rect, BorderRadius)>,
+    /// exactly these clips before painting and re-pushes them after. The
+    /// third field is the box's element scroll, a translate pushed just inside
+    /// the clip: the same box's scroll is escaped with its clip.
+    escapable_clips: Vec<(Rect, BorderRadius, (f32, f32))>,
+    /// The sum of the element scroll translates open at the box being
+    /// painted. A fixed box takes it back: no element scroll moves it.
+    open_element_scroll: (f32, f32),
     /// Whether the box being painted is inside a `PushViewportFixed` run.
     in_viewport_fixed: bool,
     /// How many ancestors of the box being painted have a `transform`. A
@@ -8623,6 +9031,7 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
@@ -8644,6 +9053,7 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
@@ -8708,13 +9118,19 @@ impl DisplayList {
         // its absolute children — image-gallery's `.gallery-item { position:
         // relative; overflow: hidden }` must keep its `.image-overlay` inside
         // the clip. `LayoutBox::position` alone would let the overlay escape.
+        // A `clip-path` clips every descendant, positioned or not, so the
+        // clips above it are scoped out of its subtree like a positioned
+        // box's: an absolute descendant popping them would pop this one.
+        let shape_clip = self.clip_path_clip(layout_box);
         let positioned = layout_box.position != Position::Static
-            || layout_box.style.position != rustkit_css::Position::Static;
+            || layout_box.style.position != rustkit_css::Position::Static
+            || shape_clip.is_some();
         let escapes = matches!(layout_box.position, Position::Absolute | Position::Fixed);
         let outer_escapable = if positioned {
             let outer = std::mem::take(&mut self.escapable_clips);
             if escapes {
-                for _ in &outer {
+                for &(_, _, scroll) in outer.iter().rev() {
+                    self.close_element_scroll(scroll);
                     self.commands.push(DisplayCommand::PopClip);
                 }
             }
@@ -8734,6 +9150,16 @@ impl DisplayList {
             self.in_viewport_fixed = true;
             self.commands.push(DisplayCommand::PushViewportFixed);
         }
+        // A fixed box under a positioned scroller is still inside that
+        // scroller's translate: undo it, for this box's subtree.
+        let held_from_element_scroll = (layout_box.position == Position::Fixed
+            && self.transformed_ancestors == 0
+            && self.open_element_scroll != (0.0, 0.0))
+            .then_some(self.open_element_scroll);
+        if let Some((x, y)) = held_from_element_scroll {
+            self.commands.push(Self::translate(x, y));
+            self.open_element_scroll = (0.0, 0.0);
+        }
 
         // Check if this creates a new stacking context
         let creates_context = layout_box
@@ -8752,6 +9178,28 @@ impl DisplayList {
         let fades = opacity < 1.0;
         if fades {
             self.commands.push(DisplayCommand::PushOpacity(opacity));
+        }
+
+        // `filter` applies before opacity (Filter Effects 1 §5), so its
+        // group sits inside the opacity scope.
+        //
+        // TODO(filter blur/drop-shadow): the filter group is opened outside
+        // the transform and the `clip-path` clip below, so today the clip
+        // runs on the content first and the filter after. For the colour
+        // matrices supported now that paints the same as Chrome, which
+        // filters first and then clips (filter -> clip -> mask -> opacity,
+        // in the element's transformed space), because a matrix is per
+        // pixel. Once `blur()` or `drop-shadow()` paint, the clip must wrap
+        // the filter: they bleed past the box, and Chrome clips that bleed
+        // away. Pinned by
+        // `rustkit_engine::filter_pins::filter_with_clip_path_clips_inside_the_filter_group`.
+        let filter_matrix = if layout_box.style.filter.is_empty() {
+            None
+        } else {
+            filter_color_matrix(&layout_box.style.filter)
+        };
+        if let Some(matrix) = filter_matrix {
+            self.commands.push(DisplayCommand::PushFilter(matrix));
         }
 
         // Check if this box has a transform
@@ -8781,6 +9229,18 @@ impl DisplayList {
             self.transformed_ancestors += 1;
         }
 
+        // `clip-path` clips the box's own painting too, so it opens before
+        // the box's content, inside its transform, and closes after its
+        // subtree.
+        if let Some((rect, radius)) = shape_clip {
+            if radius.is_zero() {
+                self.commands.push(DisplayCommand::PushClip(rect));
+            } else {
+                self.commands
+                    .push(DisplayCommand::PushClipRounded { rect, radius });
+            }
+        }
+
         // Render this box
         self.render_box_content(layout_box);
 
@@ -8796,7 +9256,12 @@ impl DisplayList {
         // absolutely positioned descendant whose containing block is above a
         // static clipper: that one escapes via `escapable_clips` when it is
         // rendered (see the top of this function).
+        //
+        // An element scroller's scroll is a translate just inside its clip:
+        // the clip stays with the box and everything under it moves, as the
+        // page's own scroll is one translate around the list.
         let overflow_clip = self.overflow_clip(layout_box);
+        let element_scroll = layout_box.element_scroll.get();
         if let Some((rect, radius)) = overflow_clip {
             if radius.is_zero() {
                 self.commands.push(DisplayCommand::PushClip(rect));
@@ -8804,8 +9269,9 @@ impl DisplayList {
                 self.commands
                     .push(DisplayCommand::PushClipRounded { rect, radius });
             }
+            self.open_scroll_of(element_scroll);
             if !positioned {
-                self.escapable_clips.push((rect, radius));
+                self.escapable_clips.push((rect, radius, element_scroll));
             }
         }
         self.depth += 1;
@@ -8819,8 +9285,8 @@ impl DisplayList {
             *layer += 1;
             let child_layer = *layer;
 
-            if child.position != Position::Static {
-                if child.z_index < 0 {
+            if let Some(z) = layout_box.child_paint_z(child) {
+                if z < 0 {
                     negative_z.push((child, child_layer));
                 } else {
                     positive_z.push((child, child_layer));
@@ -8834,8 +9300,10 @@ impl DisplayList {
         }
 
         // Sort by z-index, then by layer for stability
+        // Floats ride in `positive_z` at 0, as before.
+        let z_of = |b: &LayoutBox| layout_box.child_paint_z(b).unwrap_or(0);
         negative_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8843,7 +9311,7 @@ impl DisplayList {
             }
         });
         positive_z.sort_by(|a, b| {
-            let z_cmp = a.0.z_index.cmp(&b.0.z_index);
+            let z_cmp = z_of(a.0).cmp(&z_of(b.0));
             if z_cmp == Ordering::Equal {
                 a.1.cmp(&b.1)
             } else {
@@ -8869,6 +9337,7 @@ impl DisplayList {
 
         self.depth -= 1;
         if overflow_clip.is_some() {
+            self.close_element_scroll(element_scroll);
             self.commands.push(DisplayCommand::PopClip);
             if !positioned {
                 self.escapable_clips.pop();
@@ -8877,11 +9346,18 @@ impl DisplayList {
         if let Some(outer) = outer_ellipsis {
             self.ellipsis = outer;
         }
+        if shape_clip.is_some() {
+            self.commands.push(DisplayCommand::PopClip);
+        }
 
         // Pop transform if we pushed one
         if has_transform {
             self.commands.push(DisplayCommand::PopTransform);
             self.transformed_ancestors -= 1;
+        }
+
+        if filter_matrix.is_some() {
+            self.commands.push(DisplayCommand::PopFilter);
         }
 
         if fades {
@@ -8890,6 +9366,11 @@ impl DisplayList {
 
         if creates_context {
             self.commands.push(DisplayCommand::PopStackingContext);
+        }
+
+        if let Some(open) = held_from_element_scroll {
+            self.commands.push(DisplayCommand::PopTransform);
+            self.open_element_scroll = open;
         }
 
         if viewport_fixed {
@@ -8902,16 +9383,42 @@ impl DisplayList {
         // exactly as before.
         if let Some(outer) = outer_escapable {
             if escapes {
-                for &(rect, radius) in &outer {
+                for &(rect, radius, scroll) in &outer {
                     if radius.is_zero() {
                         self.commands.push(DisplayCommand::PushClip(rect));
                     } else {
                         self.commands
                             .push(DisplayCommand::PushClipRounded { rect, radius });
                     }
+                    self.open_scroll_of(scroll);
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    fn translate(x: f32, y: f32) -> DisplayCommand {
+        DisplayCommand::PushTransform {
+            matrix: [1.0, 0.0, 0.0, 1.0, x, y],
+            origin: (0.0, 0.0),
+        }
+    }
+
+    /// Open the translate of an element scroll, if it scrolled.
+    fn open_scroll_of(&mut self, scroll: (f32, f32)) {
+        if scroll != (0.0, 0.0) {
+            self.commands.push(Self::translate(-scroll.0, -scroll.1));
+            self.open_element_scroll.0 += scroll.0;
+            self.open_element_scroll.1 += scroll.1;
+        }
+    }
+
+    /// Close what `open_scroll_of` opened.
+    fn close_element_scroll(&mut self, scroll: (f32, f32)) {
+        if scroll != (0.0, 0.0) {
+            self.commands.push(DisplayCommand::PopTransform);
+            self.open_element_scroll.0 -= scroll.0;
+            self.open_element_scroll.1 -= scroll.1;
         }
     }
 
@@ -8923,14 +9430,15 @@ impl DisplayList {
         if matches!(layout_box.box_type, BoxType::Text(_)) {
             return 1.0;
         }
-        // Keyframe animations are parsed and not run. The fade-in idiom
-        // (`opacity: 0; animation: appear 1s forwards`) would leave its
-        // content invisible for good, so a box that names an animation is
-        // not faded, as no box was before opacity was painted. Remove when
-        // the engine runs animations.
+        // Keyframe animations are parsed and not run, so a box that names one
+        // paints the frame it settles on. The fade-in idiom (`opacity: 0;
+        // animation: appear 1s forwards`) would otherwise be invisible for
+        // good, and an animation that could not be settled is not faded, as
+        // no box was before opacity was painted. Remove when the engine runs
+        // animations.
         let animation = layout_box.style.animation_name.trim();
         if !animation.is_empty() && !animation.eq_ignore_ascii_case("none") {
-            return 1.0;
+            return layout_box.style.animation_settled_opacity.unwrap_or(1.0);
         }
         let opacity = layout_box.style.opacity;
         if opacity.is_nan() {
@@ -9100,6 +9608,208 @@ impl DisplayList {
             bottom_left: corner(&s.border_bottom_left_radius),
         }
         .fitted(border_rect.width, border_rect.height)
+    }
+
+    /// The clip a `clip-path` basic shape puts on the box and everything it
+    /// paints, as the rounded rect the painter already clips to (CSS Masking
+    /// 1 §5.1). `inset()` (with `round`), `circle()` and `ellipse()` are all
+    /// exactly a rounded rect; the reference box is the border box unless a
+    /// `padding-box`, `content-box` or `margin-box` keyword names another.
+    ///
+    /// `None` (paint unclipped, as before) for `none`, for shapes that are not
+    /// a rounded rect (`polygon()`, `path()`, `url()`), for a bare box keyword,
+    /// and for any value this does not read. A text run, an inline box or an
+    /// anonymous block is never clipped on its own: a text run carries its
+    /// parent's style, and the parent's clip already covers all three.
+    fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        if !matches!(layout_box.box_type, BoxType::Block | BoxType::Image { .. }) {
+            return None;
+        }
+        let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();
+        if raw.is_empty() || raw == "none" {
+            return None;
+        }
+        let open = raw.find('(')?;
+        let close = raw.rfind(')')?;
+        if close < open {
+            return None;
+        }
+        // `<basic-shape> <geometry-box>?` in either order.
+        let mut head: Vec<&str> = raw[..open].split_whitespace().collect();
+        let name = head.pop()?;
+        let args = raw[open + 1..close].trim();
+        let keywords: Vec<&str> = head
+            .into_iter()
+            .chain(raw[close + 1..].split_whitespace())
+            .collect();
+        let keyword = match keywords.as_slice() {
+            [] => "",
+            [k] => *k,
+            _ => return None,
+        };
+        let d = &layout_box.dimensions;
+        let reference = match keyword {
+            "" | "border-box" => d.border_box(),
+            "padding-box" => d.padding_box(),
+            "content-box" => d.content,
+            "margin-box" => d.margin_box(),
+            _ => return None,
+        };
+        let font_size = match layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root = self.root_font_size;
+        let px = |token: &str, basis: f32| -> Option<f32> {
+            if token == "0" {
+                return Some(0.0);
+            }
+            rustkit_css::parse_length(token).map(|l| l.to_px(font_size, root, basis))
+        };
+        let (w, h) = (reference.width, reference.height);
+
+        // `at <position>`: one or two keywords or lengths, centre by default.
+        let (shape, at) = match args.find(" at ").or_else(|| args.strip_prefix("at ").map(|_| 0)) {
+            Some(i) => (args[..i].trim(), Some(args[i..].trim().trim_start_matches("at").trim())),
+            None => (args, None),
+        };
+        let centre = |at: Option<&str>| -> Option<(f32, f32)> {
+            let Some(at) = at else {
+                return Some((w / 2.0, h / 2.0));
+            };
+            let t: Vec<&str> = at.split_whitespace().collect();
+            let horizontal = |s: &str| matches!(s, "left" | "right");
+            let vertical = |s: &str| matches!(s, "top" | "bottom");
+            let (xs, ys) = match t.as_slice() {
+                [a] if vertical(a) => ("center", *a),
+                [a] => (*a, "center"),
+                [a, b] if vertical(a) || horizontal(b) => (*b, *a),
+                [a, b] => (*a, *b),
+                _ => return None,
+            };
+            let x = match xs {
+                "left" => 0.0,
+                "center" => w / 2.0,
+                "right" => w,
+                v => px(v, w)?,
+            };
+            let y = match ys {
+                "top" => 0.0,
+                "center" => h / 2.0,
+                "bottom" => h,
+                v => px(v, h)?,
+            };
+            Some((x, y))
+        };
+        // A shape radius: a length, a percentage of `basis`, or the distance
+        // to the closest or farthest side along the axes given.
+        let radius = |token: &str, basis: f32, near: f32, far: f32| -> Option<f32> {
+            match token {
+                "closest-side" => Some(near),
+                "farthest-side" => Some(far),
+                v => px(v, basis).map(|r| r.max(0.0)),
+            }
+        };
+
+        let (rect, radii) = match name {
+            "inset" => {
+                let (offsets, round) = match shape.find("round") {
+                    Some(i) => (shape[..i].trim(), Some(shape[i + 5..].trim())),
+                    None => (shape, None),
+                };
+                let o: Vec<&str> = offsets.split_whitespace().collect();
+                let (t, r, b, l) = match o.as_slice() {
+                    [a] => (*a, *a, *a, *a),
+                    [a, b] => (*a, *b, *a, *b),
+                    [a, b, c] => (*a, *b, *c, *b),
+                    [a, b, c, d] => (*a, *b, *c, *d),
+                    _ => return None,
+                };
+                let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
+                let rect = Rect::new(
+                    reference.x + l,
+                    reference.y + t,
+                    (w - l - r).max(0.0),
+                    (h - t - b).max(0.0),
+                );
+                let radii = match round {
+                    None => BorderRadius::default(),
+                    Some(round) => {
+                        // The `border-radius` shorthand: 1–4 horizontal radii,
+                        // optionally `/` and 1–4 vertical ones.
+                        let (hs, vs) = match round.split_once('/') {
+                            Some((a, b)) => (a.trim(), b.trim()),
+                            None => (round, round),
+                        };
+                        let four = |list: &str, basis: f32| -> Option<[f32; 4]> {
+                            let v = list
+                                .split_whitespace()
+                                .map(|s| px(s, basis).map(|r| r.max(0.0)))
+                                .collect::<Option<Vec<f32>>>()?;
+                            Some(match v.as_slice() {
+                                [a] => [*a, *a, *a, *a],
+                                [a, b] => [*a, *b, *a, *b],
+                                [a, b, c] => [*a, *b, *c, *b],
+                                [a, b, c, d] => [*a, *b, *c, *d],
+                                _ => return None,
+                            })
+                        };
+                        let hr = four(hs, rect.width)?;
+                        let vr = four(vs, rect.height)?;
+                        let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
+                        BorderRadius {
+                            top_left: c(0),
+                            top_right: c(1),
+                            bottom_right: c(2),
+                            bottom_left: c(3),
+                        }
+                        .fitted(rect.width, rect.height)
+                    }
+                };
+                (rect, radii)
+            }
+            "circle" | "ellipse" => {
+                let (cx, cy) = centre(at)?;
+                let (near_x, far_x) = (cx.abs().min((w - cx).abs()), cx.abs().max((w - cx).abs()));
+                let (near_y, far_y) = (cy.abs().min((h - cy).abs()), cy.abs().max((h - cy).abs()));
+                let t: Vec<&str> = shape.split_whitespace().collect();
+                let (rx, ry) = if name == "circle" {
+                    // A percentage is of the reference box's normalised
+                    // diagonal, sqrt(w² + h²) / sqrt(2).
+                    let diagonal = (w * w + h * h).sqrt() / std::f32::consts::SQRT_2;
+                    let r = match t.as_slice() {
+                        [] => near_x.min(near_y),
+                        [a] => radius(a, diagonal, near_x.min(near_y), far_x.max(far_y))?,
+                        _ => return None,
+                    };
+                    (r, r)
+                } else {
+                    match t.as_slice() {
+                        [] => (near_x, near_y),
+                        [a, b] => (radius(a, w, near_x, far_x)?, radius(b, h, near_y, far_y)?),
+                        _ => return None,
+                    }
+                };
+                let rect = Rect::new(
+                    reference.x + cx - rx,
+                    reference.y + cy - ry,
+                    2.0 * rx,
+                    2.0 * ry,
+                );
+                let corner = CornerRadius { h: rx, v: ry };
+                (
+                    rect,
+                    BorderRadius {
+                        top_left: corner,
+                        top_right: corner,
+                        bottom_right: corner,
+                        bottom_left: corner,
+                    },
+                )
+            }
+            _ => return None,
+        };
+        Some((rect, radii))
     }
 
     /// The rounded clip a box imposes on its descendants, if any.

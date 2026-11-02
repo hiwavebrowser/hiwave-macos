@@ -585,8 +585,9 @@ pub enum Paint {
     /// Solid color.
     Color(Color),
     /// URL reference (gradients, patterns) the document has not resolved:
-    /// it names nothing this crate paints, and paints nothing.
-    Url(String),
+    /// it names nothing this crate paints, so it paints its fallback (the
+    /// color, `currentColor` or `none` after the `url()`), or nothing.
+    Url(String, Option<Box<Paint>>),
     /// A gradient paint server, resolved from its `url(#id)` reference.
     Gradient(Arc<Gradient>),
     /// Current color.
@@ -611,15 +612,21 @@ impl Paint {
             _ if s.starts_with("url(") => {
                 // The id is case-sensitive, so it is read from the authored
                 // text; a fallback color may follow the closing paren.
-                let url = raw[4..]
-                    .split(')')
-                    .next()
-                    .unwrap_or("")
+                let (inner, after) = raw[4..].split_once(')').unwrap_or((&raw[4..], ""));
+                let url = inner
                     .trim()
                     .trim_matches(|c| c == '"' || c == '\'')
                     .trim_start_matches('#')
                     .to_string();
-                Paint::Url(url)
+                let after = after.trim().to_lowercase();
+                let fallback = match after.as_str() {
+                    "" => None,
+                    "none" => Some(Paint::None),
+                    "currentcolor" => Some(Paint::CurrentColor),
+                    other => parse_svg_color(other).map(Paint::Color),
+                }
+                .map(Box::new);
+                Paint::Url(url, fallback)
             }
             _ => {
                 if let Some(color) = parse_svg_color(&s) {
@@ -639,11 +646,13 @@ impl Paint {
     }
 
     /// Get the solid color this paint draws with, resolving `currentColor`
-    /// to `current_color`. `None` for `none` and unresolved `url()` paints.
+    /// to `current_color`. `None` for `none` and for an unresolved `url()`
+    /// paint without a fallback.
     pub fn resolve(&self, current_color: Color) -> Option<Color> {
         match self {
             Paint::Color(c) => Some(*c),
             Paint::CurrentColor => Some(current_color),
+            Paint::Url(_, Some(fallback)) => fallback.resolve(current_color),
             _ => None,
         }
     }
@@ -1358,7 +1367,7 @@ impl SvgElement {
                 return;
             }
         };
-        if let Paint::Url(id) = &style.fill {
+        if let Paint::Url(id, _) = &style.fill {
             if let Some(gradient) = servers.get(id) {
                 style.fill = Paint::Gradient(gradient.clone());
             }
@@ -2810,11 +2819,8 @@ fn quad_bezier_points(
 
 /// Extract attribute value from XML tag.
 fn extract_attr(tag: &str, name: &str) -> Option<String> {
-    // Both spellings: HTML's tree builder lowercases attribute names, so an
-    // inline <svg viewBox=...> serialized back out of the DOM carries
-    // `viewbox=` — the camelCase spelling only survives in external .svg
-    // files. (The spec-correct place to re-case it is the HTML parser's
-    // "adjust SVG attributes" step, which rustkit-html does not have.)
+    // Both spellings: the parser adjusts `viewBox` on a parsed <svg>, but a
+    // script can still set the lowercase one on an element it made.
     let lower = name.to_lowercase();
     for candidate in [name, lower.as_str()] {
         let pattern = format!("{}=", candidate);
@@ -3780,6 +3786,65 @@ mod tests {
         assert!(doc.render(0.0, 0.0, 10.0, 10.0).is_empty());
     }
 
+    /// SVG 2 §13.2: a `url()` paint that names nothing paints its fallback
+    /// (reddit's interstitial logo is `fill: url(#missing) #ff4500`).
+    #[test]
+    fn test_paint_naming_a_missing_server_paints_its_fallback() {
+        let render = |fill: &str| {
+            let doc = SvgDocument::parse(&format!(
+                r##"<svg width="10" height="10"><rect width="10" height="10" fill="{fill}"/></svg>"##
+            ))
+            .expect("parse");
+            fill_rects(&doc.render_with_color(0.0, 0.0, 10.0, 10.0, Color::from_rgb(0, 0, 255)))
+        };
+        assert_eq!(render("url(#nope) #ff4500"), vec![(0.0, 0.0, 10.0, 10.0, (255, 69, 0))]);
+        assert_eq!(render("url('#nope') currentColor"), vec![(0.0, 0.0, 10.0, 10.0, (0, 0, 255))]);
+        assert!(render("url(#nope) none").is_empty());
+        // With a gradient elsewhere in the document the resolve pass runs;
+        // a reference it cannot find still falls back.
+        let doc = SvgDocument::parse(
+            r##"<svg width="10" height="10"><defs><linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient></defs>
+            <rect width="10" height="10" fill="url(#nope) #00ff00"/></svg>"##,
+        )
+        .expect("parse");
+        assert_eq!(fill_rects(&doc.render(0.0, 0.0, 10.0, 10.0)), vec![(0.0, 0.0, 10.0, 10.0, (0, 255, 0))]);
+    }
+
+    /// #832 RD4 companion for stroke: `resolve_paint` only upgrades fill
+    /// gradients, so stroke `url()` fallbacks are the only path that keeps
+    /// stroke-only icons visible when the paint server is missing.
+    #[test]
+    fn a_stroke_naming_a_missing_server_paints_its_fallback() {
+        let stroke_rects = |commands: &[DisplayCommand]| -> Vec<(f32, f32, f32, f32, (u8, u8, u8))> {
+            commands
+                .iter()
+                .filter_map(|c| match c {
+                    DisplayCommand::StrokeRect { rect, color, .. } => {
+                        Some((rect.x, rect.y, rect.width, rect.height, (color.r, color.g, color.b)))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let render = |stroke: &str| {
+            let doc = SvgDocument::parse(&format!(
+                r##"<svg width="10" height="10"><rect width="10" height="10" fill="none" stroke="{stroke}"/></svg>"##
+            ))
+            .expect("parse");
+            stroke_rects(&doc.render_with_color(0.0, 0.0, 10.0, 10.0, Color::from_rgb(0, 0, 255)))
+        };
+        assert_eq!(render("url(#nope) #ff4500"), vec![(0.0, 0.0, 10.0, 10.0, (255, 69, 0))]);
+        assert_eq!(render("url('#nope') currentColor"), vec![(0.0, 0.0, 10.0, 10.0, (0, 0, 255))]);
+        assert!(render("url(#nope) none").is_empty());
+        // Garbage after the url() is not a colour: no fallback, paints nothing.
+        assert!(render("url(#nope) notacolor").is_empty());
+        assert_eq!(
+            Paint::parse("url(#x) notacolor").resolve(Color::BLACK),
+            None,
+            "unparseable fallback must not invent a colour"
+        );
+    }
+
     /// Every `FillRect` the commands paint, as `(x, y, w, h, (r, g, b))`.
     fn fill_rects(commands: &[DisplayCommand]) -> Vec<(f32, f32, f32, f32, (u8, u8, u8))> {
         commands
@@ -4103,7 +4168,7 @@ mod tests {
     fn test_paint_parse() {
         assert!(matches!(Paint::parse("none"), Paint::None));
         assert!(matches!(Paint::parse("#ff0000"), Paint::Color(_)));
-        assert!(matches!(Paint::parse("url(#gradient)"), Paint::Url(_)));
+        assert!(matches!(Paint::parse("url(#gradient)"), Paint::Url(_, None)));
     }
 
     #[test]

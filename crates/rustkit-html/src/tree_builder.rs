@@ -998,6 +998,16 @@ impl<S: TreeSink> TreeBuilder<S> {
                 self.open_elements.push((name, node_id));
                 self.mode = InsertionMode::InBody;
             }
+            // HTML §13.2.6.4.6, start tag "frameset": insert the element and
+            // switch to "in frameset". No body is implied: the frameset is
+            // the html element's child, the document's body element (§3.1.3).
+            Token::StartTag {
+                name, attrs, self_closing: _
+            } if name == "frameset" => {
+                let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.open_elements.push((name, node_id));
+                self.mode = InsertionMode::InFrameset;
+            }
             _ => {
                 // Implied body start tag
                 let node_id = self.sink.start_element("body".to_string(), vec![], false);
@@ -2407,6 +2417,26 @@ mod tests {
         assert!(result.events.contains(&"start:html".to_string()));
         assert!(result.events.contains(&"start:head".to_string()));
         assert!(result.events.contains(&"start:body".to_string()));
+    }
+
+    /// HTML §13.2.6.4.6 "after head", start tag `frameset`: insert the
+    /// element and switch to "in frameset". No body is implied, so the
+    /// frameset is a child of `html` (the document's body element, §3.1.3),
+    /// not of an implicit `<body>`.
+    #[test]
+    fn frameset_after_head_is_a_child_of_html_without_an_implied_body() {
+        let html = "<html><head></head><frameset cols='*'><frame src='a'></frameset></html>";
+        let tokens = tokenize(html).unwrap();
+        let sink = TestSink::new();
+        let result = build_tree(tokens, sink).unwrap();
+        assert!(
+            !result.events.iter().any(|e| e == "start:body"),
+            "a frameset document has no body: {:?}",
+            result.events
+        );
+        let end_head = result.events.iter().position(|e| e == "end:head").expect("end:head");
+        assert_eq!(result.events.get(end_head + 1).map(String::as_str), Some("start:frameset[cols=*]"));
+        assert_eq!(result.events.get(end_head + 2).map(String::as_str), Some("start:frame[src=a]"));
     }
 
     #[test]

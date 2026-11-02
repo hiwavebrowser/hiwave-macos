@@ -154,6 +154,51 @@ jobs:
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
+  # F2c — parity-capture suites (blocking). Added 2026-10-27 after #796's
+  # LiveWake pin existed on the crate but CI only ever `cargo build`ed
+  # parity-capture — a regression would silently sleep through --live-ms
+  # again (Yahoo-class blind diagnoses). Same did-not-run guard as F2/F2b.
+  # Binary crate: `cargo test -p parity-capture` (no --lib).
+  capture-suites:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Parity-capture suites must PASS (F2c, blocking)
+        run: |
+          set -uo pipefail
+          summary="$RUNNER_TEMP/capture-suites.md"
+          {
+            echo "## Parity-capture suites (blocking)"
+            echo
+            echo "The headless capture/diagnose tool: LiveWake, event-log, report ranking, shield flag."
+            echo "| suite | result line | verdict |"
+            echo "|---|---|---|"
+          } > "$summary"
+          status=0
+          for pkg in parity-capture; do
+            log="$RUNNER_TEMP/$pkg.log"
+            echo "::group::cargo test -p $pkg"
+            if cargo test -p "$pkg" --no-fail-fast 2>&1 | tee "$log"; then rc=0; else rc=1; fi
+            echo "::endgroup::"
+            ran=$(grep -cE '^test result:' "$log" || true)
+            line=$(grep -E '^test result:' "$log" | head -1 || true)
+            if [ "$ran" -eq 0 ]; then
+              echo "| \`$pkg\` | (none) | **DID NOT RUN** — no \`test result:\` line, so nothing executed |" >> "$summary"
+              status=1
+            elif [ "$rc" -ne 0 ]; then
+              echo "| \`$pkg\` | $line | **RED** |" >> "$summary"
+              status=1
+            else
+              echo "| \`$pkg\` | $line | green |" >> "$summary"
+            fi
+          done
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
   # F3 — JS engine and bindings test suites (blocking).
   #
   # Closes the CI gap from Issue #574 (Item 5): rustkit-js and rustkit-bindings

@@ -424,6 +424,39 @@ fn a_cancel_during_the_parse_leaves_the_shown_document_in_place() {
     assert_next_navigation_loads(&mut engine, view, &server, &mut rx, &rt);
 }
 
+/// #799 (T8) review: `load_html` runs inline scripts now, so a navigation
+/// away during them must stop it as on the URL path: the rest of the
+/// scripts and both lifecycle events do not run on the abandoned document,
+/// and it fails as cancelled.
+#[test]
+fn a_cancel_between_two_scripts_of_an_html_load_runs_neither_the_second_nor_the_lifecycle() {
+    let page = "<html><body><p id=p>two</p>\
+<script>var p = document.getElementById('p'); p.setAttribute('data-step', 'one');\
+document.addEventListener('DOMContentLoaded', function () { p.setAttribute('data-dcl', 'fired'); });\
+window.addEventListener('load', function () { p.setAttribute('data-load', 'fired'); });</script>\
+<script>document.getElementById('p').setAttribute('data-step', 'two');</script>\
+</body></html>";
+    let (mut engine, view) = engine_and_view();
+    let mut rx = engine.take_event_receiver().unwrap();
+    let canceller = engine.nav_canceller(view).unwrap();
+    let hook = PhaseHook::set(move |phase| {
+        if phase == "html-script:1" {
+            assert!(canceller.cancel_current());
+        }
+    });
+    engine.load_html(view, page).unwrap();
+    drop(hook);
+
+    assert_eq!(sources(&engine, view), vec![("inline#1".to_string(), ScriptOutcome::Ran)]);
+    let p = engine.views[&view].document.as_ref().unwrap().get_element_by_id("p").unwrap();
+    assert_eq!(p.get_attribute("data-step"), Some("one"), "the second script did not run");
+    assert_eq!(p.get_attribute("data-dcl"), None, "DOMContentLoaded fired on the abandoned document");
+    assert_eq!(p.get_attribute("data-load"), None, "load fired on the abandoned document");
+    let seen = events(&mut rx);
+    assert!(cancelled(&seen), "{seen:?}");
+    assert!(!seen.iter().any(|e| matches!(e, EngineEvent::PageLoaded { .. })), "{seen:?}");
+}
+
 #[test]
 fn a_cancel_between_two_scripts_runs_neither_the_second_nor_the_lifecycle() {
     let page = "<html><body><p id=p>two</p>\

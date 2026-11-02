@@ -1,0 +1,24 @@
+<!DOCTYPE html><!-- #782 HOLD 4 (Atlas #848; reviews 5635034145 p1-p7 and 5635107389 B1.1-8, B2): @container is false after any float in the formatting context (no height exception), for a percentage width beside a float behind a context the walk cannot see, for a block with aspect-ratio, and in an open dialog. Each row is its own formatting context; bars are absolutely placed so only the query decides colour. Text is transparent. Pass: 17 green bars at (15,10+35n). FAIL: any red. -->
+<style>body{margin:0;color:transparent} .r{position:relative;width:600px;height:35px;overflow:hidden} .w{width:600px} .fl{float:left;width:300px;height:50px}
+.d::before{content:"";display:block;height:30px} dialog{inset:0 auto auto 0;border:0;padding:0;margin:0}
+i{position:absolute;left:10px;top:5px;width:20px;height:20px;background:green} .c i{background:red}
+@container (min-width:400px){i{background:red} .c i{background:green}}</style>
+<div class="r c"><div class="w"><div style="container-type:inline-size"><i></i></div></div></div>
+<div class="r"><div class="w"><div style="height:100px;aspect-ratio:1"><div style="container-type:inline-size"><i></i></div></div></div></div>
+<div class="r"><div class="w" style="height:120px;max-height:10px"><div class="fl"></div></div><div class="w"><div style="container-type:inline-size"><i></i></div></div></div>
+<div class="r"><div class="w"><div style="height:60px;font:10px/20px monospace;white-space:pre">a
+b
+<span style="float:left;width:300px;height:55px"></span></div><div style="container-type:inline-size"><i></i></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="display:flow-root"><div style="container-type:inline-size;width:100%"><i></i></div></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="contain:paint"><div style="container-type:inline-size;width:100%"><i></i></div></div></div></div>
+<div class="r"><div class="w"><div class="fl"></div><div style="overflow-y:hidden"><div style="container-type:inline-size;width:100%"><i></i></div></div></div></div>
+<div class="r"><div style="height:100px;max-height:20px"><div class="fl"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div style="height:60px"><div style="padding-top:30px"><div class="fl"></div></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div style="height:60px;width:300px">text<div class="fl"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div class="d" style="height:60px"><div class="fl"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div style="height:60px;margin-bottom:-60px"><div class="fl"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div style="height:60px"><div class="fl" style="min-height:100px"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><div style="height:60px"><div class="fl" style="box-sizing:border-box;padding:40px 0"></div></div><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><span style="height:100px"><b class="fl"></b></span><div style="container-type:inline-size"><i></i></div></div>
+<div class="r"><dialog open style="container-type:inline-size"><i></i></dialog></div>
+<div class="r"><dialog open><div style="container-type:inline-size"><i></i></div></dialog></div>

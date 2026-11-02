@@ -12,6 +12,8 @@ path = "src/main.rs"
 rustkit-engine = { path = "../rustkit-engine", features = ["headless"] }
 rustkit-viewhost = { path = "../rustkit-viewhost" }
 rustkit-layout = { path = "../rustkit-layout" }
+hiwave-shield-intercept = { path = "../hiwave-shield-intercept" }
+rustkit-net = { path = "../rustkit-net" }
 
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1.42", features = ["rt"] }
