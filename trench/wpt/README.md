@@ -35,10 +35,22 @@ The runner reads `<CARGO_TARGET_DIR or target>/parity/parity-capture`. `scripts/
 the `--release` binary instead, so a campaign number and a WPT count on one commit come from two builds of the
 same source.
 
-Every match is then rendered again broken on purpose: once with all its author style removed, and once per
-`mutations` entry in the manifest (each replaces text in the test page). If any of those still matches the
-reference, the case is UNPROVEN, `unproven_passes` in `last-run.json` says which probe, and it is not in the
-pass count. A mutation that no longer applies says so and is UNPROVEN too.
+Every match is then rendered again broken on purpose: once with all its author style removed, once with its
+area's feature forced off (`AREA_PROBES` in the runner: `outline: none !important` for css-ui-outline, and so
+on), and once per `mutations` entry in the manifest (each replaces text in the test page). If any of those still
+matches the reference, the case is UNPROVEN, `unproven_passes` in `last-run.json` says which probe, and it is not
+in the pass count. A mutation that no longer applies says so and is UNPROVEN too.
+
+**What PASS means:** the frames match, and they stop matching when the style or the area's feature is taken away.
+That is evidence the engine does the thing, not proof it does it correctly. The seed has no area probe, only its
+own `mutations`. **What UNPROVEN means:** this run cannot tell. The engine may be ignoring the feature on both
+sides, or the probe may not touch what the test asserts; where the page shows why (an SVG `transform` attribute,
+a class toggled from script), the reason says so.
+
+A FAIL under 0.1% is asked of Chromium before it goes to a C row: the same staged pages, the same viewport, exact
+RGB (`tools/parity_oracle/wpt_pair_chromium.mjs`, Playwright's Chromium). If Chromium's own test and reference
+differ too, the case is SKIP with the pixel count. `chromium_diff_pixels` carries the answer, and a FAIL with no
+answer stays a FAIL and says why in `chromium_not_measured`.
 
 ## Layout
 
@@ -63,19 +75,21 @@ module docs, where someone reading the code will hit it.
 
 ## Status words
 
-- **ERROR** is the instrument: a capture failed, a frame was blank, `rel=match` disagrees with the manifest,
-  or a page's local resource is not on disk. No pixels compared. Add a missing file to
+- **ERROR** is the instrument: a capture failed, the test or reference frame has zero ink (every pixel white),
+  `rel=match` disagrees with the manifest, or a page's local resource is not on disk. No pixels compared. A frame
+  with any ink is scored at exact RGB. Add a missing file to
   `MANIFEST.support_paths`. A missing resource outranks SKIP.
 - **SKIP** is a case the path cannot probe: `reftest-wait` (the frame is taken after load and nothing watches
-  for the completion signal), `fuzzy` annotations, and an external `<script src>` (`--html-file` runs inline
-  scripts only). The importer takes none of these, so SKIP is seed-only today.
+  for the completion signal), `fuzzy` annotations, an external `<script src>` (`--html-file` runs inline scripts
+  only), and a small FAIL whose test and reference also differ in Chromium. The importer takes none of the first
+  three, so those are seed-only today.
 - **UNPROVEN** matched its reference and also matched when broken on purpose. Scored, not a pass.
 - An inline script without a wait is scored, with `--run-inline-scripts`. A script that throws is an ERROR.
 
 ## Known gaps
 
-1. **The macOS lane seat cannot run `wpt_sync.sh` as a script.** Its allowlist refuses it, so lane sessions run
-   the git steps by hand. The script itself ran end to end in the #844 R1, `--stdin` path list included.
+1. **The macOS lane seat refuses `wpt_sync.sh` called directly.** `python3 scripts/wpt_coverage.py --no-build`
+   runs it whole there (T15b); builds still go through the seat's own cargo wrapper.
 2. **The seed stays 30; coverage grows by area.** An area takes reftests the runner can score, evenly spread
    down to a cap, so it is a sample of the area and not its pass rate. `maps_to` is by area: a FAIL has not been
    reduced, and may turn out to belong to another row.
