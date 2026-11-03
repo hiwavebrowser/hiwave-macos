@@ -12904,6 +12904,14 @@ impl layout_ctx::LayoutCtx {
                     style.webkit_line_clamp = clamp;
                 }
             }
+            "contain" => {
+                style.contain_layout_or_paint = value.split_whitespace().any(|k| {
+                    matches!(
+                        k.to_ascii_lowercase().as_str(),
+                        "layout" | "paint" | "strict" | "content"
+                    )
+                });
+            }
             "container-type" => {
                 if let Some(kind) = rustkit_css::parse_container_type(value) {
                     style.container_type = kind;
