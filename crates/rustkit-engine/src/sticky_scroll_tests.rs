@@ -751,3 +751,82 @@ fn a_cookie_bar_is_over_a_stuck_header_in_an_isolate_root() {
         ("bar z auto", ctx_wrap("isolation:isolate", &ctx_header(50)) + bar, "m"),
     ]);
 }
+
+/// #861's owed pin: percent and `calc()` `opacity` on the wrapper make the
+/// context `sticky_is_over` reads. Chromium 143 at scroll 500, on `ctx_z_probe.mjs`'s
+/// page.
+#[test]
+fn a_percent_opacity_wrapper_keeps_the_stuck_header_under_a_later_fixed_box() {
+    check_ctx_styles(&[
+        ("opacity:50%", "m"),
+        ("opacity:99%", "m"),
+        ("opacity:calc(50%)", "m"),
+        ("opacity:calc(99%)", "m"),
+        ("opacity:0%", "m"),
+        ("opacity:.99", "m"),
+        ("opacity:var(--nope, 50%)", "m"),
+        ("opacity:100%", "h"),
+        ("opacity:calc(100%)", "h"),
+        ("opacity:150%", "h"),
+        ("opacity:1", "h"),
+        ("opacity:calc(50% + 50%)", "h"),
+        ("opacity:50 %", "h"),
+    ]);
+}
+
+/// The context places the whole wrapper: order and the fixed box's `z-index`
+/// outside it, and only `z-index` inside it.
+#[test]
+fn a_percent_opacity_wrapper_orders_as_one_box() {
+    let half = "opacity:50%";
+    check_ctx(&[
+        ("fixed box first", ctx_modal(5) + &ctx_wrap(half, &ctx_header(10)), "m"),
+        ("fixed box z 0 after", ctx_wrap(half, &ctx_header(10)) + &ctx_modal(0), "m"),
+        ("fixed box z -1 after", ctx_wrap(half, &ctx_header(10)) + &ctx_modal(-1), "h"),
+        ("both inside, header higher", ctx_wrap(half, &(ctx_header(10) + &ctx_modal(5))), "h"),
+        ("both inside, fixed box higher", ctx_wrap(half, &(ctx_header(5) + &ctx_modal(10))), "m"),
+        ("100%, fixed box first", ctx_modal(5) + &ctx_wrap("opacity:100%", &ctx_header(10)), "h"),
+    ]);
+}
+
+/// The pointer's path through `Engine::hit_at`, not only script's.
+#[test]
+fn a_click_over_a_stuck_header_in_a_percent_opacity_wrapper_goes_to_the_fixed_box() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    let body = ctx_wrap("opacity:50%", &ctx_header(10)) + &ctx_modal(5);
+    engine.load_html(view, &ctx_page(&body)).expect("load");
+    engine.set_scroll_offset(view, 0.0, 500.0).expect("scroll");
+    assert_eq!(Engine::hit_at(&engine.views[&view], 10.0, 10.0).expect("hit").border_box.width, 400.0);
+}
+
+/// Whitespace in `calc()` and numbers past the float range reach the context too.
+#[test]
+fn opacity_with_a_tab_a_newline_or_a_huge_number_decides_the_context() {
+    check_ctx_styles(&[
+        ("opacity:calc(25%\n+\n25%)", "m"),
+        ("opacity:calc(25%\t+\t25%)", "m"),
+        ("opacity:-1e40", "m"),
+        ("opacity:calc(-1e40)", "m"),
+        ("opacity:calc(0\t+\t50%)", "h"),
+        ("opacity:calc(0\n+\n50%)", "h"),
+        ("opacity:1e40", "h"),
+        ("opacity:1e40%", "h"),
+        ("opacity:calc(1e40)", "h"),
+    ]);
+}
+
+/// R1 delta on #861: an overflowing division, a spaced `%` and `1.e40`.
+#[test]
+fn an_overflowing_division_or_a_dropped_calc_opacity_makes_no_wrong_context() {
+    check_ctx_styles(&[
+        ("opacity:calc(1 / 1e-40)", "h"),
+        ("opacity:calc(50% / 1e-45)", "h"),
+        ("opacity:calc(-1 / 1e-40)", "m"),
+        ("opacity:calc(50\t%)", "h"),
+        ("opacity:calc(50 %)", "h"),
+        ("opacity:calc(1.e40)", "h"),
+    ]);
+}
