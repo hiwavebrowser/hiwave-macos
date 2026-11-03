@@ -184,3 +184,136 @@ fn a_script_write_of_a_percentage_applies() {
     let at_quarter = page("", "opacity:.25");
     check(&[(at_quarter, 0.5, 0.5)], "document.getElementById('t').style.opacity = '50%'");
 }
+
+/// Each value after an earlier `.25`, in a sheet and inline: the two reach the
+/// parser by different roads.
+#[track_caller]
+fn check_after_quarter(values: &[(&str, f32)]) {
+    let cases: Vec<(String, f32, f32)> = values
+        .iter()
+        .flat_map(|&(v, want)| {
+            [
+                (page(&format!("#t{{opacity:.25;opacity:{v}}}"), ""), want, want),
+                (page("", &format!("opacity:.25;opacity:{v}")), want, want),
+            ]
+        })
+        .collect();
+    check(&cases, "");
+}
+
+/// Hand-formatted CSS. Chromium 143 on tab, newline, CR and form feed alike.
+#[test]
+fn tabs_and_newlines_in_calc_are_whitespace() {
+    check_after_quarter(&[
+        ("calc(25%\t+\t25%)", 0.5),
+        ("calc(25%\n+\n25%)", 0.5),
+        ("calc(25%\r\n+\r\n25%)", 0.5),
+        ("calc(25%\u{c}+\u{c}25%)", 0.5),
+        ("calc(\n  25% + 25%\n)", 0.5),
+        ("calc(\t25% + 25%)", 0.5),
+        ("calc(25%\n  + 25%)", 0.5),
+        ("calc(25% +\n25%)", 0.5),
+        ("calc(.25\t+\t.25)", 0.5),
+        ("calc(.25\n+\n.25)", 0.5),
+        ("calc(\t.5\t)", 0.5),
+        ("calc(\n50%\n)", 0.5),
+        ("calc(50%\t*\t.5)", 0.25),
+        ("calc(50%\n/\n2)", 0.25),
+        ("calc((\n25% + 25%\n) * 1)", 0.5),
+        ("calc(\tcalc(\n50%\t)\n)", 0.5),
+        ("calc(.75\t-\t.25)", 0.5),
+        ("calc(75%\n-\n25%)", 0.5),
+    ]);
+}
+
+/// Letting the whitespace through must not let these through with it: the mix
+/// check and the sign's two sides both have to see it as whitespace.
+#[test]
+fn tabs_and_newlines_do_not_excuse_what_calc_refuses() {
+    check_after_quarter(&[
+        ("calc(0\t+\t50%)", 0.25),
+        ("calc(0\n+\n50%)", 0.25),
+        ("calc(0\r+\r50%)", 0.25),
+        ("calc(0\u{c}+\u{c}50%)", 0.25),
+        ("calc(50%\t+\t0)", 0.25),
+        ("calc(50%\n+\n0)", 0.25),
+        ("calc(.5\t+\t50%)", 0.25),
+        ("calc((0\n+\n50%)\t*\t1)", 0.25),
+        ("calc(0 +\t50%)", 0.25),
+        ("calc(0\t+ 50%)", 0.25),
+        ("calc(25%\t+25%)", 0.25),
+        ("calc(25%+\t25%)", 0.25),
+        ("calc(25%\n+25%)", 0.25),
+        ("calc(25%+\n25%)", 0.25),
+        ("calc(50%\t*\t2%)", 0.25),
+        ("calc(1px\t+\t1px)", 0.25),
+        ("calc\t(50%)", 0.25),
+        ("calc\n(50%)", 0.25),
+        ("50\t%", 0.25),
+        ("50\n%", 0.25),
+    ]);
+}
+
+/// A number past `f32`'s range clamps, it does not drop the declaration.
+#[test]
+fn a_number_past_the_float_range_clamps() {
+    check_after_quarter(&[
+        ("1e40", 1.0),
+        ("1E40", 1.0),
+        ("1e+40", 1.0),
+        ("+1e40", 1.0),
+        ("1e39", 1.0),
+        ("1e400", 1.0),
+        ("1e4000", 1.0),
+        ("1e40%", 1.0),
+        ("1E+40%", 1.0),
+        ("1e400%", 1.0),
+        ("-1e40", 0.0),
+        ("-1e400", 0.0),
+        ("-1e40%", 0.0),
+        ("-1e400%", 0.0),
+        ("1e-400", 0.0),
+        ("-1e-400", 0.0),
+    ]);
+}
+
+/// Chromium holds such a number at `f32::MAX` inside `calc()`, which the last
+/// three can tell: `calc(1e40 * 1e-40)` is 0.034, not 1.
+#[test]
+fn calc_holds_a_number_past_the_float_range_at_the_largest_float() {
+    check_after_quarter(&[
+        ("calc(1e40)", 1.0),
+        ("calc(1E40)", 1.0),
+        ("calc(1e+40)", 1.0),
+        ("calc(1e400)", 1.0),
+        ("calc(1e40%)", 1.0),
+        ("calc(1e400%)", 1.0),
+        ("calc(-1e40)", 0.0),
+        ("calc(-1e400)", 0.0),
+        ("calc(-1e40%)", 0.0),
+        ("calc(1e40 + 1)", 1.0),
+        ("calc(1 - 1e40)", 0.0),
+        ("calc(-1 * 1e40)", 0.0),
+        ("calc(1e40 * 2)", 1.0),
+        ("calc(-1e40 * 2)", 0.0),
+        ("calc(1e20 * 1e20)", 1.0),
+        ("calc(1e40 * 0)", 0.0),
+        ("calc(1e400 * 0)", 0.0),
+        ("calc(1e40 / 1e40)", 1.0),
+        ("calc(1e400 / 1e400)", 1.0),
+        ("calc(1e40 - 1e40)", 0.0),
+        ("calc(1e400 - 1e400)", 0.0),
+        ("calc(1e40% - 1e40%)", 0.0),
+        ("calc(1e40 * 2 - 1e40 * 2)", 0.0),
+        ("calc((1e40 + 1e40) * 0)", 0.0),
+        ("calc((1e40 + 1e40) / 1e40)", 1.0),
+        ("calc(1 + 1e39 - 1e39)", 0.0),
+        ("calc(1e40 * 1e-40)", 0.0340282),
+        ("calc(1e-40 * 1e40)", 0.0340282),
+    ]);
+}
+
+#[test]
+fn calc_past_the_float_range_still_refuses_a_mix() {
+    check_after_quarter(&[("calc(1e40% + 1)", 0.25), ("calc(1e40px)", 0.25), ("calc(1e400 + 50%)", 0.25)]);
+}

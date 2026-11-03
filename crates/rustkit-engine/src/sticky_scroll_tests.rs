@@ -801,3 +801,19 @@ fn a_click_over_a_stuck_header_in_a_percent_opacity_wrapper_goes_to_the_fixed_bo
     engine.set_scroll_offset(view, 0.0, 500.0).expect("scroll");
     assert_eq!(Engine::hit_at(&engine.views[&view], 10.0, 10.0).expect("hit").border_box.width, 400.0);
 }
+
+/// Whitespace in `calc()` and numbers past the float range reach the context too.
+#[test]
+fn opacity_with_a_tab_a_newline_or_a_huge_number_decides_the_context() {
+    check_ctx_styles(&[
+        ("opacity:calc(25%\n+\n25%)", "m"),
+        ("opacity:calc(25%\t+\t25%)", "m"),
+        ("opacity:-1e40", "m"),
+        ("opacity:calc(-1e40)", "m"),
+        ("opacity:calc(0\t+\t50%)", "h"),
+        ("opacity:calc(0\n+\n50%)", "h"),
+        ("opacity:1e40", "h"),
+        ("opacity:1e40%", "h"),
+        ("opacity:calc(1e40)", "h"),
+    ]);
+}
