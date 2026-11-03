@@ -1,0 +1,83 @@
+//! Replaced boxes (`<img>`, `<canvas>`) with a natural ratio inside flex
+//! and grid, with and without `aspect-ratio` (Z row C10 (e), second slice).
+//!
+//! The rows are what Chromium 143.0.7499.4 (the parity oracle) reports for each
+//! hand-made body: `<width>x<height> @<left>,<top>` of #t's border box from
+//! `getBoundingClientRect`, rounded to 0.01. Written by
+//! `trench/z/tools/c10/replaced_ratio_gen.py` on the Atlas hub. No text, so no
+//! font metrics; the image is a 40x20 PNG data URL (natural ratio 2:1), the
+//! canvas 300x150 unless the row says otherwise.
+//!
+//! Left out (wrong on develop and at this change, or LayoutUnit rounding):
+
+
+use super::*;
+
+const CASES: &[(&str, &str, &str)] = &[
+    ("img grid: one column", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img grid: one column, width", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
+    ("img grid: one column, height", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;height:60px"></div>"##, "120x60 @0,0"),
+    ("img grid: two columns", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"><div></div></div>"##, "40x20 @0,0"),
+    ("img grid: two columns width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"><div></div></div>"##, "200x100 @0,0"),
+    ("img grid: two columns width 50%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:50%"><div></div></div>"##, "100x50 @0,0"),
+    ("img grid: two columns max-width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;max-width:100%"><div></div></div>"##, "40x20 @0,0"),
+    ("img grid: fixed column 300px", r##"<div id=c style="display:grid;width:400px;grid-template-columns:300px"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img grid: justify start", r##"<div id=c style="display:grid;width:400px;justify-items:start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img grid: align start", r##"<div id=c style="display:grid;width:400px;align-items:start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img grid: justify start, width", r##"<div id=c style="display:grid;width:400px;justify-items:start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
+    ("img grid: ratio 1, width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:1"><div></div></div>"##, "200x200 @0,0"),
+    ("img grid: width 100%, height auto attrs", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" width=40 height=20 style="display:block;width:100%;height:auto"><div></div></div>"##, "200x100 @0,0"),
+    ("img grid: fixed row 100px", r##"<div id=c style="display:grid;width:400px;grid-template-rows:100px;grid-template-columns:300px"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img grid: three columns gap", r##"<div id=c style="display:grid;width:400px;grid-template-columns:repeat(3,1fr);gap:20px"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"><div></div><div></div></div>"##, "120x60 @0,0"),
+    ("canvas grid: one column", r##"<div id=c style="display:grid;width:400px;"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "300x150 @0,0"),
+    ("canvas grid: width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><canvas id=t width=300 height=150 style="display:block;width:100%"></canvas><div></div></div>"##, "200x100 @0,0"),
+    ("canvas grid: justify start", r##"<div id=c style="display:grid;width:400px;justify-items:start"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "300x150 @0,0"),
+    ("img flex row: none", r##"<div id=c style="display:flex;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img flex row: align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img flex row: flex 1, align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;flex:1;min-width:0"></div>"##, "400x200 @0,0"),
+    ("img flex row: height, align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;height:60px"></div>"##, "120x60 @0,0"),
+    ("img flex column: width", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
+    ("img flex column: stretch", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "400x200 @0,0"),
+    ("img flex column: align start", r##"<div id=c style="display:flex;width:400px;flex-direction:column;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
+    ("img flex column: width 100%", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div>"##, "400x200 @0,0"),
+    ("canvas flex row: width", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><canvas id=t width=300 height=150 style="display:block;width:100px"></canvas></div>"##, "100x50 @0,0"),
+    ("canvas flex column: width", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><canvas id=t width=300 height=150 style="display:block;width:100px"></canvas></div>"##, "100x50 @0,0"),
+    ("canvas flex column: stretch", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "400x200 @0,0"),
+    ("card: grid column, img 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><div><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div><div></div></div>"##, "200x100 @0,0"),
+    ("card: grid column, img 100% ratio 16/9 cover", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><div><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover"></div><div></div></div>"##, "200x112.5 @0,0"),
+    ("card: flex 1, img 100%", r##"<div id=c style="display:flex;width:400px;"><div style="flex:1"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div><div style="flex:1"></div></div>"##, "200x100 @0,0"),
+    ("card: flex 1, img 100% ratio 16/9", r##"<div id=c style="display:flex;width:400px;"><div style="flex:1"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:16/9"></div><div style="flex:1"></div></div>"##, "200x112.5 @0,0"),
+];
+
+const READ: &str = "(function () { var r = document.getElementById('t').getBoundingClientRect(); \
+    var f = function (v) { return String(Math.round(v * 100) / 100); }; \
+    return f(r.width) + 'x' + f(r.height) + ' @' + f(r.left) + ',' + f(r.top); })()";
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn replaced_ratio_in_flex_and_grid_matches_chromium() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds::new(0, 0, 800, 600))
+        .expect("headless view");
+    let mut wrong = Vec::new();
+    for (name, body, want) in CASES {
+        let html = format!("<!doctype html><style>body{{margin:0}}</style><body>{body}");
+        engine.load_html(view, &html).expect("load_html");
+        let value = engine.execute_script(view, READ).expect("script");
+        let got = value
+            .strip_prefix("String(\"")
+            .and_then(|v| v.strip_suffix("\")"))
+            .unwrap_or(&value);
+        if got != *want {
+            wrong.push(format!("{name}: {got}, Chromium {want}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} wrong:\n{}",
+        wrong.len(),
+        CASES.len(),
+        wrong.join("\n")
+    );
+}
