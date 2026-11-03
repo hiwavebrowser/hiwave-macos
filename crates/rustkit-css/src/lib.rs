@@ -3531,6 +3531,7 @@ pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 pub mod media;
 pub use media::{media_query_list_matches, media_query_list_serialize};
 
+mod color_fn;
 #[cfg(test)]
 mod color_syntax_tests;
 pub mod content;
@@ -3730,65 +3731,26 @@ pub fn parse_color(value: &str) -> Option<Color> {
         return color_mix::parse_color_mix(&value.to_lowercase());
     }
 
-    // rgb() / rgba()
-    if value.starts_with("rgb") {
-        // Simplified parsing
-        let inner = value
-            .trim_start_matches("rgba(")
-            .trim_start_matches("rgb(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() >= 3 {
-            let r = parts[0].trim().parse::<u8>().ok()?;
-            let g = parts[1].trim().parse::<u8>().ok()?;
-            let b = parts[2].trim().parse::<u8>().ok()?;
-            let a = if parts.len() >= 4 {
-                parts[3].trim().parse::<f32>().ok()?
-            } else {
-                1.0
-            };
-            return Some(Color::new(r, g, b, a));
-        }
-    }
-
-    // hsl() / hsla()
-    if value.starts_with("hsl") {
-        let inner = value
-            .trim_start_matches("hsla(")
-            .trim_start_matches("hsl(")
-            .trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() >= 3 {
-            let h = parts[0]
-                .trim()
-                .trim_end_matches("deg")
-                .parse::<f32>()
-                .ok()?;
-            let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let a = if parts.len() >= 4 {
-                parts[3].trim().parse::<f32>().ok()?
-            } else {
-                1.0
-            };
-
-            // HSL to RGB conversion
-            let (r, g, b) = hsl_to_rgb(h, s, l);
-            return Some(Color::new(r, g, b, a));
-        }
+    // rgb() / rgba() / hsl() / hsla(), comma or space syntax
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("rgb") || lower.starts_with("hsl") {
+        return color_fn::parse_color_function(&lower);
     }
 
     None
 }
 
-/// Convert HSL to RGB
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let s = s.clamp(0.0, 1.0);
-    let l = l.clamp(0.0, 1.0);
+/// Convert HSL to RGB. A channel that lands exactly on .5 (`hsl(90 50% 50%)`'s
+/// red, 127.5) rounds up as Chromium does; in plain f32 it came out a hair
+/// under and rounded down.
+pub(crate) fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let (s, l) = (s.clamp(0.0, 1.0), l.clamp(0.0, 1.0));
 
+    // Chromium rounds an exact .5 up; nudge so f64 error below it does too.
+    let byte = |v: f64| (v * 255.0 + 1e-6).round() as u8;
     if s < 0.0001 {
         // Achromatic (gray)
-        let v = (l * 255.0).round() as u8;
+        let v = byte(l);
         return (v, v, v);
     }
 
@@ -3805,14 +3767,10 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     let g = hue_to_rgb(p, q, h);
     let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
 
-    (
-        (r * 255.0).round() as u8,
-        (g * 255.0).round() as u8,
-        (b * 255.0).round() as u8,
-    )
+    (byte(r), byte(g), byte(b))
 }
 
-fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
     if t < 0.0 {
         t += 1.0;
     }

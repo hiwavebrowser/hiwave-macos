@@ -20855,17 +20855,23 @@ fn parse_border_shorthand(
     Some((resolved_width, color))
 }
 
+/// `rgb(` / `rgba(` / `hsl(` / `hsla(`, which parse_color reads in full.
+fn is_rgb_or_hsl(token: &str) -> bool {
+    let lower = token.trim().to_ascii_lowercase();
+    ["rgb(", "rgba(", "hsl(", "hsla("]
+        .iter()
+        .any(|f| lower.starts_with(f))
+}
+
 /// A colour CSS accepts that `parse_color` cannot resolve yet: the
-/// `currentcolor` keyword or any colour function (space-syntax or percent
-/// `rgb()`/`hsl()`, `oklch()`, `color-mix()`, ...). A shorthand naming one
+/// `currentcolor` keyword or a colour function other than `rgb()`/`hsl()`
+/// (`oklch()`, `color()`, `light-dark()`, ...). A shorthand naming one
 /// is valid, so it must be kept with the colour left unpainted, not dropped
 /// whole as if the token were junk.
 fn is_unresolved_color(token: &str) -> bool {
-    const COLOR_FUNCTIONS: [&str; 13] = [
-        "rgb(",
-        "rgba(",
-        "hsl(",
-        "hsla(",
+    // `rgb()` / `hsl()` are not here: parse_color reads both syntaxes, so
+    // one it refuses is invalid and must drop the declaration.
+    const COLOR_FUNCTIONS: [&str; 9] = [
         "hwb(",
         "lab(",
         "lch(",
@@ -21163,6 +21169,10 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
             // Must be a color
             if let Some(c) = parse_color(part) {
                 color_value = Some(c);
+            } else if is_rgb_or_hsl(part) {
+                // A bad `rgb()` / `hsl()` (`rgb(1, 2 3)`) makes the shadow
+                // invalid; Chromium drops it rather than painting a default.
+                return None;
             }
         }
     }
