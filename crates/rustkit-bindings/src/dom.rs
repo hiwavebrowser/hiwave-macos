@@ -3039,7 +3039,15 @@ const WRAPPERS_JS: &str = r#"
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
-                if (v) m[name] = v;
+                if (name === 'opacity') {
+                    // A plain value is seen at once, as a number in 0..1. What
+                    // needs the cascade (`calc()`, `var()`, `inherit`) or is
+                    // invalid reads the last layout's row.
+                    if (/^[+-]?(\d*\.)?\d+(e[+-]?\d+)?%?$/i.test(v)) {
+                        var n = parseFloat(v) / (v.charAt(v.length - 1) === '%' ? 100 : 1);
+                        m[name] = String(Math.min(1, Math.max(0, n)));
+                    }
+                } else if (v) m[name] = v;
             }
         }
         return pseudo ? pseudoMap(m, own, pseudo) : m;

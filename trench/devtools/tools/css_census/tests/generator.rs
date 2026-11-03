@@ -379,6 +379,21 @@ fn glyph_sized_control_noise_still_passes() {
 }
 
 #[test]
+fn a_few_probes_of_drift_past_the_highest_kept_row_stays_a_match() {
+    // 48x48: 121 probes, on a control off by the same. `background-size: cover`
+    // reads 100 here, and must not flip on a little drift with no engine change.
+    let m = off_control((100, 100, 148, 148));
+    assert_eq!(judge(&m).effect, Effect::Match);
+}
+
+#[test]
+fn well_past_the_credit_is_still_unproven() {
+    // 64x64: 225 probes, under the lowest demoted row (302).
+    let m = off_control((100, 100, 164, 164));
+    assert_eq!(judge(&m).effect, Effect::Unproven);
+}
+
+#[test]
 fn off_past_the_whole_floor_is_a_mismatch_not_unproven() {
     let mut m = off_control((100, 100, 300, 200));
     // A second region only the value frame is off on, and bigger than the
@@ -415,14 +430,20 @@ fn an_unproven_value_is_measured_red_and_said_so() {
     r.values[0].computed = true;
     r.values[0].probes_off = 915;
     let md = render_markdown(&meta(), &[r]);
-    assert!(md.contains("unproven (control-limited, 915 probes)"), "{md}");
+    assert!(
+        md.contains("unproven (control-limited, 915 probes)"),
+        "{md}"
+    );
 }
 
 #[test]
 fn the_engine_sha_never_passes_head_off_as_develop() {
     assert_eq!(engine_sha(Some("1234567890ab"), "ffffffffffff"), "12345678");
     let head = engine_sha(None, "ffffffffffff");
-    assert!(head.contains("ffffffff") && head.contains("no origin/develop"), "{head}");
+    assert!(
+        head.contains("ffffffff") && head.contains("no origin/develop"),
+        "{head}"
+    );
 }
 
 #[test]
@@ -722,7 +743,11 @@ pub fn canonical_thing(name: &str) -> Option<&'static str> {
 #[test]
 fn a_head_on_two_lines_is_read_whole() {
     let arms = extract_arms(GUARDED, HELPERS);
-    for name in ["border-top-style", "border-right-style", "border-left-style"] {
+    for name in [
+        "border-top-style",
+        "border-right-style",
+        "border-left-style",
+    ] {
         assert!(arms.contains(name), "{name} in {arms:?}");
     }
     assert!(
@@ -756,24 +781,94 @@ fn losing_the_guard_arm_is_a_refusal() {
     assert!(check_arms(arms).is_err());
 }
 
-// ---- the order ----
+#[test]
+fn a_guard_whose_function_can_be_read_is_not_a_gap() {
+    assert_eq!(unread_guards(GUARDED, HELPERS), Vec::<String>::new());
+}
 
 #[test]
-fn prevalence_counts_only_loaded_sites_that_use_the_property() {
-    let census = serde_json::json!({ "results": [
-        { "status": "OK", "data": { "objectFit": { "by_value": { "cover": 2 } },
-            "stacking": { "by_reason": { "transform": 3, "opacity<1": 0 } } } },
-        { "status": "OK", "data": { "objectFit": { "by_value": {} },
-            "stacking": { "by_reason": { "transform": 1 } } } },
-        { "status": "BOTWALL", "data": { "objectFit": { "by_value": { "cover": 9 } },
-            "stacking": { "by_reason": { "transform": 9 } } } },
-    ]});
-    let p = TopSites::from_census(&census);
-    assert_eq!(p.loaded, 2);
-    assert_eq!(p.sites("transform"), Some(2));
-    assert_eq!(p.sites("object-fit"), Some(1));
-    assert_eq!(p.sites("opacity"), Some(0));
-    assert_eq!(p.sites("letter-spacing"), None, "not measured is not zero");
+fn a_guard_whose_function_is_nowhere_is_named() {
+    let gaps = unread_guards(GUARDED, "");
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].contains("canonical_thing"), "{gaps:?}");
+}
+
+#[test]
+fn a_guard_that_reads_the_name_with_no_function_is_named() {
+    let src = r#"
+impl X {
+    fn apply_style_property(&self, style: &mut ComputedStyle, property: &str, value: &str) {
+        match property {
+            _ if property.starts_with("x-") => {}
+            _ => {}
+        }
+    }
+}
+"#;
+    assert_eq!(unread_guards(src, "").len(), 1);
+}
+
+#[test]
+fn a_guard_function_with_no_names_in_it_is_named() {
+    let helpers = "pub fn canonical_thing(name: &str) -> Option<&'static str> { None }";
+    assert_eq!(unread_guards(GUARDED, helpers).len(), 1);
+}
+
+#[test]
+fn a_guard_with_more_arguments_is_read_too() {
+    let src = GUARDED.replace(
+        "canonical_thing(property)",
+        "canonical_thing(property, value)",
+    );
+    assert!(extract_arms(&src, HELPERS).contains("thing-size"));
+    assert_eq!(unread_guards(&src, HELPERS), Vec::<String>::new());
+}
+
+#[test]
+fn the_real_engine_has_no_guard_the_reader_cannot_follow() {
+    assert_eq!(
+        unread_guards(
+            include_str!("../../../../../crates/rustkit-engine/src/lib.rs"),
+            include_str!("../../../../../crates/rustkit-css/src/mask.rs"),
+        ),
+        Vec::<String>::new()
+    );
+}
+
+// ---- the order ----
+
+fn prevalence(loaded: usize) -> serde_json::Value {
+    serde_json::json!({
+        "meta": { "loaded": loaded },
+        "sites_authoring": { "transform": 44, "letter-spacing": 51 },
+    })
+}
+
+#[test]
+fn prevalence_is_per_property_and_a_name_no_site_wrote_is_zero() {
+    let p = TopSites::from_prevalence(&prevalence(68)).expect("enough sites");
+    assert_eq!(p.loaded, 68);
+    assert_eq!(p.sites("transform"), Some(44));
+    assert_eq!(p.sites("letter-spacing"), Some(51));
+    assert_eq!(p.sites("zoom"), Some(0));
+}
+
+#[test]
+fn a_prevalence_file_with_few_sites_or_no_counts_is_a_refusal() {
+    assert!(TopSites::from_prevalence(&prevalence(3)).is_err());
+    assert!(TopSites::from_prevalence(&serde_json::json!({ "meta": { "loaded": 68 } })).is_err());
+}
+
+#[test]
+fn the_checked_in_prevalence_measures_properties_the_old_census_never_asked_about() {
+    let v = serde_json::from_str(include_str!(
+        "../../../../../docs/census/css_property_prevalence_top100.json"
+    ))
+    .unwrap();
+    let p = TopSites::from_prevalence(&v).expect("a believable file");
+    for name in ["letter-spacing", "margin-top", "color", "display"] {
+        assert!(p.sites(name).unwrap() > 0, "{name}");
+    }
 }
 
 #[test]
@@ -804,6 +899,7 @@ fn row(name: &str, sites: Option<usize>, corpus: usize, class: Class, red: bool)
             engine_computed: String::new(),
             probes_off: 0,
             geometry_ok: true,
+            control_off: 0,
         }],
     }
 }
@@ -867,6 +963,55 @@ fn the_report_prints_an_off_control_rather_than_hiding_it() {
     m.contexts_off = vec![("text".into(), 14)];
     let md = render_markdown(&m, &[]);
     assert!(md.contains("text") && md.contains("14"), "{md}");
+}
+
+#[test]
+fn a_miss_on_a_broken_control_says_the_control_is_off() {
+    let mut r = row("break-inside", None, 0, Class::Unsupported, true);
+    r.values[0].control_off = 1195;
+    let md = render_markdown(&meta(), &[r.clone()]);
+    assert!(md.contains("mismatch (0 probes, control 1195 off)"), "{md}");
+    // The row's own control, `base` included: not always the context's fault.
+    assert!(md.contains("`control N off`: the row's own control"), "{md}");
+    assert!(!md.contains("belongs to the context"), "{md}");
+    assert!(md.contains("bot wall, ebay and shopify"), "{md}");
+    r.values[0].effect = Effect::Unexercised;
+    let md = render_markdown(&meta(), &[r]);
+    assert!(md.contains("unexercised (control 1195 off)"), "{md}");
+}
+
+#[test]
+fn a_miss_on_a_sound_control_says_nothing_about_it() {
+    let mut r = row("float", None, 0, Class::Computed, true);
+    r.values[0].control_off = 70;
+    let md = render_markdown(&meta(), &[r]);
+    assert!(md.contains("mismatch (0 probes)"), "{md}");
+    assert!(!md.contains("70 off"), "{md}");
+}
+
+#[test]
+fn the_json_carries_what_the_control_was_off_by() {
+    let mut r = row("float", None, 0, Class::Computed, true);
+    r.values[0].control_off = 70;
+    let v = render_json(&meta(), &[r]);
+    assert_eq!(v["properties"][0]["values"][0]["control_off"], 70);
+}
+
+#[test]
+fn paints_right_reads_wrong_lists_a_value_whatever_its_sibling_did() {
+    let mut r = row("background-clip", None, 0, Class::Parse, true);
+    let good = ValueRow {
+        value: "text".into(),
+        effect: Effect::Match,
+        computed: false,
+        ..r.values[0].clone()
+    };
+    r.values[0].effect = Effect::Unproven;
+    r.values.push(good);
+    let md = render_markdown(&meta(), &[r]);
+    let at = md.find("## Paints right").unwrap();
+    let end = md.find("## All properties").unwrap();
+    assert!(md[at..end].contains("`background-clip`"), "{md}");
 }
 
 #[test]
