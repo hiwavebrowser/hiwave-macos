@@ -2886,10 +2886,6 @@ pub struct ComputedStyle {
     /// does not honour it yet, but `@container` treats the box's width as
     /// unknown (its inline size is the physical height). Not inherited.
     pub writing_mode_declared: bool,
-    /// css-contain-2 `contain` holds `layout`, `paint`, `strict` or
-    /// `content`: the box is a formatting root. Layout reads it only to keep
-    /// such a box from collapsing margins through itself. Not inherited.
-    pub contain_layout_or_paint: bool,
     /// `columns` or `column-width` other than `auto` was declared. Layout
     /// does not split into columns for them yet, but `@container` treats a
     /// child's width as unknown. Not inherited.

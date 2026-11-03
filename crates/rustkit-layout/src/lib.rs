@@ -1317,6 +1317,42 @@ pub enum BoxType {
     LineBreak,
 }
 
+/// Which sides a float has been placed on so far in a formatting context
+/// (`collapses_through`): a `clear` can only take clearance from a float on
+/// a side it clears.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct FloatSides {
+    left: bool,
+    right: bool,
+}
+
+impl FloatSides {
+    fn of_context(floats: Option<&FloatContext>) -> Self {
+        floats.map_or(Self::default(), |f| Self {
+            left: !f.left_floats.is_empty(),
+            right: !f.right_floats.is_empty(),
+        })
+    }
+
+    fn add(&mut self, float: Float) {
+        match float {
+            Float::Left => self.left = true,
+            Float::Right => self.right = true,
+            Float::None => {}
+        }
+    }
+
+    /// Whether `clear` may move a box past one of these floats.
+    fn cleared_by(self, clear: rustkit_css::Clear) -> bool {
+        match clear {
+            rustkit_css::Clear::None => false,
+            rustkit_css::Clear::Left => self.left,
+            rustkit_css::Clear::Right => self.right,
+            rustkit_css::Clear::Both => self.left || self.right,
+        }
+    }
+}
+
 /// Type of form control for layout/rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormControlType {
@@ -4081,7 +4117,7 @@ impl LayoutBox {
         // context: a `clear` inside it may then take clearance and give it
         // height (see `collapses_through`). Read before the children take
         // the floats.
-        let floats_before = self.context_floats.as_ref().is_some_and(|f| !f.is_empty());
+        let floats_before = FloatSides::of_context(self.context_floats.as_ref());
         let top_chain = if is_formatting_root {
             Vec::new()
         } else {
@@ -4205,7 +4241,7 @@ impl LayoutBox {
             && self.dimensions.content.height <= 0.0
             && self.collapses_through(self.dimensions.content.width, floats_before)
         {
-            if top_adjoined_by_parent && self.style.clear == rustkit_css::Clear::None {
+            if top_adjoined_by_parent && !floats_before.cleared_by(self.style.clear) {
                 margin_context.first_child_top_adjoined = true;
             } else {
                 margin_context.add_margin(self.dimensions.margin.bottom);
@@ -4235,7 +4271,7 @@ impl LayoutBox {
     /// before that `clear`, in this box or earlier in the formatting context
     /// (`floats_before`). Neither collapses through here. A `clear` with no
     /// float before it, an empty clearfix, still does.
-    fn collapses_through(&self, width: f32, floats_before: bool) -> bool {
+    fn collapses_through(&self, width: f32, floats_before: FloatSides) -> bool {
         matches!(self.box_type, BoxType::Block)
             && self.style.display != rustkit_css::Display::Inline
             && !self.style.display.is_atomic_inline()
@@ -4256,12 +4292,12 @@ impl LayoutBox {
                 let mut floats_before = floats_before;
                 self.children.iter().all(|c| {
                     if !c.is_in_flow_child() {
-                        floats_before |= c.float != Float::None;
+                        floats_before.add(c.float);
                         return true;
                     }
-                    let through = !(floats_before && c.style.clear != rustkit_css::Clear::None)
+                    let through = !floats_before.cleared_by(c.style.clear)
                         && c.collapses_through(width, floats_before);
-                    floats_before |= c.holds_float();
+                    c.holds_float(&mut floats_before);
                     through
                 })
             }
@@ -4269,14 +4305,16 @@ impl LayoutBox {
 
     /// Boxes Chromium 143 never collapses margins through, that
     /// `establishes_bfc` does not know: `flow-root`, `contain` with layout or
-    /// paint, a size `container-type`, a declared vertical `writing-mode`
+    /// paint (`contain_holds_fixed`), `content-visibility: auto | hidden`
+    /// (they imply layout and paint containment), a size `container-type`, a declared vertical `writing-mode`
     /// (an orthogonal flow), `hr` (`overflow: hidden` in Chromium's UA sheet),
     /// `fieldset`, `details` (its summary line), and replaced elements.
     /// Only collapse-through reads this; `establishes_bfc` is unchanged.
     fn is_own_context_for_collapse(&self) -> bool {
         let s = &self.style;
         s.display_modifier == rustkit_css::DisplayModifier::FlowRoot
-            || s.contain_layout_or_paint
+            || s.contain_holds_fixed
+            || s.stacks & rustkit_css::STACKS_CONTENT_VISIBILITY != 0
             || s.container_type != rustkit_css::ContainerType::Normal
             || s.writing_mode_declared
             || self.identity.as_ref().is_some_and(|id| {
@@ -4302,12 +4340,15 @@ impl LayoutBox {
             })
     }
 
-    /// A float in this box or in any non-root box inside it.
-    fn holds_float(&self) -> bool {
-        self.children.iter().any(|c| {
-            c.float != Float::None
-                || (!establishes_bfc(&c.style, c.float) && c.holds_float())
-        })
+    /// Adds the sides of the floats in this box, and in any non-root box
+    /// inside it, to `sides`.
+    fn holds_float(&self, sides: &mut FloatSides) {
+        for c in &self.children {
+            sides.add(c.float);
+            if c.float == Float::None && !establishes_bfc(&c.style, c.float) {
+                c.holds_float(sides);
+            }
+        }
     }
 
     fn is_in_flow_child(&self) -> bool {
@@ -4330,7 +4371,7 @@ impl LayoutBox {
     /// box or float intervenes. Empty when this box's own top edge is closed.
     /// Percentage margins resolve against this box's content width (the
     /// deeper widths are not laid out yet — ledgered approximation).
-    fn first_child_top_margin_chain(&self, floats_before: bool) -> Vec<f32> {
+    fn first_child_top_margin_chain(&self, floats_before: FloatSides) -> Vec<f32> {
         let width = self.dimensions.content.width;
         let mut chain = Vec::new();
         let mut node = self;
@@ -4350,20 +4391,22 @@ impl LayoutBox {
             let mut first = None;
             for c in &node.children {
                 if !c.is_in_flow_child() {
-                    float_before |= c.float != Float::None;
+                    float_before.add(c.float);
                     continue;
                 }
+                // A `clear` with no float on its side before it gets no
+                // clearance: the chain walks past it as past any empty box.
                 if !c.collapses_through(width, float_before)
-                    || c.style.clear != rustkit_css::Clear::None
+                    || float_before.cleared_by(c.style.clear)
                 {
                     first = Some(c);
                     break;
                 }
-                float_before |= c.holds_float();
+                c.holds_float(&mut float_before);
                 c.through_margins(width, &mut chain);
             }
             let Some(child) = first else { break };
-            if float_before && child.style.clear != rustkit_css::Clear::None {
+            if float_before.cleared_by(child.style.clear) {
                 break;
             }
             if !matches!(child.box_type, BoxType::Block | BoxType::AnonymousBlock)
