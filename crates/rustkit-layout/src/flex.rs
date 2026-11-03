@@ -877,12 +877,11 @@ fn layout_flex_container_at(
                     // `height: 100%` child of a `flex: 1` item in a 44px row
                     // at 44, and ebay's search input with it.
                     //
-                    // Only an item that HAS such a child takes this path: the
-                    // item then keeps the height the flex algorithm gave it
-                    // and its content overflows (Chromium: a 60px block and a
-                    // `height: 100%` block in a stretched item of a 44px row
-                    // leave the item at 44), where every other item still
-                    // grows to its flow as it did.
+                    // The item then keeps the height the flex algorithm gave
+                    // it and its content overflows (Chromium: a 60px block and
+                    // a `height: 100%` block in a stretched item of a 44px
+                    // row leave the item at 44; a 670px block alone in a
+                    // 200px row leaves it at 200).
                     //
                     // `stretches()` and not `align-self` alone: an item with
                     // an auto cross margin is not stretched (§9.4.11), so a
@@ -894,12 +893,11 @@ fn layout_flex_container_at(
                         && wrap == FlexWrap::NoWrap
                         && !item.has_explicit_cross_size
                         && item.stretches(style.align_items);
-                    // A scroller stretched in a definite single line keeps
-                    // the line's height for the same reason: what is taller
-                    // scrolls (see `calculate_cross_sizes`).
-                    let scroller = item.layout_box.is_element_scroller();
+                    // Any item stretched in a definite single line keeps the
+                    // line's height after its children flow: what is taller
+                    // overflows or scrolls (see `calculate_cross_sizes`).
                     let stretch_target = definite_inner_cross
-                        .filter(|_| (percent_child || scroller) && stretched)
+                        .filter(|_| stretched)
                         .map(|cross| {
                             let outer = (cross - item.cross_margin_start - item.cross_margin_end)
                                 .max(item.min_cross_size)
@@ -2253,17 +2251,18 @@ fn calculate_cross_sizes(
                 line_cross_size - item.cross_margin_start - item.cross_margin_end
             };
 
-            // Stretch, but never below content size. Except a scroller in a
-            // definite single line: it is exactly the line's size and
-            // scrolls what is taller (Chromium 143: a `flex: 1;
-            // overflow: auto` pane holding 670px in a 200px row is 200, so
-            // its sticky header sticks). Other items keep the floor, a
-            // known divergence: Chromium stretches them to the line too.
-            let scroller = cross_axis == Axis::Vertical
-                && has_definite_cross_size
-                && single_line
-                && item.layout_box.is_element_scroller();
-            item.cross_size = if scroller {
+            // In a definite single-line row a stretched item is exactly the
+            // line's height (css-flexbox-1 §9.4.11): taller content
+            // overflows, or scrolls in a scroller, and does not grow it.
+            // Chromium 143, 200px row: a `flex: 1; overflow: auto` pane
+            // holding 670px is 200, and so are an empty 1px rail and a
+            // visible box holding 670px. The content floor stays for the
+            // other cases. It also kept a stale height: an item with no
+            // children reads its last layout's height as its content, so an
+            // empty rail in a row laid out again at a smaller height kept
+            // the old one and gave the page a phantom scroll.
+            let exact = cross_axis == Axis::Vertical && has_definite_cross_size && single_line;
+            item.cross_size = if exact {
                 stretch_target
             } else {
                 stretch_target.max(content_cross_sizes[i])
