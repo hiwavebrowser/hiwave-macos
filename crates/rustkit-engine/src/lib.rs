@@ -471,6 +471,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
 #[cfg(all(test, feature = "headless"))]
+mod color_space_syntax_tests;
+#[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
@@ -34408,21 +34410,30 @@ mod cascade_wire_tests {
         }
     }
 
-    // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
-    // percent `rgb()`/`hsl()`, `oklch()`, `color-mix()` ...) is still a
-    // VALID colour: the shorthand is kept and its other parts apply, the
-    // colour itself is left unpainted.
+    // A colour RustKit cannot resolve yet (`currentcolor`, `oklch()`,
+    // `color()` ...) is still a VALID colour: the shorthand is kept and its
+    // other parts apply, the colour itself is left unpainted. Space-syntax
+    // and percent `rgb()`/`hsl()` used to be in this list; they resolve now
+    // (Chromium 143's computed values).
     #[test]
     fn a_border_shorthand_with_an_unresolved_colour_keeps_width_and_style() {
         let e = engine();
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for (property, value, want) in [
+            ("border", "1px solid rgb(0 0 0 / 10%)", rustkit_css::Color::new(0, 0, 0, 0.1)),
+            ("border-top", "1px solid rgb(229 231 235 / 1)", rustkit_css::Color::new(229, 231, 235, 1.0)),
+            ("border", "1px solid rgba(0,0,0,10%)", rustkit_css::Color::new(0, 0, 0, 0.1)),
+            ("border", "1px solid rgb(100%,0%,0%)", rustkit_css::Color::new(255, 0, 0, 1.0)),
+            ("border", "1px solid hsl(210 40% 96%)", rustkit_css::Color::new(241, 245, 249, 1.0)),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.lctx.apply_style_property(&mut s, property, "4px dashed red");
+            e.lctx.apply_style_property(&mut s, property, value);
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
+            assert_eq!(s.border_top_color, want, "{property}: {value}");
+        }
         for (property, value) in [
             ("border", "1px solid currentColor"),
-            ("border", "1px solid rgb(0 0 0 / 10%)"),
-            ("border-top", "1px solid rgb(229 231 235 / 1)"),
-            ("border", "1px solid rgba(0,0,0,10%)"),
-            ("border", "1px solid rgb(100%,0%,0%)"),
-            ("border", "1px solid hsl(210 40% 96%)"),
             ("border", "1px solid oklch(0.7 0.1 200)"),
             ("border", "1px solid lab(50% 40 59)"),
             ("border", "1px solid hwb(0 0% 0%)"),
