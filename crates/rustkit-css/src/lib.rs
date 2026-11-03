@@ -3842,14 +3842,17 @@ pub fn parse_length(value: &str) -> Option<Length> {
 pub fn parse_opacity(value: &str) -> Option<f32> {
     let value = value.trim().to_ascii_lowercase();
     let opacity = if value.starts_with("calc(") && value.ends_with(')') {
-        let inner = &value[5..value.len() - 1];
+        // CSS has four more whitespace characters than the splitters below look for.
+        let inner = value[5..value.len() - 1].replace(['\t', '\n', '\r', '\u{c}'], " ");
         // `parse_calc_sum` files a bare number under `px`: no unit may reach it.
         let bare = inner.replace("calc", "");
-        if !bare.chars().all(|c| c.is_ascii_digit() || " .+-*/()%e".contains(c)) || calc_mixes_percent(inner) {
+        if !bare.chars().all(|c| c.is_ascii_digit() || " .+-*/()%e".contains(c)) || calc_mixes_percent(&inner) {
             return None;
         }
-        let sum = parse_calc_sum(inner)?;
-        sum.px + sum.percent / 100.0
+        let sum = parse_calc_sum(&hold_at_float_max(&inner))?;
+        // Only overflow makes a NaN here: `calc((1e40 + 1e40) * 0)` is 0 in Chromium.
+        let opacity = sum.px + sum.percent / 100.0;
+        if opacity.is_nan() { 0.0 } else { opacity }
     } else {
         let (number, percent) = match value.strip_suffix('%') {
             Some(number) => (number, true),
@@ -3861,7 +3864,44 @@ pub fn parse_opacity(value: &str) -> Option<f32> {
         let number = number.parse::<f32>().ok()?;
         if percent { number / 100.0 } else { number }
     };
-    opacity.is_finite().then(|| opacity.clamp(0.0, 1.0))
+    // `1e40` overflows to infinity, and clamps like any other large number.
+    Some(opacity.clamp(0.0, 1.0))
+}
+
+/// Rewrites each number past `f32`'s range as `f32::MAX`, where Chromium holds it
+/// (`calc(1e40 * 1e-40)` is 0.034), because the calc parser refuses an infinity
+/// for every property.
+fn hold_at_float_max(inner: &str) -> String {
+    let bytes = inner.as_bytes();
+    let mut held = String::with_capacity(inner.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if !(bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            i += 1;
+            held.push_str(&inner[start..i]);
+            continue;
+        }
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'e') {
+            let sign = usize::from(matches!(bytes.get(i + 1), Some(b'+' | b'-')));
+            if bytes.get(i + 1 + sign).is_some_and(u8::is_ascii_digit) {
+                i += 1 + sign;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+        }
+        let number = &inner[start..i];
+        if number.parse::<f32>().is_ok_and(f32::is_infinite) {
+            held.push_str(&format!("{:e}", f32::MAX));
+        } else {
+            held.push_str(number);
+        }
+    }
+    held
 }
 
 /// Whether one sum in this `calc()` adds a percentage to a number. Their values
