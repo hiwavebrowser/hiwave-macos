@@ -2948,17 +2948,24 @@ const WRAPPERS_JS: &str = r#"
     function round(v) { return Math.round(v); }
     metric('offsetWidth', function (b) { return round(b.w); });
     metric('offsetHeight', function (b) { return round(b.h); });
-    // offsetParent: the nearest positioned ancestor, else body. null when
-    // the element has no box, is fixed, or is the body itself.
+    // offsetParent: the nearest positioned ancestor with a box, else body
+    // (CSSOM View). A static element also stops at the nearest `td`, `th`
+    // or `table` with a box: by element name, whatever its display, as
+    // Chromium does. null when the element has no box, is fixed, or is the
+    // body itself.
+    var TABLE_PARENTS = { TD: 1, TH: 1, TABLE: 1 };
     function offsetParentOf(el) {
         var b = geom(el);
         if (!b || b.pos === 2) return null;
         var body = document.body;
         if (el === body || el === document.documentElement) return null;
+        var isStatic = b.pos === 0;
         for (var p = el.parentElement; p; p = p.parentElement) {
             if (p === body) return body;
             var pb = geom(p);
-            if (pb && pb.pos !== 0) return p;
+            if (!pb) continue;
+            if (pb.pos !== 0) return p;
+            if (isStatic && p.namespaceURI === 'http://www.w3.org/1999/xhtml' && TABLE_PARENTS[p.tagName]) return p;
         }
         return body;
     }
