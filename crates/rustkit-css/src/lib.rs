@@ -3539,6 +3539,12 @@ mod color_fn;
 pub use color_fn::is_unreadable_color_function;
 #[cfg(test)]
 mod color_syntax_tests;
+#[cfg(test)]
+mod unreadable_color_tests;
+#[cfg(test)]
+mod opacity_parse_tests;
+#[cfg(test)]
+mod outline_parse_tests;
 pub mod content;
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
