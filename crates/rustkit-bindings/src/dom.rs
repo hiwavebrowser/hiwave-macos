@@ -3050,10 +3050,89 @@ const WRAPPERS_JS: &str = r#"
         'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
         'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
     };
-    function fillInitial(m) {
-        for (var n in COMPUTED_INITIAL) {
-            if (!Object.prototype.hasOwnProperty.call(m, n)) m[n] = COMPUTED_INITIAL[n];
+    var hasOwn = function (o, n) { return Object.prototype.hasOwnProperty.call(o, n); };
+    // Names a read answers but an enumeration leaves out, as Chromium does:
+    // shorthands (still readable by name).
+    var COMPUTED_SHORTHANDS = {};
+    ('animation background border border-block border-block-end border-block-start border-bottom ' +
+     'border-color border-inline border-inline-end border-inline-start border-left border-radius ' +
+     'border-right border-style border-top border-width container flex flex-flow font gap grid-area ' +
+     'grid-column grid-row grid-template inset inset-block inset-inline margin margin-block ' +
+     'margin-inline mask -webkit-mask overflow padding padding-block padding-inline place-content ' +
+     'place-items place-self text-decoration transition').split(' ').forEach(function (n) {
+        COMPUTED_SHORTHANDS[n] = true;
+    });
+    // `-webkit-` names Chromium answers as the unprefixed property.
+    var WEBKIT_ALIASES = {};
+    ('transform transform-origin transition transition-property transition-duration ' +
+     'transition-delay transition-timing-function animation animation-name animation-duration ' +
+     'animation-delay animation-timing-function animation-iteration-count animation-direction ' +
+     'animation-fill-mode animation-play-state box-shadow box-sizing flex flex-grow flex-shrink ' +
+     'flex-basis flex-direction flex-wrap flex-flow order justify-content align-items align-self ' +
+     'align-content border-radius border-top-left-radius border-top-right-radius ' +
+     'border-bottom-right-radius border-bottom-left-radius opacity').split(' ').forEach(function (n) {
+        WEBKIT_ALIASES['-webkit-' + n] = n;
+    });
+    // `m.__fill` says whether the initial values stand behind the rows:
+    // looked up on read, never copied (`true`, or `'pseudo'`, which leaves
+    // out what a box that was never laid out cannot answer).
+    function initialOf(m, n) {
+        var fill = m.__fill;
+        if (!fill || !hasOwn(COMPUTED_INITIAL, n)) return undefined;
+        if (fill === 'pseudo' && /^(margin|padding|inset|transform-origin)/.test(n)) return undefined;
+        return COMPUTED_INITIAL[n];
+    }
+    function computedValue(m, n) {
+        if (hasOwn(m, n)) return m[n];
+        var v = initialOf(m, n);
+        if (v === undefined && hasOwn(WEBKIT_ALIASES, n)) return computedValue(m, WEBKIT_ALIASES[n]);
+        return v;
+    }
+    function markFill(m, how) {
+        Object.defineProperty(m, '__fill', { value: how, enumerable: false });
+    }
+    // Inline text the engine is known to drop or to keep only in part: the
+    // published row (or the initial value) would be a confident wrong answer,
+    // where the text is what the page wrote. Listed in #866.
+    function lossyInline(name, v) {
+        var t = v.toLowerCase().trim();
+        var listed = function () {
+            var depth = 0;
+            for (var i = 0; i < t.length; i++) {
+                var c = t.charAt(i);
+                if (c === '(') depth++;
+                else if (c === ')') depth--;
+                else if (c === ',' && depth === 0) return true;
+            }
+            return false;
+        };
+        if (/^(transition|animation)/.test(name) && name !== 'transition-property') return listed();
+        if (name === 'box-shadow') return listed();
+        if (name === 'transform') {
+            return /(3d|rotate[xyz]|translatez|scalez|perspective)\s*\(/.test(t) || /[0-9.](vw|vh|vmin|vmax)\b/.test(t);
         }
+        if (name === 'text-decoration') {
+            return t.split(/\s+/).some(function (w) { return !/^(none|underline|overline|line-through)$/.test(w); });
+        }
+        if (name === 'border-color' || name === 'overflow') return /\s/.test(t.replace(/\([^)]*\)/g, ''));
+        if (name === 'vertical-align') return /[0-9]/.test(t);
+        if (name === 'aspect-ratio') return t.indexOf('/') < 0 && t.indexOf('.') >= 0;
+        return name === 'flex-flow' || name === 'background-position-x' || name === 'background-position-y';
+    }
+    var LOSSY_LONGHANDS = {
+        'transition': ['transition-property', 'transition-duration', 'transition-delay', 'transition-timing-function'],
+        'animation': ['animation-name', 'animation-duration', 'animation-delay', 'animation-timing-function',
+            'animation-iteration-count', 'animation-direction', 'animation-fill-mode', 'animation-play-state'],
+        'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color']
+    };
+    var REPLACED = { IMG: 1, VIDEO: 1, CANVAS: 1, IFRAME: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1,
+        BUTTON: 1, OBJECT: 1, EMBED: 1, SVG: 1 };
+    // Where layout does not apply, `width`/`height` are the declared values
+    // (Chromium's resolved value is the used one only for a laid-out box).
+    function declaredBox(el, m, name) {
+        if (name !== 'width' && name !== 'height') return false;
+        if (m.display === 'none') return true;
+        return m.display === 'inline' && !hasOwn(REPLACED, String(el.tagName || '').toUpperCase());
     }
     function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
     function customVars(el) {
@@ -3085,7 +3164,7 @@ const WRAPPERS_JS: &str = r#"
                     (own = own || {})[name.slice(prefix.length)] = line.slice(i + 1);
                 }
             });
-            fillInitial(m);
+            markFill(m, true);
         } else if (info(el, 'laidout')) {
             m.display = 'none';
             m.visibility = 'visible';
@@ -3100,15 +3179,28 @@ const WRAPPERS_JS: &str = r#"
         }
         // A layout that has seen the attribute already answers for what it
         // publishes: `transform: rotate(10deg)` reads a matrix, `width: 50%`
-        // pixels. The text stands in only for what it does not publish, or
-        // when the write has not been laid out (the forced-layout budget).
+        // pixels. The text stands in where the engine published no row (the
+        // initial values stand behind the rows, they are not rows), where the
+        // row is empty, where the engine is known to drop part of the value,
+        // where layout does not apply, and when the write has not been laid
+        // out (the forced-layout budget). `display: none` has no transform.
         var inline = el.style;
         if (inline) {
             var stale = !!info(el, 'stale');
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
-                if (v && (stale || !Object.prototype.hasOwnProperty.call(m, name))) m[name] = v;
+                if (!v) continue;
+                if (name === 'transform' && m.display === 'none' && !stale) continue;
+                var lossy = !stale && lossyInline(name, v);
+                if (stale || lossy || !hasOwn(m, name) || m[name] === '' || declaredBox(el, m, name)) {
+                    m[name] = v;
+                }
+                // The longhands of a shorthand the engine dropped part of are
+                // unknown too: they read '' (as before #866), not a guess.
+                if (lossy && hasOwn(LOSSY_LONGHANDS, name)) {
+                    LOSSY_LONGHANDS[name].forEach(function (n) { if (!inline.getPropertyValue(n)) m[n] = ''; });
+                }
             }
         }
         return pseudo ? pseudoMap(m, own, pseudo) : m;
@@ -3121,7 +3213,7 @@ const WRAPPERS_JS: &str = r#"
         var isBox = pseudo === '::before' || pseudo === '::after';
         if (own) {
             if (own.content === 'normal') own.content = 'none';
-            fillInitial(own);
+            markFill(own, 'pseudo');
             return own;
         }
         if (!m.display) return {};
@@ -3142,9 +3234,26 @@ const WRAPPERS_JS: &str = r#"
     }
     function makeComputed(el, pseudo) {
         var m = pseudo === null ? {} : computedMap(el, pseudo);
-        // Sorted on demand: a read of one property should not pay for the list.
+        // Listed on demand: a read of one property should not pay for the
+        // list. Longhands with a value, `-webkit-` names last, as Chromium.
         var sorted = null;
-        function names() { return sorted || (sorted = Object.keys(m).sort()); }
+        function names() {
+            if (sorted) return sorted;
+            var seen = {};
+            Object.keys(m).forEach(function (n) { seen[n] = true; });
+            if (m.__fill) Object.keys(COMPUTED_INITIAL).forEach(function (n) { seen[n] = true; });
+            sorted = Object.keys(seen).filter(function (n) {
+                if (hasOwn(COMPUTED_SHORTHANDS, n)) return false;
+                var v = computedValue(m, n);
+                return v !== undefined && v !== '';
+            }).sort(function (a, b) {
+                var wa = a.indexOf('-webkit-') === 0, wb = b.indexOf('-webkit-') === 0;
+                if (wa !== wb) return wa ? 1 : -1;
+                return a < b ? -1 : a > b ? 1 : 0;
+            });
+            return sorted;
+        }
+        function read(n) { var v = computedValue(m, n); return v === undefined ? customValue(n) : v; }
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
         // A custom property not set inline: the cascaded (inherited) value.
@@ -3156,7 +3265,7 @@ const WRAPPERS_JS: &str = r#"
         var own = {
             // A custom property name is case-sensitive (Primer's
             // `--fgColor-*`): only a standard property is kebab-cased.
-            getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
+            getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return read(n); },
             getPropertyPriority: function () { return ''; },
             item: function (i) { return names()[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
@@ -3166,7 +3275,7 @@ const WRAPPERS_JS: &str = r#"
             Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
         });
         Object.defineProperty(decl, 'cssText', { configurable: true, enumerable: false,
-            get: function () { return names().map(function (n) { return n + ': ' + m[n] + ';'; }).join(' '); } });
+            get: function () { return names().map(function (n) { return n + ': ' + computedValue(m, n) + ';'; }).join(' '); } });
         Object.defineProperty(decl, 'length', { configurable: true, enumerable: false,
             get: function () { return names().length; } });
         return new Proxy(decl, {
@@ -3174,7 +3283,7 @@ const WRAPPERS_JS: &str = r#"
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
                 if (/^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
                 var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
-                return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : customValue(n));
+                return p === 'cssFloat' ? (m['float'] || '') : read(n);
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }
         });

@@ -218,7 +218,8 @@
    "expr": "getComputedStyle(document.getElementById('a')).boxShadow",
    "chrome": "rgb(0, 0, 255) 1px 1px 0px 0px",
    "base": "",
-   "expect": "chrome"
+   "expect": "gap",
+   "why": "a shadow with no colour is stored rgba(0, 0, 0, 0.5), not currentcolor"
   },
   {
    "name": "box-shadow 0 0 0 1px red, inset 2px 2px 4px rgba(0,0,0,.3)",

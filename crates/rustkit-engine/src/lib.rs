@@ -22697,6 +22697,16 @@ fn geometry_with_root(
     boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    // `rem` is the root element's font size. The root element has no box of
+    // its own here: the first element box under the tree's top inherits it.
+    fn first_element(b: &LayoutBox) -> Option<&LayoutBox> {
+        if b.node_id.is_some() {
+            return Some(b);
+        }
+        b.children.iter().find_map(first_element)
+    }
+    let root_box = layout.children.iter().find_map(first_element).unwrap_or(layout);
+    computed_read::set_root_font(&root_box.style);
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
@@ -22731,10 +22741,25 @@ fn pseudo_style_lines(style: &ComputedStyle) -> String {
     let (width, height) = (declared(&style.width), declared(&style.height));
     computed_style_lines(&LayoutBox::new(BoxType::Inline, style.clone()))
         .lines()
-        .map(|row| match row.split_once('\t') {
-            Some(("width", _)) => format!("width\t{width}"),
-            Some(("height", _)) => format!("height\t{height}"),
-            _ => row.to_string(),
+        .filter_map(|row| match row.split_once('\t') {
+            Some(("width", _)) => Some(format!("width\t{width}")),
+            Some(("height", _)) => Some(format!("height\t{height}")),
+            // Shorthands, logical names and the origin would be read off the
+            // box that was never laid out: leave them unsaid, and a transform
+            // with a percentage too. The physical margin and padding rows
+            // were already published this way.
+            Some((name, _))
+                if ["margin", "padding", "inset", "transform-origin"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+                    && !["-top", "-right", "-bottom", "-left"].iter().any(|e| name.ends_with(e)) =>
+            {
+                None
+            }
+            Some(("transform", _)) if format!("{:?}", style.transform).contains("Percent") => {
+                Some("transform\t".to_string())
+            }
+            _ => Some(row.to_string()),
         })
         .collect::<Vec<_>>()
         .join("\n")

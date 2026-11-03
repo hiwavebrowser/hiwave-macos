@@ -16,6 +16,8 @@ use crate::{css_color, css_keyword, css_px, LayoutBox};
 
 /// A number the way Blink prints one in a computed value: six significant digits.
 fn num(v: f64) -> String {
+    // Trigonometry leaves noise: cos(90deg) is 6e-17, not 0. Blink rounds it.
+    let v = if (v - v.round()).abs() < 1e-6 { v.round() } else { v };
     if v == 0.0 || !v.is_finite() {
         return "0".into();
     }
@@ -36,6 +38,24 @@ fn numf(v: f32) -> String {
     num(v.to_string().parse().unwrap_or(0.0))
 }
 
+thread_local! {
+    static ROOT_FONT_PX: std::cell::Cell<f32> = const { std::cell::Cell::new(16.0) };
+}
+
+/// The root element's font size, for `rem`, set before a snapshot is written.
+pub(crate) fn set_root_font(style: &css::ComputedStyle) {
+    let px = match style.font_size {
+        Length::Px(px) => px,
+        Length::Em(em) | Length::Rem(em) => em * 16.0,
+        _ => 16.0,
+    };
+    ROOT_FONT_PX.with(|r| r.set(px));
+}
+
+pub(crate) fn root_font() -> f32 {
+    ROOT_FONT_PX.with(|r| r.get())
+}
+
 fn keyword(debug: impl std::fmt::Debug) -> String {
     css_keyword(&format!("{debug:?}"))
 }
@@ -45,7 +65,7 @@ pub(crate) fn length(l: &Length, font_px: f32) -> Option<String> {
     Some(match l {
         Length::Px(p) => css_px(*p),
         Length::Em(e) => css_px(e * font_px),
-        Length::Rem(r) => css_px(r * 16.0),
+        Length::Rem(r) => css_px(r * root_font()),
         Length::Percent(p) => format!("{}%", numf(*p)),
         Length::Zero => "0px".into(),
         Length::Auto => "auto".into(),
@@ -77,7 +97,7 @@ fn sides(top: &str, right: &str, bottom: &str, left: &str) -> String {
 
 fn transform_matrix(ops: &[TransformOp], font_px: f32, w: f32, h: f32) -> String {
     let mut m = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
-    let px = |l: &Length, size: f32| f64::from(l.to_px(font_px, 16.0, size));
+    let px = |l: &Length, size: f32| f64::from(l.to_px(font_px, root_font(), size));
     let tan = |d: f32| f64::from(d).to_radians().tan();
     for op in ops {
         let n = match op {
@@ -142,7 +162,7 @@ fn functions(value: &str) -> Option<Vec<(String, String)>> {
 fn raw_length(token: &str, font_px: f32) -> String {
     let t = token.to_ascii_lowercase();
     if let Some(e) = t.strip_suffix("rem").and_then(|n| n.parse::<f32>().ok()) {
-        return css_px(e * 16.0);
+        return css_px(e * root_font());
     }
     if let Some(e) = t.strip_suffix("em").and_then(|n| n.parse::<f32>().ok()) {
         return css_px(e * font_px);
@@ -307,14 +327,21 @@ fn filter(raw: &str, color: css::Color, font_px: f32) -> Option<String> {
     let parts: Vec<String> = functions(raw)?
         .iter()
         .map(|(name, args)| match name.as_str() {
+            "blur" if args.trim().is_empty() => "blur(0px)".into(),
             "blur" => format!("blur({})", raw_length(args, font_px)),
+            "hue-rotate" => {
+                let degrees = crate::parse_angle(args.trim()).unwrap_or(0.0);
+                format!("hue-rotate({}deg)", numf(degrees))
+            }
             "brightness" | "contrast" | "grayscale" | "invert" | "opacity" | "saturate"
             | "sepia" => {
                 let amount = match args
                     .strip_suffix('%')
+                    .filter(|_| !args.trim().is_empty())
                     .and_then(|p| p.trim().parse::<f64>().ok())
                 {
                     Some(p) => num(p / 100.0),
+                    None if args.trim().is_empty() => "1".into(),
                     None => args
                         .parse::<f64>()
                         .map(num)
@@ -622,11 +649,33 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     let len = |l: &Length| length(l, font_px).unwrap_or_default();
 
     // Transforms.
-    if !s.transform.ops.is_empty() {
-        row(
-            "transform",
-            &transform_matrix(&s.transform.ops, font_px, bx.width, bx.height),
-        );
+    // `display: none` has no transform in Chromium: it reads `none`. A viewport
+    // unit has no viewport here: say nothing rather than resolve it to 0.
+    if !s.transform.ops.is_empty() && s.display != css::Display::None {
+        let viewport = |l: &Length| {
+            matches!(
+                l,
+                Length::Vw(_)
+                    | Length::Vh(_)
+                    | Length::Vmin(_)
+                    | Length::Vmax(_)
+                    | Length::Calc(_)
+                    | Length::Min(_)
+                    | Length::Max(_)
+                    | Length::Clamp(_)
+            )
+        };
+        let unknown = s.transform.ops.iter().any(|op| match op {
+            TransformOp::Translate(x, y) => viewport(x) || viewport(y),
+            TransformOp::TranslateX(x) | TransformOp::TranslateY(x) => viewport(x),
+            _ => false,
+        });
+        let value = if unknown {
+            String::new()
+        } else {
+            transform_matrix(&s.transform.ops, font_px, bx.width, bx.height)
+        };
+        row("transform", &value);
     }
     if let Some(TransformOp::Translate(x, y)) = &s.translate {
         let (x, y) = (len(x), len(y));
@@ -649,8 +698,8 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         "transform-origin",
         &format!(
             "{} {}",
-            css_px(s.transform_origin.x.to_px(font_px, 16.0, origin_w)),
-            css_px(s.transform_origin.y.to_px(font_px, 16.0, origin_h))
+            css_px(s.transform_origin.x.to_px(font_px, root_font(), origin_w)),
+            css_px(s.transform_origin.y.to_px(font_px, root_font(), origin_h))
         ),
     );
 
@@ -1023,7 +1072,7 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     }
     let offset = |l: &Option<Length>, size: f32| match l {
         None | Some(Length::Auto) => "auto".to_string(),
-        Some(l) => css_px(l.to_px(font_px, 16.0, size)),
+        Some(l) => css_px(l.to_px(font_px, root_font(), size)),
     };
     if s.top.is_some() || s.right.is_some() || s.bottom.is_some() || s.left.is_some() {
         let (t, r, bt, l) = (
@@ -1065,10 +1114,20 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         shown(s.border_bottom_style, d.border.bottom),
         shown(s.border_left_style, d.border.left),
     );
-    let top = border_side(d.border.top, style_t, s.border_top_color);
-    let right = border_side(d.border.right, style_r, s.border_right_color);
-    let bottom = border_side(d.border.bottom, style_b, s.border_bottom_color);
-    let left = border_side(d.border.left, style_l, s.border_left_color);
+    // The engine stores an unset or `currentcolor` border colour as black (its
+    // initial); Chromium's initial is currentcolor. Black is read as the text
+    // colour, which makes an explicit black border on coloured text read wrong.
+    let current = |c: css::Color| if c == black { s.color } else { c };
+    let (ct, cr, cb, cl) = (
+        current(s.border_top_color),
+        current(s.border_right_color),
+        current(s.border_bottom_color),
+        current(s.border_left_color),
+    );
+    let top = border_side(d.border.top, style_t, ct);
+    let right = border_side(d.border.right, style_r, cr);
+    let bottom = border_side(d.border.bottom, style_b, cb);
+    let left = border_side(d.border.left, style_l, cl);
     const UNSET: &str = "0px none rgb(0, 0, 0)";
     let mut border_named = |prefix: &str, value: &str| {
         if value != UNSET {
@@ -1103,12 +1162,6 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         row("border-bottom-style", &sb);
         row("border-left-style", &sl);
     }
-    let (ct, cr, cb, cl) = (
-        s.border_top_color,
-        s.border_right_color,
-        s.border_bottom_color,
-        s.border_left_color,
-    );
     if (ct, cr, cb) != (black, black, black) || cl != black {
         let (t, r, bt, l) = (css_color(ct), css_color(cr), css_color(cb), css_color(cl));
         row("border-color", &sides(&t, &r, &bt, &l));

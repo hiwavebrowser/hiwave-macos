@@ -1456,8 +1456,7 @@
     "prop": "border-color",
     "value": "",
     "base": "color:#060",
-    "chrome": "rgb(0, 102, 0)",
-    "gap": "an unset border colour is stored black, not currentcolor"
+    "chrome": "rgb(0, 102, 0)"
    },
    {
     "prop": "border-top-color",
@@ -1483,8 +1482,7 @@
     "prop": "border-top-color",
     "value": "",
     "base": "color:#060",
-    "chrome": "rgb(0, 102, 0)",
-    "gap": "an unset border colour is stored black, not currentcolor"
+    "chrome": "rgb(0, 102, 0)"
    },
    {
     "prop": "border-top-style",
