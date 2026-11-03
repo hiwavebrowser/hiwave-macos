@@ -463,6 +463,12 @@ pub struct Renderer {
     /// The page's scroll offset, applied while a list is executed (see
     /// `set_scroll_offset`).
     scroll_offset: (f32, f32),
+    /// What the open `PushWindowSticky` runs have moved things by, and that
+    /// sum outside the innermost of them.
+    window_sticky: (f32, f32),
+    window_sticky_outer: Vec<(f32, f32)>,
+    /// `window_sticky` outside the open `PushViewportFixed` run.
+    window_sticky_outside_fixed: (f32, f32),
     /// Address and length of the last list `execute` drew, so a test can
     /// tell the list it handed over was drawn in place and not copied.
     last_list: (usize, usize),
@@ -770,6 +776,9 @@ impl Renderer {
             stacking_contexts: Vec::new(),
             transform_stack: Vec::new(),
             scroll_offset: (0.0, 0.0),
+            window_sticky: (0.0, 0.0),
+            window_sticky_outer: Vec::new(),
+            window_sticky_outside_fixed: (0.0, 0.0),
             last_list: (0, 0),
             stats: FrameStats::default(),
             submits: Default::default(),
@@ -3042,14 +3051,32 @@ impl Renderer {
             // A fixed run undoes the page's scroll (`set_scroll_offset`);
             // unscrolled, these are marks only.
             DisplayCommand::PushViewportFixed => {
-                if self.scrolled() {
-                    self.scroll_translate(1.0);
+                let around = self.window_sticky;
+                if self.scrolled() || around != (0.0, 0.0) {
+                    let (x, y) = self.scroll_offset;
+                    self.push_transform([1.0, 0.0, 0.0, 1.0, x - around.0, y - around.1], (0.0, 0.0));
                 }
+                self.window_sticky_outside_fixed = around;
+                self.window_sticky = (0.0, 0.0);
             }
             DisplayCommand::PopViewportFixed => {
-                if self.scrolled() {
+                let around = self.window_sticky_outside_fixed;
+                if self.scrolled() || around != (0.0, 0.0) {
                     self.pop_transform();
                 }
+                self.window_sticky = around;
+            }
+
+            // Always a transform, so the pop needs no memory of the shift.
+            DisplayCommand::PushWindowSticky(rule) => {
+                let (x, y) = rule.shift(self.scroll_offset, self.window_sticky);
+                self.window_sticky_outer.push(self.window_sticky);
+                self.window_sticky = (self.window_sticky.0 + x, self.window_sticky.1 + y);
+                self.push_transform([1.0, 0.0, 0.0, 1.0, x, y], (0.0, 0.0));
+            }
+            DisplayCommand::PopWindowSticky => {
+                self.pop_transform();
+                self.window_sticky = self.window_sticky_outer.pop().unwrap_or((0.0, 0.0));
             }
 
             DisplayCommand::GradientText {
