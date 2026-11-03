@@ -996,6 +996,42 @@
    "chrome": "-1,-1",
    "base": "-1,-1",
    "expect": "chrome"
+  },
+  {
+   "name": "rem 62.5% root, body 1.6rem",
+   "html": "<!doctype html><style>body{margin:0}.box{width:100px;height:50px}html{font-size:62.5%}body{font-size:1.6rem}#a{min-width:2rem;transform:translateX(2rem)}</style><body><div id=a class=box>x</div></body>",
+   "expr": "getComputedStyle(document.getElementById('a')).minWidth+'|'+getComputedStyle(document.getElementById('a')).transform",
+   "chrome": "20px|matrix(1, 0, 0, 1, 20, 0)",
+   "base": "",
+   "expect": "chrome",
+   "source": "#866 R1 delta (comment 6604419875) nits 1 and 5"
+  },
+  {
+   "name": "rem root 10px, body 20px",
+   "html": "<!doctype html><style>body{margin:0}.box{width:100px;height:50px}html{font-size:10px}body{font-size:20px}#a{min-width:2rem}</style><body><div id=a class=box>x</div></body>",
+   "expr": "getComputedStyle(document.getElementById('a')).minWidth",
+   "chrome": "20px",
+   "base": "",
+   "expect": "chrome",
+   "source": "#866 R1 delta (comment 6604419875) nits 1 and 5"
+  },
+  {
+   "name": "outline-offset rem root 10px",
+   "html": "<!doctype html><style>body{margin:0}.box{width:100px;height:50px}html{font-size:10px}#a{outline:1px solid;outline-offset:1rem}</style><body><div id=a class=box>x</div></body>",
+   "expr": "getComputedStyle(document.getElementById('a')).outlineOffset",
+   "chrome": "10px",
+   "base": "",
+   "expect": "chrome",
+   "source": "#866 R1 delta (comment 6604419875) nits 1 and 5"
+  },
+  {
+   "name": "inline text-decoration colour longhand",
+   "html": "<!doctype html><style>body{margin:0}.box{width:100px;height:50px}</style><body><div id=a class=box style='text-decoration:underline red'>x</div></body>",
+   "expr": "getComputedStyle(document.getElementById('a')).textDecorationColor",
+   "chrome": "rgb(255, 0, 0)",
+   "base": "",
+   "expect": "base",
+   "source": "#866 R1 delta (comment 6604419875) nits 1 and 5"
   }
  ]
 }
