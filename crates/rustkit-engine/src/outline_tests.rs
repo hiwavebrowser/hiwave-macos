@@ -639,3 +639,69 @@ fn the_longhands_read_as_chromium_serializes_them() {
         "rgb(0, 128, 0)|none|0px|0px"
     );
 }
+
+/// Pins a gap (#867 R1 finding 1). Chromium keeps A's ring over C: the
+/// outlines of a paint layer's normal flow paint after all of it. Here the
+/// positioned box inside B flushes the waiting rings early (the engine paints
+/// a positioned box where it meets it, not after the normal flow), so C's
+/// background covers A's ring where they overlap.
+#[test]
+#[ignore = "a positioned descendant flushes earlier siblings' rings before later in-flow backgrounds"]
+fn a_positioned_box_in_a_middle_sibling_keeps_an_earlier_ring_on_top() {
+    assert_ink(
+        r#"<div style="margin:20px;width:100px;height:40px;outline:10px solid red"></div><div style="margin:0 20px;height:5px"><div style="position:relative;width:5px;height:5px"></div></div><div style="margin:-25px 20px 0;width:100px;height:40px;background:#00f"></div>"#,
+        3200,
+        3000,
+    );
+}
+
+#[test]
+fn a_large_negative_offset_keeps_twice_the_width_about_the_centre() {
+    // Chromium: 80x50 at 30,30 with a 3px ring at -40 is a 6x6 block at
+    // 67,52; at -30 it is 26 wide and 6 tall.
+    let (mut engine, view) = loaded(
+        r#"<div style="position:absolute;left:30px;top:30px;width:80px;height:50px;outline:3px solid red;outline-offset:-40px"></div>"#,
+    );
+    let ppm = frame(&mut engine, view);
+    assert_eq!(count(&ppm, RED), 36);
+    assert_eq!((pixel(&ppm, 67, 52), pixel(&ppm, 72, 57)), (RED, RED));
+    assert_ink(
+        r#"<div style="position:absolute;left:30px;top:30px;width:80px;height:50px;outline:3px solid red;outline-offset:-30px"></div>"#,
+        156,
+        0,
+    );
+}
+
+#[test]
+fn a_tables_ring_goes_around_its_caption_too() {
+    // Chromium rings the table wrapper: grid and the caption's margin box.
+    let table = |side: &str, caption: &str| {
+        format!(
+            r#"<table style="margin:30px;outline:3px solid red;border-spacing:0;font:16px/20px sans-serif;caption-side:{side}"><caption style="{caption}">cap</caption><tr><td style="width:100px;height:40px;padding:0"></td></tr></table>"#
+        )
+    };
+    let (mut engine, view) = loaded(&table("top", ""));
+    let ppm = frame(&mut engine, view);
+    assert_eq!(count(&ppm, RED), 996);
+    assert_eq!(pixel(&ppm, 27, 27), RED, "the ring's corner, above the caption");
+    let (mut engine, view) = loaded(&table("bottom", "margin:4px"));
+    let ppm = frame(&mut engine, view);
+    assert_eq!(count(&ppm, RED), 1044);
+    assert_eq!(pixel(&ppm, 132, 100), RED, "the ring's corner, below the caption");
+}
+
+#[test]
+fn dashes_a_clip_hides_are_not_drawn() {
+    // #867 R1 finding 4: 3000 dashed rows in a 280px clipper drew every dash
+    // of every row, about 150 commands a row.
+    let rows: String = (0..3000)
+        .map(|_| r#"<div style="height:2px;margin:2px;outline:1px dashed red"></div>"#)
+        .collect();
+    let (mut engine, view) =
+        loaded(&format!(r#"<div style="height:280px;overflow:hidden">{rows}</div>"#));
+    let ppm = frame(&mut engine, view);
+    let commands = engine.views[&view].display_list.as_ref().expect("list").commands.len();
+    assert!(commands < 30_000, "{commands} commands for about 70 visible rows");
+    assert_eq!(pixel(&ppm, 1, 1), RED, "the first row's dash is still drawn");
+    assert!(count(&ppm, RED) > 0 && (281..300).all(|y| pixel(&ppm, 100, y) != RED));
+}
