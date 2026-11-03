@@ -13,7 +13,15 @@
 //! - grid: ratio 16/9, auto-fill minmax
 //! KNOWN: block flow, not flex/grid (a float's auto width from height through the ratio):
 //! - block: height, ratio 2/1, auto width
+//! KNOWN: an item with in-flow content keeps its content height (R1 on #869,
+//! finding 3; why the rows above have no text or children):
+//! - row: flex-basis 50, ratio 2/1, wide child (300x5, Chromium 300x150)
+//! - row: flex-basis 50, ratio 2/1, max-height 40, wide child (80x5, Chromium 80x40)
+//! KNOWN: min-height over max-height on a row item's height (max wins here,
+//! min wins in Chromium; generic, not aspect-ratio):
+//! - row: flex-basis 50, ratio 2/1, min-height 40, max-height 30 (80x30, Chromium 80x40)
 //! KNOWN: replaced boxes (natural ratio) in flex and grid; next slice:
+//! - img nosrc block: width 100, auto 2 (100x100, Chromium 100x50)
 //! - img flex row: flex 1, align start
 //! - img flex column: width
 //! - img flex column: stretch
@@ -66,6 +74,43 @@ const CASES: &[(&str, &str, &str)] = &[
     ("canvas flex row: ratio 1", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><canvas id=t width=300 height=150 style="display:block;width:100px;aspect-ratio:1"></canvas></div>"##, "100x100 @0,0"),
     ("card: flex item, img 100% ratio 16/9", r##"<div id=c style="display:flex;width:400px;"><div style="flex:1"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:16/9"></div><div style="flex:1"></div></div>"##, "200x112.5 @0,0"),
     ("card: div ratio wrapper in flex 1", r##"<div id=c style="display:flex;width:400px;"><div style="flex:1"><div id=t style="aspect-ratio:16/9"></div></div><div style="flex:1"></div></div>"##, "200x112.5 @0,0"),
+    // R1 on #869: wrapping columns, min/max through the ratio, `auto <ratio>`.
+    ("col wrap height 400: ratio 2/1", r##"<div style="display:flex;width:400px;flex-direction:column;flex-wrap:wrap;height:400px"><div id=t style="aspect-ratio:2/1"></div></div>"##, "400x0 @0,0"),
+    ("col wrap-reverse height 400: ratio 2/1", r##"<div style="display:flex;width:400px;flex-direction:column;flex-wrap:wrap-reverse;height:400px"><div id=t style="aspect-ratio:2/1"></div></div>"##, "400x0 @0,0"),
+    ("col wrap no height: ratio 2/1", r##"<div style="display:flex;width:400px;flex-direction:column;flex-wrap:wrap"><div id=t style="aspect-ratio:2/1"></div></div>"##, "400x0 @0,0"),
+    ("col nowrap height 400: ratio 2/1", r##"<div style="display:flex;width:400px;flex-direction:column;height:400px"><div id=t style="aspect-ratio:2/1"></div></div>"##, "400x200 @0,0"),
+    ("col stretch: ratio 2/1, max-width 200", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:2/1;max-width:200px"></div></div>"##, "200x100 @0,0"),
+    ("col stretch: ratio 2/1, min-width 600", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:2/1;min-width:600px"></div></div>"##, "600x300 @0,0"),
+    ("col stretch: ratio 2/1, max-width 200, padding 10 content-box", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:2/1;max-width:200px;padding:10px"></div></div>"##, "220x120 @0,0"),
+    ("col stretch: ratio 2/1, max-width 200, padding 10 border-box", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:2/1;max-width:200px;padding:10px;box-sizing:border-box"></div></div>"##, "200x100 @0,0"),
+    ("col stretch: ratio 2/1, max-height 50", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:2/1;max-height:50px"></div></div>"##, "400x50 @0,0"),
+    ("col start: width 300, ratio 2/1, max-width 100", r##"<div style="display:flex;width:400px;flex-direction:column;align-items:flex-start"><div id=t style="width:300px;aspect-ratio:2/1;max-width:100px"></div></div>"##, "100x50 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, min-height 150", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px"></div></div>"##, "300x150 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, max-height 50", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;max-height:50px"></div></div>"##, "200x50 @0,0"),
+    ("row: ratio 2/1, min-height 150", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="aspect-ratio:2/1;min-height:150px"></div></div>"##, "300x150 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, min-height 150, overflow hidden", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px;overflow:hidden"></div></div>"##, "200x150 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, min-height 150, min-width 0", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px;min-width:0"></div></div>"##, "200x150 @0,0"),
+    ("row: width 200, ratio 2/1, min-height 150", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="width:200px;aspect-ratio:2/1;min-height:150px"></div></div>"##, "200x150 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, min-height 150, border-box pad 10", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px;padding:10px;box-sizing:border-box"></div></div>"##, "300x150 @0,0"),
+    ("row: flex-basis 200, ratio 2/1, min-height 150, content-box pad 10", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px;padding:10px"></div></div>"##, "320x170 @0,0"),
+    ("row: height 50, ratio 2/1, max-height 30", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="height:50px;aspect-ratio:2/1;max-height:30px"></div></div>"##, "60x30 @0,0"),
+    ("row: height 50, ratio 2/1, min-height 80", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="height:50px;aspect-ratio:2/1;min-height:80px"></div></div>"##, "160x80 @0,0"),
+    ("row: height 50, ratio 2/1, max-height 30, pad 5 content-box", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="height:50px;aspect-ratio:2/1;max-height:30px;padding:5px"></div></div>"##, "70x40 @0,0"),
+    ("row: width 160, auto 16/9, align start", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="width:160px;aspect-ratio:auto 16/9"></div></div>"##, "160x90 @0,0"),
+    ("row: width 160, 16/9 auto, align start", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="width:160px;aspect-ratio:16/9 auto"></div></div>"##, "160x90 @0,0"),
+    ("block: width 160, auto 16/9", r##"<div id=t style="width:160px;aspect-ratio:auto 16/9"></div>"##, "160x90 @0,0"),
+    ("block: width 160, 16/9 auto", r##"<div id=t style="width:160px;aspect-ratio:16/9 auto"></div>"##, "160x90 @0,0"),
+    ("block: width 160, auto 2", r##"<div id=t style="width:160px;aspect-ratio:auto 2"></div>"##, "160x80 @0,0"),
+    ("block: width 160, auto auto (invalid)", r##"<div id=t style="width:160px;aspect-ratio:2;aspect-ratio:auto auto"></div>"##, "160x80 @0,0"),
+    ("block: width 160, 2/1 then auto 16/9 auto (invalid)", r##"<div id=t style="width:160px;aspect-ratio:2/1;aspect-ratio:auto 16/9 auto"></div>"##, "160x80 @0,0"),
+    ("col stretch: auto 16/9", r##"<div style="display:flex;width:400px;flex-direction:column;"><div id=t style="aspect-ratio:auto 16/9"></div></div>"##, "400x225 @0,0"),
+    ("img block: width 100, auto 1", r##"<img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px;aspect-ratio:auto 1">"##, "100x50 @0,0"),
+    ("img block: width 100, 1 auto", r##"<img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px;aspect-ratio:1 auto">"##, "100x50 @0,0"),
+    ("img block: width 100, 1", r##"<img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px;aspect-ratio:1">"##, "100x100 @0,0"),
+    ("row: flex 1, ratio 2/1, min-height 300", r##"<div style="display:flex;width:400px;align-items:flex-start"><div id=t style="flex:1;aspect-ratio:2/1;min-height:300px"></div></div>"##, "600x300 @0,0"),
+    ("row stretch: flex-basis 200, ratio 2/1, min-height 150", r##"<div style="display:flex;width:400px;"><div id=t style="flex:0 0 200px;aspect-ratio:2/1;min-height:150px"></div></div>"##, "300x150 @0,0"),
+    ("col: flex-basis 50, ratio 2/1, min-width 300, align start", r##"<div style="display:flex;width:400px;flex-direction:column;align-items:flex-start"><div id=t style="flex:0 0 50px;aspect-ratio:2/1;min-width:300px"></div></div>"##, "300x150 @0,0"),
+    ("col: height 50, ratio 2/1, min-width 300, align start", r##"<div style="display:flex;width:400px;flex-direction:column;align-items:flex-start"><div id=t style="height:50px;aspect-ratio:2/1;min-width:300px"></div></div>"##, "300x50 @0,0"),
 ];
 
 const READ: &str = "(function () { var r = document.getElementById('t').getBoundingClientRect(); \
