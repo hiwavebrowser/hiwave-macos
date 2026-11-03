@@ -403,6 +403,8 @@ mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
 #[cfg(test)]
+mod computed_read_tests;
+#[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
