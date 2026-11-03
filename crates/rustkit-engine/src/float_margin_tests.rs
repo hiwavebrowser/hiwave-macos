@@ -128,8 +128,10 @@ fn margins_collapse_through_an_empty_block() {
 /// neighbours. A first box holding floats and a `clear` (direct, nested or a
 /// clearfix `::after`) has height and does not collapse through; neither do
 /// an `aspect-ratio` box, a box that is its own formatting context
-/// (`flow-root`, `contain: layout|paint|content|strict`, `container-type`,
-/// vertical `writing-mode`), `hr`, `fieldset` or a replaced element. An empty
+/// (`flow-root`, `contain: layout|paint|content|strict`,
+/// `content-visibility: auto|hidden`, `container-type`, vertical
+/// `writing-mode`), `hr`, `fieldset` or a replaced element. A `clear` that
+/// follows only floats on the other side gets no clearance. An empty
 /// box moved by clearance: the next box sits at
 /// `e.y - margin-top + collapse(margin-top, margin-bottom, next margin-top)`.
 /// Expected: `y/height` of every `[id]`, Chromium 143.0.7499.4, same page.
@@ -187,6 +189,13 @@ const REVIEW: &[(&str, &str, &str)] = &[
     ("container normal", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;container-name:x"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=50/10"),
     ("hr0 first", r#"<div id=p style="margin-top:7px"><hr id=e style="margin:12px 0;border:0"><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
     ("object block", r#"<div id=a style="height:20px;margin-bottom:30px"></div><object id=e style="display:block;margin:12px 0;height:0"></object><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("right float, clear:left empty", r#"<div id=f style="float:left;width:50px;height:100px;float:right"></div><div id=e style="margin:12px 0;clear:left"></div><div id=n style="height:10px;"></div>"#, "f=12/100 e=12/0 n=12/10"),
+    ("right float, clear:left empty, first in wrapper", r#"<div id=w style="margin-top:7px"><div id=f style="float:left;width:50px;height:100px;float:right"></div><div id=e style="margin:12px 0;clear:left"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "w=40/10 f=40/100 e=40/0 n=40/10"),
+    ("right float, clearfix left only", r#"<style>.cl::after{content:"";display:block;clear:left}</style><div id=w><div id=p class=cl><div id=f style="float:left;width:50px;height:100px;float:right"></div></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "w=40/10 p=40/0 f=40/100 n=40/10"),
+    ("ctx content-visibility auto", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;content-visibility:auto"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("ctx-first content-visibility auto", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;content-visibility:auto"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("ctx content-visibility hidden", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;content-visibility:hidden"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("ctx-first content-visibility hidden", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;content-visibility:hidden"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
 ];
 
 fn rects(v: &str) -> Vec<(String, f32, f32)> {
