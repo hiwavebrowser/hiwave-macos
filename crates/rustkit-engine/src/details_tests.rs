@@ -66,3 +66,29 @@ fn details_boxes_match_chromium() {
         wrong.join("\n")
     );
 }
+
+/// The default summary paints its text. The rows above read heights only, and
+/// a zero-width summary block (its style built from `Default`, not the initial
+/// style) kept the height and painted nothing.
+#[test]
+fn the_default_summary_paints_details() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds::new(0, 0, 800, 600))
+        .expect("headless view");
+    let html = format!(
+        "<!doctype html><style>{STYLE}</style><details id=d><p>hidden</p></details><details id=e open><p>shown</p></details>"
+    );
+    engine.load_html(view, &html).expect("load_html");
+    let list = engine.views[&view].display_list.as_ref().expect("display list");
+    let texts: Vec<&str> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            rustkit_layout::DisplayCommand::Text { text, .. } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    assert_eq!(texts, ["Details", "Details", "shown"]);
+}
