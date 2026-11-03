@@ -28,6 +28,21 @@ export function publishable(counts, known) {
   return Object.fromEntries(names.map((name) => [name, counts[name]]));
 }
 
+// Every name on an element's style object that CSS.supports takes as a property, evaluated in a
+// page. The object also carries descriptors such as `src`; CSS.supports refuses those. The crawl
+// writes css_known_properties.json from it, and css_known_properties.test.mjs checks that list
+// against it, so a name added to the list by hand fails.
+export const KNOWN_PROPERTIES = `(() => {
+  const style = document.documentElement.style;
+  const known = new Set();
+  for (const key in style) {
+    if (typeof style[key] !== 'string' || key === 'cssText') continue;
+    const name = key.includes('-') ? key : key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^webkit-/, '-webkit-');
+    if (CSS.supports(name, 'initial')) known.add(name);
+  }
+  return [...known].sort();
+})()`;
+
 export function isBlockedTitle(title) {
   return /just a moment|access denied|attention required|captcha|challenge|bot or not|security checkpoint|are you a human|verify you are/i.test(title || '');
 }
