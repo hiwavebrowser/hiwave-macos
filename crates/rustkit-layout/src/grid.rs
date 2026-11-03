@@ -1804,8 +1804,20 @@ pub fn layout_grid_container(
             // (see `a_span_covers_a_flexible_track`).
             let flexible = !span_over_flexible
                 && (start..start + span).all(|i| grid.columns.get(i).is_some_and(|t| t.is_flexible));
+            // `auto` carries both flags (minmax(min-content, max-content)).
+            let min_content_only = (start..start + span).all(|i| {
+                grid.columns
+                    .get(i)
+                    .is_some_and(|t| t.is_min_content && !t.is_max_content && t.fit_content_limit.is_none())
+            });
             let contribution = if flexible {
                 item.get_flexible_width_contribution(container_width)
+            } else if !min_content_only && is_compressible_replaced(item.layout_box) {
+                // One number serves as both the minimum and the content
+                // contribution here, and the compressible zero emptied an
+                // `auto` or `max-content` column (Chromium sizes it to the
+                // image). A `min-content` column keeps the zero (Chromium 0x0).
+                compressible_max_content_width(item.layout_box) + horizontal_margins(&item.layout_box.style)
             } else {
                 item.get_width_contribution(container_width)
             };
@@ -3539,6 +3551,19 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
 
     let padding_border = horizontal_padding_border(style);
 
+    // css-sizing-3 §5.2.2: a replaced box with a percentage `width` or
+    // `max-width` is compressible, and its min-content contribution is zero
+    // (its padding and border, and a length `min-width`). Chromium 143: a
+    // `width: 100%` image inside a `1fr` column's item leaves the column its
+    // share, 200 of a 400px two-column grid; here it read 400. Ahead of the
+    // pixel-width arm: `<img width=800 height=400>` under the usual
+    // `max-width: 100%` reset has a 800px `width` and is still compressible
+    // (Chromium 200x100 in that card column; read first, the 800 made the
+    // column 800 wide, #871 R1).
+    if is_compressible_replaced(layout_box) {
+        return length_min_width_border_box(layout_box).unwrap_or(padding_border);
+    }
+
     // An explicit pixel width fixes the contribution regardless of content.
     if let Length::Px(w) = style.width {
         return match style.box_sizing {
@@ -3551,16 +3576,6 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // width, which the walk below read as 0.
     if let Some(w) = replaced_content_contribution(layout_box, true, None) {
         return w + padding_border;
-    }
-    // css-sizing-3 §5.2.2: a replaced box with a percentage `width` or
-    // `max-width` is compressible, and its min-content contribution is zero
-    // (its padding and border, and a length `min-width`). Chromium 143: a
-    // `width: 100%` image inside a `1fr` column's item leaves the column its
-    // share, 200 of a 400px two-column grid; here it read 400.
-    if matches!(layout_box.box_type, BoxType::Image { .. })
-        && (length_has_percent(&style.width) || length_has_percent(&style.max_width))
-    {
-        return length_min_width_border_box(layout_box).unwrap_or(padding_border);
     }
 
     // A form control's content is not in its children (see the same arm in
@@ -4838,6 +4853,39 @@ fn place_replaced_item_in_area(
         ..Default::default()
     };
     child.layout_image_in(natural_width, natural_height, &cb, percent_height_base);
+    // An item that asks for `stretch` itself (not the container default,
+    // which stands in for `normal`) fills its area in that axis when its size
+    // there is `auto`; the other axis follows the ratio unless it stretches
+    // too. Chromium 143: `justify-self: stretch` is 400x200 in a 400px
+    // column, `align-self: stretch` 200x100 in a 100px row, both 400x100
+    // (#871 R1 finding 2). A 0-tall area (no row yet) does not stretch.
+    let stretch_x = child.style.justify_self == JustifySelf::Stretch && matches!(child.style.width, Length::Auto);
+    let stretch_y = child.style.align_self == AlignSelf::Stretch
+        && matches!(child.style.height, Length::Auto)
+        && rect.height > 0.0;
+    if stretch_x || stretch_y {
+        let border_box = child.style.box_sizing == BoxSizing::BorderBox;
+        let d = &child.dimensions;
+        let (bp_x, bp_y) = (
+            d.border.left + d.border.right + d.padding.left + d.padding.right,
+            d.border.top + d.border.bottom + d.padding.top + d.padding.bottom,
+        );
+        let (m_x, m_y) = (d.margin.left + d.margin.right, d.margin.top + d.margin.bottom);
+        let size = |area: f32, m: f32, bp: f32| {
+            let outer = (area - m).max(bp);
+            Length::Px(if border_box { outer } else { outer - bp })
+        };
+        let saved = (child.style.width.clone(), child.style.height.clone());
+        if stretch_x {
+            child.style.width = size(rect.width, m_x, bp_x);
+        }
+        if stretch_y {
+            child.style.height = size(rect.height, m_y, bp_y);
+        }
+        child.layout_image_in(natural_width, natural_height, &cb, percent_height_base);
+        child.style.width = saved.0;
+        child.style.height = saved.1;
+    }
     let d = &child.dimensions;
     let outer_width = d.margin.left
         + d.border.left
@@ -4884,6 +4932,32 @@ fn place_replaced_item_in_area(
     };
     child.dimensions.content.x += dx;
     child.dimensions.content.y += dy;
+}
+
+/// css-sizing-3 §5.2.2: an `<img>` whose `width` or `max-width` holds a
+/// percentage. Its min-content contribution is zero; its max-content
+/// contribution is the size it would have with those percentages read as
+/// `auto` / `none` (`compressible_max_content_width`).
+fn is_compressible_replaced(layout_box: &LayoutBox) -> bool {
+    matches!(layout_box.box_type, BoxType::Image { .. })
+        && (length_has_percent(&layout_box.style.width) || length_has_percent(&layout_box.style.max_width))
+}
+
+/// The max-content contribution (border box) of a compressible replaced box:
+/// a percentage `width` behaves as `auto` and a percentage `max-width` as
+/// `none` (css-sizing-3 §5.2.2 zeroes the min-content contribution only).
+/// Chromium 143: a `width: 100%` 40x20 image in an `auto 1fr` grid is 40x20;
+/// with the min-content zero as its one contribution the `auto` column was 0
+/// and the image 0x0 (#871 R1).
+fn compressible_max_content_width(layout_box: &LayoutBox) -> f32 {
+    let mut probe = layout_box.clone();
+    if length_has_percent(&probe.style.width) {
+        probe.style.width = Length::Auto;
+    }
+    if length_has_percent(&probe.style.max_width) {
+        probe.style.max_width = Length::Auto;
+    }
+    own_max_content_width(&probe)
 }
 
 /// Whether a size holds a percentage, which a grid item's own column does not
