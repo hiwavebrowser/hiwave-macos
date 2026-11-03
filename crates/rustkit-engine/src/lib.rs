@@ -20866,13 +20866,16 @@ fn is_rgb_or_hsl(token: &str) -> bool {
 }
 
 /// A colour CSS accepts that `parse_color` cannot resolve yet: the
-/// `currentcolor` keyword or a colour function other than `rgb()`/`hsl()`
-/// (`oklch()`, `color()`, `light-dark()`, ...). A shorthand naming one
+/// `currentcolor` keyword, a colour function other than `rgb()`/`hsl()`
+/// (`oklch()`, `color()`, `light-dark()`, ...), or an `rgb()`/`hsl()` that
+/// is valid but not read yet (relative colour). A shorthand naming one
 /// is valid, so it must be kept with the colour left unpainted, not dropped
 /// whole as if the token were junk.
 fn is_unresolved_color(token: &str) -> bool {
     // `rgb()` / `hsl()` are not here: parse_color reads both syntaxes, so
-    // one it refuses is invalid and must drop the declaration.
+    // one it refuses is invalid and must drop the declaration, unless it
+    // is valid CSS the parser does not read yet (`rgb(from red r g b)`,
+    // `mod()` in a channel): is_unreadable_color_function.
     const COLOR_FUNCTIONS: [&str; 9] = [
         "hwb(",
         "lab(",
@@ -20887,6 +20890,7 @@ fn is_unresolved_color(token: &str) -> bool {
     let lower = token.trim().to_ascii_lowercase();
     lower == "currentcolor"
         || (lower.ends_with(')') && COLOR_FUNCTIONS.iter().any(|f| lower.starts_with(f)))
+        || rustkit_css::is_unreadable_color_function(&lower)
 }
 
 fn parse_shorthand_4(
@@ -21171,9 +21175,11 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
             // Must be a color
             if let Some(c) = parse_color(part) {
                 color_value = Some(c);
-            } else if is_rgb_or_hsl(part) {
+            } else if is_rgb_or_hsl(part) && !is_unresolved_color(part) {
                 // A bad `rgb()` / `hsl()` (`rgb(1, 2 3)`) makes the shadow
                 // invalid; Chromium drops it rather than painting a default.
+                // One RustKit cannot read yet (`rgb(from red r g b)`) is
+                // valid: the shadow stays, in its default colour.
                 return None;
             }
         }

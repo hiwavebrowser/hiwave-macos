@@ -3532,6 +3532,7 @@ pub mod media;
 pub use media::{media_query_list_matches, media_query_list_serialize};
 
 mod color_fn;
+pub use color_fn::is_unreadable_color_function;
 #[cfg(test)]
 mod color_syntax_tests;
 pub mod content;
