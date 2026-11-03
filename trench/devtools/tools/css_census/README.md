@@ -44,16 +44,26 @@ The "sites" column comes from `docs/census/css_property_prevalence_top100.json`,
 counts only: `node docs/census/tools/css_property_prevalence.mjs` regenerates it
 live. The hosts in `docs/census/tools/never_load.mjs` (ebay and shopify domains) are
 refused at Chromium's resolver, so no page, subresource or redirect reaches them, and
-a site whose load asked for one is dropped. The checked-in 11-03 crawl predates that:
+a site whose load asked for one before the crawl left it is dropped and counted as
+dropped on every path: a redirect that failed the load, a blocked status, a request
+made while or after the crawl read the page (`prevalence_visit.mjs` decides after it
+closes the page, which it keeps 500 ms past the read). The checked-in 11-03 crawl predates that:
 it refused them only in a request handler, which a redirect gets past, so it cannot be
 shown that no refused host was reached by a redirect in that crawl. The file is public,
 so it holds only names in `docs/census/tools/css_known_properties.json`, which the
-crawl takes from Chromium; `css_property_names.test.mjs` fails on any other name. That
-guard trusts the known list itself: a name added to both files passes it, so a change
-to the list needs reading in review. `@font-face`
+crawl takes from Chromium; `css_property_names.test.mjs` fails on any other name, and
+`css_known_properties.test.mjs` checks the list itself against the property list of
+the Playwright Chromium in `tools/parity_oracle`, read on a blank page, so a name added
+by hand to both files fails too. `@font-face`
 descriptors are not counted. A census run reads the file and needs no network, and
 refuses it below `MIN_SITES` (50) loaded sites: fewer is a failed crawl. 50 is a
 chosen number, not a measured one.
+
+Tests: `cargo test -p css-census` runs every census test, the generator's and the
+node tests in `docs/census/tools/*.test.mjs` (refused hosts, the name reader, the
+known list, the crawl's drop rule). They need node and the Playwright Chromium above,
+and no network: the browser tests map every host to a local server. The node tests
+alone: `node --test docs/census/tools/*.test.mjs`.
 
 A property is its worst measured value. `--only a,b` prints JSON for those rows
 and writes no report; `--parity-capture <path>` skips the build.

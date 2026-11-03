@@ -3,7 +3,7 @@
 // One load per site, four at a time. The output is counts per property only: no site names, no URLs,
 // no page text, and only names Chromium knows. The hosts in never_load.mjs are refused at Chromium's
 // resolver, so neither a page, a subresource nor a redirect reaches them, and a site whose load asked
-// for one is dropped. The 11-03 crawl in the checked-in file predates the resolver refusal: it refused
+// for one at any point before the crawl left it is dropped (prevalence_visit.mjs). The 11-03 crawl in the checked-in file predates the resolver refusal: it refused
 // them only in a request handler, which a redirect gets past, so it cannot be shown that no refused
 // host was reached by a redirect in that crawl.
 // Usage: node docs/census/tools/css_property_prevalence.mjs [--list websuite/realsite-top100.json] [--out path.json]
