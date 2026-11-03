@@ -7486,6 +7486,9 @@ impl LayoutBox {
         if let Some(z) = child.paint_z() {
             return Some(z);
         }
+        if let Some(z) = child.sticky_table_part_z() {
+            return Some(z);
+        }
         let item = matches!(
             self.style.display,
             rustkit_css::Display::Flex
@@ -7497,6 +7500,37 @@ impl LayoutBox {
             BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
         );
         (item && child.style.z_index != 0).then_some(child.style.z_index)
+    }
+
+    /// The paint z of the highest sticky row or cell inside this row or
+    /// row group, or `None`. The engine orders positioned boxes among their
+    /// siblings only, so a sticky `th` was ordered inside its `tr` and the
+    /// later row groups painted and hit over it once it stuck (Chromium 143
+    /// paints and hits the stuck cell over the rows). Lifting the row or
+    /// row group that holds it into the positioned layer puts it after
+    /// them. Rows do not overlap one another unmoved, so nothing else in
+    /// the lifted group changes order with what it covers.
+    fn sticky_table_part_z(&self) -> Option<i32> {
+        use rustkit_css::Display;
+        let part = |b: &LayoutBox| {
+            matches!(
+                b.style.display,
+                Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup | Display::TableRow
+            )
+        };
+        if !part(self) {
+            return None;
+        }
+        self.children
+            .iter()
+            .filter_map(|child| {
+                let own = (child.style.position == rustkit_css::Position::Sticky)
+                    .then(|| child.paint_z())
+                    .flatten();
+                let below = if part(child) { child.sticky_table_part_z() } else { None };
+                own.max(below)
+            })
+            .max()
     }
 
     /// Get children sorted by z-index for painting.
@@ -7886,8 +7920,11 @@ impl LayoutBox {
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
-        // Check if the point is within our border box
-        if !border_box.contains(x, y) {
+        // Check if the point is within our border box. A row or row group
+        // holding a sticky cell or row is asked anyway: the stuck part is
+        // drawn outside it once moved.
+        let inside = border_box.contains(x, y);
+        if !inside && self.sticky_table_part_z().is_none() {
             return None;
         }
 
@@ -7923,7 +7960,7 @@ impl LayoutBox {
         // No child was hit, so we are the target, if we can be one: a
         // see-through overlay or a closed menu leaves the point to
         // whatever is under it.
-        if !self.is_hit_target() {
+        if !inside || !self.is_hit_target() {
             return None;
         }
 
