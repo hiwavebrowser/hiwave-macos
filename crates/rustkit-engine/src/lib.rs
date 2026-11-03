@@ -423,6 +423,8 @@ mod offset_parent_tests;
 #[cfg(test)]
 mod details_tests;
 #[cfg(test)]
+mod aspect_ratio_tests;
+#[cfg(test)]
 mod relative_offset_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
