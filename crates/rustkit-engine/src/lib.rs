@@ -469,6 +469,8 @@ mod form_empty_submit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
+mod outline_tests;
+#[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
@@ -12444,6 +12446,16 @@ impl Engine {
                 style.border_left_color = parent.border_left_color;
             }
             "border-top-color" => style.border_top_color = parent.border_top_color,
+            // The shorthand leaves `outline-offset` alone.
+            "outline" => {
+                style.outline.style = parent.outline.style;
+                style.outline.width = parent.outline.width.clone();
+                style.outline.color = parent.outline.color;
+            }
+            "outline-style" => style.outline.style = parent.outline.style,
+            "outline-width" => style.outline.width = parent.outline.width.clone(),
+            "outline-color" => style.outline.color = parent.outline.color,
+            "outline-offset" => style.outline.offset = parent.outline.offset.clone(),
             "border-right-color" => style.border_right_color = parent.border_right_color,
             "border-bottom-color" => style.border_bottom_color = parent.border_bottom_color,
             "border-left-color" => style.border_left_color = parent.border_left_color,
@@ -12863,6 +12875,31 @@ impl layout_ctx::LayoutCtx {
                         style.border_bottom_color = color;
                         style.border_left_color = color;
                     }
+                }
+            }
+            "outline" => {
+                if let Some(parsed) = parse_outline_shorthand(value) {
+                    style.outline = rustkit_css::Outline { offset: style.outline.offset.clone(), ..parsed };
+                }
+            }
+            "outline-style" => {
+                if let Some(s) = rustkit_css::OutlineStyle::from_keyword(&value.to_ascii_lowercase()) {
+                    style.outline.style = s;
+                }
+            }
+            "outline-width" => {
+                if let Some(width) = rustkit_css::Outline::parse_width(&value.to_ascii_lowercase()) {
+                    style.outline.width = Some(width);
+                }
+            }
+            "outline-color" => {
+                if let Some(color) = parse_outline_color(&value.to_ascii_lowercase()) {
+                    style.outline.color = color;
+                }
+            }
+            "outline-offset" => {
+                if let Some(offset) = rustkit_css::Outline::parse_offset(&value.to_ascii_lowercase()) {
+                    style.outline.offset = offset;
                 }
             }
             "border-style" => {
@@ -14051,6 +14088,13 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            "outline" => {
+                style.outline = rustkit_css::Outline { offset: style.outline.offset.clone(), ..Default::default() };
+            }
+            "outline-style" => style.outline.style = rustkit_css::OutlineStyle::None,
+            "outline-width" => style.outline.width = None,
+            "outline-color" => style.outline.color = None,
+            "outline-offset" => style.outline.offset = rustkit_css::Length::Zero,
             // `background: initial` / `unset`: no colour, no image.
             "background" => {
                 style.background_color = rustkit_css::Color::TRANSPARENT;
@@ -20718,6 +20762,38 @@ fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
         .unwrap_or_default()
 }
 
+/// An `outline-color` value, lowercase: `Some(None)` for `currentcolor`.
+fn parse_outline_color(value: &str) -> Option<Option<rustkit_css::Color>> {
+    if value == "currentcolor" {
+        return Some(None);
+    }
+    parse_color(value).map(Some)
+}
+
+/// `outline: <color> || <style> || <width>`. A part it does not know, or a
+/// part given twice, refuses the whole declaration. What it leaves out goes
+/// back to its initial value; `outline-offset` is not part of the shorthand.
+fn parse_outline_shorthand(value: &str) -> Option<rustkit_css::Outline> {
+    let value = value.to_ascii_lowercase();
+    let mut parsed = rustkit_css::Outline::default();
+    let (mut style, mut width, mut color) = (false, false, false);
+    for part in split_top_level_whitespace(&value) {
+        if let Some(s) = rustkit_css::OutlineStyle::from_keyword(part).filter(|_| !style) {
+            parsed.style = s;
+            style = true;
+        } else if let Some(w) = rustkit_css::Outline::parse_width(part).filter(|_| !width) {
+            parsed.width = Some(w);
+            width = true;
+        } else if let Some(c) = parse_outline_color(part).filter(|_| !color) {
+            parsed.color = c;
+            color = true;
+        } else {
+            return None;
+        }
+    }
+    (style || width || color).then_some(parsed)
+}
+
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
 /// ComputedStyle has no border-style field, so the style keyword only matters
 /// for `none`/`hidden` (which force a zero width, matching how the box would
@@ -23282,9 +23358,25 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         }),
     ];
     rows.into_iter()
+        .chain(outline_rows(s, font_px))
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The `getComputedStyle` rows of the outline family, as Chromium writes them.
+fn outline_rows(s: &ComputedStyle, font_px: f32) -> [(&'static str, String); 5] {
+    let color = css_color(s.outline.color.unwrap_or(s.color));
+    let style = s.outline.style.keyword();
+    let width = css_px(s.outline.used_width(font_px, 16.0));
+    [
+        ("outline", format!("{color} {style} {width}")),
+        ("outline-color", color),
+        ("outline-style", style.to_string()),
+        ("outline-width", width),
+        // In 64ths of a pixel: not rounded to two places as `css_px` does.
+        ("outline-offset", format!("{}px", s.outline.used_offset(font_px, 16.0))),
+    ]
 }
 
 /// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
