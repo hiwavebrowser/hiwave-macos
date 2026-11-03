@@ -26,3 +26,8 @@ export function neverLoad(url) {
 export function isBlockedTitle(title) {
   return /just a moment|access denied|attention required|captcha|challenge|bot or not|security checkpoint|are you a human|verify you are/i.test(title || '');
 }
+
+// Stub, red first.
+export function publishable(counts) {
+  return counts;
+}
