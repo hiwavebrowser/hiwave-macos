@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { publishable } from './css_property_names.mjs';
+import { KNOWN_PROPERTIES, publishable } from './css_property_names.mjs';
 import { launchRefusing, neverLoad } from './never_load.mjs';
 import { visitSite } from './prevalence_visit.mjs';
 
@@ -28,19 +28,6 @@ const knownPath = resolve(opt('--known-out', join(REPO, 'docs/census/tools/css_k
 const list = JSON.parse(readFileSync(resolve(REPO, listRel), 'utf8'));
 const sites = list.sites.filter((s) => !neverLoad(s.url));
 const WORKERS = 4;
-
-// Every name on an element's style object that CSS.supports takes as a property. The object also
-// carries descriptors such as `src`; CSS.supports refuses those.
-const KNOWN_PROPERTIES = `(() => {
-  const style = document.documentElement.style;
-  const known = new Set();
-  for (const key in style) {
-    if (typeof style[key] !== 'string' || key === 'cssText') continue;
-    const name = key.includes('-') ? key : key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^webkit-/, '-webkit-');
-    if (CSS.supports(name, 'initial')) known.add(name);
-  }
-  return [...known].sort();
-})()`;
 
 const browser = await launchRefusing(chromium, { headless: true });
 let refused = 0;

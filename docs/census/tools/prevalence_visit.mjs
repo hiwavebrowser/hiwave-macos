@@ -15,9 +15,12 @@ export const PAGE_CSS = `(() => {
   return out;
 })()`;
 
-// One visit. `outcome` is 'loaded' (names set), 'dropped' (the load asked for a refused host) or
-// 'failed' (no page to read). `refused` counts requests the handler aborted.
-export async function visitSite(browser, url, { viewport, settleMs = 1500 } = {}) {
+// One visit. `outcome` is 'loaded' (names set), 'dropped' (the load asked for a refused host at any
+// point before the crawl left the page, on any path: a redirect that failed the load, a blocked
+// status, a request made while or after the crawl read the page) or 'failed' (no page to read).
+// The drop is decided after the context is closed, so every request event of the page's life is in;
+// the page stays open `leaveMs` after the read. `refused` counts requests the handler aborted.
+export async function visitSite(browser, url, { viewport, settleMs = 1500, leaveMs = 500 } = {}) {
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
   const watch = await watchRefused(ctx);
   const page = await ctx.newPage();
@@ -27,31 +30,30 @@ export async function visitSite(browser, url, { viewport, settleMs = 1500 } = {}
     if (req.resourceType() !== 'stylesheet' || req.frame() !== page.mainFrame()) return;
     bodies.push(resp.text().catch(() => ''));
   });
-  let outcome = 'failed';
   let names = null;
   try {
-    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-    await page.waitForTimeout(settleMs);
-    const status = resp ? resp.status() : 0;
-    if ([401, 403, 429, 503].includes(status) || status >= 500 || isBlockedTitle(await page.title())) {
-      return { outcome, names, refused: watch.refused };
-    }
-    const css = await page.evaluate(PAGE_CSS);
-    await Promise.all(bodies);
-    if (watch.touched) {
-      outcome = 'dropped';
-      return { outcome, names, refused: watch.refused };
-    }
-    names = new Set();
-    for (const text of [...css, ...(await Promise.all(bodies))]) {
-      for (const name of authoredProperties(text)) names.add(name);
-    }
-    outcome = 'loaded';
-    return { outcome, names, refused: watch.refused };
+    names = await readPage(page, url, settleMs, bodies);
+    await page.waitForTimeout(leaveMs);
   } catch {
-    return { outcome: 'failed', names: null, refused: watch.refused };
+    names = null;
   } finally {
     await ctx.close().catch(() => {});
   }
+  if (watch.touched) return { outcome: 'dropped', names: null, refused: watch.refused };
+  return { outcome: names ? 'loaded' : 'failed', names, refused: watch.refused };
+}
+
+// The page's authored property names, or null for a page that is not a loaded site.
+async function readPage(page, url, settleMs, bodies) {
+  const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  const status = resp ? resp.status() : 0;
+  if ([401, 403, 429, 503].includes(status) || status >= 500 || isBlockedTitle(await page.title())) return null;
+  const css = await page.evaluate(PAGE_CSS);
+  const names = new Set();
+  for (const text of [...css, ...(await Promise.all(bodies))]) {
+    for (const name of authoredProperties(text)) names.add(name);
+  }
+  return names;
 }
