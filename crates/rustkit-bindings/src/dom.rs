@@ -3065,7 +3065,7 @@ const WRAPPERS_JS: &str = r#"
      'border-color border-inline border-inline-end border-inline-start border-left border-radius ' +
      'border-right border-style border-top border-width container flex flex-flow font gap grid-area ' +
      'grid-column grid-row grid-template inset inset-block inset-inline margin margin-block ' +
-     'margin-inline mask -webkit-mask overflow padding padding-block padding-inline place-content ' +
+     'margin-inline mask -webkit-mask outline overflow padding padding-block padding-inline place-content ' +
      'place-items place-self text-decoration transition').split(' ').forEach(function (n) {
         COMPUTED_SHORTHANDS[n] = true;
     });
@@ -3141,7 +3141,15 @@ const WRAPPERS_JS: &str = r#"
         if (m.display === 'none') return true;
         return m.display === 'inline' && !hasOwn(REPLACED, String(el.tagName || '').toUpperCase());
     }
-    function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
+    // Memoized: a page reads the same few dozen names over and over.
+    var KEBAB = Object.create(null);
+    function kebab(p) {
+        var k = KEBAB[p];
+        if (k === undefined) {
+            k = KEBAB[p] = p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+        }
+        return k;
+    }
     function customVars(el) {
         for (var e = el; e; e = e.parentElement) {
             var raw = info(e, 'computed');
@@ -3253,24 +3261,39 @@ const WRAPPERS_JS: &str = r#"
         var m = pseudo === null ? {} : computedMap(el, pseudo);
         // Listed on demand: a read of one property should not pay for the
         // list. Longhands with a value, `-webkit-` names last, as Chromium.
+        // Built once per object. Only a published value can be empty; a name
+        // from the initial table never is, so it is not looked at.
         var sorted = null;
         function names() {
             if (sorted) return sorted;
-            var seen = {};
-            Object.keys(m).forEach(function (n) { seen[n] = true; });
-            if (m.__fill) Object.keys(COMPUTED_INITIAL).forEach(function (n) { seen[n] = true; });
-            sorted = Object.keys(seen).filter(function (n) {
-                if (hasOwn(COMPUTED_SHORTHANDS, n)) return false;
-                var v = computedValue(m, n);
-                return v !== undefined && v !== '';
-            }).sort(function (a, b) {
-                var wa = a.indexOf('-webkit-') === 0, wb = b.indexOf('-webkit-') === 0;
-                if (wa !== wb) return wa ? 1 : -1;
-                return a < b ? -1 : a > b ? 1 : 0;
-            });
+            var seen = Object.create(null), list = [];
+            var add = function (n) {
+                if (seen[n] || hasOwn(COMPUTED_SHORTHANDS, n)) return;
+                seen[n] = true;
+                list.push(n);
+            };
+            for (var n in m) {
+                if (hasOwn(m, n) && m[n] !== '') add(n);
+                else if (hasOwn(m, n)) seen[n] = true;
+            }
+            if (m.__fill) {
+                for (var k in COMPUTED_INITIAL) {
+                    if (!(k in seen) && initialOf(m, k) !== undefined) add(k);
+                }
+            }
+            var webkit = [], plain = [];
+            list.forEach(function (x) { (x.charCodeAt(0) === 45 ? webkit : plain).push(x); });
+            sorted = plain.sort().concat(webkit.sort());
             return sorted;
         }
-        function read(n) { var v = computedValue(m, n); return v === undefined ? customValue(n) : v; }
+        var cache = Object.create(null);
+        function read(n) {
+            var v = cache[n];
+            if (v !== undefined) return v;
+            v = computedValue(m, n);
+            if (v === undefined) return customValue(n);
+            return (cache[n] = v);
+        }
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
         // A custom property not set inline: the cascaded (inherited) value.
@@ -3292,13 +3315,15 @@ const WRAPPERS_JS: &str = r#"
             Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
         });
         Object.defineProperty(decl, 'cssText', { configurable: true, enumerable: false,
-            get: function () { return names().map(function (n) { return n + ': ' + computedValue(m, n) + ';'; }).join(' '); } });
+            get: function () { return names().map(function (n) { return n + ': ' + read(n) + ';'; }).join(' '); } });
         Object.defineProperty(decl, 'length', { configurable: true, enumerable: false,
             get: function () { return names().length; } });
         return new Proxy(decl, {
             get: function (t, p, r) {
-                if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
-                if (/^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                if (typeof p !== 'string') return Reflect.get(t, p, r);
+                var c0 = p.charCodeAt(0);
+                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                if (p in t) return Reflect.get(t, p, r);
                 var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
                 return p === 'cssFloat' ? (m['float'] || '') : read(n);
             },
