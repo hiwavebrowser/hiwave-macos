@@ -621,7 +621,7 @@ fn layout_flex_container_at(
             }
         }
 
-        let item = create_flex_item(
+        let mut item = create_flex_item(
             child,
             main_axis,
             container_main_size,
@@ -629,6 +629,7 @@ fn layout_flex_container_at(
             container_cross_size,
             definite_inner_cross,
         );
+        aspect_ratio_flex_base(&mut item, main_axis, style.align_items, definite_inner_cross);
         items.push(item);
     }
 
@@ -2204,6 +2205,17 @@ fn calculate_cross_sizes(
             // keeps its fit-content width, which the already-laid-out width is
             // not. See `fit_content_cross_width` for what was wrong with it and
             // `SCOPE` below for why a stretching item is left alone.
+            // A column item that is not stretched, with a definite height
+            // and a preferred `aspect-ratio`, takes its width through the
+            // ratio (Chromium 143: `height: 50px; aspect-ratio: 2/1` under
+            // `align-items: flex-start` is 100 wide, not fit-content).
+            None if cross_axis == Axis::Horizontal
+                && !item.stretches(align_items)
+                && item.specified_main.is_some()
+                && aspect_ratio_width_from_height(item).is_some() =>
+            {
+                aspect_ratio_width_from_height(item).unwrap_or(0.0)
+            }
             None if cross_axis == Axis::Horizontal && !item.stretches(align_items) =>
             {
                 let available = (container_cross
@@ -2211,6 +2223,13 @@ fn calculate_cross_sizes(
                     - item.cross_margin_end)
                     .max(0.0);
                 fit_content_cross_width(item.layout_box, available, item.cross_pb())
+            }
+            // A row item with a preferred `aspect-ratio` takes its height
+            // from its USED width (the flexed main size), not from the width
+            // the block pre-pass laid it out at: `flex: 0 0 120px;
+            // aspect-ratio: 2/1` in a 400px row was 200 tall (Chromium 60).
+            None if cross_axis == Axis::Vertical && aspect_ratio_cross(item).is_some() => {
+                aspect_ratio_cross(item).unwrap_or(0.0)
             }
             None => get_content_cross_size(item.layout_box, cross_axis) + item.cross_pb(),
         };
@@ -2987,6 +3006,94 @@ fn content_border_height(b: &LayoutBox) -> f32 {
 }
 
 /// Get the intrinsic main size for replaced elements (form controls, images).
+/// css-flexbox-1 §9.2.3 B / css-sizing-4 §5.1: an item whose flex base size
+/// would come from its content, that has a preferred `aspect-ratio` and a
+/// definite cross size, takes its base size through the ratio from that cross
+/// size. The cross size is the explicit one, or, in a column with a definite
+/// width, the stretched one. Only non-replaced boxes: an image's natural ratio
+/// already goes through `replaced_auto_content_width`.
+///
+/// Without this the base size was the content's: an empty `aspect-ratio: 4/1`
+/// item in a 400px column was 0 tall (Chromium 143: 100), and a row item with
+/// `height: 50px; aspect-ratio: 2/1` was 0 wide (Chromium: 100).
+fn aspect_ratio_flex_base(item: &mut FlexItem, main_axis: Axis, align_items: AlignItems, definite_inner_cross: Option<f32>) {
+    if !item.main_size_from_content {
+        return;
+    }
+    let style = &item.layout_box.style;
+    let Some(ratio) = style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()) else {
+        return;
+    };
+    let cross_border_box = match item.explicit_cross_size {
+        Some(c) => c,
+        None if main_axis == Axis::Vertical && item.stretches(align_items) => match definite_inner_cross {
+            Some(w) => (w - item.cross_margin_start - item.cross_margin_end).max(0.0),
+            None => return,
+        },
+        None => return,
+    };
+    let main_pb = item.main_pb_start + item.main_pb_end;
+    let cross_pb = item.cross_pb_start + item.cross_pb_end;
+    // The ratio is width / height of the border box under `border-box` and
+    // of the content box under `content-box`.
+    let main_border_box = if style.box_sizing == rustkit_css::BoxSizing::BorderBox {
+        match main_axis {
+            Axis::Horizontal => cross_border_box * ratio,
+            Axis::Vertical => cross_border_box / ratio,
+        }
+    } else {
+        let cross_content = (cross_border_box - cross_pb).max(0.0);
+        main_pb
+            + match main_axis {
+                Axis::Horizontal => cross_content * ratio,
+                Axis::Vertical => cross_content / ratio,
+            }
+    };
+    let main_border_box = main_border_box.max(main_pb);
+    item.flex_basis = main_border_box;
+    item.hypothetical_main_size = main_border_box.max(item.min_main_size).min(item.max_main_size).max(main_pb);
+    item.target_main_size = item.hypothetical_main_size;
+}
+
+/// The border-box height a ROW item's preferred `aspect-ratio` gives it from
+/// its used (border-box) width, `target_main_size`. `None` for a box that is
+/// not a plain block or has no usable ratio. Replaced boxes keep their own
+/// path.
+fn aspect_ratio_cross(item: &FlexItem) -> Option<f32> {
+    let b = &item.layout_box;
+    if !matches!(b.box_type, crate::BoxType::Block | crate::BoxType::AnonymousBlock) {
+        return None;
+    }
+    let ratio = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite())?;
+    let main_pb = item.main_pb_start + item.main_pb_end;
+    let cross_pb = item.cross_pb_start + item.cross_pb_end;
+    let width = item.target_main_size;
+    Some(if b.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
+        (width / ratio).max(cross_pb)
+    } else {
+        ((width - main_pb).max(0.0) / ratio) + cross_pb
+    })
+}
+
+/// The border-box width a COLUMN item's preferred `aspect-ratio` gives it
+/// from its used (border-box) height, `target_main_size`. Same scope as
+/// `aspect_ratio_cross`.
+fn aspect_ratio_width_from_height(item: &FlexItem) -> Option<f32> {
+    let b = &item.layout_box;
+    if !matches!(b.box_type, crate::BoxType::Block | crate::BoxType::AnonymousBlock) {
+        return None;
+    }
+    let ratio = b.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite())?;
+    let main_pb = item.main_pb_start + item.main_pb_end;
+    let cross_pb = item.cross_pb_start + item.cross_pb_end;
+    let height = item.target_main_size;
+    Some(if b.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
+        (height * ratio).max(cross_pb)
+    } else {
+        ((height - main_pb).max(0.0) * ratio) + cross_pb
+    })
+}
+
 fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, definite_cross: Option<f32>) -> f32 {
     let box_type = &layout_box.box_type;
     let style = &layout_box.style;
