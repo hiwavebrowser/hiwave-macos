@@ -1773,6 +1773,20 @@ impl LayoutBox {
         let held = match &scrolled_extent {
             Some(extent) => extent,
             None if matches!(self.box_type, BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak) => containing_block,
+            // Rows and row groups hold nothing: a sticky cell, row or row
+            // group is held by the table's content box (Chromium 143: a
+            // sticky `th` sticks across the whole table, stopping under its
+            // padding and border, past its border spacing).
+            None if matches!(
+                self.style.display,
+                rustkit_css::Display::TableRowGroup
+                    | rustkit_css::Display::TableHeaderGroup
+                    | rustkit_css::Display::TableFooterGroup
+                    | rustkit_css::Display::TableRow
+            ) =>
+            {
+                containing_block
+            }
             None => &self.dimensions,
         };
         for (index, child) in self.children.iter().enumerate() {

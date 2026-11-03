@@ -687,6 +687,7 @@ fn layout_flex_container_at(
             stretch_cross_size,
             style.align_items,
             has_definite_cross_size,
+            wrap == FlexWrap::NoWrap,
             cross_axis,
         );
     }
@@ -893,8 +894,12 @@ fn layout_flex_container_at(
                         && wrap == FlexWrap::NoWrap
                         && !item.has_explicit_cross_size
                         && item.stretches(style.align_items);
+                    // A scroller stretched in a definite single line keeps
+                    // the line's height for the same reason: what is taller
+                    // scrolls (see `calculate_cross_sizes`).
+                    let scroller = item.layout_box.is_element_scroller();
                     let stretch_target = definite_inner_cross
-                        .filter(|_| percent_child && stretched)
+                        .filter(|_| (percent_child || scroller) && stretched)
                         .map(|cross| {
                             let outer = (cross - item.cross_margin_start - item.cross_margin_end)
                                 .max(item.min_cross_size)
@@ -2188,6 +2193,7 @@ fn calculate_cross_sizes(
     container_cross: f32,
     align_items: AlignItems,
     has_definite_cross_size: bool,
+    single_line: bool,
     cross_axis: Axis,
 ) {
     // PASS 1: Calculate content-based cross sizes for ALL items (ignore stretch for now)
@@ -2247,8 +2253,21 @@ fn calculate_cross_sizes(
                 line_cross_size - item.cross_margin_start - item.cross_margin_end
             };
 
-            // Stretch, but never below content size
-            item.cross_size = stretch_target.max(content_cross_sizes[i]);
+            // Stretch, but never below content size. Except a scroller in a
+            // definite single line: it is exactly the line's size and
+            // scrolls what is taller (Chromium 143: a `flex: 1;
+            // overflow: auto` pane holding 670px in a 200px row is 200, so
+            // its sticky header sticks). Other items keep the floor, a
+            // known divergence: Chromium stretches them to the line too.
+            let scroller = cross_axis == Axis::Vertical
+                && has_definite_cross_size
+                && single_line
+                && item.layout_box.is_element_scroller();
+            item.cross_size = if scroller {
+                stretch_target
+            } else {
+                stretch_target.max(content_cross_sizes[i])
+            };
         }
 
         // Clamp to min/max
