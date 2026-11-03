@@ -17,7 +17,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const VIEWPORT: (u32, u32) = (400, 300);
 
@@ -485,7 +485,9 @@ pub fn changed_pixels(a: &Frame, b: &Frame) -> usize {
 /// the value lands. Half the floor would not do: `background-clip` sits 450 off
 /// a 916 floor. Neither would a per-probe delta: `background-repeat: repeat-x`
 /// and a sound `text-align: center` both disagree on a tenth of their changes.
-pub const FLOOR_CREDIT: usize = 100;
+/// The highest row kept is 100 (`background-size: cover`) and the lowest demoted
+/// 302, so this sits clear of both: a few probes of drift flips neither.
+pub const FLOOR_CREDIT: usize = 150;
 
 /// Three questions. Did the declaration change anything in Chrome? Does the
 /// engine's frame agree with Chrome's, allowing the controls' own disagreement
@@ -604,9 +606,12 @@ impl Class {
 /// the value; that gap shows in the value's own columns. A value that changed
 /// nothing in Chrome has nothing to say while a sibling was measured.
 pub fn class_of(values: &[Verdict]) -> Class {
-    let measured = values
-        .iter()
-        .any(|v| matches!(v.effect, Effect::Match | Effect::Mismatch | Effect::Unproven));
+    let measured = values.iter().any(|v| {
+        matches!(
+            v.effect,
+            Effect::Match | Effect::Mismatch | Effect::Unproven
+        )
+    });
     values
         .iter()
         .filter(|v| !(measured && v.effect == Effect::Unexercised))
@@ -700,14 +705,15 @@ fn read_heads(body: &str, mut guard: impl FnMut(&str), arms: &mut BTreeSet<Strin
 
 /// The names a guard's function accepts: the heads of its match, with and
 /// without a prefix it strips first. `helpers` holds functions from other crates.
-fn guard_names(cond: &str, src: &str, helpers: &str, arms: &mut BTreeSet<String>) {
-    let Some(open) = cond.find("(property)") else {
-        return;
+/// False when no name could be read from it.
+fn guard_names(cond: &str, src: &str, helpers: &str, arms: &mut BTreeSet<String>) -> bool {
+    let Some(open) = cond.find("(property") else {
+        return false;
     };
     let name = cond[..open].rsplit([':', ' ']).next().unwrap_or("");
     let signature = format!("fn {name}(");
     let Some(body) = fn_body(helpers, &signature).or_else(|| fn_body(src, &signature)) else {
-        return;
+        return false;
     };
     let mut names = BTreeSet::new();
     read_heads(body, |_| {}, &mut names);
@@ -717,7 +723,9 @@ fn guard_names(cond: &str, src: &str, helpers: &str, arms: &mut BTreeSet<String>
             names.extend(prefixed);
         }
     }
+    let read = !names.is_empty();
     arms.extend(names);
+    read
 }
 
 /// The property names the engine has an arm for, read from the source much as
@@ -736,6 +744,30 @@ pub fn extract_arms(src: &str, helpers: &str) -> BTreeSet<String> {
         }
     }
     arms
+}
+
+/// Guards on the property name the reader could not turn into names. Each hides
+/// properties the census would call unsupported, so a run refuses them.
+pub fn unread_guards(src: &str, helpers: &str) -> Vec<String> {
+    let mut unread = Vec::new();
+    for signature in ["fn apply_style_property", "fn logical_to_physical"] {
+        let Some(body) = fn_body(src, signature) else {
+            continue;
+        };
+        let mut guards = Vec::new();
+        read_heads(
+            body,
+            |cond| guards.push(cond.to_string()),
+            &mut BTreeSet::new(),
+        );
+        for cond in guards {
+            if cond.contains("property") && !guard_names(&cond, src, helpers, &mut BTreeSet::new())
+            {
+                unread.push(cond.trim().to_string());
+            }
+        }
+    }
+    unread
 }
 
 /// Where this branch left develop, shortened. Without `origin/develop` there is
@@ -776,82 +808,34 @@ pub fn check_arms(arms: BTreeSet<String>) -> Result<BTreeSet<String>, String> {
     Ok(arms)
 }
 
-/// Which census fields say a loaded site used a property. The technique census
-/// asked about these and no others; the rest are "not measured", not zero.
-fn census_paths(property: &str) -> &'static [&'static str] {
-    match property {
-        "position" => &[
-            "/stacking/by_reason/position:relative",
-            "/stacking/by_reason/position:absolute",
-            "/stacking/by_reason/position:fixed",
-            "/stacking/by_reason/position:sticky",
-        ],
-        "z-index" => &[
-            "/stacking/by_reason/positioned+z-index",
-            "/stacking/by_reason/flex~1grid-item+z-index",
-        ],
-        "opacity" => &["/stacking/by_reason/opacity<1"],
-        "transform" => &["/stacking/by_reason/transform"],
-        "clip-path" => &["/stacking/by_reason/clip-path"],
-        "will-change" => &["/stacking/by_reason/will-change"],
-        "mask" | "mask-image" | "-webkit-mask-image" => &[
-            "/stacking/by_reason/mask",
-            "/icons/mask_image_url/count",
-            "/icons/mask_image_gradient/count",
-        ],
-        "filter" => &["/stacking/by_reason/filter"],
-        "backdrop-filter" => &["/stacking/by_reason/backdrop-filter"],
-        "mix-blend-mode" => &["/stacking/by_reason/mix-blend-mode"],
-        "isolation" => &["/stacking/by_reason/isolation"],
-        "perspective" => &["/stacking/by_reason/perspective"],
-        "contain" => &["/stacking/by_reason/contain"],
-        "object-fit" => &["/objectFit/by_value"],
-        "object-position" => &["/objectFit/non_default_position"],
-        "content-visibility" => &["/lazy/content_visibility_auto"],
-        _ => &[],
-    }
-}
+/// Fewer loaded sites than this is a failed crawl, not a measurement.
+const MIN_SITES: usize = 50;
 
-/// Top-100 prevalence, from the technique census (`docs/diagnostics/census-top100.json`).
+/// Top-100 prevalence, from `docs/census/css_property_prevalence_top100.json`.
 pub struct TopSites {
     pub loaded: usize,
-    sites: Vec<Value>,
+    authoring: BTreeMap<String, usize>,
 }
 
 impl TopSites {
-    pub fn from_census(census: &Value) -> TopSites {
-        let sites: Vec<Value> = census["results"]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter(|r| r["status"] == "OK")
-                    .map(|r| r["data"].clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        TopSites {
-            loaded: sites.len(),
-            sites,
+    pub fn from_prevalence(file: &Value) -> Result<TopSites, String> {
+        let loaded = file["meta"]["loaded"].as_u64().unwrap_or(0) as usize;
+        if loaded < MIN_SITES {
+            return Err(format!("prevalence file: only {loaded} sites loaded"));
         }
+        let authoring: BTreeMap<String, usize> = file["sites_authoring"]
+            .as_object()
+            .ok_or("prevalence file: no sites_authoring")?
+            .iter()
+            .filter_map(|(name, n)| Some((name.clone(), n.as_u64()? as usize)))
+            .collect();
+        Ok(TopSites { loaded, authoring })
     }
 
-    /// Loaded sites using the property; `None` when the census never asked.
+    /// Loaded sites authoring the property. The crawl records every name it
+    /// sees, so a name it did not see is zero.
     pub fn sites(&self, property: &str) -> Option<usize> {
-        let paths = census_paths(property);
-        if paths.is_empty() {
-            return None;
-        }
-        let used = |v: Option<&Value>| match v {
-            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) > 0.0,
-            Some(Value::Object(o)) => !o.is_empty(),
-            _ => false,
-        };
-        Some(
-            self.sites
-                .iter()
-                .filter(|site| paths.iter().any(|p| used(site.pointer(p))))
-                .count(),
-        )
+        Some(self.authoring.get(property).copied().unwrap_or(0))
     }
 }
 
@@ -879,6 +863,8 @@ pub struct ValueRow {
     pub engine_computed: String,
     pub probes_off: usize,
     pub geometry_ok: bool,
+    /// How far this row's control already was from Chrome's.
+    pub control_off: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -952,11 +938,21 @@ fn why(r: &Row) -> String {
                     code(&v.chrome_computed)
                 )
             };
+            // Past the credit, the row's control, `base` included, is broken before
+            // the value arrives. That may be the base, not the context.
+            let control = if v.control_off > FLOOR_CREDIT {
+                format!(", control {} off", v.control_off)
+            } else {
+                String::new()
+            };
             let miss = match v.effect {
                 Effect::Mismatch if !v.geometry_ok => {
-                    format!(" (geometry, {} probes)", v.probes_off)
+                    format!(" (geometry, {} probes{control})", v.probes_off)
                 }
-                Effect::Mismatch => format!(" ({} probes)", v.probes_off),
+                Effect::Mismatch => format!(" ({} probes{control})", v.probes_off),
+                Effect::Unexercised if !control.is_empty() => {
+                    format!(" ({})", control.trim_start_matches(", "))
+                }
                 Effect::Unproven => format!(" (control-limited, {} probes)", v.probes_off),
                 _ => String::new(),
             };
@@ -989,14 +985,14 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     let red: Vec<&Row> = rows.iter().filter(|r| r.red).collect();
     md.push_str(&format!("| total | {} |\n\n", rows.len()));
     md.push_str("## What this does and does not measure\n\n");
-    let measured = rows.iter().filter(|r| r.sites.is_some()).count();
     md.push_str(&format!(
-        "- Order: the \"sites\" column counts sites of the {} loaded in the top-100 technique census that use the property. That census asked about only {measured} of these properties; `?` means not measured, not zero, and those rows then sort by declarations authored in the 26-case corpus.\n",
+        "- Order: the \"sites\" column counts sites of the {} loaded from the top-100 list whose main frame authors the property in a stylesheet, `<style>` or style attribute. Authored is not applied: whether the rule matched anything is not measured. A shorthand and its longhands are separate names, and sites behind a bot wall, ebay and shopify are not in the count. Ties sort by declarations authored in the 26-case corpus.\n",
         meta.sites_loaded
     ));
     md.push_str("- One fixture per value in one context. A class says what happened there, not that every value form or context works.\n");
     md.push_str("- An `unexercised` value changed nothing in Chrome, so it cannot pass effect; `not-visual` properties paint nothing in a static frame and stop at computed.\n");
-    md.push_str("- An arm that applies a property and is then ignored still counts as parse.\n\n");
+    md.push_str("- An arm that applies a property and is then ignored still counts as parse.\n");
+    md.push_str("- `control N off`: the row's own control, its `base` declarations included, is N probes off Chrome, so the red belongs to that control first. That may be the row's `base` and not its context; the context's own number is in the list below.\n\n");
     if !meta.contexts_off.is_empty() {
         md.push_str(&format!("Controls that already disagree with Chrome (off probes, credited as noise on that context's rows up to {FLOOR_CREDIT}; a value that agrees only with more credit than that reads `unproven`, red, `control-limited`):\n\n"));
         for (context, off) in &meta.contexts_off {
@@ -1018,7 +1014,11 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     }
     let not_read: Vec<&Row> = rows
         .iter()
-        .filter(|r| r.class == Class::Effect_ && r.values.iter().any(|v| !v.computed))
+        .filter(|r| {
+            r.values
+                .iter()
+                .any(|v| v.effect == Effect::Match && !v.computed)
+        })
         .collect();
     md.push_str(&format!("\n## Paints right, reads wrong ({})\n\nScript on the page sees a different value from Chrome's, though the frame matches.\n\n", not_read.len()));
     for r in &not_read {
@@ -1074,6 +1074,7 @@ pub fn render_json(meta: &Meta, rows: &[Row]) -> Value {
                 "engine_computed": v.engine_computed,
                 "probes_off": v.probes_off,
                 "geometry_ok": v.geometry_ok,
+                "control_off": v.control_off,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })

@@ -385,6 +385,8 @@ mod computed_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
+mod opacity_value_tests;
+#[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
@@ -416,6 +418,8 @@ mod positioned_paint_order_tests;
 mod abspos_percent_height_image_tests;
 #[cfg(test)]
 mod flex_abspos_static_position_tests;
+#[cfg(test)]
+mod offset_parent_tests;
 #[cfg(test)]
 mod details_tests;
 #[cfg(test)]
@@ -12399,6 +12403,7 @@ impl Engine {
     ) -> bool {
         match property {
             "color" => style.color = parent.color,
+            "opacity" => style.opacity = parent.opacity,
             "font-family" => style.font_family = parent.font_family.clone(),
             "font-size" => style.font_size = parent.font_size.clone(),
             "font-weight" => style.font_weight = parent.font_weight,
@@ -13338,8 +13343,8 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "opacity" => {
-                if let Ok(opacity) = value.parse::<f32>() {
-                    style.opacity = opacity.clamp(0.0, 1.0);
+                if let Some(opacity) = rustkit_css::parse_opacity(value) {
+                    style.opacity = opacity;
                 }
             }
             "clip-path" | "-webkit-clip-path" => {
@@ -21637,11 +21642,13 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
         }
     }
     /// A length with no percentage: a depth has no box side to be a part of.
+    /// One inside `calc()` refuses it even if it sums to nothing, and a `calc()`
+    /// that comes to a number is no length.
     fn depth(s: &str) -> Option<()> {
-        match length(s)? {
-            rustkit_css::Length::Percent(_) => None,
-            _ => Some(()),
+        if s.contains('%') || matches!(transform_math(s), Some((_, TransformMathKind::Number))) {
+            return None;
         }
+        length(s).map(|_| ())
     }
     fn number(s: &str) -> Option<f32> {
         match transform_math(s) {
@@ -21723,8 +21730,10 @@ fn parse_transform_op(func: &str, args: &str) -> Option<rustkit_css::TransformOp
         ("perspective", [p]) => {
             if *p != "none" {
                 depth(p)?;
-                // A math function is clamped to zero, not refused.
-                if p.starts_with('-') && length(p)?.to_px(16.0, 16.0, 0.0) < 0.0 {
+                // A plain negative is refused by its sign, in any unit. A math
+                // function is clamped to zero when used, not refused.
+                let digits = p.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+                if css_number(digits).is_some_and(|n| n < 0.0) {
                     return None;
                 }
             }

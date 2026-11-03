@@ -131,6 +131,40 @@ fn offset_top_and_left_are_from_the_offset_parent() {
 }
 
 #[test]
+fn a_static_element_stops_at_a_table_cell_and_a_positioned_one_does_not() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(
+        Document::parse_html(
+            "<html><body><table id=tb><tr id=tr><td id=c><p id=s></p><p id=r></p></td></tr></table></body></html>",
+        )
+        .unwrap(),
+    );
+    b.set_document(doc.clone()).unwrap();
+    let mut m = HashMap::new();
+    m.insert(id(&doc, "tb"), geom(5.0, 5.0, 100.0, 100.0));
+    m.insert(id(&doc, "tr"), geom(5.0, 5.0, 100.0, 100.0));
+    let mut cell = geom(5.0, 5.0, 100.0, 100.0);
+    cell.border_left = 2.0;
+    cell.border_top = 2.0;
+    m.insert(id(&doc, "c"), cell);
+    m.insert(id(&doc, "s"), geom(12.0, 13.0, 10.0, 10.0));
+    let mut relative = geom(12.0, 33.0, 10.0, 10.0);
+    relative.position = 1;
+    m.insert(id(&doc, "r"), relative);
+    b.set_geometry(m);
+    assert_eq!(
+        ev(&b, "var e = document.getElementById('s'); [e.offsetParent.id, e.offsetLeft, e.offsetTop].join()"),
+        "c,5,6"
+    );
+    assert_eq!(ev(&b, "document.getElementById('c').offsetParent.id"), "tb");
+    assert_eq!(ev(&b, "document.getElementById('tr').offsetParent.id"), "tb");
+    assert_eq!(
+        ev(&b, "var e = document.getElementById('r'); [e.offsetParent === document.body, e.offsetLeft, e.offsetTop].join()"),
+        "true,12,33"
+    );
+}
+
+#[test]
 fn a_fixed_element_has_no_offset_parent() {
     let (b, doc) = bound();
     let mut m = HashMap::new();

@@ -564,7 +564,7 @@ class ChromiumFonts(unittest.TestCase):
 
 
 class ChromiumOnAreaProbes(unittest.TestCase):
-    """T15c (#857 R1): 11 of the 47 area-probe demotions differ in Chromium's own test and
+    """T15c (#857 R1): 13 of the 47 area-probe demotions differ in Chromium's own test and
     reference. Such a page says nothing either way, and its row has to say that."""
 
     ENTRIES = [{"id": "probed", "path": "a/p.html", "ref": "a/p-ref.html", "area": "css-ui-outline"}]
@@ -620,6 +620,43 @@ class ChromiumOnAreaProbes(unittest.TestCase):
         case = self.case()
         self.recheck([case], (None, None, "no chromium"))
         self.assertEqual((case["reason"], case["chromium_not_measured"]), (self.WHY, "no chromium"))
+
+    def test_the_run_counts_the_split_of_its_own(self):
+        differ, match, unanswered = self.case(id_="d"), self.case(id_="m"), self.case(id_="u")
+        differ["chromium_diff_pixels"] = 12
+        match["chromium_diff_pixels"] = 0
+        unanswered["chromium_not_measured"] = "timeout"
+        others = [
+            self.case("still matches with all its style removed", id_="unstyled"),
+            self.case(None, status="FAIL", id_="small"),
+        ]
+        self.assertEqual(
+            wpt_tier1.area_probe_chromium_counts([differ, match, unanswered] + others),
+            {"asked": 3, "differ": 1, "match": 1, "not_measured": 1},
+        )
+
+    def test_a_row_that_says_no_evidence_still_counts_as_an_area_probe(self):
+        case = self.case()
+        self.recheck([case], ({"probed": 12}, "143.0", None))
+        self.assertEqual(wpt_tier1.area_probe_chromium_counts([case])["differ"], 1)
+
+    def test_a_gap_line_names_the_question_chromium_did_not_answer(self):
+        area = self.case()
+        area["chromium_not_measured"] = "timeout"
+        small = self.case(None, status="FAIL", id_="small")
+        small["chromium_not_measured"] = "timeout"
+        self.assertEqual(
+            wpt_tier1.chromium_gap_lines([area, small]),
+            ["area probe not checked in Chromium: timeout (1)", "small FAIL not checked in Chromium: timeout (1)"],
+        )
+
+    def test_a_timed_out_area_batch_is_not_called_small_fails(self):
+        cases = [self.case(id_=f"a{i}") for i in range(47)]
+        for case in cases:
+            case["chromium_not_measured"] = "timeout"
+        self.assertEqual(
+            wpt_tier1.chromium_gap_lines(cases), ["area probe not checked in Chromium: timeout (47)"]
+        )
 
 
 class StagedCopies(unittest.TestCase):

@@ -362,3 +362,64 @@ fn infinity_and_nan_are_not_numbers() {
     after_an_earlier_one("scale(.5)", "45 25.5 50 25");
     after_an_earlier_one("scale(+2)", "-30 -12 200 100");
 }
+
+/// A depth has no box side to be a part of, so a percentage anywhere in its
+/// `calc()` refuses it, even one that sums to nothing. Chromium 143
+/// (`trench/z/tools/c10/depth_persp_probe.mjs` on the hub).
+#[test]
+fn a_depth_refuses_a_percentage_inside_calc() {
+    for value in [
+        "translateZ(10%)",
+        "translateZ(calc(10%))",
+        "translateZ(calc(10% + 1px))",
+        "translateZ(calc(0% + 0px))",
+        "translateZ(calc(5% - 5%))",
+        "translateZ(calc(1))",
+        "translateZ(1)",
+        "translate3d(1px,2px,3%)",
+        "translate3d(1px,2px,calc(3%))",
+        "translate3d(1px,2px,calc(3% + 1px))",
+        "translate3d(0,0,calc(0%))",
+        "perspective(10%)",
+        "perspective(calc(10%))",
+    ] {
+        assert!(parse_transform(value).is_none(), "{value} is refused in Chromium");
+    }
+}
+
+#[test]
+fn a_depth_takes_calc_with_no_percentage() {
+    for value in ["translateZ(calc(10px + 1px))", "translateZ(calc(1vw))", "translateZ(calc(1px * 2))", "translate3d(0,0,calc(1em))"] {
+        same(value, ONE);
+    }
+    same("translate3d(1px,2px,calc(3px + 1px))", [1.0, 0.0, 0.0, 1.0, 1.0, 2.0]);
+    same("translate3d(10%,20%,0)", [1.0, 0.0, 0.0, 1.0, 10.0, 10.0]);
+    same("translate3d(calc(10% + 1px),0,0)", [1.0, 0.0, 0.0, 1.0, 11.0, 0.0]);
+}
+
+/// A plain negative length is refused by its sign, whatever its unit; the
+/// viewport is not needed to know `-1vw` is below zero.
+#[test]
+fn a_negative_perspective_is_refused_in_any_unit() {
+    for value in ["perspective(-1px)", "perspective(-1vw)", "perspective(-1vh)", "perspective(-1vmin)", "perspective(-1vmax)", "perspective(-1em)", "perspective(-1rem)"] {
+        assert!(parse_transform(value).is_none(), "{value} is refused in Chromium");
+    }
+}
+
+/// A `calc()` is clamped to zero when used, not refused, whatever it comes to.
+#[test]
+fn a_perspective_in_calc_is_taken_whatever_it_comes_to() {
+    for value in [
+        "perspective(calc(100px))",
+        "perspective(calc(1vw - 100px))",
+        "perspective(calc(100px - 1vw))",
+        "perspective(calc(-1px))",
+        "perspective(calc(1em - 100px))",
+        "perspective(1vw)",
+        "perspective(0)",
+        "perspective(none)",
+    ] {
+        same(value, ONE);
+    }
+}
+
