@@ -97,7 +97,7 @@ fn mixed_and_malformed_forms_are_invalid() {
 }
 
 #[test]
-fn the_legacy_comma_form_is_unchanged() {
+fn the_legacy_comma_form_matches_chromium() {
     check(&[
         ("rgb(255,0,0)", rgb(255, 0, 0)),
         ("rgb(1, 2, 3)", rgb(1, 2, 3)),
@@ -105,7 +105,9 @@ fn the_legacy_comma_form_is_unchanged() {
         ("rgba(0,0,0,.1)", rgba(0, 0, 0, 0.1)),
         ("hsla(0, 100%, 50%, .25)", rgba(255, 0, 0, 0.25)),
         ("hsl(-120, 50%, 50%)", rgb(64, 64, 191)),
-        // Chromium also takes these legacy forms, which the comma parser dropped.
+        // Chromium also takes these legacy forms, which the comma parser
+        // dropped (or, for alpha above 1, kept unclamped): a change, not a
+        // no-change guard.
         ("rgba(10, 20, 30, 50%)", rgba(10, 20, 30, 0.5)),
         ("rgb(10%, 20%, 30%)", rgb(26, 51, 77)),
         ("rgba(255,0,0,2)", rgb(255, 0, 0)),
@@ -116,5 +118,67 @@ fn the_legacy_comma_form_is_unchanged() {
         ("hsl(90, 50%, 50%)", rgb(128, 191, 64)),
         ("hsl(0, 0%, 90%)", rgb(230, 230, 230)),
         ("hsl(30, 100%, 90%)", rgb(255, 230, 204)),
+    ]);
+}
+
+/// R1 on #870: what Chromium 143 does at the edges of the grammar.
+/// A comma decides the syntax at the first separator that has one, so
+/// `rgb(1 2, 3)` is the legacy form (then held to its rules); a CSS number
+/// needs a digit after its point; out-of-range numbers clamp.
+#[test]
+fn the_comma_quirk_and_number_edges_match_chromium() {
+    check(&[
+        ("rgb(1 2, 3)", rgb(1, 2, 3)),
+        ("rgb(1 2 , 3)", rgb(1, 2, 3)),
+        ("rgb(1 2, 3, 0.5)", rgba(1, 2, 3, 0.5)),
+        ("rgb(1% 2%, 3%)", rgb(3, 5, 8)),
+        ("hsl(1 2%, 3%)", rgb(8, 8, 7)),
+        ("rgb(1 2, 3 4)", None),
+        ("rgb(1 2%, 3)", None),
+        ("rgb(none 2, 3)", None),
+        ("rgb(1 2, none)", None),
+        ("rgb(1 2, 3 / 0.5)", None),
+        ("hsl(1 2%, 3)", None),
+        ("rgb(5. 0 0)", None),
+        ("rgb(1e2.5 0 0)", None),
+        ("rgb(1e 0 0)", None),
+        ("rgb(.5e1 0 0)", rgb(5, 0, 0)),
+        ("rgb(+5 0 0)", rgb(5, 0, 0)),
+        ("rgb(5.0 0 0)", rgb(5, 0, 0)),
+        ("rgb(1e40 0 0)", rgb(255, 0, 0)),
+        ("rgb(-1e40 0 0)", rgb(0, 0, 0)),
+        ("rgb(1 2 3 / 1e40)", rgb(1, 2, 3)),
+        ("rgb(1e40%, 0%, 0%)", rgb(255, 0, 0)),
+        ("rgba(1,2,3,1e40)", rgb(1, 2, 3)),
+        ("rgb(1 /* c */ 2 3)", rgb(1, 2, 3)),
+    ]);
+}
+
+/// Math functions and constants in a channel resolve as Chromium's do.
+#[test]
+fn math_function_channels_resolve() {
+    check(&[
+        ("rgb(min(255, 300) 0 0)", rgb(255, 0, 0)),
+        ("rgb(min(255,300) 0 0 / 50%)", rgba(255, 0, 0, 0.5)),
+        ("rgb(max(10, 20) 0 0)", rgb(20, 0, 0)),
+        ("rgb(clamp(0, 300, 255) 0 0)", rgb(255, 0, 0)),
+        ("rgb(clamp(0%, 50%, 100%) 0 0)", rgb(128, 0, 0)),
+        ("rgb(min(10%, 50%) 0 0)", rgb(26, 0, 0)),
+        ("rgb(min(1,2), 0, 0)", rgb(1, 0, 0)),
+        ("rgb(0 0 0 / min(0.5, 1))", rgba(0, 0, 0, 0.5)),
+        ("hsl(max(90deg, 10deg) 50% 50%)", rgb(128, 191, 64)),
+        ("rgb(round(10.6) 0 0)", rgb(11, 0, 0)),
+        ("rgb(round(10.5) 0 0)", rgb(11, 0, 0)),
+        ("rgb(round(12, 5) 0 0)", rgb(10, 0, 0)),
+        ("rgb(abs(-5) 0 0)", rgb(5, 0, 0)),
+        ("rgb(sign(-3) 0 0)", rgb(0, 0, 0)),
+        ("rgb(calc(pi * 10) 0 0)", rgb(31, 0, 0)),
+        ("rgb(calc(e) 0 0)", rgb(3, 0, 0)),
+        ("rgb(calc(infinity) 0 0)", rgb(255, 0, 0)),
+        ("rgb(calc(-infinity) 0 0)", rgb(0, 0, 0)),
+        ("rgb(calc(NaN) 0 0)", rgb(0, 0, 0)),
+        ("rgb(calc(1e40) 0 0)", rgb(255, 0, 0)),
+        ("rgb(calc(10% + 5) 0 0)", None),
+        ("rgb(min(10%, 5) 0 0)", None),
     ]);
 }

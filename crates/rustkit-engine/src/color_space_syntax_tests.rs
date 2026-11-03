@@ -325,3 +325,73 @@ fn space_syntax_colours_paint() {
         wrong.join("\n")
     );
 }
+
+/// R1 on #870: an `rgb()`/`hsl()` Chromium accepts but RustKit cannot read
+/// yet (relative colour, a math function it does not evaluate) is a valid
+/// colour, so the shorthand keeps its other parts as on develop; only a
+/// grammar error the parser is sure of drops it.
+#[test]
+fn an_unreadable_but_valid_colour_function_keeps_the_shorthand() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut wrong = Vec::new();
+    for value in [
+        "rgb(from red r g b)",
+        "rgb(from red r g b / 50%)",
+        "hsl(from red h s l)",
+        "rgb(mod(5, 3) 0 0)",
+        "rgb(sin(1) 0 0)",
+    ] {
+        let mut style = ComputedStyle::new();
+        engine.lctx.apply_style_property(&mut style, "border", "4px dashed red");
+        engine.lctx.apply_style_property(&mut style, "border", &format!("1px solid {value}"));
+        if style.border_top_width != Length::Px(1.0) {
+            wrong.push(format!("border: 1px solid {value}: width {:?}", style.border_top_width));
+        }
+        let mut style = ComputedStyle::new();
+        engine.lctx.apply_style_property(&mut style, "background", "url(a.png) red");
+        engine.lctx.apply_style_property(&mut style, "background", &format!("url(x.png) {value}"));
+        let image = style.background_layers.first().map(|l| format!("{:?}", l.image));
+        if !image.as_deref().is_some_and(|i| i.contains("x.png")) {
+            wrong.push(format!("background: url(x.png) {value}: image {image:?}"));
+        }
+        let mut style = ComputedStyle::new();
+        engine.lctx.apply_style_property(&mut style, "box-shadow", &format!("1px 2px 3px {value}"));
+        if style.box_shadows.len() != 1 {
+            wrong.push(format!("box-shadow: 1px 2px 3px {value}: {} shadows", style.box_shadows.len()));
+        }
+    }
+    assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// R1's painted examples, on a 60x60 box at 20,20. Chromium paints red at
+/// each point: the relative colour resolves there; here the border and the
+/// shadow are kept (colour not resolved yet), and `min()` resolves.
+#[test]
+fn the_r1_painted_examples() {
+    let paint = |html: &str, x: usize, y: usize| {
+        let (mut engine, view) = loaded(html);
+        pixel(&frame(&mut engine, view), x, y)
+    };
+    let boxed = |style: &str| {
+        format!("<div style=\"position:absolute;left:20px;top:20px;width:60px;height:60px;{style}\"></div>")
+    };
+    assert_ne!(
+        paint(&boxed("border:20px solid rgb(from red r g b)"), 25, 50),
+        [255, 255, 255],
+        "the border is kept"
+    );
+    assert_ne!(
+        paint(&boxed("box-shadow:0 0 0 8px rgb(from red r g b)"), 15, 50),
+        [255, 255, 255],
+        "the shadow is kept"
+    );
+    assert_eq!(
+        paint(
+            "<style>#m{background:blue;background:url(nope.png) rgb(min(255, 300) 0 0)}</style><div id=m style=\"position:absolute;left:20px;top:20px;width:60px;height:60px\"></div>",
+            50,
+            50
+        ),
+        [255, 0, 0],
+        "the later background wins, its min() resolved"
+    );
+}
