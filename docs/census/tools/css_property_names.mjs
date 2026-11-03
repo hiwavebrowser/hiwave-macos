@@ -17,13 +17,8 @@ export function authoredProperties(css) {
   return names;
 }
 
-export function neverLoad(url) {
-  try {
-    return /(^|\.)(ebay|ebayimg|ebaystatic|shopify|myshopify|shopifycdn)\./i.test(new URL(url).hostname);
-  } catch {
-    return true;
-  }
-}
+// Kept here for the tests that import it; the list lives in never_load.mjs.
+export { neverLoad } from './never_load.mjs';
 
 // The public file: names Chromium knows, sorted. Anything else the reader saw (a custom element from a
 // nested selector, a site's private declaration, a typo) can say whose page it came from.

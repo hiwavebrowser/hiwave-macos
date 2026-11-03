@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 // css_property_prevalence.mjs - how many top-100 sites author each CSS property (dev-tools T13c).
 // One load per site, four at a time. The output is counts per property only: no site names, no URLs,
-// no page text, and only names Chromium knows. ebay and shopify are never loaded live, whatever the list
-// says, as a page or as a subresource of another site.
+// no page text, and only names Chromium knows. The hosts in never_load.mjs are refused at Chromium's
+// resolver, so neither a page, a subresource nor a redirect reaches them, and a site whose load asked
+// for one is dropped. The 11-03 crawl in the checked-in file predates the resolver refusal: it refused
+// them only in a request handler, which a redirect gets past, so it cannot be shown that no refused
+// host was reached by a redirect in that crawl.
 // Usage: node docs/census/tools/css_property_prevalence.mjs [--list websuite/realsite-top100.json] [--out path.json]
 import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { authoredProperties, isBlockedTitle, neverLoad, publishable } from './css_property_names.mjs';
+import { authoredProperties, isBlockedTitle, publishable } from './css_property_names.mjs';
+import { launchRefusing, neverLoad, watchRefused } from './never_load.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '../../..');
@@ -49,16 +53,13 @@ const KNOWN_PROPERTIES = `(() => {
   return [...known].sort();
 })()`;
 
-const browser = await chromium.launch({ headless: true });
+const browser = await launchRefusing(chromium, { headless: true });
 let refused = 0;
+let dropped = 0;
 
 async function visit(site) {
   const ctx = await browser.newContext({ viewport: list.viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
-  await ctx.route('**/*', (route) => {
-    if (!neverLoad(route.request().url())) return route.continue();
-    refused += 1;
-    return route.abort();
-  });
+  const watch = await watchRefused(ctx);
   const page = await ctx.newPage();
   const bodies = [];
   page.on('response', (resp) => {
@@ -73,6 +74,11 @@ async function visit(site) {
     const status = resp ? resp.status() : 0;
     if ([401, 403, 429, 503].includes(status) || status >= 500 || isBlockedTitle(await page.title())) return null;
     const css = await page.evaluate(PAGE_CSS);
+    await Promise.all(bodies);
+    if (watch.touched) {
+      dropped += 1;
+      return null;
+    }
     const names = new Set();
     for (const text of [...css, ...(await Promise.all(bodies))]) {
       for (const name of authoredProperties(text)) names.add(name);
@@ -81,6 +87,7 @@ async function visit(site) {
   } catch {
     return null;
   } finally {
+    refused += watch.refused;
     await ctx.close().catch(() => {});
   }
 }
@@ -123,5 +130,5 @@ writeFileSync(outPath, JSON.stringify({
   },
   sites_authoring: sorted,
 }, null, 1) + '\n');
-console.error(`names seen ${Object.keys(counts).length}, kept ${Object.keys(sorted).length}; requests refused ${refused}`);
+console.error(`names seen ${Object.keys(counts).length}, kept ${Object.keys(sorted).length}; requests refused ${refused}, sites dropped for a refused host ${dropped}`);
 console.error(`wrote ${outPath}`);

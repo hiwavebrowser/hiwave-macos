@@ -42,9 +42,15 @@ The 150 is a judgement from the data: the highest row kept is 100 off
 
 The "sites" column comes from `docs/census/css_property_prevalence_top100.json`,
 counts only: `node docs/census/tools/css_property_prevalence.mjs` regenerates it
-live (ebay and shopify are never loaded). The file is public, so it holds only names
-in `docs/census/tools/css_known_properties.json`, which the crawl takes from
-Chromium; `css_property_names.test.mjs` fails on any other name. `@font-face`
+live. The hosts in `docs/census/tools/never_load.mjs` (ebay and shopify domains) are
+refused at Chromium's resolver, so no page, subresource or redirect reaches them, and
+a site whose load asked for one is dropped. The checked-in 11-03 crawl predates that:
+it refused them only in a request handler, which a redirect gets past, so it cannot be
+shown that no refused host was reached by a redirect in that crawl. The file is public,
+so it holds only names in `docs/census/tools/css_known_properties.json`, which the
+crawl takes from Chromium; `css_property_names.test.mjs` fails on any other name. That
+guard trusts the known list itself: a name added to both files passes it, so a change
+to the list needs reading in review. `@font-face`
 descriptors are not counted. A census run reads the file and needs no network, and
 refuses it below `MIN_SITES` (50) loaded sites: fewer is a failed crawl. 50 is a
 chosen number, not a measured one.
