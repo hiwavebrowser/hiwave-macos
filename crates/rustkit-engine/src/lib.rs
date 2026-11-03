@@ -22850,15 +22850,12 @@ fn geometry_with_root(
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     // `rem` is the root element's font size. The root element has no box of
-    // its own here: the first element box under the tree's top inherits it.
-    fn first_element(b: &LayoutBox) -> Option<&LayoutBox> {
-        if b.node_id.is_some() {
-            return Some(b);
-        }
-        b.children.iter().find_map(first_element)
-    }
-    let root_box = layout.children.iter().find_map(first_element).unwrap_or(layout);
-    computed_read::set_root_font(&root_box.style);
+    // its own here; its style is with the boxless ones.
+    let root_style = root_element
+        .and_then(|n| boxless.get(&n))
+        .map(|b| &*b.box_.style)
+        .unwrap_or(&*layout.style);
+    computed_read::set_root_font(root_style);
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
@@ -23410,7 +23407,7 @@ fn outline_rows(s: &ComputedStyle, font_px: f32) -> [(&'static str, String); 5] 
         ("outline-style", style.to_string()),
         ("outline-width", width),
         // In 64ths of a pixel: not rounded to two places as `css_px` does.
-        ("outline-offset", format!("{}px", s.outline.used_offset(font_px, 16.0))),
+        ("outline-offset", format!("{}px", s.outline.used_offset(font_px, computed_read::root_font()))),
     ]
 }
 

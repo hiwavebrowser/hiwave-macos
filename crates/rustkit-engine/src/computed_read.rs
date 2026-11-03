@@ -47,6 +47,8 @@ pub(crate) fn set_root_font(style: &css::ComputedStyle) {
     let px = match style.font_size {
         Length::Px(px) => px,
         Length::Em(em) | Length::Rem(em) => em * 16.0,
+        // The root's own style keeps `62.5%` as written: against the 16px default.
+        Length::Percent(p) => p / 100.0 * 16.0,
         _ => 16.0,
     };
     ROOT_FONT_PX.with(|r| r.set(px));

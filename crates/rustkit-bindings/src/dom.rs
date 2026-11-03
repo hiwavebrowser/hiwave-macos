@@ -3130,7 +3130,8 @@ const WRAPPERS_JS: &str = r#"
         'transition': ['transition-property', 'transition-duration', 'transition-delay', 'transition-timing-function'],
         'animation': ['animation-name', 'animation-duration', 'animation-delay', 'animation-timing-function',
             'animation-iteration-count', 'animation-direction', 'animation-fill-mode', 'animation-play-state'],
-        'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color']
+        'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color'],
+        'text-decoration': ['text-decoration-line', 'text-decoration-style', 'text-decoration-color']
     };
     var REPLACED = { IMG: 1, VIDEO: 1, CANVAS: 1, IFRAME: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1,
         BUTTON: 1, OBJECT: 1, EMBED: 1, SVG: 1 };
