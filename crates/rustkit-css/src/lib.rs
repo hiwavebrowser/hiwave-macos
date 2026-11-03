@@ -629,6 +629,23 @@ impl BoxShadow {
     }
 }
 
+/// `ComputedStyle::stacks`: `isolation: isolate`.
+pub const STACKS_ISOLATION: u8 = 1;
+/// `ComputedStyle::stacks`: a `mix-blend-mode` other than `normal`.
+pub const STACKS_BLEND: u8 = 2;
+/// `ComputedStyle::stacks`: a `perspective` other than `none`.
+pub const STACKS_PERSPECTIVE: u8 = 4;
+/// `ComputedStyle::stacks`: `transform-style: preserve-3d`.
+pub const STACKS_PRESERVE_3D: u8 = 8;
+/// `ComputedStyle::stacks`: `will-change` names a property that makes one.
+pub const STACKS_WILL_CHANGE: u8 = 16;
+/// `ComputedStyle::stacks`: a `backdrop-filter` other than `none`.
+pub const STACKS_BACKDROP: u8 = 32;
+/// `ComputedStyle::stacks`: `content-visibility: auto` or `hidden`.
+pub const STACKS_CONTENT_VISIBILITY: u8 = 64;
+/// `ComputedStyle::stacks`: a `view-transition-name` other than `none` or `auto`.
+pub const STACKS_VIEW_TRANSITION: u8 = 128;
+
 /// A filter function that can be applied to the backdrop.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BackdropFilter {
@@ -1795,6 +1812,69 @@ pub enum Position {
     Sticky,
 }
 
+/// Whose scroll moves a sticky box's scrollport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyPort {
+    /// The window: the scroll is known only when a frame is drawn or a point
+    /// is tested, so the rule travels in the display list.
+    Window,
+    /// The window, from under a fixed box: no scroll moves the two apart.
+    Still,
+    /// The element scroller with this node.
+    Element(usize),
+}
+
+/// Where `position: sticky` puts a box, once layout is final. All in layout
+/// coordinates, with nothing scrolled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickyRule {
+    pub port: StickyPort,
+    /// The scrollport (x, y, width, height), less the scroller's padding.
+    pub scrollport: (f32, f32, f32, f32),
+    /// The box's border box where the flow put it (x, y, width, height).
+    pub natural: (f32, f32, f32, f32),
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+    /// How far its containing block lets it move, up to its margins, as
+    /// (back, on) on each axis: back is at most 0, on at least 0.
+    pub room_x: (f32, f32),
+    pub room_y: (f32, f32),
+}
+
+impl StickyRule {
+    /// How far the box moves from where the flow put it, with its scrollport
+    /// scrolled by `scroll` and sticky boxes around it, inside the same
+    /// scrollport, already moved by `above`. Its containing block moves with
+    /// those, so `above` only changes where the scrollport is.
+    pub fn shift(&self, scroll: (f32, f32), above: (f32, f32)) -> (f32, f32) {
+        // A box that does not fit between the two insets has only the near one.
+        let axis = |port: f32, size: f32, at: f32, length: f32, near: Option<f32>, far: Option<f32>, room: (f32, f32)| {
+            let mut moved = 0.0f32;
+            if let Some(far) = far.filter(|far| near.is_none_or(|near| near + far + length <= size)) {
+                let want = port + size - far - (at + length);
+                if want < 0.0 {
+                    moved = want.max(room.0);
+                }
+            }
+            if let Some(near) = near {
+                let want = port + near - (at + moved);
+                if want > 0.0 {
+                    moved = (moved + want).min(room.1);
+                }
+            }
+            moved
+        };
+        let (px, py, pw, ph) = self.scrollport;
+        let (x, y, w, h) = self.natural;
+        (
+            axis(px + scroll.0 - above.0, pw, x, w, self.left, self.right, self.room_x),
+            axis(py + scroll.1 - above.1, ph, y, h, self.top, self.bottom, self.room_y),
+        )
+    }
+}
+
 /// CSS float property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Float {
@@ -2829,6 +2909,15 @@ pub struct ComputedStyle {
     /// `none`. Paint reads the colour-matrix functions from it
     /// (`rustkit_layout::filter_color_matrix`). Not inherited.
     pub filter: String,
+    /// `will-change` names a property that makes a containing block for
+    /// fixed boxes. Only that is kept: nothing else reads it. Not inherited.
+    pub will_change_holds_fixed: bool,
+    /// `contain` has `paint` or `layout`, alone or through `strict` or
+    /// `content`: a containing block for fixed boxes. Not inherited.
+    pub contain_holds_fixed: bool,
+    /// Declarations read only to tell a stacking context, one `STACKS_*` bit
+    /// each: nothing paints or lays out by them. Not inherited.
+    pub stacks: u8,
 
     // Image/replaced element
     pub image_url: Option<String>,
