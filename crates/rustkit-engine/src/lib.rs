@@ -476,6 +476,8 @@ mod glyph_atlas_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
 mod outline_tests;
 #[cfg(all(test, feature = "headless"))]
+mod color_space_syntax_tests;
+#[cfg(all(test, feature = "headless"))]
 mod polygon_transform_tests;
 #[cfg(all(test, feature = "headless"))]
 mod fixed_under_scroll_tests;
@@ -20858,17 +20860,26 @@ fn parse_border_shorthand(
     Some((resolved_width, color))
 }
 
+/// `rgb(` / `rgba(` / `hsl(` / `hsla(`, which parse_color reads in full.
+fn is_rgb_or_hsl(token: &str) -> bool {
+    let lower = token.trim().to_ascii_lowercase();
+    ["rgb(", "rgba(", "hsl(", "hsla("]
+        .iter()
+        .any(|f| lower.starts_with(f))
+}
+
 /// A colour CSS accepts that `parse_color` cannot resolve yet: the
-/// `currentcolor` keyword or any colour function (space-syntax or percent
-/// `rgb()`/`hsl()`, `oklch()`, `color-mix()`, ...). A shorthand naming one
+/// `currentcolor` keyword, a colour function other than `rgb()`/`hsl()`
+/// (`oklch()`, `color()`, `light-dark()`, ...), or an `rgb()`/`hsl()` that
+/// is valid but not read yet (relative colour). A shorthand naming one
 /// is valid, so it must be kept with the colour left unpainted, not dropped
 /// whole as if the token were junk.
 fn is_unresolved_color(token: &str) -> bool {
-    const COLOR_FUNCTIONS: [&str; 13] = [
-        "rgb(",
-        "rgba(",
-        "hsl(",
-        "hsla(",
+    // `rgb()` / `hsl()` are not here: parse_color reads both syntaxes, so
+    // one it refuses is invalid and must drop the declaration, unless it
+    // is valid CSS the parser does not read yet (`rgb(from red r g b)`,
+    // `mod()` in a channel): is_unreadable_color_function.
+    const COLOR_FUNCTIONS: [&str; 9] = [
         "hwb(",
         "lab(",
         "lch(",
@@ -20882,6 +20893,7 @@ fn is_unresolved_color(token: &str) -> bool {
     let lower = token.trim().to_ascii_lowercase();
     lower == "currentcolor"
         || (lower.ends_with(')') && COLOR_FUNCTIONS.iter().any(|f| lower.starts_with(f)))
+        || rustkit_css::is_unreadable_color_function(&lower)
 }
 
 fn parse_shorthand_4(
@@ -21166,6 +21178,12 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
             // Must be a color
             if let Some(c) = parse_color(part) {
                 color_value = Some(c);
+            } else if is_rgb_or_hsl(part) && !is_unresolved_color(part) {
+                // A bad `rgb()` / `hsl()` (`rgb(1, 2 3)`) makes the shadow
+                // invalid; Chromium drops it rather than painting a default.
+                // One RustKit cannot read yet (`rgb(from red r g b)`) is
+                // valid: the shadow stays, in its default colour.
+                return None;
             }
         }
     }
@@ -34440,21 +34458,30 @@ mod cascade_wire_tests {
         }
     }
 
-    // A colour RustKit cannot resolve yet (`currentcolor`, space-syntax or
-    // percent `rgb()`/`hsl()`, `oklch()`, `color-mix()` ...) is still a
-    // VALID colour: the shorthand is kept and its other parts apply, the
-    // colour itself is left unpainted.
+    // A colour RustKit cannot resolve yet (`currentcolor`, `oklch()`,
+    // `color()` ...) is still a VALID colour: the shorthand is kept and its
+    // other parts apply, the colour itself is left unpainted. Space-syntax
+    // and percent `rgb()`/`hsl()` used to be in this list; they resolve now
+    // (Chromium 143's computed values).
     #[test]
     fn a_border_shorthand_with_an_unresolved_colour_keeps_width_and_style() {
         let e = engine();
         let red = rustkit_css::Color::new(255, 0, 0, 1.0);
+        for (property, value, want) in [
+            ("border", "1px solid rgb(0 0 0 / 10%)", rustkit_css::Color::new(0, 0, 0, 0.1)),
+            ("border-top", "1px solid rgb(229 231 235 / 1)", rustkit_css::Color::new(229, 231, 235, 1.0)),
+            ("border", "1px solid rgba(0,0,0,10%)", rustkit_css::Color::new(0, 0, 0, 0.1)),
+            ("border", "1px solid rgb(100%,0%,0%)", rustkit_css::Color::new(255, 0, 0, 1.0)),
+            ("border", "1px solid hsl(210 40% 96%)", rustkit_css::Color::new(241, 245, 249, 1.0)),
+        ] {
+            let mut s = ComputedStyle::default();
+            e.lctx.apply_style_property(&mut s, property, "4px dashed red");
+            e.lctx.apply_style_property(&mut s, property, value);
+            assert_eq!(s.border_top_width, rustkit_css::Length::Px(1.0), "{property}: {value}");
+            assert_eq!(s.border_top_color, want, "{property}: {value}");
+        }
         for (property, value) in [
             ("border", "1px solid currentColor"),
-            ("border", "1px solid rgb(0 0 0 / 10%)"),
-            ("border-top", "1px solid rgb(229 231 235 / 1)"),
-            ("border", "1px solid rgba(0,0,0,10%)"),
-            ("border", "1px solid rgb(100%,0%,0%)"),
-            ("border", "1px solid hsl(210 40% 96%)"),
             ("border", "1px solid oklch(0.7 0.1 200)"),
             ("border", "1px solid lab(50% 40 59)"),
             ("border", "1px solid hwb(0 0% 0%)"),
