@@ -16,15 +16,24 @@ fn page_of(cases: &[serde_json::Value]) -> String {
     let text = |c: &serde_json::Value, k: &str| c[k].as_str().unwrap_or("").to_string();
     let decl = |c: &serde_json::Value| {
         let value = text(c, "value");
-        let own = if value.is_empty() { String::new() } else { format!(";{}:{value}", text(c, "prop")) };
-        format!("{}{own}", text(c, "base"))
+        let own = if value.is_empty() {
+            String::new()
+        } else {
+            format!("{}:{value}", text(c, "prop"))
+        };
+        format!("{};{own}", text(c, "base"))
+            .trim_start_matches(';')
+            .to_string()
     };
     let inline = |c: &serde_json::Value| c["inline"].as_bool().unwrap_or(false);
     let mut rules = String::new();
     let mut divs = String::new();
     for (i, c) in cases.iter().enumerate() {
         if inline(c) {
-            divs.push_str(&format!("<div id=c{i} class=box style=\"{}\">x</div>", decl(c)));
+            divs.push_str(&format!(
+                "<div id=c{i} class=box style=\"{}\">x</div>",
+                decl(c)
+            ));
         } else {
             rules.push_str(&format!("#c{i}{{{}}}\n", decl(c)));
             divs.push_str(&format!("<div id=c{i} class=box>x</div>"));
@@ -37,7 +46,10 @@ fn page_of(cases: &[serde_json::Value]) -> String {
 
 fn eval(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
     let value = engine.execute_script(id, script).expect("script");
-    let inner = value.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&value);
+    let inner = value
+        .strip_prefix("String(\"")
+        .and_then(|v| v.strip_suffix("\")"))
+        .unwrap_or(&value);
     inner.replace("\\\"", "\"").replace("\\\\", "\\")
 }
 
@@ -47,7 +59,9 @@ fn family(name: &str) {
     assert_eq!(doc["oracle"], "143.0.7499.4");
     let cases = doc["families"][name].as_array().expect("family").clone();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-    let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
+    let id = engine
+        .create_headless_view(Bounds::new(0, 0, 400, 300))
+        .expect("view");
     engine.load_html(id, &page_of(&cases)).expect("load");
     let mut wrong = Vec::new();
     for (i, c) in cases.iter().enumerate() {
@@ -56,15 +70,30 @@ fn family(name: &str) {
         let read = eval(
             &mut engine,
             id,
-            &format!("getComputedStyle(document.getElementById('c{i}')).getPropertyValue('{prop}')"),
+            &format!(
+                "getComputedStyle(document.getElementById('c{i}')).getPropertyValue('{prop}')"
+            ),
         );
         let gap = c.get("gap").is_some();
         if (read == chrome) == gap {
-            let why = if gap { "gap now right, drop the mark" } else { "wrong" };
-            wrong.push(format!("{prop}: {:?} read {read:?}, Chromium {chrome:?} ({why})", c["value"]));
+            let why = if gap {
+                "gap now right, drop the mark"
+            } else {
+                "wrong"
+            };
+            wrong.push(format!(
+                "{prop}: {:?} read {read:?}, Chromium {chrome:?} ({why})",
+                c["value"]
+            ));
         }
     }
-    assert!(wrong.is_empty(), "{name}: {} of {}\n{}", wrong.len(), cases.len(), wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{name}: {} of {}\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
 }
 
 macro_rules! families {
@@ -72,8 +101,25 @@ macro_rules! families {
 }
 
 families!(
-    transform, clip, filter, box_shadow, text_decoration, text, background, object, transition,
-    animation, container, sizing, box_shorthands, border, flex, grid, mask, font, inline,
+    transform,
+    clip,
+    filter,
+    box_shadow,
+    text_decoration,
+    text,
+    background,
+    object,
+    transition,
+    animation,
+    container,
+    sizing,
+    box_shorthands,
+    border,
+    flex,
+    grid,
+    mask,
+    font,
+    inline,
 );
 
 /// A script's write to `style` is read back through the serializer, not as the
@@ -81,9 +127,14 @@ families!(
 #[test]
 fn a_style_write_reads_back_serialized() {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
-    let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
+    let id = engine
+        .create_headless_view(Bounds::new(0, 0, 400, 300))
+        .expect("view");
     engine
-        .load_html(id, "<!doctype html><style>#a{width:100px;height:50px}</style><div id=a>x</div>")
+        .load_html(
+            id,
+            "<!doctype html><style>#a{width:100px;height:50px}</style><div id=a>x</div>",
+        )
         .expect("load");
     let read = eval(
         &mut engine,

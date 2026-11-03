@@ -255,7 +255,9 @@ fn getcomputedstyle_reads_the_published_style() {
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.display, c.getPropertyValue('color'), c.fontSize, c['margin-top'], c.marginTop, c.cssFloat, c.getPropertyValue('nope') === ''].join()"),
         "flex,rgb(1, 2, 3),20px,4px,4px,left,true"
     );
-    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "10,border-bottom-left-radius,function");
+    // The five published rows, the five unset radii, and the initial values
+    // of every other property the engine serializes (`COMPUTED_INITIAL`).
+    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "166,-webkit-box-orient,function");
     assert_eq!(
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); try { c.setProperty('color', 'red'); 'no throw' } catch (e) { e.name }"),
         "NoModificationAllowedError"

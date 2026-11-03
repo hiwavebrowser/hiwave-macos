@@ -1610,6 +1610,9 @@ pub(crate) fn install(
             }
             let host = h.borrow();
             match (host.node(args), string_arg(args, 2)) {
+                (Some(_), Some("stale")) => {
+                    JsValue::String(if d.written_since_layout() { "1".into() } else { String::new() })
+                }
                 (Some(_), Some("laidout")) => {
                     JsValue::String(if host.geometry.is_empty() { String::new() } else { "1".into() })
                 }
@@ -2985,6 +2988,73 @@ const WRAPPERS_JS: &str = r#"
     // string. Custom properties come as `custom` rows on the nearest
     // element (self or ancestor) whose set is its own; `customVars` walks up.
     var COMPUTED_NAMES = {};
+    // What a property reads when the engine published no row for it: Chromium's
+    // serialized initial value (`computed_read.rs` publishes only what differs).
+    var COMPUTED_INITIAL = {
+        '-webkit-box-orient': 'horizontal', '-webkit-clip-path': 'none', '-webkit-filter': 'none',
+        '-webkit-line-clamp': 'none', '-webkit-mask': 'none', '-webkit-mask-clip': 'border-box',
+        '-webkit-mask-image': 'none', '-webkit-mask-origin': 'border-box',
+        '-webkit-mask-position': '0% 0%', '-webkit-mask-repeat': 'repeat',
+        '-webkit-mask-size': 'auto', '-webkit-text-fill-color': 'rgb(0, 0, 0)',
+        'align-content': 'normal', 'align-items': 'normal', 'align-self': 'auto',
+        'animation': 'none 0s ease 0s 1 normal none running', 'animation-delay': '0s',
+        'animation-direction': 'normal', 'animation-duration': '0s', 'animation-fill-mode': 'none',
+        'animation-iteration-count': '1', 'animation-name': 'none',
+        'animation-play-state': 'running', 'animation-timing-function': 'ease',
+        'aspect-ratio': 'auto',
+        'background': 'rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box',
+        'background-clip': 'border-box', 'background-image': 'none',
+        'background-origin': 'padding-box', 'background-position': '0% 0%',
+        'background-position-x': '0%', 'background-position-y': '0%',
+        'background-repeat': 'repeat', 'background-size': 'auto',
+        'border': '0px none rgb(0, 0, 0)', 'border-block': '0px none rgb(0, 0, 0)',
+        'border-block-end': '0px none rgb(0, 0, 0)', 'border-block-start': '0px none rgb(0, 0, 0)',
+        'border-bottom': '0px none rgb(0, 0, 0)', 'border-bottom-color': 'rgb(0, 0, 0)',
+        'border-bottom-style': 'none', 'border-collapse': 'separate',
+        'border-color': 'rgb(0, 0, 0)', 'border-end-end-radius': '0px',
+        'border-end-start-radius': '0px', 'border-inline': '0px none rgb(0, 0, 0)',
+        'border-inline-end': '0px none rgb(0, 0, 0)',
+        'border-inline-start': '0px none rgb(0, 0, 0)', 'border-left': '0px none rgb(0, 0, 0)',
+        'border-left-color': 'rgb(0, 0, 0)', 'border-left-style': 'none',
+        'border-right': '0px none rgb(0, 0, 0)', 'border-right-color': 'rgb(0, 0, 0)',
+        'border-right-style': 'none', 'border-spacing': '0px', 'border-start-end-radius': '0px',
+        'border-start-start-radius': '0px', 'border-style': 'none',
+        'border-top': '0px none rgb(0, 0, 0)', 'border-top-color': 'rgb(0, 0, 0)',
+        'border-top-style': 'none', 'border-width': '0px', 'box-shadow': 'none', 'clear': 'none',
+        'clip-path': 'none', 'column-count': 'auto', 'column-gap': 'normal', 'container': 'none',
+        'container-name': 'none', 'container-type': 'normal', 'filter': 'none', 'flex': '0 1 auto',
+        'flex-basis': 'auto', 'flex-flow': 'row nowrap', 'flex-grow': '0', 'flex-shrink': '1',
+        'flex-wrap': 'nowrap', 'font': '16px Times', 'gap': 'normal', 'grid-area': 'auto',
+        'grid-auto-columns': 'auto', 'grid-auto-flow': 'row', 'grid-auto-rows': 'auto',
+        'grid-column': 'auto', 'grid-column-end': 'auto', 'grid-column-start': 'auto',
+        'grid-row': 'auto', 'grid-row-end': 'auto', 'grid-row-start': 'auto',
+        'grid-template': 'none', 'grid-template-areas': 'none', 'grid-template-columns': 'none',
+        'grid-template-rows': 'none', 'inset': 'auto', 'inset-block': 'auto',
+        'inset-block-end': 'auto', 'inset-block-start': 'auto', 'inset-inline': 'auto',
+        'inset-inline-end': 'auto', 'inset-inline-start': 'auto', 'justify-content': 'normal',
+        'justify-items': 'normal', 'justify-self': 'auto', 'line-break': 'auto', 'margin': '0px',
+        'margin-block': '0px', 'margin-block-end': '0px', 'margin-block-start': '0px',
+        'margin-inline': '0px', 'margin-inline-end': '0px', 'margin-inline-start': '0px',
+        'mask': 'none', 'mask-clip': 'border-box', 'mask-image': 'none',
+        'mask-origin': 'border-box', 'mask-position': '0% 0%', 'mask-repeat': 'repeat',
+        'mask-size': 'auto', 'max-height': 'none', 'max-width': 'none', 'min-height': '0px',
+        'min-width': '0px', 'object-fit': 'fill', 'object-position': '50% 50%', 'order': '0',
+        'overflow': 'visible', 'overflow-wrap': 'normal', 'padding': '0px', 'padding-block': '0px',
+        'padding-block-end': '0px', 'padding-block-start': '0px', 'padding-inline': '0px',
+        'padding-inline-end': '0px', 'padding-inline-start': '0px', 'place-content': 'normal',
+        'place-items': 'normal', 'place-self': 'auto', 'rotate': 'none', 'row-gap': 'normal',
+        'scale': 'none', 'text-decoration': 'none', 'text-decoration-color': 'rgb(0, 0, 0)',
+        'text-decoration-line': 'none', 'text-decoration-style': 'solid', 'text-overflow': 'clip',
+        'transform': 'none', 'transition': 'all', 'transition-delay': '0s',
+        'transition-duration': '0s', 'transition-property': 'all',
+        'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
+        'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
+    };
+    function fillInitial(m) {
+        for (var n in COMPUTED_INITIAL) {
+            if (!Object.prototype.hasOwnProperty.call(m, n)) m[n] = COMPUTED_INITIAL[n];
+        }
+    }
     function kebab(p) { return p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
     function customVars(el) {
         for (var e = el; e; e = e.parentElement) {
@@ -3015,6 +3085,7 @@ const WRAPPERS_JS: &str = r#"
                     (own = own || {})[name.slice(prefix.length)] = line.slice(i + 1);
                 }
             });
+            fillInitial(m);
         } else if (info(el, 'laidout')) {
             m.display = 'none';
             m.visibility = 'visible';
@@ -3027,12 +3098,17 @@ const WRAPPERS_JS: &str = r#"
                 if (!Object.prototype.hasOwnProperty.call(m, n)) m[n] = '0px';
             });
         }
+        // A layout that has seen the attribute already answers for what it
+        // publishes: `transform: rotate(10deg)` reads a matrix, `width: 50%`
+        // pixels. The text stands in only for what it does not publish, or
+        // when the write has not been laid out (the forced-layout budget).
         var inline = el.style;
         if (inline) {
+            var stale = !!info(el, 'stale');
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
-                if (v) m[name] = v;
+                if (v && (stale || !Object.prototype.hasOwnProperty.call(m, name))) m[name] = v;
             }
         }
         return pseudo ? pseudoMap(m, own, pseudo) : m;
@@ -3045,6 +3121,7 @@ const WRAPPERS_JS: &str = r#"
         var isBox = pseudo === '::before' || pseudo === '::after';
         if (own) {
             if (own.content === 'normal') own.content = 'none';
+            fillInitial(own);
             return own;
         }
         if (!m.display) return {};
@@ -3065,7 +3142,9 @@ const WRAPPERS_JS: &str = r#"
     }
     function makeComputed(el, pseudo) {
         var m = pseudo === null ? {} : computedMap(el, pseudo);
-        var names = Object.keys(m).sort();
+        // Sorted on demand: a read of one property should not pay for the list.
+        var sorted = null;
+        function names() { return sorted || (sorted = Object.keys(m).sort()); }
         var decl = Object.create(CSSStyleDeclaration.prototype);
         function ro() { throw new DOMException('These styles are computed, and therefore read-only.', 'NoModificationAllowedError'); }
         // A custom property not set inline: the cascaded (inherited) value.
@@ -3079,20 +3158,22 @@ const WRAPPERS_JS: &str = r#"
             // `--fgColor-*`): only a standard property is kebab-cased.
             getPropertyValue: function (n) { n = String(n); if (n.indexOf('--') !== 0) n = kebab(n); return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : customValue(n); },
             getPropertyPriority: function () { return ''; },
-            item: function (i) { return names[i >>> 0] || ''; },
+            item: function (i) { return names()[i >>> 0] || ''; },
             setProperty: ro, removeProperty: ro,
-            cssText: names.map(function (n) { return n + ': ' + m[n] + ';'; }).join(' '),
-            length: names.length,
             parentRule: null
         };
         Object.keys(own).forEach(function (k) {
             Object.defineProperty(decl, k, { value: own[k], writable: false, configurable: true, enumerable: false });
         });
+        Object.defineProperty(decl, 'cssText', { configurable: true, enumerable: false,
+            get: function () { return names().map(function (n) { return n + ': ' + m[n] + ';'; }).join(' '); } });
+        Object.defineProperty(decl, 'length', { configurable: true, enumerable: false,
+            get: function () { return names().length; } });
         return new Proxy(decl, {
             get: function (t, p, r) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, r);
-                if (/^(0|[1-9][0-9]*)$/.test(p)) return names[Number(p)];
-                var n = p.indexOf('--') === 0 ? p : kebab(p);
+                if (/^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
                 return Object.prototype.hasOwnProperty.call(m, n) ? m[n] : (p === 'cssFloat' ? (m['float'] || '') : customValue(n));
             },
             set: function (t, p) { if (typeof p === 'string' && !(p in t)) ro(); return false; }

@@ -25,7 +25,7 @@ const doc = JSON.parse(readFileSync(url, 'utf8'));
 const write = process.argv.includes('--write');
 
 function pageOf(cases) {
-  const decl = (c) => `${c.base || ''}${c.value ? `;${c.prop}:${c.value}` : ''}`;
+  const decl = (c) => `${c.base || ''};${c.value ? `${c.prop}:${c.value}` : ''}`.replace(/^;/, '');
   const rules = cases.map((c, i) => c.inline ? '' : `#c${i}{${decl(c)}}`).join('\n');
   const divs = cases.map((c, i) =>
     `<div id=c${i} class=box${c.inline ? ` style="${decl(c)}"` : ''}>x</div>`).join('');

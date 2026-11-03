@@ -402,6 +402,7 @@ mod is_complex_argument_tests;
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
+mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
@@ -23136,9 +23137,10 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         rustkit_css::LineHeight::Number(n) => css_px(n * font_px),
         rustkit_css::LineHeight::Px(p) => css_px(p),
     };
-    let letter_spacing = match s.letter_spacing {
-        rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
-        _ => "normal".to_string(),
+    let letter_spacing = match &s.letter_spacing {
+        rustkit_css::Length::Zero => "normal".to_string(),
+        rustkit_css::Length::Px(p) if *p == 0.0 => "normal".to_string(),
+        l => computed_read::length(l, font_px).unwrap_or_default(),
     };
     let box_edges = d.border_box();
     // `display: contents` has no used box. CSSOM returns the computed
@@ -23154,6 +23156,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         corner_radii_px(&s.border_bottom_right_radius, font_px, box_edges.width, box_edges.height),
         corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
     ];
+    let more = computed_read::rows(b, font_px, &line_height);
     let rows: Vec<(&str, String)> = vec![
         ("display", s.display_keyword().to_string()),
         ("position", css_keyword(&format!("{:?}", s.position))),
@@ -23209,10 +23212,13 @@ fn computed_style_lines(b: &LayoutBox) -> String {
             None => "normal".to_string(),
         }),
     ];
-    rows.into_iter()
+    let mut lines = rows
+        .into_iter()
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    lines.push_str(&more);
+    lines
 }
 
 /// A CSS string serialised the way CSSOM does: double quotes, `"` and `\`
