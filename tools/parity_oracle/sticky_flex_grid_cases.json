@@ -80,6 +80,30 @@
   "row_stretch_all": {
    "page": "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#rail{width:1px}#v{width:50px}#txt{width:50px;font:16px/20px sans-serif}#after{height:10px}</style><body><div id=r><div id=rail></div><div id=v><div style='height:670px'></div></div><div id=txt>a</div></div><div id=after></div></body>",
    "script": "[H('rail'), H('v'), H('txt'), H('r'), Y('after'), D()].join(' ')"
+  },
+  "flex_row_table": {
+   "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}</style><body><div id=r><table id=tb cellspacing=0><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+  },
+  "flex_row_table_collapsed_border": {
+   "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{border:2px solid;border-collapse:collapse}</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+  },
+  "flex_row_inline_table": {
+   "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{display:inline-table}</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+  },
+  "flex_row_display_table_div": {
+   "page": "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#tb{display:table}#b{width:20px}#nx{height:5px}</style><body><div id=r><div id=tb><div id=last style='height:670px;width:20px'></div></div><div id=b></div></div><div id=nx></div></body>",
+   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+  },
+  "flex_row_short_table_stretches": {
+   "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}</style><body><div id=r><table id=tb cellspacing=0><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+  },
+  "flex_row_tall_content_keeps_its_size": {
+   "page": "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#a{width:50px}#t{display:table;height:300px}#c{display:flex;flex-direction:column;width:50px}#k{height:400px;flex:none}#nx{height:5px}</style><body><div id=r><div id=a><div id=t style='width:10px'></div></div><div id=c><div id=k></div></div></div><div id=nx></div></body>",
+   "script": "[H('a'), H('t'), H('c'), H('k'), H('r'), Y('nx'), D()].join(' ')"
   }
  }
 }

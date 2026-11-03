@@ -278,6 +278,84 @@ fn every_stretched_item_of_a_fixed_row_takes_the_rows_height() {
     );
 }
 
+/// A table's height is a minimum: in a 200px row a table of ten 30px rows stays 300 and overflows.
+#[test]
+fn a_table_in_a_fixed_row_keeps_its_rows() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}",
+            "</style><body><div id=r><table id=tb cellspacing=0><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+        ),
+        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "300/300/300 270 200/200/200 200/200/300 200 600",
+    );
+}
+
+/// The same with a collapsed 2px border.
+#[test]
+fn a_collapsed_table_in_a_fixed_row_keeps_its_rows() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{border:2px solid;border-collapse:collapse}",
+            "</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+        ),
+        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "304/304/303 272 200/200/200 200/200/304 200 600",
+    );
+}
+
+/// The same as `display: inline-table`, with its border spacing.
+#[test]
+fn an_inline_table_in_a_fixed_row_keeps_its_rows() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{display:inline-table}",
+            "</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+        ),
+        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "322/322/322 290 200/200/200 200/200/322 200 600",
+    );
+}
+
+/// A `display: table` div holding 670px stays 670.
+#[test]
+fn a_display_table_div_in_a_fixed_row_keeps_its_content_height() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#tb{display:table}#b{width:20px}#nx{height:5px}",
+            "</style><body><div id=r><div id=tb><div id=last style='height:670px;width:20px'></div></div><div id=b></div></div><div id=nx></div></body>",
+        ),
+        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "670/670/670 0 200/200/200 200/200/670 200 670",
+    );
+}
+
+/// A table shorter than the row still stretches to it.
+#[test]
+fn a_short_table_in_a_fixed_row_still_stretches() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}",
+            "</style><body><div id=r><table id=tb cellspacing=0><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
+        ),
+        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "200/200/200 0 200/200/200 200/200/200 200 600",
+    );
+}
+
+/// A stretched item is the row's height, and what it holds keeps its own: a 300px `display: table` box and a `flex: none` 400px child overflow.
+#[test]
+fn content_taller_than_a_fixed_row_keeps_its_size() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#a{width:50px}#t{display:table;height:300px}#c{display:flex;flex-direction:column;width:50px}#k{height:400px;flex:none}#nx{height:5px}",
+            "</style><body><div id=r><div id=a><div id=t style='width:10px'></div></div><div id=c><div id=k></div></div></div><div id=nx></div></body>",
+        ),
+        "[H('a'), H('t'), H('c'), H('k'), H('r'), Y('nx'), D()].join(' ')",
+        "200/200/300 300/300/300 200/200/400 400/400/400 200/200/400 200 600",
+    );
+}
+
 /// `align-items: flex-start` on the container, in a scroller.
 #[test]
 fn align_items_start_lets_a_flex_item_stick() {
