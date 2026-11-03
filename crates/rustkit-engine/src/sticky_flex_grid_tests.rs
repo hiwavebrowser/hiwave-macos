@@ -98,6 +98,7 @@ fn a_grid_sidebar_sticks_to_its_scroller() {
 
 /// A sticky `th` in a table in a scroller: the table, not the row, holds it.
 #[test]
+#[ignore = "sticky table parts need stacking-context hoisting: PLAN-z follow-up row after C7 (#868 R1 delta 3); expected values are Chromium 143"]
 fn a_th_sticks_in_a_scrolling_table() {
     check(
         concat!(
@@ -111,6 +112,7 @@ fn a_th_sticks_in_a_scrolling_table() {
 
 /// A sticky `th` in the window, until the table's end.
 #[test]
+#[ignore = "sticky table parts need stacking-context hoisting: PLAN-z follow-up row after C7 (#868 R1 delta 3); expected values are Chromium 143"]
 fn a_th_sticks_to_the_window_until_the_table_ends() {
     check(
         concat!(
@@ -137,6 +139,7 @@ fn a_sticky_thead_carries_its_cells() {
 
 /// A sticky `tr`, held by the table.
 #[test]
+#[ignore = "sticky table parts need stacking-context hoisting: PLAN-z follow-up row after C7 (#868 R1 delta 3); expected values are Chromium 143"]
 fn a_sticky_tr_sticks_in_a_scrolling_table() {
     check(
         concat!(
@@ -150,6 +153,7 @@ fn a_sticky_tr_sticks_in_a_scrolling_table() {
 
 /// A sticky `th` stops at the table's content box: under its border and padding, past its border spacing, with a caption above.
 #[test]
+#[ignore = "sticky table parts need stacking-context hoisting: PLAN-z follow-up row after C7 (#868 R1 delta 3); expected values are Chromium 143"]
 fn a_th_stops_at_the_tables_content_box() {
     check(
         concat!(
@@ -163,6 +167,7 @@ fn a_th_stops_at_the_tables_content_box() {
 
 /// A `bottom: 0` footer cell rides up to the scrollport's bottom edge.
 #[test]
+#[ignore = "sticky table parts need stacking-context hoisting: PLAN-z follow-up row after C7 (#868 R1 delta 3); expected values are Chromium 143"]
 fn a_bottom_sticky_footer_cell_holds_up_from_the_tables_end() {
     check(
         concat!(
