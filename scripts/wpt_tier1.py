@@ -62,6 +62,7 @@ sync not run, negative control did not go red).
 """
 
 import argparse
+import collections
 import concurrent.futures
 import json
 import math
@@ -832,14 +833,15 @@ def recheck_small_fails(cases, entries, viewport, oracle=chromium_pair_diffs):
             )
 
 
+def is_area_probe_demotion(case) -> bool:
+    return case["status"] == "UNPROVEN" and case["reason"].startswith(area_probe_reason_prefix(case["area"]))
+
+
 def recheck_area_probes(cases, entries, viewport, oracle=chromium_pair_diffs):
     """A match demoted by its area probe, on a page Chromium's own test and reference
     do not match on: the page is no evidence for the engine or against it. It stays
     UNPROVEN and its reason says so."""
-    probed = [
-        c for c in cases
-        if c["status"] == "UNPROVEN" and c["reason"].startswith(area_probe_reason_prefix(c["area"]))
-    ]
+    probed = [c for c in cases if is_area_probe_demotion(c)]
     if not probed:
         return
     version = _ask_chromium(probed, entries, viewport, oracle)
@@ -849,6 +851,27 @@ def recheck_area_probes(cases, entries, viewport, oracle=chromium_pair_diffs):
                 f"; Chromium {version}'s own test and reference differ by {case['chromium_diff_pixels']} px "
                 "under the same staging, so this page is not evidence either way"
             )
+
+
+def area_probe_chromium_counts(cases):
+    """What Chromium said about the area-probe demotions, as one count per answer."""
+    probed = [c for c in cases if is_area_probe_demotion(c)]
+    pixels = [c["chromium_diff_pixels"] for c in probed]
+    return {
+        "asked": len(probed),
+        "differ": sum(1 for p in pixels if p),
+        "match": sum(1 for p in pixels if p == 0),
+        "not_measured": sum(1 for p in pixels if p is None),
+    }
+
+
+def chromium_gap_lines(cases):
+    """One console line per question Chromium did not answer, and why."""
+    gaps = collections.Counter(
+        ("area probe" if is_area_probe_demotion(c) else "small FAIL", c["chromium_not_measured"])
+        for c in cases if c["chromium_not_measured"]
+    )
+    return [f"{question} not checked in Chromium: {why} ({n})" for (question, why), n in sorted(gaps.items())]
 
 
 def remove_staged():
@@ -1009,6 +1032,7 @@ def main():
         "campaign_rule_counts": campaign_counts(cases),
         "areas": areas,
         "unproven_passes": unproven_passes(cases),
+        "area_probe_chromium": area_probe_chromium_counts(cases),
         "attribution": {
             "_comment": "Fails grouped by a named engine capability gap. Attribution only — these cases stay in the denominator. A gap here is a lane, not an excuse.",
             "blocked_fails": {
@@ -1059,8 +1083,11 @@ def main():
         print(f"  campaign rule not measured: {why}")
     if last_run["unproven_passes"]:
         print(f"  unproven: {len(last_run['unproven_passes'])} (see last-run.json)")
-    for why in sorted({c["chromium_not_measured"] for c in cases if c["chromium_not_measured"]}):
-        print(f"  small FAIL not checked in Chromium: {why}")
+    split = last_run["area_probe_chromium"]
+    print(f"  area probes in Chromium: {split['asked']} asked, {split['differ']} differ, "
+          f"{split['match']} match, {split['not_measured']} not measured")
+    for line in chromium_gap_lines(cases):
+        print(f"  {line}")
     for gap, ids in last_run["attribution"]["blocked_fails"].items():
         print(f"  attributed: {len(ids)} fail(s) blocked by {gap}")
     suspect = last_run["attribution"]["suspect_passes"]["ids"]

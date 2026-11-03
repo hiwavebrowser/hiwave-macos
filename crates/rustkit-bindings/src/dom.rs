@@ -3191,6 +3191,16 @@ const WRAPPERS_JS: &str = r#"
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
                 if (!v) continue;
+                if (name === 'opacity') {
+                    // #861: a plain value is seen at once, as a number in 0..1.
+                    // What needs the cascade (`calc()`, `var()`, `inherit`) or
+                    // is invalid reads the last layout's row.
+                    if (/^[+-]?(\d*\.)?\d+(e[+-]?\d+)?%?$/i.test(v)) {
+                        var n = parseFloat(v) / (v.charAt(v.length - 1) === '%' ? 100 : 1);
+                        m[name] = String(Math.min(1, Math.max(0, n)));
+                    }
+                    continue;
+                }
                 if (name === 'transform' && m.display === 'none' && !stale) continue;
                 var lossy = !stale && lossyInline(name, v);
                 if (stale || lossy || !hasOwn(m, name) || m[name] === '' || declaredBox(el, m, name)) {
