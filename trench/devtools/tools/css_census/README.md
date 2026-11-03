@@ -36,11 +36,18 @@ engines. Each page's own script prints `getComputedStyle` and the rects of every
 The 150 is a judgement from the data: the highest row kept is 100 off
   (`background-size: cover`), the lowest demoted 302. The `bg` rows stay red until
   its control is fixed (C14); re-read them then. A miss past that on a control off
-  by more than 150 says `control N off`: the red belongs to the context first.
+  by more than 150 says `control N off`: the red belongs to the control first. That
+  is the row's own control, `base` declarations included, so it may be the row's
+  `base` and not its context; the context's number is in the report's control list.
 
 The "sites" column comes from `docs/census/css_property_prevalence_top100.json`,
 counts only: `node docs/census/tools/css_property_prevalence.mjs` regenerates it
-live (ebay is never loaded). A census run reads the file and needs no network.
+live (ebay and shopify are never loaded). The file is public, so it holds only names
+in `docs/census/tools/css_known_properties.json`, which the crawl takes from
+Chromium; `css_property_names.test.mjs` fails on any other name. `@font-face`
+descriptors are not counted. A census run reads the file and needs no network, and
+refuses it below `MIN_SITES` (50) loaded sites: fewer is a failed crawl. 50 is a
+chosen number, not a measured one.
 
 A property is its worst measured value. `--only a,b` prints JSON for those rows
 and writes no report; `--parity-capture <path>` skips the build.

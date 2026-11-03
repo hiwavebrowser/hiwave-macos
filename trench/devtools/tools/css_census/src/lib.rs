@@ -938,7 +938,8 @@ fn why(r: &Row) -> String {
                     code(&v.chrome_computed)
                 )
             };
-            // Past the credit, the context is broken before the value arrives.
+            // Past the credit, the row's control, `base` included, is broken before
+            // the value arrives. That may be the base, not the context.
             let control = if v.control_off > FLOOR_CREDIT {
                 format!(", control {} off", v.control_off)
             } else {
@@ -985,12 +986,13 @@ pub fn render_markdown(meta: &Meta, rows: &[Row]) -> String {
     md.push_str(&format!("| total | {} |\n\n", rows.len()));
     md.push_str("## What this does and does not measure\n\n");
     md.push_str(&format!(
-        "- Order: the \"sites\" column counts sites of the {} loaded from the top-100 list whose main frame authors the property in a stylesheet, `<style>` or style attribute. Authored is not applied: whether the rule matched anything is not measured. A shorthand and its longhands are separate names, and sites behind a bot wall and ebay are not in the count. Ties sort by declarations authored in the 26-case corpus.\n",
+        "- Order: the \"sites\" column counts sites of the {} loaded from the top-100 list whose main frame authors the property in a stylesheet, `<style>` or style attribute. Authored is not applied: whether the rule matched anything is not measured. A shorthand and its longhands are separate names, and sites behind a bot wall, ebay and shopify are not in the count. Ties sort by declarations authored in the 26-case corpus.\n",
         meta.sites_loaded
     ));
     md.push_str("- One fixture per value in one context. A class says what happened there, not that every value form or context works.\n");
     md.push_str("- An `unexercised` value changed nothing in Chrome, so it cannot pass effect; `not-visual` properties paint nothing in a static frame and stop at computed.\n");
-    md.push_str("- An arm that applies a property and is then ignored still counts as parse.\n\n");
+    md.push_str("- An arm that applies a property and is then ignored still counts as parse.\n");
+    md.push_str("- `control N off`: the row's own control, its `base` declarations included, is N probes off Chrome, so the red belongs to that control first. That may be the row's `base` and not its context; the context's own number is in the list below.\n\n");
     if !meta.contexts_off.is_empty() {
         md.push_str(&format!("Controls that already disagree with Chrome (off probes, credited as noise on that context's rows up to {FLOOR_CREDIT}; a value that agrees only with more credit than that reads `unproven`, red, `control-limited`):\n\n"));
         for (context, off) in &meta.contexts_off {

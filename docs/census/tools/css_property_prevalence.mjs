@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // css_property_prevalence.mjs - how many top-100 sites author each CSS property (dev-tools T13c).
 // One load per site, four at a time. The output is counts per property only: no site names, no URLs,
-// no page text. ebay is never loaded live, whatever the list says.
+// no page text, and only names Chromium knows. ebay and shopify are never loaded live, whatever the list
+// says, as a page or as a subresource of another site.
 // Usage: node docs/census/tools/css_property_prevalence.mjs [--list websuite/realsite-top100.json] [--out path.json]
 import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { authoredProperties, isBlockedTitle, neverLoad } from './css_property_names.mjs';
+import { authoredProperties, isBlockedTitle, neverLoad, publishable } from './css_property_names.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '../../..');
@@ -18,6 +19,7 @@ const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const listRel = opt('--list', 'websuite/realsite-top100.json');
 const outPath = resolve(opt('--out', join(REPO, 'docs/census/css_property_prevalence_top100.json')));
+const knownPath = resolve(opt('--known-out', join(REPO, 'docs/census/tools/css_known_properties.json')));
 const list = JSON.parse(readFileSync(resolve(REPO, listRel), 'utf8'));
 const sites = list.sites.filter((s) => !neverLoad(s.url));
 const WORKERS = 4;
@@ -34,10 +36,29 @@ const PAGE_CSS = `(() => {
   return out;
 })()`;
 
+// Every name on an element's style object that CSS.supports takes as a property. The object also
+// carries descriptors such as `src`; CSS.supports refuses those.
+const KNOWN_PROPERTIES = `(() => {
+  const style = document.documentElement.style;
+  const known = new Set();
+  for (const key in style) {
+    if (typeof style[key] !== 'string' || key === 'cssText') continue;
+    const name = key.includes('-') ? key : key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()).replace(/^webkit-/, '-webkit-');
+    if (CSS.supports(name, 'initial')) known.add(name);
+  }
+  return [...known].sort();
+})()`;
+
 const browser = await chromium.launch({ headless: true });
+let refused = 0;
 
 async function visit(site) {
   const ctx = await browser.newContext({ viewport: list.viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
+  await ctx.route('**/*', (route) => {
+    if (!neverLoad(route.request().url())) return route.continue();
+    refused += 1;
+    return route.abort();
+  });
   const page = await ctx.newPage();
   const bodies = [];
   page.on('response', (resp) => {
@@ -82,8 +103,15 @@ await Promise.all(Array.from({ length: WORKERS }, async () => {
 }));
 
 const version = browser.version();
+const blank = await browser.newPage();
+const known = await blank.evaluate(KNOWN_PROPERTIES);
 await browser.close();
-const sorted = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)));
+const sorted = publishable(counts, known);
+writeFileSync(knownPath, JSON.stringify({
+  chromium: version,
+  measure: 'names on an element style object that CSS.supports(name, "initial") accepts',
+  properties: known,
+}, null, 0).replace(/","/g, '",\n "') + '\n');
 writeFileSync(outPath, JSON.stringify({
   meta: {
     date: new Date().toISOString().slice(0, 10),
@@ -91,8 +119,9 @@ writeFileSync(outPath, JSON.stringify({
     universe: listRel,
     asked: sites.length,
     loaded,
-    measure: 'loaded sites whose main frame authors the property in a stylesheet, <style> or style attribute',
+    measure: 'loaded sites whose main frame authors the property in a stylesheet, <style> or style attribute; @font-face descriptors are not counted, and only names Chromium knows are kept',
   },
   sites_authoring: sorted,
 }, null, 1) + '\n');
+console.error(`names seen ${Object.keys(counts).length}, kept ${Object.keys(sorted).length}; requests refused ${refused}`);
 console.error(`wrote ${outPath}`);
