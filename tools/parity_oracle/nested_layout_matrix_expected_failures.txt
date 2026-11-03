@@ -51,7 +51,6 @@ core--flex-row--grid--w-auto--h-auto         grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-50pct--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-200px--h-auto        grid-item-of-flex-laid-out-as-block
 core--flex-row--grid--w-min-content--h-auto  grid-item-of-flex-laid-out-as-block
-clamp--flex-row--max-height-grid             grid-item-of-flex-laid-out-as-block
 margin-auto--flex-row--grid                  grid-item-of-flex-laid-out-as-block
 margin-auto--flex-col--grid                  grid-item-of-flex-laid-out-as-block
 gap--flex-row--grid                          grid-item-of-flex-laid-out-as-block

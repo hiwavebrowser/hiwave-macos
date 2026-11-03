@@ -694,6 +694,7 @@ fn layout_flex_container_at(
             stretch_cross_size,
             style.align_items,
             has_definite_cross_size,
+            wrap == FlexWrap::NoWrap,
             cross_axis,
         );
     }
@@ -883,12 +884,11 @@ fn layout_flex_container_at(
                     // `height: 100%` child of a `flex: 1` item in a 44px row
                     // at 44, and ebay's search input with it.
                     //
-                    // Only an item that HAS such a child takes this path: the
-                    // item then keeps the height the flex algorithm gave it
-                    // and its content overflows (Chromium: a 60px block and a
-                    // `height: 100%` block in a stretched item of a 44px row
-                    // leave the item at 44), where every other item still
-                    // grows to its flow as it did.
+                    // The item then keeps the height the flex algorithm gave
+                    // it and its content overflows (Chromium: a 60px block and
+                    // a `height: 100%` block in a stretched item of a 44px
+                    // row leave the item at 44; a 670px block alone in a
+                    // 200px row leaves it at 200).
                     //
                     // `stretches()` and not `align-self` alone: an item with
                     // an auto cross margin is not stretched (§9.4.11), so a
@@ -900,8 +900,11 @@ fn layout_flex_container_at(
                         && wrap == FlexWrap::NoWrap
                         && !item.has_explicit_cross_size
                         && item.stretches(style.align_items);
+                    // Any item stretched in a definite single line keeps the
+                    // line's height after its children flow: what is taller
+                    // overflows or scrolls (see `calculate_cross_sizes`).
                     let stretch_target = definite_inner_cross
-                        .filter(|_| percent_child && stretched)
+                        .filter(|_| stretched && !is_table_box(item.layout_box))
                         .map(|cross| {
                             let outer = (cross - item.cross_margin_start - item.cross_margin_end)
                                 .max(item.min_cross_size)
@@ -2224,11 +2227,21 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
 /// has a definite (non-auto) cross size. This affects stretch behavior:
 /// - With definite cross size: stretch items to fill the container
 /// - With auto cross size: stretch items to match the tallest item in the line
+/// A table box: its used height is never below its rows' (CSS 2.1
+/// §17.5.3), so a stretch can grow it but not cut it.
+fn is_table_box(layout_box: &LayoutBox) -> bool {
+    matches!(
+        layout_box.style.display,
+        rustkit_css::Display::Table | rustkit_css::Display::InlineTable
+    )
+}
+
 fn calculate_cross_sizes(
     line: &mut FlexLine,
     container_cross: f32,
     align_items: AlignItems,
     has_definite_cross_size: bool,
+    single_line: bool,
     cross_axis: Axis,
 ) {
     // PASS 1: Calculate content-based cross sizes for ALL items (ignore stretch for now)
@@ -2308,8 +2321,28 @@ fn calculate_cross_sizes(
                 line_cross_size - item.cross_margin_start - item.cross_margin_end
             };
 
-            // Stretch, but never below content size
-            item.cross_size = stretch_target.max(content_cross_sizes[i]);
+            // In a definite single-line row a stretched item is exactly the
+            // line's height (css-flexbox-1 §9.4.11): taller content
+            // overflows, or scrolls in a scroller, and does not grow it.
+            // Chromium 143, 200px row: a `flex: 1; overflow: auto` pane
+            // holding 670px is 200, and so are an empty 1px rail and a
+            // visible box holding 670px. The content floor stays for the
+            // other cases. It also kept a stale height: an item with no
+            // children reads its last layout's height as its content, so an
+            // empty rail in a row laid out again at a smaller height kept
+            // the old one and gave the page a phantom scroll.
+            // A table is the exception: its height is a minimum (CSS 2.1
+            // §17.5.3), so it keeps the content floor. Chromium 143: a
+            // table of ten 30px rows in a 200px row is 300.
+            let exact = cross_axis == Axis::Vertical
+                && has_definite_cross_size
+                && single_line
+                && !is_table_box(item.layout_box);
+            item.cross_size = if exact {
+                stretch_target
+            } else {
+                stretch_target.max(content_cross_sizes[i])
+            };
         }
 
         // Clamp to min/max
