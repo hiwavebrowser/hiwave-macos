@@ -1,5 +1,5 @@
 {
- "at": "var $ = function (i) { return document.getElementById(i); }; var at = function (i) { var r = $(i).getBoundingClientRect(); return r.x + ',' + r.y; }; var top = function (i) { return at(i) + ' ' + $(i).offsetTop; }; var hit = function (x, y) { var e = document.elementFromPoint(x, y); return e && e.id || '-'; }; var walk = function (s, offs, f) { return offs.map(function (o) { $(s).scrollTop = o; return f(); }).join(' | '); }; var win = function (offs, f) { return offs.map(function (o) { window.scrollTo(0, o); return f(); }).join(' | '); }; ",
+ "at": "var $ = function (i) { return document.getElementById(i); }; var at = function (i) { var r = $(i).getBoundingClientRect(); return r.x + ',' + r.y; }; var top = function (i) { return at(i) + ' ' + $(i).offsetTop; }; var hit = function (x, y) { var e = document.elementFromPoint(x, y); return e && e.id || '-'; }; var walk = function (s, offs, f) { return offs.map(function (o) { $(s).scrollTop = o; return f(); }).join(' | '); }; var win = function (offs, f) { return offs.map(function (o) { window.scrollTo(0, o); return f(); }).join(' | '); }; var H = function (i) { var e = $(i); return e.offsetHeight + '/' + e.clientHeight + '/' + e.scrollHeight; }; var D = function () { return document.documentElement.scrollHeight; }; var Y = function (i) { return Math.round($(i).getBoundingClientRect().y); }; ",
  "cases": {
   "flex_col_scroller": {
    "page": "<!doctype html><style>body{margin:0;height:3000px}#s{overflow:auto;width:200px;height:100px}#f{display:flex;flex-direction:column}#gap{height:50px}#h{position:sticky;top:0;height:20px}#t{height:600px}</style><body><div id=s><div id=f><div id=gap></div><div id=h></div><div id=t></div></div></div></body>",
@@ -68,6 +68,18 @@
   "table_th_tfoot_bottom": {
    "page": "<!doctype html><style>body{margin:0;height:3000px}#s{overflow:auto;width:300px;height:100px}table{border-collapse:collapse;border-spacing:0}td,th{padding:0;height:20px;width:100px}#ft{position:sticky;bottom:0}</style><body><div id=s><table id=tb><tbody><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr><tr><td>r</td><td>r</td></tr></tbody><tfoot><tr><td id=ft>f</td><td>g</td></tr></tfoot></table></div></body>",
    "script": "walk('s', [0, 30, 100, 300, 1000], function () { return top('ft'); })"
+  },
+  "shell_rail_sticky": {
+   "page": "<!doctype html><style>body{margin:0}#app{display:flex;flex-direction:column;height:600px}#hd{height:50px;flex:none}#r{flex:1;display:flex;min-height:0}#side{width:200px}#p{flex:1;overflow:auto}</style><body><div id=app><div id=hd></div><div id=r><div id=side></div><div id=p><div id=gap style='height:50px'></div><div id=h style='position:sticky;top:0;height:20px'></div><div id=t style='height:600px'></div></div></div></div></body>",
+   "script": "walk('p', [0, 30, 50, 300, 1000], function () { return Y('h'); }) + ' # ' + [H('side'), H('p'), H('r'), D(), (function () { window.scrollTo(0, 500); return window.scrollY; })()].join(' ')"
+  },
+  "shell_rail_no_sticky": {
+   "page": "<!doctype html><style>body{margin:0}#app{display:flex;flex-direction:column;height:600px}#hd{height:50px;flex:none}#r{flex:1;display:flex;min-height:0}#side{width:200px}#p{flex:1;overflow:auto}</style><body><div id=app><div id=hd></div><div id=r><div id=side></div><div id=p><div style='height:670px'></div></div></div></div></body>",
+   "script": "[H('side'), H('p'), H('r'), D(), (function () { window.scrollTo(0, 500); return window.scrollY; })()].join(' ')"
+  },
+  "row_stretch_all": {
+   "page": "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#rail{width:1px}#v{width:50px}#txt{width:50px;font:16px/20px sans-serif}#after{height:10px}</style><body><div id=r><div id=rail></div><div id=v><div style='height:670px'></div></div><div id=txt>a</div></div><div id=after></div></body>",
+   "script": "[H('rail'), H('v'), H('txt'), H('r'), Y('after'), D()].join(' ')"
   }
  }
 }

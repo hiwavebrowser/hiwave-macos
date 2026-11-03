@@ -13,6 +13,9 @@ const AT: &str = concat!(
     "var hit = function (x, y) { var e = document.elementFromPoint(x, y); return e && e.id || '-'; }; ",
     "var walk = function (s, offs, f) { return offs.map(function (o) { $(s).scrollTop = o; return f(); }).join(' | '); }; ",
     "var win = function (offs, f) { return offs.map(function (o) { window.scrollTo(0, o); return f(); }).join(' | '); }; ",
+    "var H = function (i) { var e = $(i); return e.offsetHeight + '/' + e.clientHeight + '/' + e.scrollHeight; }; ",
+    "var D = function () { return document.documentElement.scrollHeight; }; ",
+    "var Y = function (i) { return Math.round($(i).getBoundingClientRect().y); }; ",
 );
 
 #[track_caller]
@@ -233,6 +236,45 @@ fn a_stretched_flex_item_never_moves_but_start_and_end_do() {
         ),
         "win([0, 100, 500, 1070, 1300], function () { return [top('a'), top('b'), top('e'), $('a').offsetHeight].join(' '); })",
         "0,100 100 50,100 100 100,1070 1070 1000 | 0,0 100 50,0 100 100,970 1070 1000 | 0,-400 100 50,0 500 100,570 1070 1000 | 0,-970 100 50,0 1070 100,0 1070 1000 | 0,-1200 100 50,-230 1070 100,-230 1070 1000",
+    );
+}
+
+/// The app shell: a 600px column, a 50px header, a `flex: 1` row holding an empty 200px rail and a `flex: 1; overflow: auto` pane with a sticky header. The rail is the row's 550, the page does not scroll.
+#[test]
+fn an_app_shell_pane_scrolls_and_its_empty_rail_does_not_grow_the_page() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}#app{display:flex;flex-direction:column;height:600px}#hd{height:50px;flex:none}#r{flex:1;display:flex;min-height:0}#side{width:200px}#p{flex:1;overflow:auto}",
+            "</style><body><div id=app><div id=hd></div><div id=r><div id=side></div><div id=p><div id=gap style='height:50px'></div><div id=h style='position:sticky;top:0;height:20px'></div><div id=t style='height:600px'></div></div></div></div></body>",
+        ),
+        "walk('p', [0, 30, 50, 300, 1000], function () { return Y('h'); }) + ' # ' + [H('side'), H('p'), H('r'), D(), (function () { window.scrollTo(0, 500); return window.scrollY; })()].join(' ')",
+        "100 | 70 | 50 | 50 | 50 # 550/550/550 550/550/670 550/550/550 600 0",
+    );
+}
+
+/// The same shell with no sticky box.
+#[test]
+fn an_app_shell_without_sticky_keeps_its_rail_to_the_row() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}#app{display:flex;flex-direction:column;height:600px}#hd{height:50px;flex:none}#r{flex:1;display:flex;min-height:0}#side{width:200px}#p{flex:1;overflow:auto}",
+            "</style><body><div id=app><div id=hd></div><div id=r><div id=side></div><div id=p><div style='height:670px'></div></div></div></div></body>",
+        ),
+        "[H('side'), H('p'), H('r'), D(), (function () { window.scrollTo(0, 500); return window.scrollY; })()].join(' ')",
+        "550/550/550 550/550/670 550/550/550 600 0",
+    );
+}
+
+/// In a 200px row every stretched item is 200: an empty rail, a box whose 670px content overflows (it does not grow the row), a line of text.
+#[test]
+fn every_stretched_item_of_a_fixed_row_takes_the_rows_height() {
+    check(
+        concat!(
+            "<!doctype html><style>body{margin:0}#r{display:flex;height:200px}#rail{width:1px}#v{width:50px}#txt{width:50px;font:16px/20px sans-serif}#after{height:10px}",
+            "</style><body><div id=r><div id=rail></div><div id=v><div style='height:670px'></div></div><div id=txt>a</div></div><div id=after></div></body>",
+        ),
+        "[H('rail'), H('v'), H('txt'), H('r'), Y('after'), D()].join(' ')",
+        "200/200/200 200/200/670 200/200/200 200/200/670 200 670",
     );
 }
 
