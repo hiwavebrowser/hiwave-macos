@@ -897,7 +897,7 @@ fn layout_flex_container_at(
                     // line's height after its children flow: what is taller
                     // overflows or scrolls (see `calculate_cross_sizes`).
                     let stretch_target = definite_inner_cross
-                        .filter(|_| stretched)
+                        .filter(|_| stretched && !is_table_box(item.layout_box))
                         .map(|cross| {
                             let outer = (cross - item.cross_margin_start - item.cross_margin_end)
                                 .max(item.min_cross_size)
@@ -2186,6 +2186,15 @@ fn resolve_flexible_lengths(line: &mut FlexLine, container_main: f32, main_gap: 
 /// has a definite (non-auto) cross size. This affects stretch behavior:
 /// - With definite cross size: stretch items to fill the container
 /// - With auto cross size: stretch items to match the tallest item in the line
+/// A table box: its used height is never below its rows' (CSS 2.1
+/// §17.5.3), so a stretch can grow it but not cut it.
+fn is_table_box(layout_box: &LayoutBox) -> bool {
+    matches!(
+        layout_box.style.display,
+        rustkit_css::Display::Table | rustkit_css::Display::InlineTable
+    )
+}
+
 fn calculate_cross_sizes(
     line: &mut FlexLine,
     container_cross: f32,
@@ -2261,7 +2270,13 @@ fn calculate_cross_sizes(
             // children reads its last layout's height as its content, so an
             // empty rail in a row laid out again at a smaller height kept
             // the old one and gave the page a phantom scroll.
-            let exact = cross_axis == Axis::Vertical && has_definite_cross_size && single_line;
+            // A table is the exception: its height is a minimum (CSS 2.1
+            // §17.5.3), so it keeps the content floor. Chromium 143: a
+            // table of ten 30px rows in a 200px row is 300.
+            let exact = cross_axis == Axis::Vertical
+                && has_definite_cross_size
+                && single_line
+                && !is_table_box(item.layout_box);
             item.cross_size = if exact {
                 stretch_target
             } else {
