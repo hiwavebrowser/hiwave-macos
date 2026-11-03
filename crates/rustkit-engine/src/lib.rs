@@ -406,6 +406,9 @@ mod is_complex_argument_tests;
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
+mod computed_read;
+#[cfg(test)]
+mod computed_read_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
@@ -22887,6 +22890,13 @@ fn geometry_with_root(
     boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    // `rem` is the root element's font size. The root element has no box of
+    // its own here; its style is with the boxless ones.
+    let root_style = root_element
+        .and_then(|n| boxless.get(&n))
+        .map(|b| &*b.box_.style)
+        .unwrap_or(&*layout.style);
+    computed_read::set_root_font(root_style);
     let mut snapshot = geometry_snapshot(layout);
     if let Some(root) = root_element {
         snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
@@ -22921,10 +22931,25 @@ fn pseudo_style_lines(style: &ComputedStyle) -> String {
     let (width, height) = (declared(&style.width), declared(&style.height));
     computed_style_lines(&LayoutBox::new(BoxType::Inline, style.clone()))
         .lines()
-        .map(|row| match row.split_once('\t') {
-            Some(("width", _)) => format!("width\t{width}"),
-            Some(("height", _)) => format!("height\t{height}"),
-            _ => row.to_string(),
+        .filter_map(|row| match row.split_once('\t') {
+            Some(("width", _)) => Some(format!("width\t{width}")),
+            Some(("height", _)) => Some(format!("height\t{height}")),
+            // Shorthands, logical names and the origin would be read off the
+            // box that was never laid out: leave them unsaid, and a transform
+            // with a percentage too. The physical margin and padding rows
+            // were already published this way.
+            Some((name, _))
+                if ["margin", "padding", "inset", "transform-origin"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+                    && !["-top", "-right", "-bottom", "-left"].iter().any(|e| name.ends_with(e)) =>
+            {
+                None
+            }
+            Some(("transform", _)) if format!("{:?}", style.transform).contains("Percent") => {
+                Some("transform\t".to_string())
+            }
+            _ => Some(row.to_string()),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -23327,9 +23352,10 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         rustkit_css::LineHeight::Number(n) => css_px(n * font_px),
         rustkit_css::LineHeight::Px(p) => css_px(p),
     };
-    let letter_spacing = match s.letter_spacing {
-        rustkit_css::Length::Px(p) if p != 0.0 => css_px(p),
-        _ => "normal".to_string(),
+    let letter_spacing = match &s.letter_spacing {
+        rustkit_css::Length::Zero => "normal".to_string(),
+        rustkit_css::Length::Px(p) if *p == 0.0 => "normal".to_string(),
+        l => computed_read::length(l, font_px).unwrap_or_default(),
     };
     let box_edges = d.border_box();
     // `display: contents` has no used box. CSSOM returns the computed
@@ -23345,6 +23371,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         corner_radii_px(&s.border_bottom_right_radius, font_px, box_edges.width, box_edges.height),
         corner_radii_px(&s.border_bottom_left_radius, font_px, box_edges.width, box_edges.height),
     ];
+    let more = computed_read::rows(b, font_px, &line_height);
     let rows: Vec<(&str, String)> = vec![
         ("display", s.display_keyword().to_string()),
         ("position", css_keyword(&format!("{:?}", s.position))),
@@ -23400,11 +23427,14 @@ fn computed_style_lines(b: &LayoutBox) -> String {
             None => "normal".to_string(),
         }),
     ];
-    rows.into_iter()
+    let mut lines = rows
+        .into_iter()
         .chain(outline_rows(s, font_px))
         .map(|(n, v)| format!("{n}\t{v}"))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    lines.push_str(&more);
+    lines
 }
 
 /// The `getComputedStyle` rows of the outline family, as Chromium writes them.
@@ -23418,7 +23448,7 @@ fn outline_rows(s: &ComputedStyle, font_px: f32) -> [(&'static str, String); 5] 
         ("outline-style", style.to_string()),
         ("outline-width", width),
         // In 64ths of a pixel: not rounded to two places as `css_px` does.
-        ("outline-offset", format!("{}px", s.outline.used_offset(font_px, 16.0))),
+        ("outline-offset", format!("{}px", s.outline.used_offset(font_px, computed_read::root_font()))),
     ]
 }
 
