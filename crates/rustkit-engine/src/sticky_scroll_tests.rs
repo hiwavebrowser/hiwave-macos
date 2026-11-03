@@ -817,3 +817,16 @@ fn opacity_with_a_tab_a_newline_or_a_huge_number_decides_the_context() {
         ("opacity:calc(1e40)", "h"),
     ]);
 }
+
+/// R1 delta on #861: an overflowing division, a spaced `%` and `1.e40`.
+#[test]
+fn an_overflowing_division_or_a_dropped_calc_opacity_makes_no_wrong_context() {
+    check_ctx_styles(&[
+        ("opacity:calc(1 / 1e-40)", "h"),
+        ("opacity:calc(50% / 1e-45)", "h"),
+        ("opacity:calc(-1 / 1e-40)", "m"),
+        ("opacity:calc(50\t%)", "h"),
+        ("opacity:calc(50 %)", "h"),
+        ("opacity:calc(1.e40)", "h"),
+    ]);
+}

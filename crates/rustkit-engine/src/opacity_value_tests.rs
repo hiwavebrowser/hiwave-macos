@@ -318,3 +318,50 @@ fn calc_holds_a_number_past_the_float_range_at_the_largest_float() {
 fn calc_past_the_float_range_still_refuses_a_mix() {
     check_after_quarter(&[("calc(1e40% + 1)", 0.25), ("calc(1e40px)", 0.25), ("calc(1e400 + 50%)", 0.25)]);
 }
+
+/// Dividing by a number so small the quotient overflows: the quotient clamps,
+/// it does not fade the box out. An unused field of the sum must not decide.
+#[test]
+fn a_division_that_overflows_clamps() {
+    check_after_quarter(&[
+        ("calc(1 / 1e-39)", 1.0),
+        ("calc(1 / 1e-40)", 1.0),
+        ("calc(1 / 1e-45)", 1.0),
+        ("calc(.5 / 1e-40)", 1.0),
+        ("calc(50% / 1e-39)", 1.0),
+        ("calc(50% / 1e-45)", 1.0),
+        ("calc(1e-40 / 1e-40)", 1.0),
+        ("calc(1e-39 / 1e-39)", 1.0),
+        ("calc(-1 / 1e-40)", 0.0),
+        ("calc(-50% / 1e-40)", 0.0),
+    ]);
+}
+
+/// `%` belongs to its number: any whitespace between them drops the value,
+/// inside `calc()` as outside it.
+#[test]
+fn whitespace_before_a_percent_in_calc_is_dropped() {
+    check_after_quarter(&[
+        ("calc(50 %)", 0.25),
+        ("calc(50\t%)", 0.25),
+        ("calc(50\n%)", 0.25),
+        ("calc(50\r%)", 0.25),
+        ("calc(50\u{c}%)", 0.25),
+        ("calc(1e40 %)", 0.25),
+        ("calc(25% + 25 %)", 0.25),
+        ("calc((50 %) * 1)", 0.25),
+    ]);
+}
+
+/// `1.` is no CSS number, so neither is `1.e40`; holding it at the largest
+/// float must not make it one.
+#[test]
+fn a_number_ending_in_a_dot_before_its_exponent_is_dropped_in_calc() {
+    check_after_quarter(&[
+        ("calc(1.e40)", 0.25),
+        ("calc(1.e400)", 0.25),
+        ("calc(-1.e40)", 0.25),
+        ("calc(1.e40%)", 0.25),
+        ("calc(1.e40 * 1e-40)", 0.25),
+    ]);
+}
