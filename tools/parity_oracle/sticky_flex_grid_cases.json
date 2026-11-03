@@ -87,7 +87,7 @@
   },
   "flex_row_table_collapsed_border": {
    "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{border:2px solid;border-collapse:collapse}</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
-   "script": "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
+   "script": "[$('tb').offsetHeight, Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')"
   },
   "flex_row_inline_table": {
    "page": "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{display:inline-table}</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",

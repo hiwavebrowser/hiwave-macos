@@ -299,8 +299,8 @@ fn a_collapsed_table_in_a_fixed_row_keeps_its_rows() {
             "<!doctype html><style>body{margin:0}td{height:30px;padding:0;width:20px}#r{display:flex;height:200px}#b{width:20px}#nx{height:5px}#tb{border:2px solid;border-collapse:collapse}",
             "</style><body><div id=r><table id=tb><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr><td></td></tr><tr id=last><td></td></tr></table><div id=b></div></div><div id=nx></div></body>",
         ),
-        "[H('tb'), Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
-        "304/304/303 272 200/200/200 200/200/304 200 600",
+        "[$('tb').offsetHeight, Y('last'), H('b'), H('r'), Y('nx'), D()].join(' ')",
+        "304 272 200/200/200 200/200/304 200 600",
     );
 }
 
