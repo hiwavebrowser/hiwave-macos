@@ -45,14 +45,13 @@ const CASES: &[(&str, &str, &str)] = &[
 const READ: &str = "(function () { var e = document.getElementById('t'); var o = e.offsetParent; \
     return [o ? (o.id || o.tagName.toLowerCase()) : 'null', e.offsetLeft, e.offsetTop].join(' '); })()";
 
-#[test]
-fn offset_parent_through_tables_matches_chromium() {
+fn wrong_rows(cases: &[(&str, &str, &str)]) -> Vec<String> {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds::new(0, 0, 800, 600))
         .expect("headless view");
     let mut wrong = Vec::new();
-    for (name, body, want) in CASES {
+    for (name, body, want) in cases {
         let html = format!("<!doctype html><style>body{{margin:0}}</style><body>{body}");
         engine.load_html(view, &html).expect("load_html");
         let value = engine.execute_script(view, READ).expect("script");
@@ -64,11 +63,41 @@ fn offset_parent_through_tables_matches_chromium() {
             wrong.push(format!("{name}: {got}, Chromium {want}"));
         }
     }
+    wrong
+}
+
+#[test]
+fn offset_parent_through_tables_matches_chromium() {
+    let wrong = wrong_rows(CASES);
     assert!(
         wrong.is_empty(),
         "{} of {} wrong:\n{}",
         wrong.len(),
         CASES.len(),
+        wrong.join("\n")
+    );
+}
+
+/// A table with a top `<caption>`: Chromium's table box includes the caption,
+/// so a row or cell is 12px down from the table's padding edge. HiWave's table
+/// box starts below the caption, so it reads `tb 0 0`, and the table itself
+/// reads 12px low. Not an offsetParent bug: the table wrapper box should hold
+/// the caption (C10/C12 follow-up, PR #864 R1 finding 1).
+const CAPTION_CASES: &[(&str, &str, &str)] = &[
+    ("td in a captioned table", r##"<table id=tb style="border-spacing:0;margin:5px"><caption style="height:12px;padding:0"></caption><tr><td id=t style="width:40px;height:40px"></td></tr></table>"##, "tb 0 12"),
+    ("tr in a captioned table", r##"<table id=tb style="border-spacing:0;margin:5px"><caption style="height:12px;padding:0"></caption><tr id=t><td style="width:40px;height:40px"></td></tr></table>"##, "tb 0 12"),
+    ("captioned table is the target", r##"<table id=t style="border-spacing:0;margin:5px"><caption style="height:12px;padding:0"></caption><tr><td style="width:40px;height:40px"></td></tr></table>"##, "body 5 5"),
+];
+
+#[test]
+#[ignore = "table box excludes a top caption (C10/C12 follow-up)"]
+fn offset_parent_in_a_captioned_table_matches_chromium() {
+    let wrong = wrong_rows(CAPTION_CASES);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} wrong:\n{}",
+        wrong.len(),
+        CAPTION_CASES.len(),
         wrong.join("\n")
     );
 }
