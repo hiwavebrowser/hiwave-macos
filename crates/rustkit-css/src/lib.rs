@@ -3846,12 +3846,18 @@ pub fn parse_opacity(value: &str) -> Option<f32> {
         let inner = value[5..value.len() - 1].replace(['\t', '\n', '\r', '\u{c}'], " ");
         // `parse_calc_sum` files a bare number under `px`: no unit may reach it.
         let bare = inner.replace("calc", "");
-        if !bare.chars().all(|c| c.is_ascii_digit() || " .+-*/()%e".contains(c)) || calc_mixes_percent(&inner) {
+        // `%` belongs to its number; the unit splitter would trim a space away.
+        if !bare.chars().all(|c| c.is_ascii_digit() || " .+-*/()%e".contains(c))
+            || inner.contains(" %")
+            || calc_mixes_percent(&inner)
+        {
             return None;
         }
         let sum = parse_calc_sum(&hold_at_float_max(&inner))?;
-        // Only overflow makes a NaN here: `calc((1e40 + 1e40) * 0)` is 0 in Chromium.
-        let opacity = sum.px + sum.percent / 100.0;
+        // Read only the field in use: scaling by an overflowed `1 / 1e-40` turns
+        // an unused zero field into NaN. In the used field only overflow makes a
+        // NaN, and `calc((1e40 + 1e40) * 0)` is 0 in Chromium.
+        let opacity = if inner.contains('%') { sum.percent / 100.0 } else { sum.px };
         if opacity.is_nan() { 0.0 } else { opacity }
     } else {
         let (number, percent) = match value.strip_suffix('%') {
@@ -3895,7 +3901,9 @@ fn hold_at_float_max(inner: &str) -> String {
             }
         }
         let number = &inner[start..i];
-        if number.parse::<f32>().is_ok_and(f32::is_infinite) {
+        // Only a CSS number is held: `1.e40` is not one, and stays an infinity
+        // the calc parser refuses.
+        if is_css_number(number) && number.parse::<f32>().is_ok_and(f32::is_infinite) {
             held.push_str(&format!("{:e}", f32::MAX));
         } else {
             held.push_str(number);
