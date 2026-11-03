@@ -123,3 +123,109 @@ fn margins_collapse_through_an_empty_block() {
     assert!(wrong.is_empty(), "{} of {} wrong:\n{}", wrong.len(), THROUGH.len(), wrong.join("\n"));
 }
 
+
+/// R1 on #863: pages develop got right and this row broke, and their
+/// neighbours. A first box holding floats and a `clear` (direct, nested or a
+/// clearfix `::after`) has height and does not collapse through; neither do
+/// an `aspect-ratio` box, a box that is its own formatting context
+/// (`flow-root`, `contain: layout|paint|content|strict`, `container-type`,
+/// vertical `writing-mode`), `hr`, `fieldset` or a replaced element. An empty
+/// box moved by clearance: the next box sits at
+/// `e.y - margin-top + collapse(margin-top, margin-bottom, next margin-top)`.
+/// Expected: `y/height` of every `[id]`, Chromium 143.0.7499.4, same page.
+const REVIEW: &[(&str, &str, &str)] = &[
+    ("clear moved, mb larger", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="margin:0 0 20px;clear:both"></div><div id=n style="height:10px;"></div>"#, "f=0/100 e=100/0 n=120/10"),
+    ("clear moved, neg mb", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="margin:0 0 -8px;clear:both"></div><div id=n style="height:10px;"></div>"#, "f=0/100 e=100/0 n=92/10"),
+    ("clear moved, next neg mt", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="margin:0 0 20px;clear:both"></div><div id=n style="height:10px;margin-top:-5px"></div>"#, "f=0/100 e=100/0 n=115/10"),
+    ("clear last in auto parent, no margins (spacer)", r#"<div id=p><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both"></div></div><div id=n style="height:10px;margin-top:15px"></div>"#, "p=0/100 f=0/100 e=100/0 n=115/10"),
+    ("clear last in parent mb on parent", r#"<div id=p style="margin-bottom:25px"><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both"></div></div><div id=n style="height:10px;margin-top:15px"></div>"#, "p=0/100 f=0/100 e=100/0 n=125/10"),
+    ("clear last in padded parent", r#"<div id=p style="padding:5px"><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin-bottom:20px"></div></div><div id=n style="height:10px;"></div>"#, "p=0/130 f=5/100 e=105/0 n=130/10"),
+    ("clear last in BFC parent", r#"<div id=p style="overflow:hidden"><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin-bottom:20px"></div></div><div id=n style="height:10px;"></div>"#, "p=0/120 f=0/100 e=100/0 n=120/10"),
+    ("clear in nested parent offset", r#"<div id=p style="margin-top:50px;padding-top:10px"><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin:0 0 20px"></div><div id=n style="height:10px;"></div></div>"#, "p=50/140 f=60/100 e=160/0 n=180/10"),
+    ("clearfix block", r#"<style>.cf::after{content:"";display:block;clear:both}.cf2::after{content:"";display:table;clear:both}.cf3::after{content:".";display:block;height:0;clear:both;visibility:hidden}</style><div id=p class=cf><div id=f style="float:left;width:50px;height:100px;"></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "p=0/100 f=0/100 n=120/10"),
+    ("clearfix with mb on parent", r#"<style>.cf::after{content:"";display:block;clear:both}.cf2::after{content:"";display:table;clear:both}.cf3::after{content:".";display:block;height:0;clear:both;visibility:hidden}</style><div id=p class=cf style="margin-bottom:25px"><div id=f style="float:left;width:50px;height:100px;"></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "p=0/100 f=0/100 n=125/10"),
+    ("first aspect-ratio", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;aspect-ratio:4/1;width:80px"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/70 e=12/20 n=72/10"),
+    ("bfc flow-root", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;display:flow-root"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first flow-root", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;display:flow-root"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc contain layout", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:layout"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first contain layout", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;contain:layout"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc contain paint", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:paint"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first contain paint", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;contain:paint"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc contain content", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:content"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first contain content", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;contain:content"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc container", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;container-type:size"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first container", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;container-type:size"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc container inline", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;container-type:inline-size"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first container inline", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;container-type:inline-size"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("bfc writing-mode", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;writing-mode:vertical-rl"></div><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("bfc-first writing-mode", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;writing-mode:vertical-rl"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("el iframe0", r#"<div id=a style="height:20px;margin-bottom:30px"></div><iframe id=e style="display:block;margin:12px 0;height:0;border:0"></iframe><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("el-first iframe0", r#"<div id=p style="margin-top:7px"><iframe id=e style="display:block;margin:12px 0;height:0;border:0"></iframe><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("el hr0", r#"<div id=a style="height:20px;margin-bottom:30px"></div><hr id=e style="margin:12px 0;border:0"><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("el-first hr0", r#"<div id=p style="margin-top:7px"><hr id=e style="margin:12px 0;border:0"><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("el fieldset", r#"<div id=a style="height:20px;margin-bottom:30px"></div><fieldset id=e style="margin:12px 0;border:0;padding:0"></fieldset><div id=n style="height:10px;"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("el-first fieldset", r#"<div id=p style="margin-top:7px"><fieldset id=e style="margin:12px 0;border:0;padding:0"></fieldset><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("page: nav clearfix then h1", r#"<style>.cf::after{content:"";display:block;clear:both}li{list-style:none}</style><nav id=p class=cf><div id=f style="float:left;width:50px;height:100px;"></div></nav><h1 id=n style="height:30px"></h1>"#, "p=0/100 f=0/100 n=121.4/30"),
+    ("page: wrap, header clearfix, main mt", r#"<style>.cf::after{content:"";display:block;clear:both}li{list-style:none}</style><div id=w><header id=p class=cf><div id=f style="float:left;width:50px;height:100px;"></div></header><main id=n style="height:30px;margin-top:20px"></main></div>"#, "w=0/150 p=0/100 f=0/100 n=120/30"),
+    ("page: floats then clear div, then section mt", r#"<div id=p><div id=f style="float:left;width:50px;height:100px;"></div><div style="clear:both"></div></div><section id=n style="height:30px;margin-top:40px"></section>"#, "p=0/100 f=0/100 n=140/30"),
+    ("aspect-ratio hero first", r#"<div id=p style="aspect-ratio:4/1;margin-bottom:10px"></div><div id=n style="height:10px;margin-top:40px"></div>"#, "p=0/200 n=240/10"),
+    ("clear spacer mb, then footer", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin-bottom:24px"></div><footer id=n style="height:30px"></footer>"#, "f=0/100 e=100/0 n=124/30"),
+    ("clear spacer mb, in padded card", r#"<div id=p style="padding:10px"><div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin-bottom:24px"></div></div>"#, "p=0/144 f=10/100 e=110/0"),
+    ("clear grandchild", r#"<div id=p><div id=f style="float:left;width:50px;height:100px;"></div><div><div style="clear:both"></div></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "p=0/100 f=0/100 n=120/10"),
+    ("clear spacer mt10 mb30", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin:10px 0 30px"></div><div id=n style="height:10px;"></div>"#, "f=0/100 e=100/0 n=120/10"),
+    ("clear spacer mt30 mb10", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin:30px 0 10px"></div><div id=n style="height:10px;margin-top:5px"></div>"#, "f=0/100 e=100/0 n=100/10"),
+    ("clear spacer mt-10 mb20", r#"<div id=f style="float:left;width:50px;height:100px;"></div><div id=e style="clear:both;margin:-10px 0 20px"></div><div id=n style="height:10px;"></div>"#, "f=0/100 e=100/0 n=120/10"),
+    ("cf table first", r#"<style>.cf::after{content:"";display:table;clear:both}</style><div id=p class=cf><div id=f style="float:left;width:50px;height:100px;"></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "p=0/100 f=0/100 n=120/10"),
+    ("cf nested two deep first", r#"<style>.cf::after{content:"";display:block;clear:both}</style><div id=w><div id=p class=cf><div id=f style="float:left;width:50px;height:100px;"></div></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "w=0/100 p=0/100 f=0/100 n=120/10"),
+    ("aspect-ratio sib", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;aspect-ratio:4/1"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/200 n=262/10"),
+    ("only floats first then mt", r#"<div id=p><div id=f style="float:left;width:50px;height:100px;"></div></div><div id=n style="height:10px;margin-top:20px"></div>"#, "p=20/0 f=20/100 n=20/10"),
+    ("video block h0", r#"<div id=a style="height:20px;margin-bottom:30px"></div><video id=e style="display:block;margin:12px 0;height:0"></video><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("vertical first", r#"<div id=p style="margin-top:7px"><div id=e style="margin:12px 0;writing-mode:vertical-rl"></div><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("contain strict", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:strict"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=62/10"),
+    ("contain size only", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:size"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=50/10"),
+    ("contain style only", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;contain:style"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=50/10"),
+    ("container normal", r#"<div id=a style="height:20px;margin-bottom:30px"></div><div id=e style="margin:12px 0;container-name:x"></div><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=50/10"),
+    ("hr0 first", r#"<div id=p style="margin-top:7px"><hr id=e style="margin:12px 0;border:0"><div id=n style="height:10px;margin-top:40px"></div></div>"#, "p=12/50 e=12/0 n=52/10"),
+    ("object block", r#"<div id=a style="height:20px;margin-bottom:30px"></div><object id=e style="display:block;margin:12px 0;height:0"></object><div id=n style="height:10px"></div>"#, "a=0/20 e=50/0 n=62/10"),
+];
+
+fn rects(v: &str) -> Vec<(String, f32, f32)> {
+    v.split_whitespace()
+        .filter_map(|t| {
+            let (k, r) = t.split_once('=')?;
+            let (y, h) = r.split_once('/')?;
+            Some((k.to_string(), y.parse().ok()?, h.parse().ok()?))
+        })
+        .collect()
+}
+
+#[test]
+fn floats_clearance_and_formatting_roots_stop_an_empty_block_as_chromium_does() {
+    let wrong: Vec<String> = REVIEW
+        .iter()
+        .filter_map(|(name, body, want)| {
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let view = engine
+                .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+                .expect("view");
+            let page = format!("<!doctype html><style>body{{margin:0}}</style>{body}");
+            engine.load_html(view, &page).expect("load");
+            let got = engine
+                .execute_script(
+                    view,
+                    "Array.prototype.map.call(document.querySelectorAll('[id]'), function (e) { \
+                     var r = e.getBoundingClientRect(); return e.id + '=' + r.y + '/' + r.height; \
+                     }).join(' ')",
+                )
+                .expect("script");
+            let got = got.trim_start_matches("String(\"").trim_end_matches("\")").to_string();
+            let (g, w) = (rects(&got), rects(want));
+            let same = g.len() == w.len()
+                && g.iter().zip(&w).all(|(a, b)| {
+                    a.0 == b.0 && (a.1 - b.1).abs() <= 0.5 && (a.2 - b.2).abs() <= 0.5
+                });
+            (!same).then(|| format!("{name}: {got}, Chromium {want}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{} of {} wrong:\n{}", wrong.len(), REVIEW.len(), wrong.join("\n"));
+}
