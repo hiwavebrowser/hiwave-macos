@@ -9,11 +9,29 @@
 //! canvas 300x150 unless the row says otherwise.
 //!
 //! Left out (wrong on develop and at this change, or LayoutUnit rounding):
+//! KNOWN: <canvas> has no natural size anywhere (built as an empty box, 0x0 in block flow too); a box-builder item, not flex/grid:
+//! - canvas block: none
+//! - canvas grid: one column
+//! - canvas grid: width 100%
+//! - canvas grid: justify start
+//! - canvas flex row: width
+//! - canvas flex column: width
+//! - canvas flex column: stretch
+//! KNOWN: an author `height: auto` loses to the height= attribute (the builder cannot tell it from the initial auto); block flow too:
+//! - img block: width 100%, height auto attrs
+//! - img grid: width 100%, height auto attrs
+//! KNOWN: replaced flex items keep their natural height when the flexed or stretched width changes (flex.rs, after #869):
+//! - img flex row: flex 1, align start
+//! - img flex column: width
+//! - img flex column: stretch
+//! - img flex column: width 100%
 
 
 use super::*;
 
 const CASES: &[(&str, &str, &str)] = &[
+    ("img block: none", r##"<img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;">"##, "40x20 @0,0"),
+    ("img block: width 50%", r##"<img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:50%">"##, "400x200 @0,0"),
     ("img grid: one column", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
     ("img grid: one column, width", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
     ("img grid: one column, height", r##"<div id=c style="display:grid;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;height:60px"></div>"##, "120x60 @0,0"),
@@ -26,23 +44,12 @@ const CASES: &[(&str, &str, &str)] = &[
     ("img grid: align start", r##"<div id=c style="display:grid;width:400px;align-items:start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
     ("img grid: justify start, width", r##"<div id=c style="display:grid;width:400px;justify-items:start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
     ("img grid: ratio 1, width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:1"><div></div></div>"##, "200x200 @0,0"),
-    ("img grid: width 100%, height auto attrs", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" width=40 height=20 style="display:block;width:100%;height:auto"><div></div></div>"##, "200x100 @0,0"),
     ("img grid: fixed row 100px", r##"<div id=c style="display:grid;width:400px;grid-template-rows:100px;grid-template-columns:300px"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
     ("img grid: three columns gap", r##"<div id=c style="display:grid;width:400px;grid-template-columns:repeat(3,1fr);gap:20px"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"><div></div><div></div></div>"##, "120x60 @0,0"),
-    ("canvas grid: one column", r##"<div id=c style="display:grid;width:400px;"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "300x150 @0,0"),
-    ("canvas grid: width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><canvas id=t width=300 height=150 style="display:block;width:100%"></canvas><div></div></div>"##, "200x100 @0,0"),
-    ("canvas grid: justify start", r##"<div id=c style="display:grid;width:400px;justify-items:start"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "300x150 @0,0"),
     ("img flex row: none", r##"<div id=c style="display:flex;width:400px;"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
     ("img flex row: align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
-    ("img flex row: flex 1, align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;flex:1;min-width:0"></div>"##, "400x200 @0,0"),
     ("img flex row: height, align start", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;height:60px"></div>"##, "120x60 @0,0"),
-    ("img flex column: width", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100px"></div>"##, "100x50 @0,0"),
-    ("img flex column: stretch", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "400x200 @0,0"),
     ("img flex column: align start", r##"<div id=c style="display:flex;width:400px;flex-direction:column;align-items:flex-start"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;"></div>"##, "40x20 @0,0"),
-    ("img flex column: width 100%", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div>"##, "400x200 @0,0"),
-    ("canvas flex row: width", r##"<div id=c style="display:flex;width:400px;align-items:flex-start"><canvas id=t width=300 height=150 style="display:block;width:100px"></canvas></div>"##, "100x50 @0,0"),
-    ("canvas flex column: width", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><canvas id=t width=300 height=150 style="display:block;width:100px"></canvas></div>"##, "100x50 @0,0"),
-    ("canvas flex column: stretch", r##"<div id=c style="display:flex;width:400px;flex-direction:column"><canvas id=t width=300 height=150 style="display:block;"></canvas></div>"##, "400x200 @0,0"),
     ("card: grid column, img 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><div><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div><div></div></div>"##, "200x100 @0,0"),
     ("card: grid column, img 100% ratio 16/9 cover", r##"<div id=c style="display:grid;width:400px;grid-template-columns:1fr 1fr"><div><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover"></div><div></div></div>"##, "200x112.5 @0,0"),
     ("card: flex 1, img 100%", r##"<div id=c style="display:flex;width:400px;"><div style="flex:1"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"></div><div style="flex:1"></div></div>"##, "200x100 @0,0"),

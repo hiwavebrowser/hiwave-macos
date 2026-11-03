@@ -420,6 +420,18 @@ impl<'a> GridItem<'a> {
         let style = &self.layout_box.style;
         let margins = horizontal_margins(style);
 
+        // css-sizing-3 §5.2.2: a replaced box whose `width` (or `max-width`)
+        // is a percentage is compressible, and its min-content contribution
+        // is zero (plus a length `min-width`). Resolved against the
+        // container, a `width: 100%` image made its `1fr` column the whole
+        // grid: 400 wide in a two-column 400px grid, Chromium 200.
+        if matches!(self.layout_box.box_type, crate::BoxType::Image { .. })
+            && (length_has_percent(&style.width) || length_has_percent(&style.max_width))
+        {
+            let min_width = length_min_width_border_box(self.layout_box).unwrap_or(0.0);
+            return min_width + margins;
+        }
+
         // Check for explicit width
         match &style.width {
             Length::Px(w) => return *w + margins,
@@ -1857,7 +1869,37 @@ pub fn layout_grid_container(
         .iter()
         .zip(l0_fragments)
         .map(|(item, fragment)| {
-            let estimate = item.get_height_contribution(height_for_contributions);
+            let mut estimate = item.get_height_contribution(height_for_contributions);
+            // A replaced item's block size is the replaced-element rules at
+            // the width its columns give it (a 100% image in a 200px column
+            // is 100 tall); the estimate has no children to read and said 0.
+            if matches!(item.layout_box.box_type, crate::BoxType::Image { .. })
+                && matches!(item.layout_box.style.height, Length::Auto)
+            {
+                let c0 = (item.column_start - 1).max(0) as usize;
+                let c1 = ((item.column_end - 1).max(0) as usize).min(grid.columns.len());
+                if c0 < c1 {
+                    let area = Rect::new(
+                        0.0,
+                        0.0,
+                        (c0..c1).map(|i| grid.columns[i].size).sum::<f32>()
+                            + (c1 - c0 - 1) as f32 * column_gap,
+                        0.0,
+                    );
+                    let mut probe = item.layout_box.clone();
+                    place_item_in_area(&mut probe, &area, style);
+                    let d = &probe.dimensions;
+                    estimate = estimate.max(
+                        d.margin.top
+                            + d.border.top
+                            + d.padding.top
+                            + d.content.height
+                            + d.padding.bottom
+                            + d.border.bottom
+                            + d.margin.bottom,
+                    );
+                }
+            }
             let blocks = fragment
                 .as_ref()
                 .and_then(|f| Some((f.border_box.block.px()?, f.content_box.block.px()?)));
@@ -2029,6 +2071,16 @@ pub fn layout_grid_container(
         }
         let item_idx = phase9_idx;
         phase9_idx += 1;
+
+        // A replaced item has nothing to flow: its height is the one
+        // `place_replaced_item_in_area` gave it. Recorded so Phase 9.5 sizes
+        // the row from it, not from an empty item's zero.
+        if matches!(child.box_type, crate::BoxType::Image { .. }) {
+            if let Some(slot) = real_heights.get_mut(item_idx) {
+                *slot = Some(child.dimensions.content.height);
+            }
+            continue;
+        }
 
         if !child.children.is_empty() {
             if child.style.display.is_flex() {
@@ -2282,6 +2334,38 @@ pub fn layout_grid_container(
                                 ..Default::default()
                             };
                             grandchild.calculate_block_width(&item_box);
+                        }
+                        // A percentage width is a share of the ITEM, which the
+                        // block pre-pass did not have: it sized the image
+                        // against the grid container, so a `width: 100%`
+                        // picture in a card filled the whole grid (Chromium
+                        // 143: 200x100 in a 200px column, here 400x200). Re-run
+                        // the replaced sizing against the item's width; any
+                        // other image keeps its pre-pass size, as before.
+                        crate::BoxType::Image {
+                            natural_width,
+                            natural_height,
+                            ..
+                        } if length_has_percent(&grandchild.style.width)
+                            || length_has_percent(&grandchild.style.max_width) =>
+                        {
+                            let item_box = crate::Dimensions {
+                                content: crate::Rect::new(
+                                    grid_item_x,
+                                    current_y,
+                                    grid_item_width,
+                                    0.0,
+                                ),
+                                ..Default::default()
+                            };
+                            let percent_height_base = (!matches!(item_style_height, Length::Auto))
+                                .then_some(grid_item_height);
+                            grandchild.layout_image_in(
+                                natural_width,
+                                natural_height,
+                                &item_box,
+                                percent_height_base,
+                            );
                         }
                         crate::BoxType::Image { .. } => {}
                         _ => {
@@ -3468,6 +3552,16 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     if let Some(w) = replaced_content_contribution(layout_box, true, None) {
         return w + padding_border;
     }
+    // css-sizing-3 §5.2.2: a replaced box with a percentage `width` or
+    // `max-width` is compressible, and its min-content contribution is zero
+    // (its padding and border, and a length `min-width`). Chromium 143: a
+    // `width: 100%` image inside a `1fr` column's item leaves the column its
+    // share, 200 of a 400px two-column grid; here it read 400.
+    if matches!(layout_box.box_type, BoxType::Image { .. })
+        && (length_has_percent(&style.width) || length_has_percent(&style.max_width))
+    {
+        return length_min_width_border_box(layout_box).unwrap_or(padding_border);
+    }
 
     // A form control's content is not in its children (see the same arm in
     // `own_max_content_width`), so the generic walk below finds nothing and
@@ -4607,6 +4701,16 @@ fn align_content_to_justify(align: &AlignContent) -> JustifyContent {
 /// query (`crate::fragment::intrinsic_fragment`), which must put the same
 /// box to the item's layout that final layout does.
 fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &ComputedStyle) {
+    if let crate::BoxType::Image {
+        natural_width,
+        natural_height,
+        ..
+    } = &child.box_type
+    {
+        let (natural_width, natural_height) = (*natural_width, *natural_height);
+        place_replaced_item_in_area(child, natural_width, natural_height, rect, container_style);
+        return;
+    }
     // css-grid-1 §6.5: the grid area is filled by the item's MARGIN
     // box. Alignment — including `stretch`, which is what makes this
     // load-bearing — runs on the area shrunk by the margins, so a
@@ -4702,6 +4806,95 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     child.dimensions.content.y = y + padding_top + border_top;
     child.dimensions.content.width = content_width;
     child.dimensions.content.height = content_height;
+}
+
+/// A replaced grid item (`<img>`, an inline `<svg>`) in its grid area `rect`.
+///
+/// css-align-3 §6.1/§6.2: `normal` alignment of a replaced box with a natural
+/// size or ratio behaves as `start`, not `stretch`, in both axes, so the item
+/// keeps the size the replaced-element rules give it in a containing block
+/// the size of its area (css-grid-1 §6.2: the area is the containing block,
+/// so a percentage `width` is a share of the column). Chromium 143: a 40x20
+/// image in a 400px column is 40x20, and `width: 100%` in a 200px column is
+/// 200x100. Through `place_item_in_area`, every item was given the whole area
+/// across and, its height being `auto` with no children to flow, a row of
+/// zero: card grids lost every picture.
+///
+/// The engine has no `normal` keyword: `justify-items`/`align-items` read
+/// `stretch` by default, so `stretch` is taken as `normal` here. An image the
+/// page stretches on purpose keeps its own size; that is the cost.
+fn place_replaced_item_in_area(
+    child: &mut LayoutBox,
+    natural_width: f32,
+    natural_height: f32,
+    rect: &Rect,
+    container_style: &ComputedStyle,
+) {
+    // The row height is a percentage base once track sizing is done; the L0
+    // query and the row-contribution probe pass a 0-tall area (no row yet).
+    let percent_height_base = (rect.height > 0.0).then_some(rect.height);
+    let cb = crate::Dimensions {
+        content: Rect::new(rect.x, rect.y, rect.width, 0.0),
+        ..Default::default()
+    };
+    child.layout_image_in(natural_width, natural_height, &cb, percent_height_base);
+    let d = &child.dimensions;
+    let outer_width = d.margin.left
+        + d.border.left
+        + d.padding.left
+        + d.content.width
+        + d.padding.right
+        + d.border.right
+        + d.margin.right;
+    let outer_height = d.margin.top
+        + d.border.top
+        + d.padding.top
+        + d.content.height
+        + d.padding.bottom
+        + d.border.bottom
+        + d.margin.bottom;
+    let justify = match child.style.justify_self {
+        JustifySelf::Auto => match container_style.justify_items {
+            JustifyItems::Start => JustifySelf::Start,
+            JustifyItems::End => JustifySelf::End,
+            JustifyItems::Center => JustifySelf::Center,
+            JustifyItems::Stretch => JustifySelf::Stretch,
+        },
+        other => other,
+    };
+    let free_x = rect.width - outer_width;
+    let dx = match justify {
+        JustifySelf::Center => free_x / 2.0,
+        JustifySelf::End => free_x,
+        _ => 0.0,
+    };
+    let align = match child.style.align_self {
+        AlignSelf::Auto => match container_style.align_items {
+            AlignItems::Center => AlignSelf::Center,
+            AlignItems::FlexEnd => AlignSelf::FlexEnd,
+            _ => AlignSelf::FlexStart,
+        },
+        other => other,
+    };
+    let free_y = rect.height - outer_height;
+    let dy = match align {
+        AlignSelf::Center if rect.height > 0.0 => free_y / 2.0,
+        AlignSelf::FlexEnd if rect.height > 0.0 => free_y,
+        _ => 0.0,
+    };
+    child.dimensions.content.x += dx;
+    child.dimensions.content.y += dy;
+}
+
+/// Whether a size holds a percentage, which a grid item's own column does not
+/// resolve during track sizing.
+fn length_has_percent(l: &Length) -> bool {
+    match l {
+        Length::Percent(_) => true,
+        Length::Calc(sum) => sum.percent != 0.0,
+        Length::Min(_) | Length::Max(_) | Length::Clamp(_) => true,
+        _ => false,
+    }
 }
 
 /// Apply justify-self alignment.
