@@ -9867,10 +9867,20 @@ impl DisplayList {
             return Vec::new();
         }
         let border_box = outline_box(layout_box);
-        let left = (border_box.x - reach).round();
-        let top = (border_box.y - reach).round();
-        let right = (border_box.right() + reach).round().max(left);
-        let bottom = (border_box.bottom() + reach).round().max(top);
+        // A negative offset shrinks the ring no smaller than twice its width
+        // across, about the box's centre (CSS UI 4 §4.4; Chromium: an 80x50
+        // box ringed 3px at -40px is a 6x6 block in its middle).
+        let span = |start: f32, end: f32| {
+            let (from, to) = (start - reach, end + reach);
+            if to - from >= 2.0 * width {
+                (from.round(), to.round())
+            } else {
+                let middle = (start + end) / 2.0;
+                ((middle - width).round(), (middle + width).round())
+            }
+        };
+        let (left, right) = span(border_box.x, border_box.right());
+        let (top, bottom) = span(border_box.y, border_box.bottom());
         let outer = Rect::new(left, top, right - left, bottom - top);
         let radius = self.outline_radius(layout_box, reach);
         let (dark, light) = three_d_colors(color);
@@ -9893,7 +9903,7 @@ impl DisplayList {
                 } else {
                     rustkit_css::BorderStyle::Dotted
                 };
-                outline_dashes(&mut out, outer, width, color, style);
+                outline_dashes(&mut out, outer, width, color, style, self.visible_through_clips());
             }
             // The ring command has no dash pattern: a rounded one is drawn solid.
             Style::Dashed | Style::Dotted => {
@@ -9927,6 +9937,33 @@ impl DisplayList {
             Style::Outset => outline_ring(&mut out, outer, width, [light, dark, dark, light], radius),
         }
         out
+    }
+
+    /// What the clips open around the box being painted let through, in its
+    /// coordinates, or `None` when that is not known here: under a transform
+    /// (the clips are outside it), or with no clip listed. Each listed clip
+    /// sits outside its own scroll and the scrolls of the clips inside it.
+    fn visible_through_clips(&self) -> Option<Rect> {
+        if self.transformed_ancestors > 0 || self.escapable_clips.is_empty() {
+            return None;
+        }
+        let (mut dx, mut dy) = (0.0, 0.0);
+        let mut visible: Option<Rect> = None;
+        for &(rect, _, (sx, sy)) in self.escapable_clips.iter().rev() {
+            dx += sx;
+            dy += sy;
+            let clip = Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height);
+            visible = Some(match visible {
+                None => clip,
+                Some(v) => {
+                    let (x, y) = (v.x.max(clip.x), v.y.max(clip.y));
+                    let right = v.right().min(clip.right()).max(x);
+                    let bottom = v.bottom().min(clip.bottom()).max(y);
+                    Rect::new(x, y, right - x, bottom - y)
+                }
+            });
+        }
+        visible
     }
 
     /// The outer radii of the ring around a box that has a radius: each grows
@@ -11985,19 +12022,24 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
     measure_text_simple(text, font_size)
 }
 
-/// Blink's dash pattern for one border side of `length` px
-/// (`StrokeData::SetupPaintDashPathEffect` + `SelectBestDashGap`): a dashed
-/// side draws dashes of 2x its thickness with 1x gaps (3x / 2x under 3px),
-/// a dotted side 1x / 1x; the gap is then stretched or squeezed so the side
-/// starts AND ends on a whole dash, choosing the dash count whose gap is
-/// nearest the nominal one. A side too short for two dashes paints solid.
-/// Returns `(dash, gap)`, or `None` for a solid side.
-///
-/// Thick dotted borders are round dots in Chrome; they are square here.
 /// The box an outline goes around: the border box, and for an inline box
 /// what its inline content reaches as well.
 fn outline_box(layout_box: &LayoutBox) -> Rect {
     let mut rect = layout_box.dimensions.border_box();
+    // A table's ring goes around its wrapper: the grid and its captions'
+    // margin boxes (Chromium).
+    if matches!(layout_box.style.display, rustkit_css::Display::Table | rustkit_css::Display::InlineTable) {
+        for caption in &layout_box.children {
+            if caption.style.display == rustkit_css::Display::TableCaption {
+                let reach = caption.dimensions.margin_box();
+                let (right, bottom) = (rect.right().max(reach.right()), rect.bottom().max(reach.bottom()));
+                rect.x = rect.x.min(reach.x);
+                rect.y = rect.y.min(reach.y);
+                rect.width = right - rect.x;
+                rect.height = bottom - rect.y;
+            }
+        }
+    }
     if matches!(layout_box.box_type, BoxType::Inline) {
         for child in &layout_box.children {
             if child.position == Position::Static && child.float == Float::None {
@@ -12109,14 +12151,20 @@ fn outline_ring(
     }
 }
 
-/// A dashed or dotted ring, side by side.
+/// A dashed or dotted ring, side by side. A dash outside `visible` (what
+/// the clips let through) is not drawn: a long list of dashed rows in a
+/// scroller drew every dash of every row (#867 R1).
 fn outline_dashes(
     out: &mut Vec<DisplayCommand>,
     outer: Rect,
     width: f32,
     color: Color,
     style: rustkit_css::BorderStyle,
+    visible: Option<Rect>,
 ) {
+    let shows = |r: &Rect| {
+        visible.is_none_or(|v| r.x < v.right() && r.right() > v.x && r.y < v.bottom() && r.bottom() > v.y)
+    };
     let (x, y, w, h) = (outer.x, outer.y, outer.width, outer.height);
     let (across, down) = (width.min(w / 2.0), width.min(h / 2.0));
     for (strip, horizontal) in [
@@ -12126,7 +12174,7 @@ fn outline_dashes(
         (Rect::new(x + w - across, y + down, across, h - 2.0 * down), false),
     ] {
         let length = if horizontal { strip.width } else { strip.height };
-        if length <= 0.0 {
+        if length <= 0.0 || !shows(&strip) {
             continue;
         }
         let Some((dash, gap)) = border_dash_pattern(style, width, length) else {
@@ -12141,12 +12189,23 @@ fn outline_dashes(
             } else {
                 Rect::new(strip.x, strip.y + at, strip.width, run)
             };
-            out.push(DisplayCommand::SolidColor(color, rect));
+            if shows(&rect) {
+                out.push(DisplayCommand::SolidColor(color, rect));
+            }
             at += dash + gap;
         }
     }
 }
 
+/// Blink's dash pattern for one border side of `length` px
+/// (`StrokeData::SetupPaintDashPathEffect` + `SelectBestDashGap`): a dashed
+/// side draws dashes of 2x its thickness with 1x gaps (3x / 2x under 3px),
+/// a dotted side 1x / 1x; the gap is then stretched or squeezed so the side
+/// starts AND ends on a whole dash, choosing the dash count whose gap is
+/// nearest the nominal one. A side too short for two dashes paints solid.
+/// Returns `(dash, gap)`, or `None` for a solid side.
+///
+/// Thick dotted borders are round dots in Chrome; they are square here.
 fn border_dash_pattern(
     style: rustkit_css::BorderStyle,
     thickness: f32,
