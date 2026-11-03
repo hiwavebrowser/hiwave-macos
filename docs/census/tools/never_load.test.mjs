@@ -72,12 +72,17 @@ test('a redirect into a refused host fails, for a page and for a stylesheet', as
 
 test('both crawlers launch through the refusal and watch every context', async () => {
   const { readFileSync } = await import('node:fs');
-  for (const file of ['css_property_prevalence.mjs', 'run_technique_census.mjs']) {
-    const src = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+  const read = (file) => readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+  // The prevalence crawler's contexts are opened in prevalence_visit.mjs.
+  for (const [file, visits] of [['css_property_prevalence.mjs', 'prevalence_visit.mjs'], ['run_technique_census.mjs', 'run_technique_census.mjs']]) {
+    const src = read(file);
     assert.match(src, /from '\.\/never_load\.mjs'/, file);
     assert.doesNotMatch(src, /chromium\.launch\(/, file);
     assert.match(src, /launchRefusing\(/, file);
-    assert.match(src, /watchRefused\(/, file);
-    assert.doesNotMatch(src, /ebay|shopify/i, `${file} names no refused site itself`);
+    if (visits !== file) assert.match(src, new RegExp(`from '\\./${visits.replace('.', '\\.')}'`), file);
+    const visit = read(visits);
+    assert.match(visit, /watchRefused\(/, visits);
+    assert.doesNotMatch(visit, /newContext\([\s\S]*newContext\(/, `${visits} opens one context per visit`);
+    for (const f of new Set([file, visits])) assert.doesNotMatch(read(f), /ebay|shopify/i, `${f} names no refused site itself`);
   }
 });
