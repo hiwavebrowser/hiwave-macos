@@ -2503,6 +2503,117 @@ impl BorderStyle {
     }
 }
 
+/// `outline-style`. Unlike [`BorderStyle`] it keeps every keyword, for
+/// `getComputedStyle` and for paint, and it has `auto` and no `hidden`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutlineStyle {
+    #[default]
+    None,
+    Auto,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset,
+}
+
+impl OutlineStyle {
+    /// The style a lowercase keyword names.
+    pub fn from_keyword(keyword: &str) -> Option<Self> {
+        Some(match keyword {
+            "none" => Self::None,
+            "auto" => Self::Auto,
+            "solid" => Self::Solid,
+            "dashed" => Self::Dashed,
+            "dotted" => Self::Dotted,
+            "double" => Self::Double,
+            "groove" => Self::Groove,
+            "ridge" => Self::Ridge,
+            "inset" => Self::Inset,
+            "outset" => Self::Outset,
+            _ => return None,
+        })
+    }
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Auto => "auto",
+            Self::Solid => "solid",
+            Self::Dashed => "dashed",
+            Self::Dotted => "dotted",
+            Self::Double => "double",
+            Self::Groove => "groove",
+            Self::Ridge => "ridge",
+            Self::Inset => "inset",
+            Self::Outset => "outset",
+        }
+    }
+}
+
+/// The `outline-*` longhands. Not inherited, and no part of layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Outline {
+    pub style: OutlineStyle,
+    /// `None` is the initial `medium`.
+    pub width: Option<Length>,
+    /// `None` is the initial `currentcolor`.
+    pub color: Option<Color>,
+    pub offset: Length,
+}
+
+impl Outline {
+    /// The width as Chromium computes it: 0 with no style, otherwise floored
+    /// to a whole pixel, and at least 1 if it is not 0 (1.5px is 1, 0.5px is 1).
+    pub fn used_width(&self, font_size: f32, root_font_size: f32) -> f32 {
+        if self.style == OutlineStyle::None {
+            return 0.0;
+        }
+        let px = match &self.width {
+            None => 3.0,
+            Some(width) => width.to_px(font_size, root_font_size, 0.0).max(0.0),
+        };
+        if px > 0.0 { px.floor().max(1.0) } else { 0.0 }
+    }
+
+    /// The offset as Chromium computes it, floored to a 64th of a pixel.
+    pub fn used_offset(&self, font_size: f32, root_font_size: f32) -> f32 {
+        (self.offset.to_px(font_size, root_font_size, 0.0) * 64.0).floor() / 64.0
+    }
+
+    /// An `outline-width` value, lowercase: a keyword or a length that is
+    /// not negative. No percentage, and no bare number but 0.
+    pub fn parse_width(value: &str) -> Option<Length> {
+        match value {
+            "thin" => return Some(Length::Px(1.0)),
+            "medium" => return Some(Length::Px(3.0)),
+            "thick" => return Some(Length::Px(5.0)),
+            _ => {}
+        }
+        let length = Self::parse_offset(value)?;
+        let negative = match length {
+            Length::Px(v) | Length::Em(v) | Length::Rem(v) | Length::Vw(v) | Length::Vh(v)
+            | Length::Vmin(v) | Length::Vmax(v) => v < 0.0,
+            _ => false,
+        };
+        (!negative).then_some(length)
+    }
+
+    /// An `outline-offset` value, lowercase: a length, of either sign.
+    pub fn parse_offset(value: &str) -> Option<Length> {
+        if value.parse::<f32>().is_ok_and(|n| n != 0.0) {
+            return None;
+        }
+        match parse_length(value)? {
+            Length::Auto | Length::FitContent | Length::Percent(_) => None,
+            length => Some(length),
+        }
+    }
+}
+
 /// The custom properties (`--*`) in effect on one element, as a chain of
 /// layers: the element's own changes over an `Arc` of its parent's set.
 /// Primer declares hundreds of `--*` on `:root`, and an element that
@@ -2671,6 +2782,7 @@ impl ComputedStyle {
         self.text_decoration_thickness = from.text_decoration_thickness.clone();
         self.webkit_text_fill_color = from.webkit_text_fill_color;
         self.box_shadows = from.box_shadows.clone();
+        self.outline = from.outline.clone();
         self.transition_property = from.transition_property.clone();
         self.transition_duration = from.transition_duration;
         self.transition_timing_function = from.transition_timing_function.clone();
@@ -2696,6 +2808,7 @@ impl ComputedStyle {
             && self.text_decoration_thickness == other.text_decoration_thickness
             && self.webkit_text_fill_color == other.webkit_text_fill_color
             && self.box_shadows == other.box_shadows
+            && self.outline == other.outline
             && self.transition_property == other.transition_property
             && self.transition_duration == other.transition_duration
             && self.transition_timing_function == other.transition_timing_function
@@ -2758,6 +2871,8 @@ pub struct ComputedStyle {
     pub border_right_style: BorderStyle,
     pub border_bottom_style: BorderStyle,
     pub border_left_style: BorderStyle,
+
+    pub outline: Outline,
 
     // Border radius (for rounded corners): a horizontal and a vertical
     // radius per corner (CSS Backgrounds 3 §5.1)

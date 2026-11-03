@@ -9175,6 +9175,21 @@ fn parse_length(value: &str) -> Option<f32> {
     }
 }
 
+/// One box's outline, built and waiting to be painted.
+///
+/// Chromium paints the outlines of the normal-flow boxes of a paint layer
+/// after all their content (a later block's background goes under an earlier
+/// block's outline), children before parents and siblings in order, and
+/// before the layer's positioned children. A box that paints as one unit
+/// (positioned, floated, inline-block, a flex or grid item, or an effect's
+/// group) is that layer for what is inside it. The clips the box was under
+/// have closed by then, so they ride along to be opened again.
+#[derive(Debug, Clone)]
+struct PendingOutline {
+    clips: Vec<(Rect, BorderRadius, (f32, f32))>,
+    commands: Vec<DisplayCommand>,
+}
+
 /// A display list of paint commands.
 #[derive(Debug, Clone)]
 pub struct DisplayList {
@@ -9203,6 +9218,11 @@ pub struct DisplayList {
     /// third field is the box's element scroll, a translate pushed just inside
     /// the clip: the same box's scroll is escaped with its clip.
     escapable_clips: Vec<(Rect, BorderRadius, (f32, f32))>,
+    /// Outlines of boxes in normal flow, waiting for the outline phase of
+    /// the box that paints them (see [`PendingOutline`]).
+    pending_outlines: Vec<PendingOutline>,
+    /// Whether the box about to be painted is a flex or grid item.
+    painting_item: bool,
     /// The sum of the element scroll translates open at the box being
     /// painted. A fixed box takes it back: no element scroll moves it.
     open_element_scroll: (f32, f32),
@@ -9316,6 +9336,8 @@ impl DisplayList {
             depth: 0,
             root_overflow_visible: true,
             escapable_clips: Vec::new(),
+            pending_outlines: Vec::new(),
+            painting_item: false,
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
@@ -9338,6 +9360,8 @@ impl DisplayList {
             root_overflow_visible: root.style.overflow_x == rustkit_css::Overflow::Visible
                 && root.style.overflow_y == rustkit_css::Overflow::Visible,
             escapable_clips: Vec::new(),
+            pending_outlines: Vec::new(),
+            painting_item: false,
             open_element_scroll: (0.0, 0.0),
             in_viewport_fixed: false,
             transformed_ancestors: 0,
@@ -9543,6 +9567,28 @@ impl DisplayList {
             }
         }
 
+        // Outlines (see `PendingOutline`). Taken here: the clips this box
+        // pushes for its children do not clip its own outline.
+        let is_item = std::mem::take(&mut self.painting_item);
+        let paints_as_unit = self.depth == 0
+            || positioned
+            || creates_context
+            || fades
+            || filter_matrix.is_some()
+            || has_transform
+            || is_item
+            || layout_box.float != Float::None
+            || matches!(
+                layout_box.style.display,
+                rustkit_css::Display::InlineBlock
+                    | rustkit_css::Display::InlineFlex
+                    | rustkit_css::Display::InlineGrid
+            );
+        let outer_outlines = paints_as_unit.then(|| std::mem::take(&mut self.pending_outlines));
+        let mut own_outline = Some(self.outline_commands(layout_box))
+            .filter(|commands| !commands.is_empty())
+            .map(|commands| PendingOutline { clips: self.escapable_clips.clone(), commands });
+
         // Render this box
         self.render_box_content(layout_box);
 
@@ -9621,20 +9667,45 @@ impl DisplayList {
             }
         });
 
+        let items_paint_as_units = matches!(
+            layout_box.style.display,
+            rustkit_css::Display::Flex
+                | rustkit_css::Display::InlineFlex
+                | rustkit_css::Display::Grid
+                | rustkit_css::Display::InlineGrid
+        );
+
+        // A positioned box with a clip does not list it in `escapable_clips`.
+        let unlisted_clip = overflow_clip.filter(|_| positioned);
+
         // Render in correct order:
         // 1. Negative z-index positioned descendants
         for (child, _) in negative_z {
+            self.painting_item = items_paint_as_units;
             self.render_stacking_context(child, z_index, layer);
         }
 
         // 2. Normal flow block children
         for (child, _) in &normal_flow {
+            self.painting_item = items_paint_as_units;
             self.render_stacking_context(child, z_index, layer);
         }
 
-        // 3. Floats and positive/zero z-index positioned descendants
+        // 3. Floats and positive/zero z-index positioned descendants. The
+        // positioned ones paint over the outlines so far.
         for (child, _) in positive_z {
+            if layout_box.child_paint_z(child).is_some() {
+                self.flush_outlines(own_outline.take(), unlisted_clip, element_scroll);
+            }
+            self.painting_item = items_paint_as_units;
             self.render_stacking_context(child, z_index, layer);
+        }
+
+        if let Some(outer) = outer_outlines {
+            self.flush_outlines(own_outline.take(), unlisted_clip, element_scroll);
+            self.pending_outlines = outer;
+        } else if let Some(own) = own_outline.take() {
+            self.pending_outlines.push(own);
         }
 
         self.depth -= 1;
@@ -9701,6 +9772,176 @@ impl DisplayList {
                 }
             }
             self.escapable_clips = outer;
+        }
+    }
+
+    /// Paint the waiting outlines and then the box's own, each under the
+    /// clips it was found under. `unlisted_clip` is the box's own clip when
+    /// `escapable_clips` does not list it: the box's own outline goes outside.
+    fn flush_outlines(
+        &mut self,
+        own: Option<PendingOutline>,
+        unlisted_clip: Option<(Rect, BorderRadius)>,
+        own_scroll: (f32, f32),
+    ) {
+        for outline in std::mem::take(&mut self.pending_outlines) {
+            self.paint_outline_under_its_clips(outline);
+        }
+        let Some(own) = own else { return };
+        if let Some((rect, radius)) = unlisted_clip {
+            self.close_element_scroll(own_scroll);
+            self.commands.push(DisplayCommand::PopClip);
+            self.commands.extend(own.commands);
+            self.push_clip(rect, radius);
+            self.open_scroll_of(own_scroll);
+        } else {
+            self.paint_outline_under_its_clips(own);
+        }
+    }
+
+    fn push_clip(&mut self, rect: Rect, radius: BorderRadius) {
+        if radius.is_zero() {
+            self.commands.push(DisplayCommand::PushClip(rect));
+        } else {
+            self.commands.push(DisplayCommand::PushClipRounded { rect, radius });
+        }
+    }
+
+    /// Close the clips open now that the outline was not under, open the
+    /// ones it was under, paint it, and put everything back.
+    fn paint_outline_under_its_clips(&mut self, outline: PendingOutline) {
+        let same = |a: &(Rect, BorderRadius, (f32, f32)), b: &(Rect, BorderRadius, (f32, f32))| {
+            (a.0.x, a.0.y, a.0.width, a.0.height) == (b.0.x, b.0.y, b.0.width, b.0.height)
+                && a.1 == b.1
+                && a.2 == b.2
+        };
+        let open = self.escapable_clips.clone();
+        let shared = open.iter().zip(&outline.clips).take_while(|(a, b)| same(a, b)).count();
+        for &(_, _, scroll) in open[shared..].iter().rev() {
+            self.close_element_scroll(scroll);
+            self.commands.push(DisplayCommand::PopClip);
+        }
+        for &(rect, radius, scroll) in &outline.clips[shared..] {
+            self.push_clip(rect, radius);
+            self.open_scroll_of(scroll);
+        }
+        self.commands.extend(outline.commands);
+        for &(_, _, scroll) in outline.clips[shared..].iter().rev() {
+            self.close_element_scroll(scroll);
+            self.commands.push(DisplayCommand::PopClip);
+        }
+        for &(rect, radius, scroll) in &open[shared..] {
+            self.push_clip(rect, radius);
+            self.open_scroll_of(scroll);
+        }
+    }
+
+    /// The commands of a box's outline: none if it paints no outline.
+    fn outline_commands(&self, layout_box: &LayoutBox) -> Vec<DisplayCommand> {
+        use rustkit_css::OutlineStyle as Style;
+        let s = &layout_box.style;
+        if s.outline.style == Style::None
+            || s.visibility != rustkit_css::Visibility::Visible
+            || matches!(
+                layout_box.box_type,
+                BoxType::Text(_) | BoxType::AnonymousBlock | BoxType::LineBreak
+            )
+        {
+            return Vec::new();
+        }
+        let font_size = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let color = s.outline.color.unwrap_or(s.color);
+        let offset = s.outline.used_offset(font_size, self.root_font_size);
+        // `auto` is 2px whatever its width, its outer pixel outside the box,
+        // rounded by 3px at least.
+        let (width, reach) = if s.outline.style == Style::Auto {
+            (2.0, offset + 1.0)
+        } else {
+            let width = s.outline.used_width(font_size, self.root_font_size);
+            (width, offset + width)
+        };
+        if width <= 0.0 || color.a <= 0.0 {
+            return Vec::new();
+        }
+        let border_box = outline_box(layout_box);
+        let left = (border_box.x - reach).round();
+        let top = (border_box.y - reach).round();
+        let right = (border_box.right() + reach).round().max(left);
+        let bottom = (border_box.bottom() + reach).round().max(top);
+        let outer = Rect::new(left, top, right - left, bottom - top);
+        let radius = self.outline_radius(layout_box, reach);
+        let (dark, light) = three_d_colors(color);
+        let mut out = Vec::new();
+        match s.outline.style {
+            Style::None => {}
+            Style::Solid => outline_ring(&mut out, outer, width, [color; 4], radius),
+            Style::Auto => {
+                let radius = BorderRadius {
+                    top_left: at_least(radius.top_left, 3.0),
+                    top_right: at_least(radius.top_right, 3.0),
+                    bottom_right: at_least(radius.bottom_right, 3.0),
+                    bottom_left: at_least(radius.bottom_left, 3.0),
+                };
+                outline_ring(&mut out, outer, width, [color; 4], radius);
+            }
+            Style::Dashed | Style::Dotted if radius.is_zero() => {
+                let style = if s.outline.style == Style::Dashed {
+                    rustkit_css::BorderStyle::Dashed
+                } else {
+                    rustkit_css::BorderStyle::Dotted
+                };
+                outline_dashes(&mut out, outer, width, color, style);
+            }
+            // The ring command has no dash pattern: a rounded one is drawn solid.
+            Style::Dashed | Style::Dotted => {
+                outline_ring(&mut out, outer, width, [color; 4], radius)
+            }
+            Style::Double if width < 3.0 => {
+                outline_ring(&mut out, outer, width, [color; 4], radius)
+            }
+            Style::Double => {
+                let stroke = (width / 3.0).round();
+                outline_ring(&mut out, outer, stroke, [color; 4], radius);
+                let inner = width - stroke;
+                outline_ring(&mut out, inset(outer, inner), stroke, [color; 4], shrunk(radius, inner));
+            }
+            Style::Groove | Style::Ridge if width < 2.0 => {
+                outline_ring(&mut out, outer, width, [color; 4], radius)
+            }
+            Style::Groove | Style::Ridge => {
+                let (near, far) = if s.outline.style == Style::Groove { (dark, light) } else { (light, dark) };
+                let outer_part = (width / 2.0).ceil();
+                outline_ring(&mut out, outer, outer_part, [near, far, far, near], radius);
+                outline_ring(
+                    &mut out,
+                    inset(outer, outer_part),
+                    width - outer_part,
+                    [far, near, near, far],
+                    shrunk(radius, outer_part),
+                );
+            }
+            Style::Inset => outline_ring(&mut out, outer, width, [dark, light, light, dark], radius),
+            Style::Outset => outline_ring(&mut out, outer, width, [light, dark, dark, light], radius),
+        }
+        out
+    }
+
+    /// The outer radii of the ring around a box that has a radius: each grows
+    /// with the ring's reach, and a corner with none stays square.
+    fn outline_radius(&self, layout_box: &LayoutBox, reach: f32) -> BorderRadius {
+        let radius = self.border_radius_px(layout_box);
+        let grown = |c: CornerRadius| CornerRadius {
+            h: if c.h > 0.0 { (c.h + reach).max(0.0) } else { 0.0 },
+            v: if c.v > 0.0 { (c.v + reach).max(0.0) } else { 0.0 },
+        };
+        BorderRadius {
+            top_left: grown(radius.top_left),
+            top_right: grown(radius.top_right),
+            bottom_right: grown(radius.bottom_right),
+            bottom_left: grown(radius.bottom_left),
         }
     }
 
@@ -11753,6 +11994,159 @@ pub fn measure_text(text: &str, _font_family: &str, font_size: f32) -> text::Tex
 /// Returns `(dash, gap)`, or `None` for a solid side.
 ///
 /// Thick dotted borders are round dots in Chrome; they are square here.
+/// The box an outline goes around: the border box, and for an inline box
+/// what its inline content reaches as well.
+fn outline_box(layout_box: &LayoutBox) -> Rect {
+    let mut rect = layout_box.dimensions.border_box();
+    if matches!(layout_box.box_type, BoxType::Inline) {
+        for child in &layout_box.children {
+            if child.position == Position::Static && child.float == Float::None {
+                let reach = outline_box(child);
+                let (right, bottom) = (rect.right().max(reach.right()), rect.bottom().max(reach.bottom()));
+                rect.x = rect.x.min(reach.x);
+                rect.y = rect.y.min(reach.y);
+                rect.width = right - rect.x;
+                rect.height = bottom - rect.y;
+            }
+        }
+    }
+    rect
+}
+
+fn inset(rect: Rect, by: f32) -> Rect {
+    Rect::new(
+        rect.x + by,
+        rect.y + by,
+        (rect.width - 2.0 * by).max(0.0),
+        (rect.height - 2.0 * by).max(0.0),
+    )
+}
+
+fn at_least(corner: CornerRadius, r: f32) -> CornerRadius {
+    CornerRadius { h: corner.h.max(r), v: corner.v.max(r) }
+}
+
+fn shrunk(radius: BorderRadius, by: f32) -> BorderRadius {
+    let less = |c: CornerRadius| CornerRadius { h: (c.h - by).max(0.0), v: (c.v - by).max(0.0) };
+    BorderRadius {
+        top_left: less(radius.top_left),
+        top_right: less(radius.top_right),
+        bottom_right: less(radius.bottom_right),
+        bottom_left: less(radius.bottom_left),
+    }
+}
+
+/// The dark and the light side of Chromium's `inset`/`outset`/`groove`/`ridge`.
+/// The dark is the colour less a third of its brightness (each channel in
+/// 256ths, floored), which takes a very dark colour to black; the light side
+/// is the colour itself, unless that is nearly black, when it is brightened
+/// by a third. Black's light side is 0x545454. Read off Chromium's frames on
+/// eight colours.
+fn three_d_colors(color: Color) -> (Color, Color) {
+    let channels = [color.r, color.g, color.b].map(|c| c as f32 / 255.0);
+    let value = channels.iter().cloned().fold(0.0_f32, f32::max);
+    let scaled = |multiplier: f32| {
+        let [r, g, b] = channels.map(|c| ((c * multiplier * 256.0).floor()).min(255.0) as u8);
+        Color { r, g, b, a: color.a }
+    };
+    let dark = if value > 0.33 { scaled((value - 0.33) / value) } else { Color { r: 0, g: 0, b: 0, a: color.a } };
+    let squared: i32 = [color.r, color.g, color.b].iter().map(|c| (*c as i32).pow(2)).sum();
+    let light = if value <= 0.0 {
+        Color { r: 0x54, g: 0x54, b: 0x54, a: color.a }
+    } else if squared < 3 * 0x20 * 0x20 {
+        scaled((value + 0.33).min(1.0) / value)
+    } else {
+        color
+    };
+    (dark, light)
+}
+
+/// A ring `width` thick inside `outer`, colours top, right, bottom, left.
+/// Its parts do not overlap: a translucent ring blends once at the corners.
+fn outline_ring(
+    out: &mut Vec<DisplayCommand>,
+    outer: Rect,
+    width: f32,
+    colors: [Color; 4],
+    radius: BorderRadius,
+) {
+    if !radius.is_zero() {
+        out.push(DisplayCommand::RoundedBorder {
+            rect: outer,
+            widths: [width; 4],
+            colors,
+            radius: radius.fitted(outer.width, outer.height),
+        });
+        return;
+    }
+    let (x, y, w, h) = (outer.x, outer.y, outer.width, outer.height);
+    let (across, down) = (width.min(w / 2.0), width.min(h / 2.0));
+    if colors.iter().all(|c| *c == colors[0]) {
+        let strips = [
+            Rect::new(x, y, w, down),
+            Rect::new(x, y + h - down, w, down),
+            Rect::new(x, y + down, across, h - 2.0 * down),
+            Rect::new(x + w - across, y + down, across, h - 2.0 * down),
+        ];
+        for strip in strips {
+            if strip.width > 0.0 && strip.height > 0.0 {
+                out.push(DisplayCommand::SolidColor(colors[0], strip));
+            }
+        }
+        return;
+    }
+    // Sides of different colours meet on the diagonal.
+    let (l, t, r, b) = (x, y, x + w, y + h);
+    let (il, it, ir, ib) = (l + across, t + down, r - across, b - down);
+    let sides = [
+        vec![(l, t), (r, t), (ir, it), (il, it)],
+        vec![(r, t), (r, b), (ir, ib), (ir, it)],
+        vec![(r, b), (l, b), (il, ib), (ir, ib)],
+        vec![(l, b), (l, t), (il, it), (il, ib)],
+    ];
+    for (points, color) in sides.into_iter().zip(colors) {
+        out.push(DisplayCommand::FillPolygon { points, color });
+    }
+}
+
+/// A dashed or dotted ring, side by side.
+fn outline_dashes(
+    out: &mut Vec<DisplayCommand>,
+    outer: Rect,
+    width: f32,
+    color: Color,
+    style: rustkit_css::BorderStyle,
+) {
+    let (x, y, w, h) = (outer.x, outer.y, outer.width, outer.height);
+    let (across, down) = (width.min(w / 2.0), width.min(h / 2.0));
+    for (strip, horizontal) in [
+        (Rect::new(x, y, w, down), true),
+        (Rect::new(x, y + h - down, w, down), true),
+        (Rect::new(x, y + down, across, h - 2.0 * down), false),
+        (Rect::new(x + w - across, y + down, across, h - 2.0 * down), false),
+    ] {
+        let length = if horizontal { strip.width } else { strip.height };
+        if length <= 0.0 {
+            continue;
+        }
+        let Some((dash, gap)) = border_dash_pattern(style, width, length) else {
+            out.push(DisplayCommand::SolidColor(color, strip));
+            continue;
+        };
+        let mut at = 0.0;
+        while at < length - 0.01 {
+            let run = dash.min(length - at);
+            let rect = if horizontal {
+                Rect::new(strip.x + at, strip.y, run, strip.height)
+            } else {
+                Rect::new(strip.x, strip.y + at, strip.width, run)
+            };
+            out.push(DisplayCommand::SolidColor(color, rect));
+            at += dash + gap;
+        }
+    }
+}
+
 fn border_dash_pattern(
     style: rustkit_css::BorderStyle,
     thickness: f32,
