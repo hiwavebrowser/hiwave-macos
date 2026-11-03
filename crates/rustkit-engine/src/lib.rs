@@ -8575,7 +8575,31 @@ impl Engine {
     /// §15.3.9): a block list item reading "Details", styled as a child of
     /// the details. It has no element, so script cannot reach it.
     fn default_details_summary(details: &ComputedStyle) -> LayoutBox {
-        let mut style = ComputedStyle::inherit_from(details);
+        // `ComputedStyle::inherit_from` takes its non-inherited fields from
+        // `Default` (a zero `width`, not `auto`), so start from the initial
+        // style and copy the inherited ones over it, as text boxes do.
+        let from = ComputedStyle::inherit_from(details);
+        let mut style = ComputedStyle::new();
+        style.color = from.color;
+        style.font_size = from.font_size;
+        style.font_weight = from.font_weight;
+        style.font_style = from.font_style;
+        style.font_stretch = from.font_stretch;
+        style.font_family = from.font_family;
+        style.line_height = from.line_height;
+        style.text_align = from.text_align;
+        style.letter_spacing = from.letter_spacing;
+        style.word_spacing = from.word_spacing;
+        style.text_indent = from.text_indent;
+        style.text_transform = from.text_transform;
+        style.white_space = from.white_space;
+        style.word_break = from.word_break;
+        style.overflow_wrap = from.overflow_wrap;
+        style.line_break = from.line_break;
+        style.direction = from.direction;
+        style.writing_mode = from.writing_mode;
+        style.visibility = from.visibility;
+        style.pointer_events = from.pointer_events;
         style.display = rustkit_css::Display::Block;
         style.display_modifier = rustkit_css::DisplayModifier::ListItem;
         let mut summary = LayoutBox::new(BoxType::Block, style.clone());
