@@ -385,6 +385,8 @@ mod computed_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
+mod float_margin_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
