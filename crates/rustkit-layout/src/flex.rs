@@ -629,7 +629,13 @@ fn layout_flex_container_at(
             container_cross_size,
             definite_inner_cross,
         );
-        aspect_ratio_flex_base(&mut item, main_axis, style.align_items, definite_inner_cross);
+        aspect_ratio_flex_base(
+            &mut item,
+            main_axis,
+            style.align_items,
+            definite_inner_cross,
+            style.flex_wrap == FlexWrap::NoWrap,
+        );
         items.push(item);
     }
 
@@ -1853,6 +1859,40 @@ fn create_flex_item<'a>(
             // looking like the rule is implemented on both axes.
             Axis::Vertical => 0.0,
         };
+        // css-flexbox-1 §4.5: for a non-replaced item with a preferred
+        // `aspect-ratio`, the content size suggestion is clamped by the
+        // cross axis's definite min/max sizes converted through the ratio
+        // (min wins). `flex: 0 0 200px; aspect-ratio: 2/1; min-height: 150px`
+        // in a row is 300 wide (Chromium 143); with `max-height: 40px` and a
+        // 300px-wide child, 80.
+        let content_min = match layout_box.style.aspect_ratio.filter(|r| *r > 0.0 && r.is_finite()) {
+            Some(ratio)
+                if matches!(
+                    layout_box.box_type,
+                    crate::BoxType::Block | crate::BoxType::AnonymousBlock
+                ) =>
+            {
+                let through = |cross: f32| {
+                    ratio_main_from_cross(
+                        &layout_box.style,
+                        ratio,
+                        main_axis,
+                        spec_cross_to_border_box(cross),
+                        main_pb,
+                        cross_pb,
+                    )
+                };
+                let mut m = content_min;
+                if max_cross.is_finite() {
+                    m = m.min(through(max_cross));
+                }
+                if css_min_cross > 0.0 {
+                    m = m.max(through(css_min_cross));
+                }
+                m
+            }
+            _ => content_min,
+        };
         specified_main.map_or(content_min, |s| content_min.min(s))
     } else {
         0.0
@@ -2208,10 +2248,12 @@ fn calculate_cross_sizes(
             // A column item that is not stretched, with a definite height
             // and a preferred `aspect-ratio`, takes its width through the
             // ratio (Chromium 143: `height: 50px; aspect-ratio: 2/1` under
-            // `align-items: flex-start` is 100 wide, not fit-content).
+            // `align-items: flex-start` is 100 wide, not fit-content). A
+            // definite flex basis counts the same: `flex: 0 0 80px` is
+            // 160x80. A height that came from content does not.
             None if cross_axis == Axis::Horizontal
                 && !item.stretches(align_items)
-                && item.specified_main.is_some()
+                && (item.specified_main.is_some() || !item.main_size_from_content)
                 && aspect_ratio_width_from_height(item).is_some() =>
             {
                 aspect_ratio_width_from_height(item).unwrap_or(0.0)
@@ -3005,7 +3047,6 @@ fn content_border_height(b: &LayoutBox) -> f32 {
     (content.max(0.0) + pb).max(min)
 }
 
-/// Get the intrinsic main size for replaced elements (form controls, images).
 /// css-flexbox-1 §9.2.3 B / css-sizing-4 §5.1: an item whose flex base size
 /// would come from its content, that has a preferred `aspect-ratio` and a
 /// definite cross size, takes its base size through the ratio from that cross
@@ -3016,7 +3057,19 @@ fn content_border_height(b: &LayoutBox) -> f32 {
 /// Without this the base size was the content's: an empty `aspect-ratio: 4/1`
 /// item in a 400px column was 0 tall (Chromium 143: 100), and a row item with
 /// `height: 50px; aspect-ratio: 2/1` was 0 wide (Chromium: 100).
-fn aspect_ratio_flex_base(item: &mut FlexItem, main_axis: Axis, align_items: AlignItems, definite_inner_cross: Option<f32>) {
+///
+/// The stretched width is definite only in a single-line column (§9.8): in a
+/// wrapping one an empty `aspect-ratio: 2/1` item stays 400x0 (Chromium 143).
+/// The cross size is clamped by min/max-width (or -height) before it goes
+/// through the ratio: a stretched `max-width: 200px` item is 200x100, not
+/// 200x200, and `height: 50px; max-height: 30px` is 60 wide, not 100.
+fn aspect_ratio_flex_base(
+    item: &mut FlexItem,
+    main_axis: Axis,
+    align_items: AlignItems,
+    definite_inner_cross: Option<f32>,
+    single_line: bool,
+) {
     if !item.main_size_from_content {
         return;
     }
@@ -3026,16 +3079,33 @@ fn aspect_ratio_flex_base(item: &mut FlexItem, main_axis: Axis, align_items: Ali
     };
     let cross_border_box = match item.explicit_cross_size {
         Some(c) => c,
-        None if main_axis == Axis::Vertical && item.stretches(align_items) => match definite_inner_cross {
+        None if main_axis == Axis::Vertical && single_line && item.stretches(align_items) => match definite_inner_cross {
             Some(w) => (w - item.cross_margin_start - item.cross_margin_end).max(0.0),
             None => return,
         },
         None => return,
     };
+    // Min wins over max (css-sizing-3 §5.2).
+    let cross_border_box = cross_border_box.min(item.max_cross_size).max(item.min_cross_size);
     let main_pb = item.main_pb_start + item.main_pb_end;
     let cross_pb = item.cross_pb_start + item.cross_pb_end;
-    // The ratio is width / height of the border box under `border-box` and
-    // of the content box under `content-box`.
+    let main_border_box = ratio_main_from_cross(style, ratio, main_axis, cross_border_box, main_pb, cross_pb);
+    item.flex_basis = main_border_box;
+    item.hypothetical_main_size = main_border_box.max(item.min_main_size).min(item.max_main_size).max(main_pb);
+    item.target_main_size = item.hypothetical_main_size;
+}
+
+/// The border-box main size a preferred `aspect-ratio` gives a border-box
+/// cross size. The ratio is width / height of the border box under
+/// `border-box` and of the content box under `content-box`.
+fn ratio_main_from_cross(
+    style: &rustkit_css::ComputedStyle,
+    ratio: f32,
+    main_axis: Axis,
+    cross_border_box: f32,
+    main_pb: f32,
+    cross_pb: f32,
+) -> f32 {
     let main_border_box = if style.box_sizing == rustkit_css::BoxSizing::BorderBox {
         match main_axis {
             Axis::Horizontal => cross_border_box * ratio,
@@ -3049,10 +3119,7 @@ fn aspect_ratio_flex_base(item: &mut FlexItem, main_axis: Axis, align_items: Ali
                 Axis::Vertical => cross_content / ratio,
             }
     };
-    let main_border_box = main_border_box.max(main_pb);
-    item.flex_basis = main_border_box;
-    item.hypothetical_main_size = main_border_box.max(item.min_main_size).min(item.max_main_size).max(main_pb);
-    item.target_main_size = item.hypothetical_main_size;
+    main_border_box.max(main_pb)
 }
 
 /// The border-box height a ROW item's preferred `aspect-ratio` gives it from
@@ -3094,6 +3161,7 @@ fn aspect_ratio_width_from_height(item: &FlexItem) -> Option<f32> {
     })
 }
 
+/// Get the intrinsic main size for replaced elements (form controls, images).
 fn get_intrinsic_main_size(layout_box: &crate::LayoutBox, main_axis: Axis, definite_cross: Option<f32>) -> f32 {
     let box_type = &layout_box.box_type;
     let style = &layout_box.style;

@@ -13222,17 +13222,35 @@ impl layout_ctx::LayoutCtx {
                 // `auto` resets an earlier ratio. A degenerate ratio (`0`,
                 // `0/1`, `1/0`) is valid and behaves as `auto`; a negative
                 // number makes the declaration invalid (it changes nothing).
+                // `auto && <ratio>` (either order) keeps the ratio for a
+                // non-replaced box: `width: 160px; aspect-ratio: auto 16/9`
+                // is 160x90 in Chromium 143, and was dropped whole here.
                 let value = value.trim();
-                let (w, h) = match value.split_once('/') {
+                let (has_auto, ratio_text) = if let Some(r) = value
+                    .strip_prefix("auto")
+                    .filter(|r| r.starts_with(char::is_whitespace))
+                {
+                    (true, r.trim())
+                } else if let Some(r) = value
+                    .strip_suffix("auto")
+                    .filter(|r| r.ends_with(char::is_whitespace))
+                {
+                    (true, r.trim())
+                } else {
+                    (false, value)
+                };
+                let (w, h) = match ratio_text.split_once('/') {
                     Some((w, h)) => (w.trim().parse::<f32>(), h.trim().parse::<f32>()),
-                    None => (value.parse::<f32>(), Ok(1.0)),
+                    None => (ratio_text.parse::<f32>(), Ok(1.0)),
                 };
                 if value == "auto" {
                     style.aspect_ratio = None;
+                    style.aspect_ratio_auto = false;
                 } else if let (Ok(w), Ok(h)) = (w, h) {
                     if w >= 0.0 && h >= 0.0 {
                         let ratio = w / h;
                         style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
+                        style.aspect_ratio_auto = has_auto;
                     }
                 }
             }
@@ -14116,7 +14134,10 @@ impl layout_ctx::LayoutCtx {
             }
             // Not inherited, so `unset` lands here too: the initial value is
             // `auto`, no ratio.
-            "aspect-ratio" => style.aspect_ratio = None,
+            "aspect-ratio" => {
+                style.aspect_ratio = None;
+                style.aspect_ratio_auto = false;
+            }
             // Not inherited either: `initial` and `unset` undo a reset's
             // `* { box-sizing: inherit }`.
             "box-sizing" => style.box_sizing = rustkit_css::BoxSizing::ContentBox,

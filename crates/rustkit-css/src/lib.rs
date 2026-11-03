@@ -2845,6 +2845,10 @@ pub struct ComputedStyle {
     pub max_width: Length,
     pub max_height: Length,
     pub aspect_ratio: Option<f32>, // width / height ratio
+    /// `aspect-ratio: auto <ratio>` (either order): a replaced box with a
+    /// natural ratio uses that instead of `aspect_ratio`; every other box
+    /// uses `aspect_ratio` as if `auto` were absent.
+    pub aspect_ratio_auto: bool,
 
     // Margin
     pub margin_top: Length,
