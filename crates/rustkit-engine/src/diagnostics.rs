@@ -1253,7 +1253,9 @@ fn style_record(
             "grid-column-end" => Some(grid_line(&s.grid_column_end)),
             "grid-row-start" => Some(grid_line(&s.grid_row_start)),
             "grid-row-end" => Some(grid_line(&s.grid_row_end)),
-            "aspect-ratio" => Some(s.aspect_ratio.map_or("auto".into(), |r| format!("{} / 1", num(r)))),
+            "aspect-ratio" => Some(s.aspect_ratio.map_or("auto".into(), |r| {
+                format!("{}{} / 1", if s.aspect_ratio_auto { "auto " } else { "" }, num(r))
+            })),
             "vertical-align" => Some(match s.vertical_align {
                 rustkit_css::VerticalAlign::Length(px) => css_px(px),
                 v => kw(&v),

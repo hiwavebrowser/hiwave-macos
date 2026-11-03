@@ -3229,7 +3229,12 @@ impl LayoutBox {
             } else {
                 None
             },
-            self.style.aspect_ratio,
+            // `auto <ratio>`: the natural ratio wins when there is one.
+            if self.style.aspect_ratio_auto && natural_width > 0.0 && natural_height > 0.0 {
+                None
+            } else {
+                self.style.aspect_ratio
+            },
             horizontal_decoration,
             vertical_decoration,
             border_box_sizing,
