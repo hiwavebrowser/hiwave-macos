@@ -421,6 +421,8 @@ mod flex_abspos_static_position_tests;
 #[cfg(test)]
 mod offset_parent_tests;
 #[cfg(test)]
+mod details_tests;
+#[cfg(test)]
 mod relative_offset_tests;
 #[cfg(test)]
 mod svg_background_clip_tests;
@@ -8573,6 +8575,44 @@ impl Engine {
     /// An inline that already has line content or its own box (padding,
     /// border, background, a width) is left as an inline. Those already
     /// produce a box; reboxing them would change boxes that match.
+    /// The summary a `<details>` with no `<summary>` child shows (HTML
+    /// §15.3.9): a block list item reading "Details", styled as a child of
+    /// the details. It has no element, so script cannot reach it.
+    fn default_details_summary(details: &ComputedStyle) -> LayoutBox {
+        // `ComputedStyle::inherit_from` takes its non-inherited fields from
+        // `Default` (a zero `width`, not `auto`), so start from the initial
+        // style and copy the inherited ones over it, as text boxes do.
+        let from = ComputedStyle::inherit_from(details);
+        let mut style = ComputedStyle::new();
+        style.color = from.color;
+        style.font_size = from.font_size;
+        style.font_weight = from.font_weight;
+        style.font_style = from.font_style;
+        style.font_stretch = from.font_stretch;
+        style.font_family = from.font_family;
+        style.line_height = from.line_height;
+        style.text_align = from.text_align;
+        style.letter_spacing = from.letter_spacing;
+        style.word_spacing = from.word_spacing;
+        style.text_indent = from.text_indent;
+        style.text_transform = from.text_transform;
+        style.white_space = from.white_space;
+        style.word_break = from.word_break;
+        style.overflow_wrap = from.overflow_wrap;
+        style.line_break = from.line_break;
+        style.direction = from.direction;
+        style.writing_mode = from.writing_mode;
+        style.visibility = from.visibility;
+        style.pointer_events = from.pointer_events;
+        style.display = rustkit_css::Display::Block;
+        style.display_modifier = rustkit_css::DisplayModifier::ListItem;
+        let mut summary = LayoutBox::new(BoxType::Block, style.clone());
+        summary
+            .children
+            .push(LayoutBox::new(BoxType::Text("Details".to_string()), style));
+        summary
+    }
+
     fn rebox_culled_inline(child: &mut LayoutBox) {
         if !matches!(child.box_type, BoxType::Inline)
             || child.style.display != rustkit_css::Display::Inline
@@ -10451,19 +10491,27 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
                 let mut type_seen: HashMap<Cow<'_, str>, usize> = HashMap::new();
-                // A <details> without `open` renders its first <summary>
-                // child and nothing else (HTML §15.3.9: the rest sits in a
-                // slot the UA hides, which author `display` cannot reach).
-                // The hidden children are still styled below: they count
-                // as siblings for the selectors of the one that shows.
-                let closed_details = &*tag_lower == "details" && !attributes.contains_key("open");
-                let details_summary = closed_details
+                // A <details> renders its first <summary> child first,
+                // wherever it sits, and without `open` nothing else (HTML
+                // §15.3.9: the summary goes in the UA shadow tree's first
+                // slot, the rest in a slot the UA hides, which author
+                // `display` cannot reach). With no summary child the UA
+                // shows its own, reading "Details". The hidden children are
+                // still styled below: they count as siblings for the
+                // selectors of the one that shows.
+                let is_details = &*tag_lower == "details";
+                let closed_details = is_details && !attributes.contains_key("open");
+                let details_summary = is_details
                     .then(|| {
                         child_nodes.iter().position(|c| {
                             matches!(&c.node_type, NodeType::Element { tag_name, .. } if &*lower_tag(tag_name) == "summary")
                         })
                     })
                     .flatten();
+                // Where the summary's boxes go: after `::before`, ahead of
+                // every other child.
+                let details_start = layout_box.children.len();
+                let mut summary_boxes: Vec<LayoutBox> = Vec::new();
                 let children_parent_style: &ComputedStyle = match &unblockified {
                     Some(s) => s,
                     None => &layout_box.style,
@@ -10569,11 +10617,16 @@ impl layout_ctx::LayoutCtx {
                             continue;
                         }
                         let link_href = child_box.link_href;
+                        let into = if is_details && details_summary == Some(child_index) {
+                            &mut summary_boxes
+                        } else {
+                            &mut layout_box.children
+                        };
                         for mut grandchild in child_box.children {
                             if grandchild.link_href.is_none() {
                                 grandchild.link_href = link_href.clone();
                             }
-                            Engine::push_child_hoisting_line_breaks(&mut layout_box.children, grandchild);
+                            Engine::push_child_hoisting_line_breaks(into, grandchild);
                         }
                         continue;
                     }
@@ -10605,7 +10658,12 @@ impl layout_ctx::LayoutCtx {
                     };
 
                     if should_include && shown {
-                        Engine::push_child_hoisting_line_breaks(&mut layout_box.children, child_box);
+                        let into = if is_details && details_summary == Some(child_index) {
+                            &mut summary_boxes
+                        } else {
+                            &mut layout_box.children
+                        };
+                        Engine::push_child_hoisting_line_breaks(into, child_box);
                     } else {
                         // A box the tree drops (an empty block with nothing
                         // visible about it, an empty inline, hidden
@@ -10631,6 +10689,13 @@ impl layout_ctx::LayoutCtx {
                             }
                         }
                     }
+                }
+                if is_details {
+                    if details_summary.is_none() {
+                        summary_boxes.push(Engine::default_details_summary(&layout_box.style));
+                    }
+                    let at = details_start.min(layout_box.children.len());
+                    layout_box.children.splice(at..at, summary_boxes);
                 }
                 drop(table_hints);
                 drop(share_chain);
