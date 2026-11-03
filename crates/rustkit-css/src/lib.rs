@@ -3840,6 +3840,138 @@ pub fn parse_length(value: &str) -> Option<Length> {
     None
 }
 
+/// An `opacity` value, clamped to 0..1: `<number> | <percentage>`, or a `calc()`
+/// of either but not of both (Chromium 143, `opacity_pct_probe.mjs` on the hub).
+/// `min()`, `max()` and `clamp()` are not read.
+pub fn parse_opacity(value: &str) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    let opacity = if value.starts_with("calc(") && value.ends_with(')') {
+        // CSS has four more whitespace characters than the splitters below look for.
+        let inner = value[5..value.len() - 1].replace(['\t', '\n', '\r', '\u{c}'], " ");
+        // `parse_calc_sum` files a bare number under `px`: no unit may reach it.
+        let bare = inner.replace("calc", "");
+        // `%` belongs to its number; the unit splitter would trim a space away.
+        if !bare.chars().all(|c| c.is_ascii_digit() || " .+-*/()%e".contains(c))
+            || inner.contains(" %")
+            || calc_mixes_percent(&inner)
+        {
+            return None;
+        }
+        let sum = parse_calc_sum(&hold_at_float_max(&inner))?;
+        // Read only the field in use: scaling by an overflowed `1 / 1e-40` turns
+        // an unused zero field into NaN. In the used field only overflow makes a
+        // NaN, and `calc((1e40 + 1e40) * 0)` is 0 in Chromium.
+        let opacity = if inner.contains('%') { sum.percent / 100.0 } else { sum.px };
+        if opacity.is_nan() { 0.0 } else { opacity }
+    } else {
+        let (number, percent) = match value.strip_suffix('%') {
+            Some(number) => (number, true),
+            None => (value.as_str(), false),
+        };
+        if !is_css_number(number) {
+            return None;
+        }
+        let number = number.parse::<f32>().ok()?;
+        if percent { number / 100.0 } else { number }
+    };
+    // `1e40` overflows to infinity, and clamps like any other large number.
+    Some(opacity.clamp(0.0, 1.0))
+}
+
+/// Rewrites each number past `f32`'s range as `f32::MAX`, where Chromium holds it
+/// (`calc(1e40 * 1e-40)` is 0.034), because the calc parser refuses an infinity
+/// for every property.
+fn hold_at_float_max(inner: &str) -> String {
+    let bytes = inner.as_bytes();
+    let mut held = String::with_capacity(inner.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if !(bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            i += 1;
+            held.push_str(&inner[start..i]);
+            continue;
+        }
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'e') {
+            let sign = usize::from(matches!(bytes.get(i + 1), Some(b'+' | b'-')));
+            if bytes.get(i + 1 + sign).is_some_and(u8::is_ascii_digit) {
+                i += 1 + sign;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+        }
+        let number = &inner[start..i];
+        // Only a CSS number is held: `1.e40` is not one, and stays an infinity
+        // the calc parser refuses.
+        if is_css_number(number) && number.parse::<f32>().is_ok_and(f32::is_infinite) {
+            held.push_str(&format!("{:e}", f32::MAX));
+        } else {
+            held.push_str(number);
+        }
+    }
+    held
+}
+
+/// Whether one sum in this `calc()` adds a percentage to a number. Their values
+/// cannot tell: `calc(0 + 50%)` has a number that is zero, and is still invalid.
+fn calc_mixes_percent(inner: &str) -> bool {
+    let bytes = inner.as_bytes();
+    let (mut depth, mut start) = (0i32, 0);
+    let mut terms = Vec::new();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'+' | b'-' if depth == 0 && i > 0 && bytes[i - 1] == b' ' && bytes.get(i + 1) == Some(&b' ') => {
+                terms.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    terms.push(&inner[start..]);
+    let with_percent = terms.iter().filter(|term| term.contains('%')).count();
+    if with_percent != 0 && with_percent != terms.len() {
+        return true;
+    }
+    // Each bracket holds a sum of its own.
+    let mut open = Vec::new();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => open.push(i),
+            b')' => {
+                if let Some(from) = open.pop() {
+                    if open.is_empty() && calc_mixes_percent(&inner[from + 1..i]) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// css-syntax-3 §4.3.3's number, which Rust's float parser is wider than: it
+/// also takes `inf`, `NaN` and `1.`.
+fn is_css_number(value: &str) -> bool {
+    let value = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let (mantissa, exponent) = match value.split_once('e') {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (value, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mantissa_ok = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole.is_empty() || digits(whole)) && digits(fraction),
+        None => digits(mantissa),
+    };
+    mantissa_ok && exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)))
+}
+
 /// Parse the inside of a `calc()` into css-values-3 §8.1 normal form.
 ///
 /// Grammar, exactly the spec's:

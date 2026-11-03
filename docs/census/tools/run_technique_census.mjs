@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // run_technique_census.mjs — TECHNIQUE CENSUS runner (docs-only tooling; no engine code).
 // One Chromium instance, one load per site, sequential. Universe: websuite list JSON (default realsite-top80.json).
-// Usage: node docs/census/tools/run_technique_census.mjs [--list websuite/realsite-top100.json] [--sites google,ebay] [--out path.json]
-// Chromium: PARITY_CHROME_PATH if set, else Playwright-bundled Chromium.
+// Usage: node docs/census/tools/run_technique_census.mjs [--list websuite/realsite-top100.json] [--sites google,wikipedia] [--out path.json]
+// Chromium: PARITY_CHROME_PATH if set, else Playwright-bundled Chromium. The hosts in never_load.mjs are
+// refused at its resolver and per request; a site on them is not run, and one whose load asked for them
+// is recorded NOT RUN.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { homedir } from 'os';
+import { launchRefusing, neverLoad, watchRefused } from './never_load.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '../../..');
@@ -22,7 +25,7 @@ const listRel = opt('--list', 'websuite/realsite-top80.json');
 const listPath = resolve(REPO, listRel);
 const list = JSON.parse(readFileSync(listPath, 'utf8'));
 const only = opt('--sites', '');
-const sites = only ? list.sites.filter(s => only.split(',').includes(s.id)) : list.sites;
+const sites = (only ? list.sites.filter(s => only.split(',').includes(s.id)) : list.sites).filter(s => !neverLoad(s.url));
 const universeLabel = listRel.startsWith('/') ? listPath : listRel;
 const classifier = readFileSync(join(__dirname, 'technique_classifier.js'), 'utf8');
 
@@ -78,7 +81,7 @@ function isJsResource(url, headers) {
 const chrome = resolveChrome();
 const launchOpts = { headless: true };
 if (chrome.executablePath) launchOpts.executablePath = chrome.executablePath;
-const browser = await chromium.launch(launchOpts);
+const browser = await launchRefusing(chromium, launchOpts);
 const meta = {
   date: today,
   started_utc: new Date().toISOString(),
@@ -96,6 +99,7 @@ for (const s of sites) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 
   const ctx = await browser.newContext({ viewport: list.viewport, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'America/New_York' });
+  const watch = await watchRefused(ctx);
   await ctx.addInitScript(IO_HOOK);
   const page = await ctx.newPage();
   const jsBundles = []; // { url, bytes }
@@ -159,7 +163,6 @@ for (const s of sites) {
     if (/react(-dom)?(\.min)?\.js|react\.production/i.test(scriptUrls)) addFw('React', 'script:react');
     if (/vue(\.runtime)?(\.min)?\.js|vue\.global/i.test(scriptUrls)) addFw('Vue', 'script:vue');
     if (/angular/i.test(scriptUrls)) addFw('Angular', 'script:angular');
-    if (/cdn\.shopify\.com/i.test(scriptUrls)) addFw('Shopify', 'script:shopify');
     rec.data.frameworks = fw;
 
     // Bot wall merge — exclusive status: HTTP client/error challenge codes are BOTWALL, not OK.
@@ -181,6 +184,8 @@ for (const s of sites) {
   } catch (e) {
     rec.reason = String(e && e.message || e).split('\n')[0].slice(0, 200);
   }
+  // A load that asked for a refused host is not a measurement, whatever it returned.
+  if (watch.touched) rec = { id: s.id, url: s.url, status: 'NOT RUN', reason: 'asked for a refused host' };
   rec.ms = Date.now() - t0;
   const tag = rec.status.padEnd(8);
   const bw = rec.data && rec.data.botWall && rec.data.botWall.vendors.length ? ` bw=${rec.data.botWall.vendors.join('+')}` : '';
@@ -188,7 +193,7 @@ for (const s of sites) {
   console.error(`${tag} ${s.id} ${rec.ms}ms http=${rec.http_status || '-'}${bw}${bun} attempt=${attempt} ${rec.reason || ''}`);
   await ctx.close();
     // One retry only when the load never produced a page record (timeout / net error).
-    if (rec.status !== 'NOT RUN' || attempt === MAX_ATTEMPTS) break;
+    if (rec.status !== 'NOT RUN' || attempt === MAX_ATTEMPTS || watch.touched) break;
     console.error(`RETRY    ${s.id} after fail: ${rec.reason}`);
   }
   results.push(rec);
