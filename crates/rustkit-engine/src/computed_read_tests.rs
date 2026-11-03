@@ -143,3 +143,38 @@ fn a_style_write_reads_back_serialized() {
     );
     assert_eq!(read, "matrix(1, 0, 0, 1, 10, 5)");
 }
+
+/// The #866 R1's 124 cases (its own pages, not this file's). Each says what it
+/// must read: Chromium's answer, or what develop read before this change where
+/// the engine still cannot answer (`base`), or `gap` (neither, listed in the PR).
+#[test]
+fn r1_cases() {
+    const R1: &str = include_str!("../../../tools/parity_oracle/computed_read_r1_cases.json");
+    let doc: serde_json::Value = serde_json::from_str(R1).expect("r1 cases");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let mut wrong = Vec::new();
+    let mut counts = std::collections::BTreeMap::new();
+    for c in doc["cases"].as_array().expect("cases") {
+        let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
+        let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
+        engine.load_html(id, &s("html")).expect("load");
+        let read = eval(&mut engine, id, &s("expr"));
+        let (chrome, base, expect) = (s("chrome"), s("base"), s("expect"));
+        let ok = match expect.as_str() {
+            "chrome" => read == chrome,
+            "base" => read == base || read == chrome,
+            "gap" => read != chrome,
+            _ => true,
+        };
+        *counts.entry(if read == chrome { "chrome" } else if read == base { "base" } else { "other" }).or_insert(0) += 1;
+        if std::env::var("R1_DUMP").is_ok() {
+            eprintln!("R1\t{}\t{read}", s("name"));
+        }
+        if !ok {
+            wrong.push(format!("{} ({expect}): read {read:?}, Chromium {chrome:?}, base {base:?}", s("name")));
+        }
+        let _ = engine.destroy_view(id);
+    }
+    eprintln!("r1 reads: {counts:?}");
+    assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+}
