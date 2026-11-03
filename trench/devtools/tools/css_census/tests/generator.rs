@@ -971,6 +971,10 @@ fn a_miss_on_a_broken_control_says_the_control_is_off() {
     r.values[0].control_off = 1195;
     let md = render_markdown(&meta(), &[r.clone()]);
     assert!(md.contains("mismatch (0 probes, control 1195 off)"), "{md}");
+    // The row's own control, `base` included: not always the context's fault.
+    assert!(md.contains("`control N off`: the row's own control"), "{md}");
+    assert!(!md.contains("belongs to the context"), "{md}");
+    assert!(md.contains("bot wall, ebay and shopify"), "{md}");
     r.values[0].effect = Effect::Unexercised;
     let md = render_markdown(&meta(), &[r]);
     assert!(md.contains("unexercised (control 1195 off)"), "{md}");
