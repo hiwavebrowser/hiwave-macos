@@ -10016,4 +10016,80 @@ mod tests {
             "`top: 50%` of 120px is 60px, not {lead}"
         );
     }
+
+    /// A news-site story column: a 12-column `repeat(12, minmax(0, 1fr))`
+    /// grid with a 16px gap, a `span 8` block item, and in it a padded column
+    /// flex card of blocks. Chromium 143 (1040px grid): the item is 688 wide
+    /// and the card's stretched blocks are 688 - 2*16 = 656. They were laid
+    /// out against the grid CONTAINER's width (1040 - 32 = 1008), so the
+    /// story rows ran 352px past their track and overlapped the next column.
+    #[test]
+    fn a_flex_card_in_a_spanning_grid_item_stretches_to_the_track_span() {
+        let mut gs = ComputedStyle::new();
+        gs.display = Display::Grid;
+        gs.grid_template_columns = GridTemplate::from_sizes(
+            (0..12)
+                .map(|_| TrackSize::minmax(TrackSize::Px(0.0), TrackSize::Fr(1.0)))
+                .collect(),
+        );
+        gs.column_gap = Length::Px(16.0);
+        gs.row_gap = Length::Px(16.0);
+        let mut grid = LayoutBox::new(BoxType::Block, gs);
+
+        let mut hs = ComputedStyle::new();
+        hs.grid_column_start = GridLine::Span(12);
+        hs.height = Length::Px(76.0);
+        grid.children.push(LayoutBox::new(BoxType::Block, hs));
+
+        let mut is = ComputedStyle::new();
+        is.grid_column_start = GridLine::Span(8);
+        let mut item = LayoutBox::new(BoxType::Block, is);
+
+        let mut cs = ComputedStyle::new();
+        cs.display = Display::Flex;
+        cs.flex_direction = rustkit_css::FlexDirection::Column;
+        cs.grid_column_start = GridLine::Span(12);
+        for side in [&mut cs.padding_left, &mut cs.padding_right, &mut cs.padding_top, &mut cs.padding_bottom] {
+            *side = Length::Px(16.0);
+        }
+        let mut card = LayoutBox::new(BoxType::Block, cs);
+        for h in [20.0, 30.0] {
+            let mut rs = ComputedStyle::new();
+            rs.height = Length::Px(h);
+            card.children.push(LayoutBox::new(BoxType::Block, rs));
+        }
+        item.children.push(card);
+        grid.children.push(item);
+
+        let mut ss = ComputedStyle::new();
+        ss.grid_column_start = GridLine::Span(4);
+        ss.height = Length::Px(50.0);
+        grid.children.push(LayoutBox::new(BoxType::Block, ss));
+
+        layout_grid_container(&mut grid, 1040.0, 0.0);
+
+        let item = &grid.children[1];
+        assert!(
+            (item.dimensions.content.width - 688.0).abs() < 0.01,
+            "span 8 of 12 in 1040 with 16px gaps is 688, got {}",
+            item.dimensions.content.width
+        );
+        let card = &item.children[0];
+        assert!(
+            (card.dimensions.content.width - 656.0).abs() < 0.01,
+            "the card fills the item less its padding, got {}",
+            card.dimensions.content.width
+        );
+        for (i, row) in card.children.iter().enumerate() {
+            assert!(
+                (row.dimensions.content.width - 656.0).abs() < 0.01,
+                "card row {i} stretches to the card's 656, not the grid's width: got {}",
+                row.dimensions.content.width
+            );
+            assert!(
+                (row.dimensions.content.x - card.dimensions.content.x).abs() < 0.01,
+                "card row {i} starts at the card's content edge"
+            );
+        }
+    }
 }
