@@ -24,6 +24,8 @@ use rustkit_css::{
 };
 use tracing::{debug, trace};
 
+use std::cell::Cell;
+
 use crate::{BoxType, LayoutBox, Rect};
 
 // ==================== Grid Container ====================
@@ -458,7 +460,7 @@ impl<'a> GridItem<'a> {
         // tracks. Scroll containers may shrink below their content and keep
         // the explicit-only contribution.
         let auto_min = if style.overflow_x == Overflow::Visible {
-            estimate_min_content_width(self.layout_box)
+            grid_item_min_content_width(self.layout_box)
         } else {
             0.0
         };
@@ -3387,7 +3389,7 @@ fn grid_columns_content_width(layout_box: &LayoutBox, min: bool) -> Option<f32> 
     let mut contributions = vec![(0.0f32, 0.0f32, 0.0f32); columns];
     for (i, c) in items.iter().enumerate() {
         let (low, high, floor) = &mut contributions[i % columns];
-        let min_content = estimate_min_content_width(c);
+        let min_content = grid_item_min_content_width(c);
         let minimum = minimum_contribution_width(c, min_content);
         *low = low.max(min_content).max(minimum);
         *high = high.max(estimate_max_content_width(c)).max(minimum);
@@ -3546,7 +3548,9 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
         return text_min_content_width(text, style);
     }
     if style.display.is_table() {
-        return crate::table::table_intrinsic_widths(layout_box).0;
+        // A table's columns are not grid tracks: the compressible rule below
+        // stays off inside it, even under a grid item (see that arm).
+        return with_compressible_replaced_min(false, || crate::table::table_intrinsic_widths(layout_box).0);
     }
 
     let padding_border = horizontal_padding_border(style);
@@ -3560,7 +3564,14 @@ pub(crate) fn own_min_content_width(layout_box: &LayoutBox) -> f32 {
     // `max-width: 100%` reset has a 800px `width` and is still compressible
     // (Chromium 200x100 in that card column; read first, the 800 made the
     // column 800 wide, #871 R1).
-    if is_compressible_replaced(layout_box) {
+    //
+    // GRID TRACK SIZING ONLY (`with_compressible_replaced_min`). This
+    // function also answers table cells and shrink-to-fit, where Chromium 143
+    // keeps the image's width: a `float: right; display: table` figure
+    // holding a `max-width: 100%` 250px image is 258 wide; with the zero it
+    // was 8 (60 with a 60px caption), an encyclopedia infobox's figure
+    // squeezed to its caption (#871 batch 9).
+    if COMPRESSIBLE_REPLACED_MIN.with(Cell::get) && is_compressible_replaced(layout_box) {
         return length_min_width_border_box(layout_box).unwrap_or(padding_border);
     }
 
@@ -4943,6 +4954,32 @@ fn is_compressible_replaced(layout_box: &LayoutBox) -> bool {
         && (length_has_percent(&layout_box.style.width) || length_has_percent(&layout_box.style.max_width))
 }
 
+thread_local! {
+    /// Whether `own_min_content_width` applies the compressible-replaced
+    /// zero. On only while grid track sizing asks for an item's min-content
+    /// (`with_compressible_replaced_min(true, ..)`), off again inside a table.
+    static COMPRESSIBLE_REPLACED_MIN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `f` with the compressible-replaced min-content rule on or off,
+/// restoring the previous setting afterwards (also on unwind).
+fn with_compressible_replaced_min<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COMPRESSIBLE_REPLACED_MIN.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(COMPRESSIBLE_REPLACED_MIN.with(|c| c.replace(on)));
+    f()
+}
+
+/// A grid item's min-content width (border box): `estimate_min_content_width`
+/// with the compressible-replaced rule on, which is a grid track sizing rule.
+fn grid_item_min_content_width(layout_box: &LayoutBox) -> f32 {
+    with_compressible_replaced_min(true, || estimate_min_content_width(layout_box))
+}
+
 /// The max-content contribution (border box) of a compressible replaced box:
 /// a percentage `width` behaves as `auto` and a percentage `max-width` as
 /// `none` (css-sizing-3 §5.2.2 zeroes the min-content contribution only).
@@ -4999,7 +5036,7 @@ fn apply_justify_self(
         // the logo sat at the left edge. The estimators give border boxes,
         // which is the size this helper returns.
         Length::Auto if align != JustifySelf::Stretch => estimate_max_content_width(child)
-            .min(cell_width.max(estimate_min_content_width(child))),
+            .min(cell_width.max(grid_item_min_content_width(child))),
         Length::Auto | Length::FitContent => cell_width,
         Length::Px(w) => w,
         Length::Percent(p) => cell_width * p / 100.0,
