@@ -350,7 +350,9 @@ fn a_redirect_chain_is_recorded_between_the_request_and_its_response() {
             "navigation_redirect / -> /hop 302",
             "navigation_redirect /hop -> /final 302",
             "response #1 200 text/html",
-            "navigation_commit / 200",
+            // The committed document is the last hop's (Z row S1); the
+            // query stays off the log as everywhere else.
+            "navigation_commit /final 200",
         ]
     );
     assert!(!serde_json::to_string(&records).unwrap().contains("SECRET"));
