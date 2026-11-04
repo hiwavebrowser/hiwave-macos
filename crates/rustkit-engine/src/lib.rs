@@ -526,6 +526,8 @@ mod transform_parse_tests;
 #[cfg(all(test, feature = "headless"))]
 mod transform_rect_tests;
 #[cfg(all(test, feature = "headless"))]
+mod replaced_ratio_tests;
+#[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
