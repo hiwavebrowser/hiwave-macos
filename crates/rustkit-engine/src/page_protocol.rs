@@ -1171,6 +1171,23 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
                     out.push(PageCmd::Render { every });
                 }
             }
+            // A pointer move replaces an earlier one that only input marks
+            // and renders separate it from: the page hears the latest
+            // position once, as Chromium dispatches coalesced moves once a
+            // frame. Nothing is passed: a press, key, click, live turn or
+            // navigation between two moves keeps both. Every mark stays, so
+            // input-to-present still counts from the first move (Z row S2:
+            // eleven queued 430 ms moves held a navigation for 5.5 s).
+            PageCmd::Input(PageInput::MouseMove { x, y }) => {
+                let earlier = out
+                    .iter()
+                    .rposition(|c| !matches!(c, PageCmd::NoteInput { .. } | PageCmd::Render { .. }))
+                    .filter(|&i| matches!(out[i], PageCmd::Input(PageInput::MouseMove { .. })));
+                if let Some(i) = earlier {
+                    out.remove(i);
+                }
+                out.push(PageCmd::Input(PageInput::MouseMove { x, y }));
+            }
             PageCmd::PumpLive { elapsed_ms, reply } => {
                 if matches!(out.last(), Some(PageCmd::PumpLive { .. })) {
                     if let Some(PageCmd::PumpLive {
