@@ -5737,6 +5737,16 @@ impl Engine {
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
+        // The module map keys the fetch, not just the evaluation: tags that
+        // name one module URL share one request and its answer, as in
+        // Chromium. A store page names one component module from each of
+        // its instances (S12: 220 tags, 31 URLs); fetching each tag's copy
+        // queued the duplicates behind the window below and held the first
+        // script back by seconds.
+        type SharedModuleFetch = futures::future::Shared<
+            futures::future::LocalBoxFuture<'static, Result<(String, String), ScriptOutcome>>,
+        >;
+        let mut module_fetches: HashMap<Url, SharedModuleFetch> = HashMap::new();
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
@@ -5744,6 +5754,44 @@ impl Engine {
                 let policy = policy.clone();
                 let base = base.clone();
                 let inspector = inspector.clone();
+                let shared_module = match &entry {
+                    Ok((_, Body::External(url))) if is_module => {
+                        let shared = module_fetches.entry(url.clone()).or_insert_with(|| {
+                            let (policy, loader, base, inspector, url) =
+                                (policy.clone(), loader.clone(), base.clone(), inspector.clone(), url.clone());
+                            async move {
+                                let Some(policy) = policy else {
+                                    return Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "no network policy for this page".into(),
+                                    )));
+                                };
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
+                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
+                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                                inspector::answer_module(guard, &fetched);
+                                match fetched {
+                                    Ok(Ok(module)) => Ok((module.final_url.to_string(), module.source)),
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
+                                        rustkit_net::policy::Denial::BadStatus(status) => FetchFailure::Status(status),
+                                        denial => FetchFailure::Transport(format!("{denial}")),
+                                    })),
+                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "timed out".into(),
+                                    ))),
+                                }
+                            }
+                            .boxed_local()
+                            .shared()
+                        });
+                        Some(shared.clone())
+                    }
+                    _ => None,
+                };
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -5755,36 +5803,13 @@ impl Engine {
                         // module entry point (script destination, CORS,
                         // JavaScript MIME, 2xx, shield, budgets); its
                         // identity is the URL it ends up at.
-                        Ok((timing, Body::External(url))) if is_module => match &policy {
-                            None => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                "no network policy for this page".into(),
-                            ))),
-                            Some(policy) => {
-                                let guard = inspector
-                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
-                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
-                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
-                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
-                                let guard = guard.map(|g| g.deadline(deadline));
-                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
-                                inspector::answer_module(guard, &fetched);
-                                match fetched {
-                                    Ok(Ok(module)) => {
-                                        label = module.final_url.to_string();
-                                        Ok((timing, module.source))
-                                    }
-                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
-                                        rustkit_net::policy::Denial::BadStatus(status) => {
-                                            FetchFailure::Status(status)
-                                        }
-                                        denial => FetchFailure::Transport(format!("{denial}")),
-                                    })),
-                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        "timed out".into(),
-                                    ))),
-                                }
-                            }
+                        // One fetch per module URL (see `module_fetches`).
+                        Ok((timing, Body::External(_))) if is_module => match shared_module {
+                            Some(shared) => shared.await.map(|(final_url, source)| {
+                                label = final_url;
+                                (timing, source)
+                            }),
+                            None => Err(ScriptOutcome::Skipped("module fetch not started")),
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
