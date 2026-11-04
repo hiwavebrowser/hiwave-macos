@@ -35448,6 +35448,58 @@ document.currentScript.remove();
         );
     }
 
+    /// Z row S6 (microsoft on the real window): a sheet still loading at the
+    /// subresource budget was dropped for good, so a page whose sheets came
+    /// late stayed unstyled. Chromium never drops a sheet; it applies it
+    /// when it arrives. The load still ends at the budget; the late sheet is
+    /// applied on a live turn, in its document-order place (`fast.css`,
+    /// linked after it, still wins for `color`).
+    #[test]
+    fn a_sheet_that_misses_the_budget_applies_when_it_arrives() {
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/fast.css">
+</head><body><div id="box">hi</div></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.css", "text/css", "#box { width: 123px; color: red }".into()),
+            ("/fast.css", "text/css", "#box { color: blue }".into()),
+        ]);
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 100 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let started = std::time::Instant::now();
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        assert!(started.elapsed() < std::time::Duration::from_millis(2_500), "the load waited for the late sheet");
+        let width = |engine: &mut Engine| {
+            engine
+                .execute_script(view, "String(document.getElementById('box').getBoundingClientRect().width)")
+                .unwrap()
+        };
+        assert_ne!(width(&mut engine), r#"String("123")"#, "the late sheet cannot have arrived yet");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && width(&mut engine) != r#"String("123")"# {
+            rt.block_on(engine.pump_live(view, 50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(width(&mut engine), r#"String("123")"#, "the late sheet was applied when it arrived");
+        assert_eq!(
+            engine
+                .execute_script(view, "getComputedStyle(document.getElementById('box')).color")
+                .unwrap(),
+            r#"String("rgb(0, 0, 255)")"#,
+            "in document order: the sheet linked after it still wins"
+        );
+    }
+
     /// A hung `@font-face` fetch is cut at `subresource_budget_ms` and marked
     /// failed so a later relayout does not retry it forever.
     #[test]
