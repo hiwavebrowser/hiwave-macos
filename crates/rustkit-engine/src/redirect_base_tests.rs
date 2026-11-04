@@ -7,28 +7,24 @@
 //! twelve `www.gmail.com/assets/*.css` 404s).
 //!
 //! Two loopback servers on different ports are two origins: `/start` on the
-//! first redirects to `/app/page` on the second, whose page links
+//! first (`/start/<port>`) redirects to `/app/page` on the second, whose page links
 //! `style.css` relatively.
 
 use super::*;
 use crate::error_page_script_tests::{engine, serve, text};
-use std::sync::atomic::{AtomicU16, Ordering};
-
-static TARGET_PORT: AtomicU16 = AtomicU16::new(0);
 
 const PAGE: &str = r#"<!doctype html><html><head><title>Target</title>
 <link rel="stylesheet" href="style.css"></head>
 <body><div id="box">box</div><img src="pic.png" width="1" height="1"></body></html>"#;
 
 fn first_host(path: &str, _cookie: &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
-    match path {
-        "/start" => {
-            let to: &'static str = Box::leak(
-                format!("http://127.0.0.1:{}/app/page", TARGET_PORT.load(Ordering::SeqCst)).into_boxed_str(),
-            );
+    // `/start/<port>` redirects to the second host on that port.
+    match path.strip_prefix("/start/") {
+        Some(port) => {
+            let to: &'static str = Box::leak(format!("http://127.0.0.1:{port}/app/page").into_boxed_str());
             (302, "text/html", vec![("Location", to)], String::new())
         }
-        _ => (404, "text/plain", vec![], "not found on the first host".into()),
+        None => (404, "text/plain", vec![], "not found on the first host".into()),
     }
 }
 
@@ -44,10 +40,9 @@ fn second_host(path: &str, _cookie: &str) -> (u16, &'static str, Vec<(&'static s
 #[test]
 fn a_redirected_document_belongs_to_the_redirect_target() {
     let target = serve(second_host);
-    TARGET_PORT.store(target.url("/").port().unwrap(), Ordering::SeqCst);
     let first = serve(first_host);
     let (mut engine, view, rt) = engine();
-    rt.block_on(engine.load_url(view, first.url("/start"))).expect("load");
+    rt.block_on(engine.load_url(view, first.url(&format!("/start/{}", target.url("/").port().unwrap())))).expect("load");
 
     let want = target.url("/app/page").to_string();
     assert_eq!(engine.views[&view].title.as_deref(), Some("Target"), "the target's page is shown");
@@ -64,7 +59,7 @@ fn a_redirected_document_belongs_to_the_redirect_target() {
     );
 
     let first_paths: Vec<String> = first.requests().into_iter().map(|(p, _)| p).collect();
-    assert_eq!(first_paths, vec!["/start"], "nothing relative is asked of the first host");
+    assert_eq!(first_paths.len(), 1, "nothing relative is asked of the first host: {first_paths:?}");
     let second_paths: Vec<String> = target.requests().into_iter().map(|(p, _)| p).collect();
     assert!(
         second_paths.iter().any(|p| p == "/app/style.css"),
@@ -74,5 +69,36 @@ fn a_redirected_document_belongs_to_the_redirect_target() {
         text(&mut engine, view, "String(document.getElementById('box').getBoundingClientRect().width)"),
         r#"String("123")"#,
         "and applied"
+    );
+    assert_eq!(
+        engine.views[&view].navigation.session_history().current_url().map(|u| u.to_string()),
+        Some(want),
+        "the history entry is the last hop's: Back and reload go there"
+    );
+}
+
+/// Fetch: a redirect target with no fragment takes the request's.
+#[test]
+fn a_redirect_keeps_the_requested_fragment() {
+    let target = serve(second_host);
+    let first = serve(first_host);
+    let (mut engine, view, rt) = engine();
+    let mut start = first.url(&format!("/start/{}", target.url("/").port().unwrap()));
+    start.set_fragment(Some("box"));
+    rt.block_on(engine.load_url(view, start)).expect("load");
+    let want = format!("{}#box", target.url("/app/page"));
+    assert_eq!(text(&mut engine, view, "location.href"), format!(r#"String("{want}")"#));
+    assert_eq!(text(&mut engine, view, "location.hash"), r##"String("#box")"##);
+}
+
+/// No redirect: the requested URL is the document's, as before.
+#[test]
+fn an_unredirected_document_keeps_its_url() {
+    let target = serve(second_host);
+    let (mut engine, view, rt) = engine();
+    rt.block_on(engine.load_url(view, target.url("/app/page"))).expect("load");
+    assert_eq!(
+        text(&mut engine, view, "location.href"),
+        format!(r#"String("{}")"#, target.url("/app/page"))
     );
 }
