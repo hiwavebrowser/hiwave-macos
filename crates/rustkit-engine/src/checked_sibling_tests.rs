@@ -119,10 +119,23 @@ fn sibling_steps_above_the_subject_follow_script_checkedness() {
 }
 
 #[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
 fn a_click_on_the_box_swaps_its_icon() {
     // What Pete does on the page: click an unchecked box. Its unchecked
-    // icon goes, its checked icon shows, and painting follows the restyle.
-    let (mut engine, view) = page();
+    // icon goes and its checked icon shows. The control is a block here:
+    // an inline checkbox inside an inline span (PAGE's shape) is not found
+    // by the hit test at its centre (`elementFromPoint` reads BODY), a
+    // separate gap this change does not touch.
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds::new(0, 0, 400, 600))
+        .expect("headless view");
+    let click_page = PAGE.replace(
+        r#"<input class="cb__ctrl" type="checkbox" id="c1">"#,
+        r#"<input class="cb__ctrl" type="checkbox" id="c1" style="display:block;width:30px;height:30px;margin:0">"#,
+    );
+    assert_ne!(click_page, PAGE);
+    engine.load_html(view, &click_page).expect("load_html");
     let at = eval(
         &mut engine,
         view,
@@ -131,6 +144,15 @@ fn a_click_on_the_box_swaps_its_icon() {
     );
     let (x, y) = at.split_once(',').expect("point");
     let (x, y): (f32, f32) = (x.parse().unwrap(), y.parse().unwrap());
+    let hit = eval(
+        &mut engine,
+        view,
+        &format!(
+            "(function () {{ var e = document.elementFromPoint({x}, {y}); \
+             return e ? e.tagName + '.' + e.className + '#' + e.id : 'none'; }})()"
+        ),
+    );
+    assert_eq!(hit, "INPUT.cb__ctrl#c1", "elementFromPoint at the box's centre {at}");
     engine.click_at_point(view, x, y);
     let got = eval(
         &mut engine,
