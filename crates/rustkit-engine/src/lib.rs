@@ -442,6 +442,8 @@ mod aspect_ratio_tests;
 #[cfg(test)]
 mod relative_offset_tests;
 #[cfg(test)]
+mod checked_sibling_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
