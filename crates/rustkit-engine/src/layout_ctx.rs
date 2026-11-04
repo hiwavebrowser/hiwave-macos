@@ -106,6 +106,10 @@ impl LayoutCtx {
                 *self.ctx.building.borrow_mut() = self.prev.take();
             }
         }
+        // A selector walk that reads an ancestor's earlier siblings from the
+        // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
+        let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
+        let _walk_checked = crate::WalkCheckedScope::enter(checked);
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         build()
