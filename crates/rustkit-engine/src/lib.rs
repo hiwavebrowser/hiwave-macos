@@ -373,6 +373,8 @@ mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod error_page_script_tests;
 #[cfg(all(test, feature = "headless"))]
+mod redirect_base_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_loading_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_net_engine_tests;
@@ -6964,6 +6966,25 @@ impl Engine {
             debug!(?id, %url, "Navigation abandoned: superseded or stopped");
             return Ok(());
         }
+
+        // After redirects the document is the last hop's: its location,
+        // base URL, history entry and address bar (HTML "navigate"; Fetch
+        // keeps the request's fragment when the last hop has none). Until
+        // S1 the requested URL was committed, so every relative URL on
+        // www.gmail.com's sign-in page was asked of www.gmail.com.
+        let url = if response.url != url && !response.redirect_chain.is_empty() {
+            let mut last = response.url.clone();
+            if last.fragment().is_none() {
+                last.set_fragment(url.fragment());
+            }
+            debug!(?id, from = %url, to = %last, "Navigation redirected");
+            if let Some(view) = self.views.get_mut(&id) {
+                view.navigation.redirected_to(last.clone());
+            }
+            last
+        } else {
+            url
+        };
 
         let status = response.status;
         let header_referrer_policy = response
