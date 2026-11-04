@@ -2977,6 +2977,10 @@ pub struct ComputedStyle {
     /// `clip-path` as authored (empty for `none`); layout resolves the
     /// basic shape against the box it clips. Not inherited.
     pub clip_path: String,
+    /// The legacy `clip` property (CSS 2.1 §11.1.2, CSS Masking 1 §6.1):
+    /// `None` for `auto`. Only an absolutely or fixed positioned box is
+    /// clipped by it. Not inherited.
+    pub clip: Option<ClipRect>,
     pub visibility: Visibility,
     pub pointer_events: PointerEvents,
     pub overflow_x: Overflow,
@@ -3544,6 +3548,8 @@ mod unreadable_color_tests;
 #[cfg(test)]
 mod opacity_parse_tests;
 #[cfg(test)]
+mod clip_parse_tests;
+#[cfg(test)]
 mod outline_parse_tests;
 pub mod content;
 pub mod selector_escape;
@@ -3925,6 +3931,55 @@ pub fn parse_length(value: &str) -> Option<Length> {
 /// An `opacity` value, clamped to 0..1: `<number> | <percentage>`, or a `calc()`
 /// of either but not of both (Chromium 143, `opacity_pct_probe.mjs` on the hub).
 /// `min()`, `max()` and `clamp()` are not read.
+/// `clip: rect(<top>, <right>, <bottom>, <left>)`: each side a length or
+/// `auto`; `right` and `bottom` are measured from the box's left and top
+/// border edges, as `top` and `left` are (CSS 2.1 §11.1.2).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClipRect {
+    pub top: Option<Length>,
+    pub right: Option<Length>,
+    pub bottom: Option<Length>,
+    pub left: Option<Length>,
+}
+
+/// Parses the `clip` property: `Some(None)` for `auto`, `Some(Some(rect))`
+/// for `rect()` with four sides separated by commas or by white space, as
+/// Chromium takes both (Bootstrap writes `rect(0,0,0,0)`, others
+/// `rect(0 0 0 0)`). A percentage or anything else refuses the declaration.
+pub fn parse_clip(value: &str) -> Option<Option<ClipRect>> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "auto" {
+        return Some(None);
+    }
+    let inner = value.strip_prefix("rect(")?.strip_suffix(')')?;
+    let parts: Vec<&str> = if inner.contains(',') {
+        inner.split(',').map(str::trim).collect()
+    } else {
+        inner.split_whitespace().collect()
+    };
+    let [top, right, bottom, left] = parts.as_slice() else {
+        return None;
+    };
+    let side = |token: &str| -> Option<Option<Length>> {
+        match token {
+            "auto" => Some(None),
+            "" => None,
+            // `parse_length` takes a bare number as px; only `0` may be unitless.
+            t if t != "0" && t.parse::<f32>().is_ok() => None,
+            t => match parse_length(t)? {
+                Length::Percent(_) | Length::Auto | Length::FitContent => None,
+                l => Some(Some(l)),
+            },
+        }
+    };
+    Some(Some(ClipRect {
+        top: side(top)?,
+        right: side(right)?,
+        bottom: side(bottom)?,
+        left: side(left)?,
+    }))
+}
+
 pub fn parse_opacity(value: &str) -> Option<f32> {
     let value = value.trim().to_ascii_lowercase();
     let opacity = if value.starts_with("calc(") && value.ends_with(')') {
