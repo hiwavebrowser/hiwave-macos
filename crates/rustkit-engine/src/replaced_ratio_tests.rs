@@ -24,6 +24,7 @@
 //! - card: three columns gap, img attrs 800x400 max-width 100% height auto
 //! KNOWN: a percentage max-width scales a height= attribute down with the width (layout_image_in); it stands in for the author `height: auto` above, so the two are fixed together:
 //! - img grid: two columns, attrs 800x400 max-width 100%
+//! - table: cell img attrs max-width 100%, narrow
 //! KNOWN: replaced flex items keep their natural height when the flexed or stretched width changes (flex.rs, after #869):
 //! - img flex row: flex 1, align start
 //! - img flex column: width
@@ -68,6 +69,9 @@ const CASES: &[(&str, &str, &str)] = &[
     ("img grid: max-content column, width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:max-content 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"><div></div></div>"##, "40x20 @0,0"),
     ("img grid: auto column, max-width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:auto 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;max-width:100%"><div></div></div>"##, "40x20 @0,0"),
     ("img grid: min-content column, width 100%", r##"<div id=c style="display:grid;width:400px;grid-template-columns:min-content 1fr"><img id=t src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" style="display:block;width:100%"><div></div></div>"##, "0x0 @0,0"),
+    ("table figure: float, link, img attrs max-width 100%", r##"<figure id=t style="float:right;display:table;margin:0 0 8px 16px;"><a style="display:block;border:1px solid #888;padding:3px"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" width=250 height=125 style="display:block;max-width:100%;height:auto"></a></figure>"##, "258x133 @542,0"),
+    ("table figure: float, link, img attrs max-width 100%, caption", r##"<figure id=t style="float:right;display:table;margin:0 0 8px 16px;"><a style="display:block;border:1px solid #888;padding:3px"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" width=250 height=125 style="display:block;max-width:100%;height:auto"></a><figcaption style="display:table-caption;caption-side:bottom"><div style="width:60px;height:10px"></div></figcaption></figure>"##, "258x143 @542,0"),
+    ("table: cell img attrs max-width 100%", r##"<div style="width:400px"><table id=t style="border-spacing:0"><tr><td style="padding:0"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAI0lEQVR42u3NsQ0AAAjAoP7/tJ7hIAk7TZ1ILBaLxWKx+E+8ffodDqIehz0AAAAASUVORK5CYII=" width=250 height=125 style="display:block;max-width:100%"></td></tr></table></div>"##, "250x125 @0,0"),
 ];
 
 const READ: &str = "(function () { var r = document.getElementById('t').getBoundingClientRect(); \
