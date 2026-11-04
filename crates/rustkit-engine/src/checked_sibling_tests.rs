@@ -155,6 +155,7 @@ fn sibling_steps_above_the_subject_stay_linear_in_the_sibling_count() {
         "li ~ li > span { color: red }",
     ] {
         let ms = list_load_ms(N, rule);
+        eprintln!("{N} siblings: `{rule}` {ms} ms, control {control} ms");
         assert!(
             ms <= control * 2 + 50,
             "`{rule}` on {N} siblings: {ms} ms, control (no sibling step) {control} ms"
