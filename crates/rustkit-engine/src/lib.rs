@@ -388,6 +388,14 @@ mod keyframes_opacity_tests;
 mod float_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
+#[cfg(test)]
+mod aspect_ratio_apply_tests;
+#[cfg(test)]
+mod color_shorthand_keep_tests;
+#[cfg(test)]
+mod depth_perspective_refuse_tests;
+#[cfg(test)]
+mod outline_apply_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
