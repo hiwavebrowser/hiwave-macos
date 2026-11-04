@@ -876,6 +876,13 @@ impl ImagePlan {
     }
 }
 
+/// External stylesheets that arrived within the load's budget, each with its
+/// document-order index, and the fetches still out at the budget.
+type LoadedSheets = (
+    Vec<(usize, Stylesheet)>,
+    Vec<script_net::LiveFuture<(usize, Option<Stylesheet>)>>,
+);
+
 /// What an image pass fetched ([`Engine::fetch_planned_images`]). Raster
 /// images are already in the image manager's cache; the SVG documents wait
 /// here for the engine's.
@@ -1050,6 +1057,13 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// External stylesheets still loading when the load's subresource
+    /// budget ran out (Z row S6). Each keeps loading and lands at its
+    /// document-order slot (the `usize`) on a live turn.
+    live_sheets: Vec<script_net::LiveFuture<(usize, Option<Stylesheet>)>>,
+    /// The document-order index of each entry of `external_stylesheets`,
+    /// so a late sheet is inserted where the cascade expects it.
+    external_sheet_slots: Vec<usize>,
     /// External classic scripts the page inserted whose fetches are still
     /// out, or finished and not yet run. The fetch is not tied to a turn
     /// deadline. A live turn runs one whose fetch has finished (an
@@ -1149,6 +1163,8 @@ impl ViewState {
         self.live_modules.clear();
         self.live_modules_started = 0;
         self.live_images.clear();
+        self.live_sheets.clear();
+        self.external_sheet_slots.clear();
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
         // parked on that document must not fire `load` on this one.
@@ -2708,6 +2724,8 @@ impl Engine {
             live_modules: Vec::new(),
             live_modules_started: 0,
             live_images: Vec::new(),
+            live_sheets: Vec::new(),
+            external_sheet_slots: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -2806,6 +2824,8 @@ impl Engine {
             live_modules: Vec::new(),
             live_modules_started: 0,
             live_images: Vec::new(),
+            live_sheets: Vec::new(),
+            external_sheet_slots: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -2921,6 +2941,8 @@ impl Engine {
             live_modules: Vec::new(),
             live_modules_started: 0,
             live_images: Vec::new(),
+            live_sheets: Vec::new(),
+            external_sheet_slots: Vec::new(),
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -5015,6 +5037,33 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
             }
         }
+        // External stylesheets that missed the load's budget (Z row S6):
+        // each goes in at its document-order place, then the page restyles.
+        let late_sheets = match self.views.get_mut(&id) {
+            Some(view) => script_net::settle_live(&mut view.live_sheets, LIVE_NETWORK_SLICE).await,
+            None => Vec::new(),
+        };
+        let mut sheets_arrived = 0;
+        if let Some(view) = self.views.get_mut(&id) {
+            for (index, sheet) in late_sheets {
+                let Some(sheet) = sheet else { continue };
+                let at = view.external_sheet_slots.partition_point(|&slot| slot < index);
+                view.external_sheet_slots.insert(at, index);
+                Rc::make_mut(&mut view.external_stylesheets).insert(at, sheet);
+                sheets_arrived += 1;
+            }
+        }
+        if sheets_arrived > 0 {
+            info!(count = sheets_arrived, "Applied external stylesheets that arrived after the load");
+            let fonts = self.load_local_web_fonts(id);
+            if fonts > 0 {
+                debug!(count = fonts, "Loaded web fonts from late stylesheets");
+            }
+            match self.relayout_for(id, RelayoutCause::StylesheetLoaded) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after late stylesheets failed"),
+            }
+        }
         let fetched = match self.views.get_mut(&id) {
             Some(view) => script_net::settle_live(&mut view.live_images, LIVE_NETWORK_SLICE).await,
             None => Vec::new(),
@@ -5035,7 +5084,7 @@ impl Engine {
             }
         }
         if let Some(view) = self.views.get(&id) {
-            out.in_flight += view.live_images.len();
+            out.in_flight += view.live_images.len() + view.live_sheets.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -15273,10 +15322,22 @@ impl Engine {
         &mut self,
         id: EngineViewId,
     ) -> Result<Vec<Stylesheet>, EngineError> {
+        let (sheets, _late) = self.load_external_stylesheets_slotted(id).await?;
+        Ok(sheets.into_iter().map(|(_, sheet)| sheet).collect())
+    }
+
+    /// The external stylesheets that arrived within the subresource budget,
+    /// each with its document-order index, and the fetches still out at the
+    /// budget, which keep going (Z row S6: they used to be dropped, and a
+    /// page whose sheets came late stayed unstyled).
+    async fn load_external_stylesheets_slotted(
+        &mut self,
+        id: EngineViewId,
+    ) -> Result<LoadedSheets, EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
 
         let Some(document) = &view.document else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
 
         let base_url = view.url.as_ref();
@@ -15288,77 +15349,106 @@ impl Engine {
         use futures::stream::StreamExt;
         const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
-        let loader = self.loader.clone();
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
-        let referrer = &referrer;
-        let inspector = &view.inspector;
-        let fetched: Vec<Option<Stylesheet>> = futures::stream::iter(urls.into_iter().map(|url| {
-            let loader = loader.clone();
-            async move {
-                info!(%url, "Loading external stylesheet");
-                let load = async {
-                    // Made inside the future the budget drops: a sheet still
-                    // loading at the deadline is recorded over budget.
-                    let guard = inspector
-                        .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
-                        .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
-                    match loader.fetch(referrer.get_for(url.clone(), RequestDestination::Style)).await {
-                        Ok(response) => {
-                            let received = guard.map(|g| g.received(&response));
-                            if response.ok() {
-                                let text = response.text().await;
-                                if let Some(received) = received {
-                                    match &text {
-                                        Ok(css_text) => received.read(css_text.len()),
-                                        Err(_) => received.fail(FailureStage::Decode, "body is not UTF-8"),
-                                    }
-                                }
-                                match text {
-                                    Ok(css_text) => match {
-                                        let _style = wgate::bucket(wgate::HoldBucket::Style);
-                                        Stylesheet::parse(&absolutize_css_urls(&css_text, &url))
-                                    } {
-                                        Ok(stylesheet) => {
-                                            debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
-                                            Some(stylesheet)
-                                        }
-                                        Err(e) => {
-                                            warn!(?e, %url, "Failed to parse external stylesheet");
-                                            None
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!(?e, %url, "Failed to read stylesheet body");
-                                        None
-                                    }
-                                }
-                            } else {
-                                if let Some(received) = received {
-                                    received.unread();
-                                }
-                                warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+        let fetches: Vec<_> = urls
+            .into_iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let mut fetch: script_net::LiveFuture<Option<Stylesheet>> = Box::pin(Self::fetch_stylesheet(
+                    self.loader.clone(),
+                    view.inspector.clone(),
+                    referrer.get_for(url.clone(), RequestDestination::Style),
+                    url.clone(),
+                    deadline,
+                ));
+                async move {
+                    match tokio::time::timeout_at(deadline, &mut fetch).await {
+                        Ok(sheet) => (index, Ok(sheet)),
+                        Err(_) => {
+                            warn!(%url, "Stylesheet over the subresource budget; it is applied when it arrives");
+                            (index, Err(fetch))
+                        }
+                    }
+                }
+            })
+            .collect();
+        let fetched: Vec<_> = futures::stream::iter(fetches)
+            .buffered(MAX_CONCURRENT_CSS_LOADS)
+            .collect()
+            .await;
+
+        let mut sheets = Vec::new();
+        let mut late = Vec::new();
+        for (index, outcome) in fetched {
+            match outcome {
+                Ok(Some(sheet)) => sheets.push((index, sheet)),
+                Ok(None) => {}
+                Err(fetch) => late.push(Box::pin(async move { (index, fetch.await) })
+                    as script_net::LiveFuture<(usize, Option<Stylesheet>)>),
+            }
+        }
+        Ok((sheets, late))
+    }
+
+    /// Fetch and parse one external stylesheet. Owns what it uses, so a
+    /// fetch still out at the load's budget can finish on a live turn.
+    async fn fetch_stylesheet(
+        loader: Arc<ResourceLoader>,
+        inspector: Arc<Inspector>,
+        request: Request,
+        url: Url,
+        deadline: tokio::time::Instant,
+    ) -> Option<Stylesheet> {
+        info!(%url, "Loading external stylesheet");
+        // A sheet still loading at the deadline is recorded over budget.
+        let guard = inspector
+            .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
+            .map(|g| g.over_budget_at(deadline, "subresource budget spent"));
+        match loader.fetch(request).await {
+            Ok(response) => {
+                let received = guard.map(|g| g.received(&response));
+                if response.ok() {
+                    let text = response.text().await;
+                    if let Some(received) = received {
+                        match &text {
+                            Ok(css_text) => received.read(css_text.len()),
+                            Err(_) => received.fail(FailureStage::Decode, "body is not UTF-8"),
+                        }
+                    }
+                    match text {
+                        Ok(css_text) => match {
+                            let _style = wgate::bucket(wgate::HoldBucket::Style);
+                            Stylesheet::parse(&absolutize_css_urls(&css_text, &url))
+                        } {
+                            Ok(stylesheet) => {
+                                debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
+                                Some(stylesheet)
+                            }
+                            Err(e) => {
+                                warn!(?e, %url, "Failed to parse external stylesheet");
                                 None
                             }
-                        }
+                        },
                         Err(e) => {
-                            inspector::fail_net(guard, &e);
-                            warn!(?e, %url, "Failed to fetch stylesheet");
+                            warn!(?e, %url, "Failed to read stylesheet body");
                             None
                         }
                     }
-                };
-                tokio::time::timeout_at(deadline, load).await.unwrap_or_else(|_| {
-                    warn!(%url, "Stylesheet over the subresource budget; rendering without it");
+                } else {
+                    if let Some(received) = received {
+                        received.unread();
+                    }
+                    warn!(status = %response.status, %url, "Failed to fetch stylesheet");
                     None
-                })
+                }
             }
-        }))
-        .buffered(MAX_CONCURRENT_CSS_LOADS)
-        .collect()
-        .await;
-
-        Ok(fetched.into_iter().flatten().collect())
+            Err(e) => {
+                inspector::fail_net(guard, &e);
+                warn!(?e, %url, "Failed to fetch stylesheet");
+                None
+            }
+        }
     }
 
     /// The http(s) `url()` background images the view's display list paints.
@@ -15746,12 +15836,13 @@ impl Engine {
         // so it had the defect first.
         let sheets = wgate::bucket(wgate::HoldBucket::Sheets);
         let Some(external_stylesheets) =
-            nav_cancel::unless_cancelled(watch, self.load_external_stylesheets(id)).await
+            nav_cancel::unless_cancelled(watch, self.load_external_stylesheets_slotted(id)).await
         else {
             return Ok(());
         };
         drop(sheets);
-        let external_stylesheets = external_stylesheets?;
+        let (external_stylesheets, late_sheets) = external_stylesheets?;
+        let (slots, external_stylesheets): (Vec<usize>, Vec<Stylesheet>) = external_stylesheets.into_iter().unzip();
         let count = external_stylesheets.len();
 
         // Relayout is needed when we HAVE new sheets, and equally when we
@@ -15766,6 +15857,8 @@ impl Engine {
         let mut deferred = false;
         if let Some(view) = self.views.get_mut(&id) {
             view.external_stylesheets = Rc::new(external_stylesheets);
+            view.external_sheet_slots = slots;
+            view.live_sheets = late_sheets;
             // Read, not taken: a cancel before the relayout below (which
             // may drop this future at any await) finds it still set and
             // lays the document out (`load_cancelled`).
@@ -35474,6 +35567,58 @@ document.currentScript.remove();
         assert!(
             !engine.lctx.svg_cache.borrow().contains_key(slow_svg.as_str()),
             "stalled SVG must not enter the SVG cache after the budget"
+        );
+    }
+
+    /// Z row S6 (microsoft on the real window): a sheet still loading at the
+    /// subresource budget was dropped for good, so a page whose sheets came
+    /// late stayed unstyled. Chromium never drops a sheet; it applies it
+    /// when it arrives. The load still ends at the budget; the late sheet is
+    /// applied on a live turn, in its document-order place (`fast.css`,
+    /// linked after it, still wins for `color`).
+    #[test]
+    fn a_sheet_that_misses_the_budget_applies_when_it_arrives() {
+        let page = r#"<html><head>
+<link rel="stylesheet" href="/slow.css">
+<link rel="stylesheet" href="/fast.css">
+</head><body><div id="box">hi</div></body></html>"#;
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/slow.css", "text/css", "#box { width: 123px; color: red }".into()),
+            ("/fast.css", "text/css", "#box { color: blue }".into()),
+        ]);
+        let config = EngineConfig {
+            subresource_budget_ms: 500,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::new(config).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 100 })
+            .expect("view");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let started = std::time::Instant::now();
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        assert!(started.elapsed() < std::time::Duration::from_millis(2_500), "the load waited for the late sheet");
+        let width = |engine: &mut Engine| {
+            engine
+                .execute_script(view, "String(document.getElementById('box').getBoundingClientRect().width)")
+                .unwrap()
+        };
+        assert_ne!(width(&mut engine), r#"String("123")"#, "the late sheet cannot have arrived yet");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && width(&mut engine) != r#"String("123")"# {
+            rt.block_on(engine.pump_live(view, 50));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(width(&mut engine), r#"String("123")"#, "the late sheet was applied when it arrived");
+        assert_eq!(
+            engine
+                .execute_script(view, "getComputedStyle(document.getElementById('box')).color")
+                .unwrap(),
+            r#"String("rgb(0, 0, 255)")"#,
+            "in document order: the sheet linked after it still wins"
         );
     }
 
