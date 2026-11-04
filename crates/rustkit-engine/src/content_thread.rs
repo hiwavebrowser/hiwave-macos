@@ -1438,6 +1438,53 @@ mod tests {
         );
     }
 
+    /// Z row S2 (Pete's hand test 11-03, reddit): a navigation typed while
+    /// the pointer moved waited 5.5 s behind eleven queued moves of the page
+    /// being left, each a ~430 ms hover restyle there, and their 288
+    /// listener calls were then cut by the navigation. Chromium dispatches
+    /// one move per frame from the latest position (coalesced pointer
+    /// events). A move replaces an earlier one when only input marks and
+    /// renders sit between; a press, key, click or navigation is never
+    /// passed.
+    #[test]
+    fn coalesce_keeps_only_the_latest_of_adjacent_moves() {
+        let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
+        let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
+        let url = Url::parse("https://example.com/").unwrap();
+        let batch = vec![
+            note(1),
+            mv(1.0),
+            note(2),
+            mv(2.0),
+            PageCmd::Render { every: false },
+            note(3),
+            mv(3.0),
+            PageCmd::Navigate { url, nav_id: 7 },
+        ];
+        let out = coalesce(batch);
+        let moves: Vec<f32> = out
+            .iter()
+            .filter_map(|c| match c {
+                PageCmd::Input(PageInput::MouseMove { x, .. }) => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves, vec![3.0], "one move, from the latest position");
+        assert_eq!(
+            out.iter().filter(|c| matches!(c, PageCmd::NoteInput { .. })).count(),
+            3,
+            "every input mark is kept for the latency figure"
+        );
+        assert!(matches!(out.last(), Some(PageCmd::Navigate { nav_id: 7, .. })), "the navigation stays last");
+
+        // A press between moves keeps both: the page hears where it went down.
+        let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0 }), mv(2.0)];
+        let out = coalesce(batch);
+        assert_eq!(out.len(), 3, "a move jumped the press");
+        assert!(matches!(out[0], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 1.0));
+        assert!(matches!(out[1], PageCmd::Input(PageInput::MouseDown { .. })));
+    }
+
     fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {
         let deadline = Instant::now() + budget;
         let mut events = Vec::new();
