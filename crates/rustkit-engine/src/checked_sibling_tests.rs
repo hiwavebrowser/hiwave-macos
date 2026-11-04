@@ -118,6 +118,50 @@ fn sibling_steps_above_the_subject_follow_script_checkedness() {
     assert!(bad.is_empty(), "{} of {} rows differ from Chrome 143: {bad:?}", bad.len(), IDS.len());
 }
 
+/// Milliseconds for the fastest of two loads of `n` list items, each
+/// `<li><span>`, styled by `rule`.
+fn list_load_ms(n: usize, rule: &str) -> u128 {
+    let items = "<li><span>x</span></li>".repeat(n);
+    let html = format!("<!doctype html><html><head><style>{rule}</style></head><body><ul>{items}</ul></body></html>");
+    (0..2)
+        .map(|_| {
+            let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+            let view = engine
+                .create_headless_view(Bounds::new(0, 0, 400, 600))
+                .expect("headless view");
+            let start = std::time::Instant::now();
+            engine.load_html(view, &html).expect("load_html");
+            start.elapsed().as_millis()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn sibling_steps_above_the_subject_stay_linear_in_the_sibling_count() {
+    // #878 batch 13 hold: a sibling step above the subject read EVERY
+    // earlier sibling of the ancestor, cloned, for each subject, so 3000
+    // `li` under `li ~ li span` built in 1160 ms against 32 ms on develop
+    // (6000: 4669 vs 62). Each shape must stay within 2x of the same page
+    // with a rule that has no sibling step: `+` reads the one element
+    // before, a `~` that matches stops at the nearest, one that never
+    // matches is not rescanned per subject.
+    const N: usize = 3000;
+    let control = list_load_ms(N, "ul li span { color: red }");
+    for rule in [
+        "li ~ li span { color: red }",
+        "li + li span { color: red }",
+        ".absent ~ li span { color: red }",
+        "li ~ li > span { color: red }",
+    ] {
+        let ms = list_load_ms(N, rule);
+        assert!(
+            ms <= control * 2 + 50,
+            "`{rule}` on {N} siblings: {ms} ms, control (no sibling step) {control} ms"
+        );
+    }
+}
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
 fn a_click_on_the_box_swaps_its_icon() {
