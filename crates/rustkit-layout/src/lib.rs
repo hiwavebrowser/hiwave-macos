@@ -9642,6 +9642,7 @@ impl DisplayList {
         // clips above it are scoped out of its subtree like a positioned
         // box's: an absolute descendant popping them would pop this one.
         let shape_clip = self.clip_path_clip(layout_box);
+        let rect_clip = self.clip_rect_clip(layout_box);
         let positioned = layout_box.position != Position::Static
             || layout_box.style.position != rustkit_css::Position::Static
             || shape_clip.is_some();
@@ -9768,7 +9769,10 @@ impl DisplayList {
 
         // `clip-path` clips the box's own painting too, so it opens before
         // the box's content, inside its transform, and closes after its
-        // subtree.
+        // subtree. The legacy `clip` rect is applied the same way, outside it.
+        if let Some(rect) = rect_clip {
+            self.commands.push(DisplayCommand::PushClip(rect));
+        }
         if let Some((rect, radius)) = shape_clip {
             if radius.is_zero() {
                 self.commands.push(DisplayCommand::PushClip(rect));
@@ -9931,6 +9935,9 @@ impl DisplayList {
             self.ellipsis = outer;
         }
         if shape_clip.is_some() {
+            self.commands.push(DisplayCommand::PopClip);
+        }
+        if rect_clip.is_some() {
             self.commands.push(DisplayCommand::PopClip);
         }
 
@@ -10416,9 +10423,53 @@ impl DisplayList {
     /// a rounded rect (`polygon()`, `path()`, `url()`), for a bare box keyword,
     /// and for any value this does not read. A text run, an inline box or an
     /// anonymous block is never clipped on its own: a text run carries its
-    /// parent's style, and the parent's clip already covers all three.
+    /// parent's style, and the parent's clip already covers all three. A form
+    /// control is clipped like a block: eBay's visually hidden header buttons
+    /// are `<button>`s with `clip-path: inset(50%)`.
+    /// The legacy `clip: rect()` of an absolutely or fixed positioned box
+    /// (CSS 2.1 §11.1.2): a rect from the border box's top-left corner, each
+    /// `auto` side at the border edge. It clips the box and every descendant,
+    /// like `clip-path`. Static and relative boxes ignore it, as in Chromium.
+    /// A right side left of the left side (or bottom above top) clips all:
+    /// `rect(0,0,0,0)` and `rect(1px,1px,1px,1px)` are the visually-hidden
+    /// pattern on most large sites.
+    fn clip_rect_clip(&self, layout_box: &LayoutBox) -> Option<Rect> {
+        let clip = layout_box.style.clip.as_ref()?;
+        if !matches!(layout_box.position, Position::Absolute | Position::Fixed) {
+            return None;
+        }
+        if !matches!(
+            layout_box.box_type,
+            BoxType::Block | BoxType::Image { .. } | BoxType::FormControl(_)
+        ) {
+            return None;
+        }
+        let font_size = match layout_box.style.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let root = self.root_font_size;
+        let border = layout_box.dimensions.border_box();
+        let side = |side: &Option<Length>, auto: f32| -> f32 {
+            side.as_ref().map_or(auto, |l| l.to_px(font_size, root, 0.0))
+        };
+        let top = side(&clip.top, 0.0);
+        let right = side(&clip.right, border.width);
+        let bottom = side(&clip.bottom, border.height);
+        let left = side(&clip.left, 0.0);
+        Some(Rect::new(
+            border.x + left,
+            border.y + top,
+            (right - left).max(0.0),
+            (bottom - top).max(0.0),
+        ))
+    }
+
     fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
-        if !matches!(layout_box.box_type, BoxType::Block | BoxType::Image { .. }) {
+        if !matches!(
+            layout_box.box_type,
+            BoxType::Block | BoxType::Image { .. } | BoxType::FormControl(_)
+        ) {
             return None;
         }
         let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();

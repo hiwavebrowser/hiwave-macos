@@ -536,6 +536,8 @@ mod transform_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod replaced_ratio_tests;
 #[cfg(all(test, feature = "headless"))]
+mod visually_hidden_tests;
+#[cfg(all(test, feature = "headless"))]
 mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
@@ -13433,6 +13435,11 @@ impl layout_ctx::LayoutCtx {
                     value.to_string()
                 };
             }
+            "clip" => {
+                if let Some(clip) = rustkit_css::parse_clip(value) {
+                    style.clip = clip;
+                }
+            }
             "filter" | "-webkit-filter" => {
                 let value = value.trim().to_ascii_lowercase();
                 style.filter = if value == "none" { String::new() } else { value };
@@ -14190,6 +14197,7 @@ impl layout_ctx::LayoutCtx {
             }
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
+            "clip" => style.clip = None,
             "filter" | "-webkit-filter" => style.filter.clear(),
             "will-change" => {
                 style.will_change_holds_fixed = false;
