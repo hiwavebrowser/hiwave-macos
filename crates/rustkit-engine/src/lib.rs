@@ -284,6 +284,10 @@ pub mod inspector;
 mod inspector_glue;
 mod console_log;
 mod relayout_cause;
+mod select_popup;
+mod select_popup_engine;
+#[cfg(test)]
+mod select_popup_engine_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
@@ -1143,6 +1147,8 @@ impl ViewState {
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
+        self.lay.select_popup.borrow_mut().take();
+        self.lay.select_popup_release.set(false);
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.focused_node.set(None);
         self.wheel_gesture = None;
@@ -3240,6 +3246,10 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        // An open `<select>` drop-down takes the wheel.
+        if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
+            return Ok(moved);
+        }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
         let held_target = held
@@ -3576,6 +3586,10 @@ impl Engine {
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
         let _hold = wgate::hold("press");
+        // An open `<select>` drop-down takes the press.
+        if let Some(took) = self.select_popup_press(id, viewport_x, viewport_y) {
+            return took;
+        }
         let target = self.element_at_point(id, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
@@ -3617,6 +3631,10 @@ impl Engine {
     /// listeners wrote to the DOM is laid out before this returns.
     pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
         let _hold = wgate::hold("move");
+        // An open `<select>` drop-down takes the pointer.
+        if self.select_popup_move(id, viewport_x, viewport_y) {
+            return;
+        }
         self.pointer_moved(id, viewport_x, viewport_y, true);
     }
 
@@ -3920,6 +3938,11 @@ impl Engine {
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         let _hold = wgate::hold("click");
+        // An open `<select>` drop-down takes the release (and so does the
+        // release of a press that closed one).
+        if self.select_popup_release(id, viewport_x, viewport_y).is_some() {
+            return ClickOutcome { focused: self.focused_tag(id), navigate: None };
+        }
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
             let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
@@ -4007,6 +4030,11 @@ impl Engine {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.take_navigation_requests();
             }
+        }
+        // A click on a drop-down `<select>` opens it (after the page's
+        // listeners, which may cancel the click).
+        if not_cancelled && elsewhere.is_none() && navigate.is_none() {
+            self.open_select_popup_on_click(id, viewport_x, viewport_y);
         }
         self.settle_pointer_restyle(id);
         ClickOutcome { focused, navigate }
@@ -5120,6 +5148,11 @@ impl Engine {
         let _hold = wgate::hold("key");
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
+        // An open `<select>` drop-down takes the keys; the page hears none.
+        if let Some(changed) = self.select_popup_key(id, key_code, key, alt) {
+            return changed;
+        }
+
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
             return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
@@ -5130,6 +5163,10 @@ impl Engine {
             && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
         {
             return false;
+        }
+        // A focused, closed drop-down: keys open it or change its value.
+        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, alt) {
+            return changed;
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
@@ -5234,6 +5271,11 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let _hold = wgate::hold("submit");
+        // Enter in an open `<select>` drop-down picks an option
+        // (`handle_text_key`); it submits nothing.
+        if self.select_popup_open(id) {
+            return None;
+        }
         let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
@@ -5524,11 +5566,11 @@ impl layout_ctx::LayoutCtx {
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
         let read = self.with_building_lay(|lay| {
             let checked = match tag_lower {
-                "input" => lay
+                "input" | "option" => lay
                     .checked_states.borrow()
                     .get(&node_raw)
                     .copied()
-                    .filter(|checked| *checked != attributes.contains_key("checked")),
+                    .filter(|checked| *checked != attributes.contains_key(checkedness_attribute(tag_lower))),
                 _ => None,
             };
             let hovered = lay.hover_chain.borrow().contains(&node_raw);
@@ -5544,10 +5586,10 @@ impl layout_ctx::LayoutCtx {
         let mut attributes = attributes.clone();
         match checked {
             Some(true) => {
-                attributes.insert("checked".to_string(), String::new());
+                attributes.insert(checkedness_attribute(tag_lower).to_string(), String::new());
             }
             Some(false) => {
-                attributes.remove("checked");
+                attributes.remove(checkedness_attribute(tag_lower));
             }
             None => {}
         }
@@ -8314,6 +8356,8 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        // An open `<select>` drop-down paints over the page.
+        self.append_select_popup(id, &mut dl);
         dl
     }
 
@@ -10347,36 +10391,27 @@ impl layout_ctx::LayoutCtx {
                 }
 
                 if tag_lower == "select" {
-                    // Get options from children
-                    let entries: Vec<(String, bool)> = node
-                        .children()
-                        .into_iter()
-                        .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element {
-                                tag_name, attributes, ..
-                            } = &child.node_type
-                            {
-                                if tag_name.to_lowercase() == "option" {
-                                    let text = child.text_content();
-                                    if !text.is_empty() {
-                                        return Some((text, attributes.contains_key("selected")));
-                                    }
-                                }
-                            }
-                            None
-                        })
-                        .collect();
+                    // The list of options (HTML §4.10.7: option children and
+                    // the options of optgroup children, empty ones too, so
+                    // indices are `selectedIndex`'s), each selected as
+                    // script or the user last set it, else by its
+                    // `selected` attribute.
+                    let list = select_popup::options_of(node);
+                    let live_selected = |o: &select_popup::SelectOption| {
+                        self.with_building_lay(|lay| lay.checked_states.borrow().get(&o.node).copied())
+                            .flatten()
+                            .unwrap_or(o.default_selected)
+                    };
+                    let entries: Vec<(String, bool)> =
+                        list.iter().map(|o| (o.label.clone(), live_selected(o))).collect();
 
                     // HTML §4.10.10 selectedness: the option carrying
-                    // `selected` (the last one, if several) is displayed.
-                    // Index 0 was hardcoded, so settings' Tab Decay unit
-                    // showed "hours" where `<option value="days" selected>`
-                    // makes Chrome show "days".
-                    let selected_index = if entries.is_empty() {
-                        None
-                    } else {
-                        Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
-                    };
+                    // `selected` (the last one, if several) is displayed,
+                    // else the first enabled one. Index 0 was hardcoded, so
+                    // settings' Tab Decay unit showed "hours" where
+                    // `<option value="days" selected>` makes Chrome show
+                    // "days".
+                    let selected_index = select_popup::displayed_index(&list, live_selected);
                     // What a list box highlights: with `multiple`, every
                     // option carrying `selected`; without, only the last
                     // one. No fallback to the first option — that is the
@@ -16772,13 +16807,14 @@ impl SelectorMatcher {
         // `:checked` reads the attribute map; a control whose checkedness
         // has left its attribute is matched with the attribute as it would
         // be (the cascade does the same, `Engine::live_attributes`).
+        let attr = checkedness_attribute(&tag);
         let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
-            Some(&on) if on != attributes.contains_key("checked") => {
+            Some(&on) if on != attributes.contains_key(attr) => {
                 let mut attributes = attributes.clone();
                 if on {
-                    attributes.insert("checked".to_string(), String::new());
+                    attributes.insert(attr.to_string(), String::new());
                 } else {
-                    attributes.remove("checked");
+                    attributes.remove(attr);
                 }
                 Some(attributes)
             }
@@ -36737,6 +36773,16 @@ fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
 /// state its attributes decide.
 type SiblingKey = (String, Vec<String>, Option<String>, ElementState);
+
+/// The attribute that carries a control's default checkedness: `selected`
+/// on an `<option>`, `checked` on an `<input>`.
+fn checkedness_attribute(tag_lower: &str) -> &'static str {
+    if tag_lower == "option" {
+        "selected"
+    } else {
+        "checked"
+    }
+}
 
 /// The form-control state an element's own attributes decide, for
 /// `:checked` / `:disabled` / `:enabled` on a compound left of a sibling

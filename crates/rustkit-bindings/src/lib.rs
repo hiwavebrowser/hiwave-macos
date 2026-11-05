@@ -2037,6 +2037,19 @@ impl DomBindings {
         Ok(())
     }
 
+    /// The user picked option `index` of the select `node` (by node id) in
+    /// its drop-down or with a key: its selectedness moves there and the
+    /// select hears `input` and `change`. Returns whether the selection
+    /// changed (a disabled option, or the one already selected, does not
+    /// change it and fires nothing).
+    pub fn pick_option(&self, node: usize, index: usize) -> Result<bool, BindingError> {
+        let picked = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+        Ok(matches!(picked, JsValue::Boolean(true)))
+    }
+
     /// Enter in a field (by node id): implicit submission of its form. An
     /// uncancelled `submit` is then in [`Self::take_submit_requests`].
     pub fn implicit_submit(&self, node: usize) -> Result<(), BindingError> {

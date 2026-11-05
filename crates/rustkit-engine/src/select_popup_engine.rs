@@ -1,0 +1,467 @@
+//! The engine side of the `<select>` drop-down (CH2.E6; the model and its
+//! paint are `select_popup`).
+//!
+//! - A click on a focusable drop-down select (no `size` above 1, no
+//!   `multiple`, not disabled), or Space, Alt+Down/Alt+Up or F4 while one
+//!   is focused, opens its popup at the control.
+//! - While it is open the popup owns the pointer, the wheel and the keys:
+//!   the page hears none of them. A move over it highlights the option under
+//!   the pointer; a click on an enabled option picks it; a press anywhere
+//!   else closes it (and its release goes nowhere). Arrow, Page, Home and
+//!   End keys move the highlight, a letter jumps to the next option starting
+//!   with it, Enter, Space or Tab pick the highlighted one, Escape closes.
+//! - While a drop-down is focused and closed, arrow keys, Home, End and
+//!   letters change its value directly, as in Chrome on Windows and Linux.
+//! - A pick goes through script (`DomBindings::pick_option`): selectedness,
+//!   then trusted `input` and `change`. The option's selectedness reaches
+//!   layout and `:checked` through the checkedness side table.
+//!
+//! The popup's commands follow the page's in the view's display list, so
+//! a headless capture shows it and it paints over everything.
+
+use super::*;
+use crate::select_popup::{edge_enabled, next_enabled, typeahead, PopupFont, SelectOption, SelectPopup};
+
+/// Win32 virtual keys, as `handle_text_key` takes them.
+const VK_TAB: u32 = 0x09;
+const VK_ENTER: u32 = 0x0D;
+const VK_ESCAPE: u32 = 0x1B;
+const VK_SPACE: u32 = 0x20;
+const VK_PAGE_UP: u32 = 0x21;
+const VK_PAGE_DOWN: u32 = 0x22;
+const VK_END: u32 = 0x23;
+const VK_HOME: u32 = 0x24;
+const VK_LEFT: u32 = 0x25;
+const VK_UP: u32 = 0x26;
+const VK_RIGHT: u32 = 0x27;
+const VK_DOWN: u32 = 0x28;
+const VK_F4: u32 = 0x73;
+
+/// A key as the popup reads it: the virtual key, else the named key in
+/// `key` (`"ArrowDown"`), else the typed character.
+fn key_of(key_code: u32, key: &str) -> (u32, Option<char>) {
+    if key_code != 0 {
+        return (key_code, None);
+    }
+    let named = match key {
+        "Tab" => VK_TAB,
+        "Enter" => VK_ENTER,
+        "Escape" => VK_ESCAPE,
+        " " | "Spacebar" => VK_SPACE,
+        "PageUp" => VK_PAGE_UP,
+        "PageDown" => VK_PAGE_DOWN,
+        "End" => VK_END,
+        "Home" => VK_HOME,
+        "ArrowLeft" => VK_LEFT,
+        "ArrowUp" => VK_UP,
+        "ArrowRight" => VK_RIGHT,
+        "ArrowDown" => VK_DOWN,
+        "F4" => VK_F4,
+        _ => 0,
+    };
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if named == 0 && !c.is_control() => (0, Some(c)),
+        _ => (named, None),
+    }
+}
+
+/// The first box `node` generated.
+fn box_of(b: &LayoutBox, node: usize) -> Option<&LayoutBox> {
+    if b.node_id == Some(node) {
+        return Some(b);
+    }
+    b.children.iter().find_map(|c| box_of(c, node))
+}
+
+impl Engine {
+    /// Whether a drop-down is open in the view.
+    pub fn select_popup_open(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|v| v.lay.select_popup.borrow().is_some())
+    }
+
+    /// The `<select>` element `raw` as a drop-down that can open: a
+    /// single select shown as a menu list (no `multiple`, `size` 1 or
+    /// absent), not disabled.
+    pub(crate) fn drop_down_select(&self, id: EngineViewId, raw: usize) -> Option<Rc<Node>> {
+        let node = self.node(id, raw)?;
+        let is_select = node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("select"));
+        let size = node.get_attribute("size").and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(0);
+        let ok = is_select
+            && node.get_attribute("multiple").is_none()
+            && size <= 1
+            && !Self::in_disabled_control(node.clone());
+        ok.then_some(node)
+    }
+
+    /// The select's options and the one it shows now.
+    fn select_state(&self, id: EngineViewId, select: &Rc<Node>) -> (Vec<SelectOption>, Option<usize>) {
+        let options = select_popup::options_of(select);
+        let shown = self.views.get(&id).and_then(|view| {
+            let live = view.lay.checked_states.borrow();
+            select_popup::displayed_index(&options, |o| live.get(&o.node).copied().unwrap_or(o.default_selected))
+        });
+        (options, shown)
+    }
+
+    /// Open the drop-down of the select `raw`. Returns false when it is no
+    /// drop-down, has no box or no options.
+    pub(crate) fn open_select_popup(&mut self, id: EngineViewId, raw: usize) -> bool {
+        let Some(select) = self.drop_down_select(id, raw) else {
+            return false;
+        };
+        let (options, shown) = self.select_state(id, &select);
+        if options.is_empty() {
+            return false;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(layout) = view.layout.as_ref() else {
+            return false;
+        };
+        let Some(b) = box_of(layout, raw) else {
+            return false;
+        };
+        let anchor = b.dimensions.border_box();
+        let (w, h) = view
+            .laid_with
+            .as_ref()
+            .map(|with| (with.size.0 as f32, with.size.1 as f32))
+            .unwrap_or((layout.dimensions.border_box().width, anchor.y + anchor.height + 400.0));
+        let visible = Rect::new(view.scroll_offset.0, view.scroll_offset.1, w, h);
+        let font = PopupFont {
+            size: match b.style.font_size {
+                rustkit_css::Length::Px(px) => px,
+                _ => 13.333,
+            },
+            family: b.style.font_family.clone(),
+            weight: b.style.font_weight.0,
+            color: if b.style.color.a > 0.0 { b.style.color } else { rustkit_css::Color::BLACK },
+        };
+        let (family, size, weight) = (font.family.clone(), font.size, b.style.font_weight);
+        let measure = |s: &str| {
+            rustkit_layout::measure_text_advanced(s, &family, size, weight, rustkit_css::FontStyle::Normal).width
+        };
+        let popup = SelectPopup::open(raw, options, shown, anchor, visible, font, measure);
+        debug!(?id, select = raw, rows = popup.rows.len(), "Opened a select popup");
+        *view.lay.select_popup.borrow_mut() = Some(popup);
+        self.repaint_select_popup(id);
+        true
+    }
+
+    /// Close the drop-down, if one is open, without picking.
+    pub fn close_select_popup(&mut self, id: EngineViewId) -> bool {
+        let closed = self
+            .views
+            .get(&id)
+            .and_then(|v| v.lay.select_popup.borrow_mut().take())
+            .is_some();
+        if closed {
+            self.repaint_select_popup(id);
+        }
+        closed
+    }
+
+    /// Close the drop-down and pick the highlighted option.
+    fn commit_select_popup(&mut self, id: EngineViewId) {
+        let popup = self.views.get(&id).and_then(|v| v.lay.select_popup.borrow_mut().take());
+        let Some(popup) = popup else {
+            return;
+        };
+        self.repaint_select_popup(id);
+        if let Some(index) = popup.highlighted {
+            self.pick_select_option(id, popup.select, index);
+        }
+    }
+
+    /// The user picked option `index` of the select `select`: its
+    /// selectedness moves there, the select hears `input` and `change`,
+    /// and what that changed is laid out. Nothing happens for a disabled
+    /// option or the one already selected. Returns whether it changed.
+    pub(crate) fn pick_select_option(&mut self, id: EngineViewId, select: usize, index: usize) -> bool {
+        let Some(node) = self.node(id, select) else {
+            return false;
+        };
+        let (options, shown) = self.select_state(id, &node);
+        let Some(option) = options.get(index) else {
+            return false;
+        };
+        if option.disabled || shown == Some(index) {
+            return false;
+        }
+        let picked = match self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            Some(bindings) => {
+                let _turn = rustkit_js::DiagTurn::enter("live");
+                let armed = arm_live_turn(&self.config, bindings);
+                let picked = bindings.pick_option(select, index).unwrap_or_else(|e| {
+                    debug!(?id, error = %e, "select change listener threw");
+                    true
+                });
+                if let Some(stopped) = end_live_turn(&self.config, armed, bindings, "event:change") {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.script_log.push(stopped);
+                    }
+                }
+                picked
+            }
+            // No script: the side table alone, which layout and `:checked`
+            // read.
+            None => {
+                if let Some(view) = self.views.get(&id) {
+                    let mut live = view.lay.checked_states.borrow_mut();
+                    for (i, o) in options.iter().enumerate() {
+                        live.insert(o.node, i == index);
+                    }
+                }
+                if let Err(e) = self.relayout_for(id, RelayoutCause::Input) {
+                    debug!(?id, error = %e, "relayout after a select pick failed");
+                }
+                true
+            }
+        };
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after a select pick failed");
+        }
+        picked
+    }
+
+    /// Put the popup's commands at the end of the view's display list (or
+    /// take them out when it closed) and present the frame. The page is
+    /// not laid out again.
+    pub(crate) fn repaint_select_popup(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let Some(list) = view.display_list.as_ref() else {
+            return;
+        };
+        let mut list = DisplayList::clone(list);
+        let painted = view.lay.select_popup_painted.get();
+        list.commands.truncate(list.commands.len().saturating_sub(painted));
+        let commands = view.lay.select_popup.borrow().as_ref().map(SelectPopup::commands).unwrap_or_default();
+        view.lay.select_popup_painted.set(commands.len());
+        list.commands.extend(commands);
+        view.display_list = Some(Arc::new(list));
+        view.frame_generation += 1;
+        if let Err(e) = self.render(id) {
+            debug!(?id, error = %e, "render of the select popup failed");
+        }
+    }
+
+    /// Append the popup's commands to a display list just built from a
+    /// layout (none when no popup is open), and note how many there are
+    /// for the next repaint to take off.
+    pub(crate) fn append_select_popup(&self, id: EngineViewId, list: &mut DisplayList) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let commands = view.lay.select_popup.borrow().as_ref().map(SelectPopup::commands).unwrap_or_default();
+        view.lay.select_popup_painted.set(commands.len());
+        list.commands.extend(commands);
+    }
+
+    /// A press at VIEWPORT coordinates while a drop-down is open: the
+    /// popup's. `Some(true)` when it took the press (inside it, or outside,
+    /// which closes it), `None` when no popup is open.
+    pub(crate) fn select_popup_press(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<bool> {
+        let view = self.views.get(&id)?;
+        let (x, y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let inside = view.lay.select_popup.borrow().as_ref()?.contains(x, y);
+        if !inside {
+            // Chrome closes the popup at the press, and the press (and its
+            // release) does nothing else: not even reopen a select clicked
+            // to close it.
+            view.lay.select_popup_release.set(true);
+            self.close_select_popup(id);
+        }
+        Some(true)
+    }
+
+    /// A release at VIEWPORT coordinates while a drop-down is open, or
+    /// after a press closed one: the popup's. `None` when the page should
+    /// have it.
+    pub(crate) fn select_popup_release(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<()> {
+        let view = self.views.get_mut(&id)?;
+        if view.lay.select_popup_release.replace(false) {
+            view.primary_button_down = false;
+            view.press_target = None;
+            return Some(());
+        }
+        let (x, y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let hit = {
+            let popup = view.lay.select_popup.borrow();
+            let popup = popup.as_ref()?;
+            if popup.contains(x, y) {
+                Some(popup.option_at(x, y).filter(|&i| !popup.options[i].disabled))
+            } else {
+                None
+            }
+        };
+        view.primary_button_down = false;
+        view.press_target = None;
+        match hit {
+            // On an enabled option: it is picked.
+            Some(Some(index)) => {
+                if let Some(popup) = view.lay.select_popup.borrow_mut().as_mut() {
+                    popup.highlighted = Some(index);
+                }
+                self.commit_select_popup(id);
+            }
+            // On a group label, a disabled option or the frame: nothing.
+            Some(None) => {}
+            // Outside (a release with no press first): closes.
+            None => {
+                self.close_select_popup(id);
+            }
+        }
+        Some(())
+    }
+
+    /// A pointer move while a drop-down is open: the popup's (the page
+    /// hears nothing). Returns false when no popup is open.
+    pub(crate) fn select_popup_move(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let (x, y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let moved = match view.lay.select_popup.borrow_mut().as_mut() {
+            Some(popup) => popup.hover(x, y),
+            None => return false,
+        };
+        if moved {
+            self.repaint_select_popup(id);
+        }
+        true
+    }
+
+    /// A wheel step while a drop-down is open: over it, its rows scroll;
+    /// elsewhere it closes. `None` when no popup is open.
+    pub(crate) fn select_popup_wheel(&mut self, id: EngineViewId, x: f32, y: f32, delta_y: f32) -> Option<bool> {
+        let view = self.views.get(&id)?;
+        let (px, py) = (x + view.scroll_offset.0, y + view.scroll_offset.1);
+        let moved = {
+            let mut popup = view.lay.select_popup.borrow_mut();
+            let popup = popup.as_mut()?;
+            if !popup.contains(px, py) {
+                None
+            } else {
+                // Wheel sign convention: a negative delta advances.
+                let rows = (-delta_y / popup.row_height).round() as isize;
+                let rows = if rows == 0 && delta_y != 0.0 { -(delta_y.signum() as isize) } else { rows };
+                Some(popup.scroll_rows(rows))
+            }
+        };
+        match moved {
+            Some(moved) => {
+                if moved {
+                    self.repaint_select_popup(id);
+                }
+                Some(moved)
+            }
+            None => Some(self.close_select_popup(id)),
+        }
+    }
+
+    /// A key while a drop-down is open: the popup's (the page hears no
+    /// `keydown`). `None` when no popup is open; else whether anything
+    /// changed.
+    pub(crate) fn select_popup_key(&mut self, id: EngineViewId, key_code: u32, key: &str, alt: bool) -> Option<bool> {
+        let view = self.views.get(&id)?;
+        if view.lay.select_popup.borrow().is_none() {
+            return None;
+        }
+        let (code, typed) = key_of(key_code, key);
+        enum Then {
+            Repaint(bool),
+            Commit,
+            Close,
+        }
+        let then = {
+            let mut popup = view.lay.select_popup.borrow_mut();
+            let popup = popup.as_mut()?;
+            let page = popup.visible_rows.saturating_sub(1).max(1) as isize;
+            let typing = !popup.typed.is_empty()
+                && popup.typed_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1000));
+            match (code, typed) {
+                (VK_UP | VK_DOWN, _) if alt => Then::Commit,
+                (VK_UP, _) => Then::Repaint(popup.step(-1)),
+                (VK_DOWN, _) => Then::Repaint(popup.step(1)),
+                (VK_PAGE_UP, _) => Then::Repaint(popup.step(-page)),
+                (VK_PAGE_DOWN, _) => Then::Repaint(popup.step(page)),
+                (VK_HOME, _) => Then::Repaint(popup.highlight(edge_enabled(&popup.options, false))),
+                (VK_END, _) => Then::Repaint(popup.highlight(edge_enabled(&popup.options, true))),
+                (VK_SPACE, _) if typing => Then::Repaint(popup.type_char(' ', std::time::Instant::now())),
+                (VK_ENTER | VK_SPACE | VK_TAB | VK_F4, _) => Then::Commit,
+                (VK_ESCAPE, _) => Then::Close,
+                (0, Some(c)) => Then::Repaint(popup.type_char(c, std::time::Instant::now())),
+                _ => Then::Repaint(false),
+            }
+        };
+        Some(match then {
+            Then::Repaint(changed) => {
+                if changed {
+                    self.repaint_select_popup(id);
+                }
+                changed
+            }
+            Then::Commit => {
+                self.commit_select_popup(id);
+                true
+            }
+            Then::Close => self.close_select_popup(id),
+        })
+    }
+
+    /// A key at the focused, closed drop-down `select` (after its
+    /// `keydown` went uncancelled): Space, Alt+Down/Up and F4 open it;
+    /// arrows, Home, End and letters pick an option directly. `None` when
+    /// the key is not the select's.
+    pub(crate) fn closed_select_key(
+        &mut self,
+        id: EngineViewId,
+        select: usize,
+        key_code: u32,
+        key: &str,
+        alt: bool,
+    ) -> Option<bool> {
+        let node = self.drop_down_select(id, select)?;
+        let (code, typed) = key_of(key_code, key);
+        let (options, shown) = self.select_state(id, &node);
+        let target = match (code, typed) {
+            (VK_UP | VK_DOWN, _) if alt => return Some(self.open_select_popup(id, select)),
+            (VK_SPACE | VK_F4, _) => return Some(self.open_select_popup(id, select)),
+            (VK_UP | VK_LEFT, _) => next_enabled(&options, shown, -1),
+            (VK_DOWN | VK_RIGHT, _) => next_enabled(&options, shown, 1),
+            (VK_HOME | VK_PAGE_UP, _) => edge_enabled(&options, false),
+            (VK_END | VK_PAGE_DOWN, _) => edge_enabled(&options, true),
+            (0, Some(c)) => typeahead(&options, shown, &c.to_string()),
+            _ => return None,
+        };
+        Some(match target {
+            Some(index) => self.pick_select_option(id, select, index),
+            None => false,
+        })
+    }
+
+    /// After a click's default actions: a click on a drop-down select that
+    /// now has the focus opens it.
+    pub(crate) fn open_select_popup_on_click(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw()) else {
+            return;
+        };
+        let Some(hit) = self
+            .views
+            .get(&id)
+            .and_then(|v| Self::hit_at(v, viewport_x, viewport_y))
+            .and_then(|h| h.node_id)
+        else {
+            return;
+        };
+        // The click was on the select itself (or on something inside it).
+        let on_select = self.element_chain(id, hit).contains(&focused);
+        if on_select && self.drop_down_select(id, focused).is_some() {
+            self.open_select_popup(id, focused);
+        }
+    }
+}

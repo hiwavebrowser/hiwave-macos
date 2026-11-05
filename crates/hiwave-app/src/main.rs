@@ -2243,6 +2243,14 @@ fn main() {
                             let (vk, text) = match &key_event.logical_key {
                                 Key::ArrowLeft => (0x25u32, String::new()),
                                 Key::ArrowRight => (0x27, String::new()),
+                                // A focused `<select>` opens, moves and
+                                // closes its drop-down with these (CH2.E6);
+                                // the native key path already maps them.
+                                Key::ArrowUp => (0x26, String::new()),
+                                Key::ArrowDown => (0x28, String::new()),
+                                Key::PageUp => (0x21, String::new()),
+                                Key::PageDown => (0x22, String::new()),
+                                Key::Escape => (0x1B, String::new()),
                                 Key::Home => (0x24, String::new()),
                                 Key::End => (0x23, String::new()),
                                 Key::Backspace => (0x08, String::new()),

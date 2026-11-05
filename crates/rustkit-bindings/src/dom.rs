@@ -3917,6 +3917,17 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // The user picked an option of a select in its drop-down or with a
+    // key (web_forms.js's pick: selectedness, `input`, `change`). Returns
+    // whether the selection changed.
+    var pickOption = null;
+    Object.defineProperty(Document.prototype, '__rkPickOption', {
+        value: function (id, index) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            return !!(target && pickOption && pickOption(target, index));
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     // Enter in a field (web_forms.js's implicit submission).
     var implicitSubmit = null;
     Object.defineProperty(Document.prototype, '__rkImplicitSubmit', {
@@ -4362,7 +4373,8 @@ const WRAPPERS_JS: &str = r#"
             if (s && s.gen === gen) N.submit(s.gen, s.id, b && b.gen === gen ? b.id : null);
         },
         setActivation: function (f) { activation = f; },
-        setImplicitSubmit: function (f) { implicitSubmit = f; }
+        setImplicitSubmit: function (f) { implicitSubmit = f; },
+        setPickOption: function (f) { pickOption = f; }
     };
     // For web_history.js, which deletes it: script asks for a navigation.
     g.__rkNavInternals = { navigate: function (url, replace) { N.navigate(String(url), !!replace); } };
