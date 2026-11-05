@@ -2407,4 +2407,52 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             .unwrap_or_default();
         assert!(seen.contains("csF"), "the page's keydown listener saw Ctrl+Shift+F: {seen}");
     }
+
+    // The engine's `handle_text_key` fires the DOM keydown itself (fire_key),
+    // and the action then dispatched a synthetic one on top: a page listener
+    // heard every key twice, and a toggle (the chrome's Ctrl+Shift+F focus
+    // mode) switched on and straight off again (chrome board, 2026-11-05).
+    #[test]
+    fn a_key_action_reaches_the_page_listener_once() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             var n = 0;\
+             document.addEventListener('keydown', function(e){ n += 1; document.body.setAttribute('data-n', String(n)); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F3"}]"#).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-n'))")
+            .unwrap_or_default();
+        assert!(seen.contains('1') && !seen.contains('2'), "one keydown per key action: {seen}");
+    }
+
+    // `key` with `text` wrote the string onto the control's value from
+    // script: no keydown, no selection replaced. Playwright types it. The
+    // chrome's address bar selects all on focus, so Chromium showed the typed
+    // URL and RustKit the old one with the typed URL appended (chrome board,
+    // 2026-11-05). Typed text goes through the engine's keyboard, a key at a
+    // time, as a user's does.
+    #[test]
+    fn typed_text_goes_through_the_engines_keyboard_a_key_at_a_time() {
+        let (mut engine, view) = board_view(
+            "<html><body><input id=\"i\" value=\"abc\"><script>\
+             var keys = [];\
+             document.addEventListener('keydown', function(e){ keys.push(e.key); document.body.setAttribute('data-keys', keys.join('')); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"key","selector":"#i","text":"xy"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let keys = engine
+            .execute_script(view, "String(document.body.getAttribute('data-keys'))")
+            .unwrap_or_default();
+        assert!(keys.contains("xy"), "the page heard a keydown per typed character: {keys}");
+        let value = engine
+            .execute_script(view, "String(document.getElementById('i').value)")
+            .unwrap_or_default();
+        assert!(value.contains("abcxy"), "the text landed in the focused control: {value}");
+    }
 }
