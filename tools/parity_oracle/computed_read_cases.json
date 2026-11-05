@@ -260,6 +260,63 @@
     "chrome": "blur(4px)"
    }
   ],
+  "backdrop_filter": [
+   {
+    "prop": "backdrop-filter",
+    "value": "blur(12px)",
+    "chrome": "blur(12px)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "saturate(180%) blur(20px)",
+    "chrome": "saturate(1.8) blur(20px)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "blur(0.25em)",
+    "chrome": "blur(4px)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "brightness(50%) contrast(2)",
+    "chrome": "brightness(0.5) contrast(2)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "opacity(.5)",
+    "chrome": "opacity(0.5)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "grayscale()",
+    "chrome": "grayscale(1)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "blur()",
+    "chrome": "blur(0px)"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "none",
+    "chrome": "none"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "",
+    "chrome": "none"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "blur(2px) foo(1)",
+    "chrome": "none"
+   },
+   {
+    "prop": "backdrop-filter",
+    "value": "blur(-1px)",
+    "chrome": "none"
+   }
+  ],
   "box_shadow": [
    {
     "prop": "box-shadow",

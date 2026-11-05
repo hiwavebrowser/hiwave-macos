@@ -610,6 +610,8 @@ mod flex_shorthand_tests;
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod backdrop_filter_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
