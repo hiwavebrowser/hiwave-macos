@@ -87,6 +87,8 @@ mod forced_layout_budget_tests;
 #[cfg(test)]
 mod range_tests;
 #[cfg(test)]
+mod selection_tests;
+#[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
 mod observers_tests;
@@ -2023,6 +2025,36 @@ impl DomBindings {
         match self.evaluate("document.__rkTakeFocus()") {
             Ok(JsValue::Number(n)) if n >= 0.0 => Some(Some(n as usize)),
             Ok(JsValue::Number(_)) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// The user moved the document selection (a drag, a double-click):
+    /// `Some((anchor, anchor_offset, focus, focus_offset))` by node id and
+    /// UTF-16 offset, or `None` to clear it. Script sees it through
+    /// `getSelection()` and hears `selectionchange`; the move is not echoed
+    /// back by [`Self::take_selection_change`].
+    pub fn set_selection(&self, ends: Option<(usize, usize, usize, usize)>) -> Result<(), BindingError> {
+        let call = match ends {
+            Some((a, ao, f, fo)) => format!("document.__rkSetSelection({a}, {ao}, {f}, {fo});"),
+            None => "document.__rkSetSelection(null, 0, null, 0);".to_string(),
+        };
+        self.runtime.borrow_mut().evaluate_script(&call)?;
+        Ok(())
+    }
+
+    /// The document selection, when script changed it since the last call
+    /// (or since [`Self::set_selection`]): `Some(Some(ends))` as in
+    /// `set_selection`, `Some(None)` for no selection, `None` when it has
+    /// not changed.
+    #[allow(clippy::type_complexity)]
+    pub fn take_selection_change(&self) -> Option<Option<(usize, usize, usize, usize)>> {
+        match self.evaluate("document.__rkTakeSelection ? document.__rkTakeSelection() : null") {
+            Ok(JsValue::String(s)) if s.is_empty() => Some(None),
+            Ok(JsValue::String(s)) => {
+                let n: Vec<usize> = s.split(' ').filter_map(|p| p.parse().ok()).collect();
+                (n.len() == 4).then(|| Some((n[0], n[1], n[2], n[3])))
+            }
             _ => None,
         }
     }

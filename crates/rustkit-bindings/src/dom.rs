@@ -3750,6 +3750,245 @@ const WRAPPERS_JS: &str = r#"
     Document.prototype.createRange = function () {
         return makeRange(this.nodeType === 9 ? this : g.document);
     };
+    // Range stringifier (DOM §5.5): the data of the Text nodes the range
+    // contains, the partial ends included.
+    function nextInTree(n) {
+        if (n.firstChild) return n.firstChild;
+        return nextSkipping(n);
+    }
+    function nextSkipping(n) {
+        while (n) {
+            if (n.nextSibling) return n.nextSibling;
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function rangeText(r) {
+        var s = r.start, e = r.end;
+        if (s.node === e.node && s.node.nodeType === 3) return s.node.data.slice(s.offset, e.offset);
+        var out = s.node.nodeType === 3 ? s.node.data.slice(s.offset) : '';
+        var n = s.node.nodeType === 3 ? nextSkipping(s.node)
+              : (s.offset < s.node.childNodes.length ? s.node.childNodes[s.offset] : nextSkipping(s.node));
+        while (n) {
+            if (n === e.node) {
+                if (n.nodeType === 3) {
+                    out += n.data.slice(0, e.offset);
+                    break;
+                }
+                n = nextInTree(n);
+                continue;
+            }
+            var p = n.parentNode;
+            if (!p || !pointBefore({ node: p, offset: childIndex(p, n) }, e)) break;
+            if (n.nodeType === 3) out += n.data;
+            n = nextInTree(n);
+        }
+        return out;
+    }
+    Range.prototype.toString = function () { return rangeText(slots(this, 'toString')); };
+    // The rect of a range: the union of the boxes of the elements its ends
+    // sit in (no per-character geometry reaches script yet).
+    Range.prototype.getBoundingClientRect = function () {
+        var r = slots(this, 'getBoundingClientRect');
+        function box(node) {
+            var el = node.nodeType === 1 ? node : node.parentElement;
+            return el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        }
+        var a = box(r.start.node), b = r.end.node === r.start.node ? a : box(r.end.node);
+        if (!a) a = b;
+        if (!b) b = a;
+        if (!a) return g.DOMRect ? new g.DOMRect(0, 0, 0, 0) : { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+        var left = Math.min(a.left, b.left), top = Math.min(a.top, b.top);
+        var right = Math.max(a.right, b.right), bottom = Math.max(a.bottom, b.bottom);
+        return g.DOMRect ? new g.DOMRect(left, top, right - left, bottom - top)
+            : { x: left, y: top, width: right - left, height: bottom - top, top: top, left: left, right: right, bottom: bottom };
+    };
+    Range.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
+    Range.prototype.cloneRange = function () {
+        var r = slots(this, 'cloneRange');
+        var made = makeRange(g.document);
+        made[RANGE].start = { node: r.start.node, offset: r.start.offset };
+        made[RANGE].end = { node: r.end.node, offset: r.end.offset };
+        return made;
+    };
+    if (!Range.prototype.setStartBefore) {
+        Range.prototype.setStartBefore = function (n) { this.setStart(n.parentNode, childIndex(n.parentNode, n)); };
+        Range.prototype.setStartAfter = function (n) { this.setStart(n.parentNode, childIndex(n.parentNode, n) + 1); };
+        Range.prototype.setEndBefore = function (n) { this.setEnd(n.parentNode, childIndex(n.parentNode, n)); };
+        Range.prototype.setEndAfter = function (n) { this.setEnd(n.parentNode, childIndex(n.parentNode, n) + 1); };
+    }
+    Range.prototype.detach = function () {};
+
+    // The document's selection (Selection API §2): at most one range, and a
+    // direction that says which end is the anchor. The engine paints it and
+    // moves it with the mouse: `__rkSetSelection` is how a drag reaches
+    // script, `__rkTakeSelection` how a script's change reaches the engine.
+    var SELN = { range: null, backward: false, gen: -1, sent: '', pending: false };
+    function selRange() {
+        if (SELN.gen !== gen) {
+            SELN.range = null;
+            SELN.gen = gen;
+        }
+        return SELN.range;
+    }
+    function selectionChanged() {
+        if (SELN.pending) return;
+        SELN.pending = true;
+        Promise.resolve().then(function () {
+            SELN.pending = false;
+            if (!g.Event) return;
+            g.document.dispatchEvent(new g.Event('selectionchange', { bubbles: false, cancelable: false }));
+        });
+    }
+    function setSel(anchor, focus) {
+        selRange();
+        if (!anchor) {
+            if (!SELN.range) return;
+            SELN.range = null;
+            SELN.backward = false;
+            selectionChanged();
+            return;
+        }
+        var backward = pointBefore(focus, anchor);
+        var range = makeRange(g.document);
+        range[RANGE].start = backward ? focus : anchor;
+        range[RANGE].end = backward ? anchor : focus;
+        SELN.range = range;
+        SELN.backward = backward;
+        selectionChanged();
+    }
+    function selEnds() {
+        var r = selRange();
+        if (!r) return null;
+        var s = r[RANGE];
+        return SELN.backward ? { anchor: s.end, focus: s.start } : { anchor: s.start, focus: s.end };
+    }
+    function Selection() { throw new TypeError('Illegal constructor'); }
+    var selection = Object.create(Selection.prototype);
+    Object.defineProperty(Selection.prototype, Symbol.toStringTag, { value: 'Selection' });
+    g.Selection = Selection;
+    getter(Selection.prototype, 'anchorNode', function () { var e = selEnds(); return e ? e.anchor.node : null; });
+    getter(Selection.prototype, 'anchorOffset', function () { var e = selEnds(); return e ? e.anchor.offset : 0; });
+    getter(Selection.prototype, 'focusNode', function () { var e = selEnds(); return e ? e.focus.node : null; });
+    getter(Selection.prototype, 'focusOffset', function () { var e = selEnds(); return e ? e.focus.offset : 0; });
+    getter(Selection.prototype, 'isCollapsed', function () { var r = selRange(); return !r || r.collapsed; });
+    getter(Selection.prototype, 'rangeCount', function () { return selRange() ? 1 : 0; });
+    getter(Selection.prototype, 'type', function () {
+        var r = selRange();
+        return !r ? 'None' : r.collapsed ? 'Caret' : 'Range';
+    });
+    getter(Selection.prototype, 'direction', function () {
+        var r = selRange();
+        return !r || r.collapsed ? 'none' : SELN.backward ? 'backward' : 'forward';
+    });
+    Selection.prototype.getRangeAt = function (i) {
+        var r = selRange();
+        if (!r || Number(i) !== 0) {
+            throw new DOMException("Failed to execute 'getRangeAt' on 'Selection': " + i + " is not a valid index.", 'IndexSizeError');
+        }
+        return r;
+    };
+    Selection.prototype.addRange = function (range) {
+        slots(range, 'addRange');
+        if (selRange()) return;
+        SELN.range = range;
+        SELN.backward = false;
+        selectionChanged();
+    };
+    Selection.prototype.removeRange = function (range) {
+        if (selRange() !== range) {
+            throw new DOMException("Failed to execute 'removeRange' on 'Selection': The given range isn't in document.", 'NotFoundError');
+        }
+        setSel(null);
+    };
+    Selection.prototype.removeAllRanges = function () { setSel(null); };
+    Selection.prototype.empty = Selection.prototype.removeAllRanges;
+    Selection.prototype.collapse = function (node, offset) {
+        if (node == null) return setSel(null);
+        var p = rangeBoundary(node, offset || 0, 'collapse');
+        setSel(p, { node: p.node, offset: p.offset });
+    };
+    Selection.prototype.setPosition = Selection.prototype.collapse;
+    Selection.prototype.collapseToStart = function () {
+        var r = selRange();
+        if (!r) throw new DOMException("Failed to execute 'collapseToStart' on 'Selection': there is no selection.", 'InvalidStateError');
+        var s = r[RANGE].start;
+        setSel({ node: s.node, offset: s.offset }, { node: s.node, offset: s.offset });
+    };
+    Selection.prototype.collapseToEnd = function () {
+        var r = selRange();
+        if (!r) throw new DOMException("Failed to execute 'collapseToEnd' on 'Selection': there is no selection.", 'InvalidStateError');
+        var e = r[RANGE].end;
+        setSel({ node: e.node, offset: e.offset }, { node: e.node, offset: e.offset });
+    };
+    Selection.prototype.extend = function (node, offset) {
+        var ends = selEnds();
+        if (!ends) throw new DOMException("Failed to execute 'extend' on 'Selection': This Selection object doesn't have any Ranges.", 'InvalidStateError');
+        var p = rangeBoundary(node, offset || 0, 'extend');
+        setSel({ node: ends.anchor.node, offset: ends.anchor.offset }, p);
+    };
+    Selection.prototype.setBaseAndExtent = function (an, ao, fn, fo) {
+        var a = rangeBoundary(an, ao, 'setBaseAndExtent');
+        var f = rangeBoundary(fn, fo, 'setBaseAndExtent');
+        setSel(a, f);
+    };
+    Selection.prototype.selectAllChildren = function (node) {
+        var a = rangeBoundary(node, 0, 'selectAllChildren');
+        setSel(a, { node: node, offset: node.childNodes.length });
+    };
+    Selection.prototype.deleteFromDocument = function () {
+        var r = selRange();
+        if (r) {
+            r.deleteContents();
+            selectionChanged();
+        }
+    };
+    Selection.prototype.containsNode = function (node, partly) {
+        var r = selRange();
+        if (!r || !node || !node.parentNode) return false;
+        var s = r[RANGE];
+        var at = { node: node.parentNode, offset: childIndex(node.parentNode, node) };
+        var after = { node: node.parentNode, offset: at.offset + 1 };
+        if (partly) return pointBefore(at, s.end) && pointBefore(s.start, after);
+        return !pointBefore(at, s.start) && !pointBefore(s.end, after);
+    };
+    Selection.prototype.modify = function () {};
+    Selection.prototype.toString = function () {
+        var r = selRange();
+        return r ? rangeText(r[RANGE]) : '';
+    };
+    g.getSelection = function () { return selection; };
+    Document.prototype.getSelection = function () { return selection; };
+    // The engine moved the selection (a drag, a double-click): ids and
+    // UTF-16 offsets, or null to clear it.
+    Object.defineProperty(Document.prototype, '__rkSetSelection', {
+        value: function (aId, aOff, fId, fOff) {
+            var a = typeof aId === 'number' ? wrap(aId) : null;
+            var f = typeof fId === 'number' ? wrap(fId) : null;
+            if (!a || !f) setSel(null);
+            else setSel({ node: a, offset: Math.min(aOff, nodeLength(a)) }, { node: f, offset: Math.min(fOff, nodeLength(f)) });
+            SELN.sent = selKey();
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+    function selKey() {
+        var e = selEnds();
+        if (!e) return '';
+        var a = e.anchor.node[SLOT], f = e.focus.node[SLOT];
+        if (!a || !f || a.gen !== gen || f.gen !== gen) return '';
+        return a.id + ' ' + e.anchor.offset + ' ' + f.id + ' ' + e.focus.offset;
+    }
+    // The selection as the engine last heard it changed: null when it did
+    // not, else '' (none) or "anchorId anchorOffset focusId focusOffset".
+    Object.defineProperty(Document.prototype, '__rkTakeSelection', {
+        value: function () {
+            var key = selKey();
+            if (key === SELN.sent) return null;
+            SELN.sent = key;
+            return key;
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     function pointHit(x, y, method) {
         x = Number(x);
         y = Number(y);
