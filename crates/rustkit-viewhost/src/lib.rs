@@ -37,7 +37,7 @@ pub use input_queue::{
     drain_input, drain_input_view, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
     PendingScroll, PointerInput,
 };
-pub use region::{compose_region, region_contains, RegionRect};
+pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
 #[cfg(windows)]

@@ -74,6 +74,35 @@ pub fn region_contains(region: &[RegionRect], x: f64, y: f64) -> bool {
     region.iter().any(|r| r.contains(x, y))
 }
 
+
+/// The region of a view whose overlays come from its own frames
+/// (CH3.A3b): the layout gives the size and the hole, each presented frame
+/// gives the boxes it paints over the hole. Stub.
+#[derive(Debug, Default)]
+pub struct FrameRegion {
+    overlays: Vec<RegionRect>,
+}
+
+impl FrameRegion {
+    pub fn lay_out(&mut self, _width: f64, _height: f64, _hole: Option<RegionRect>) {}
+
+    pub fn hole(&self) -> Option<RegionRect> {
+        None
+    }
+
+    pub fn present(
+        &mut self,
+        _frame: u64,
+        _overlays: impl FnOnce(RegionRect) -> Vec<RegionRect>,
+    ) -> Option<Vec<RegionRect>> {
+        None
+    }
+
+    pub fn overlays(&self) -> &[RegionRect] {
+        &self.overlays
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +181,62 @@ mod tests {
     fn a_hole_that_covers_the_view_leaves_only_the_overlays() {
         let region = compose_region(400.0, 300.0, Some(r(-10.0, -10.0, 500.0, 500.0)), &[r(10.0, 10.0, 20.0, 20.0)]);
         assert_eq!(region, vec![r(10.0, 10.0, 20.0, 20.0)]);
+    }
+
+    // CH3.A3b: the region follows the frames as they are presented.
+
+    #[test]
+    fn a_presented_frame_brings_its_overlays_into_the_region_in_the_same_call() {
+        let mut fr = FrameRegion::default();
+        fr.lay_out(1280.0, 800.0, Some(HOLE));
+        let menu = r(600.0, 104.0, 194.0, 100.0);
+        let region = fr.present(7, |hole| {
+            assert_eq!(hole, HOLE, "the overlays are derived against the current hole");
+            vec![menu]
+        });
+        let region = region.expect("a new frame changes the region now, not on a later message");
+        assert!(region_contains(&region, 650.0, 150.0), "the menu over the page");
+        assert!(!region_contains(&region, 650.0, 300.0), "the page below it");
+        assert_eq!(fr.overlays(), &[menu]);
+    }
+
+    #[test]
+    fn the_frame_already_applied_is_not_derived_again() {
+        let mut fr = FrameRegion::default();
+        fr.lay_out(1280.0, 800.0, Some(HOLE));
+        assert!(fr.present(7, |_| vec![]).is_some());
+        assert!(fr.present(7, |_| panic!("derived twice")).is_none());
+    }
+
+    #[test]
+    fn a_frame_that_closes_the_menu_takes_it_out_of_the_region() {
+        let mut fr = FrameRegion::default();
+        fr.lay_out(1280.0, 800.0, Some(HOLE));
+        fr.present(7, |_| vec![r(600.0, 104.0, 194.0, 100.0)]);
+        let region = fr.present(8, |_| vec![]).expect("frame 8");
+        assert!(!region_contains(&region, 650.0, 150.0));
+        assert!(fr.overlays().is_empty());
+    }
+
+    #[test]
+    fn a_new_layout_derives_the_frame_on_screen_again_against_the_new_hole() {
+        let mut fr = FrameRegion::default();
+        fr.lay_out(1280.0, 800.0, Some(HOLE));
+        fr.present(7, |_| vec![]);
+        let narrower = r(220.0, 104.0, 760.0, 696.0);
+        fr.lay_out(1280.0, 800.0, Some(narrower));
+        assert_eq!(fr.hole(), Some(narrower));
+        let region = fr.present(7, |hole| {
+            assert_eq!(hole, narrower);
+            vec![]
+        });
+        let region = region.expect("the same frame, a new hole: derived again");
+        assert!(region_contains(&region, 1100.0, 400.0), "the right sidebar is the chrome's");
+    }
+
+    #[test]
+    fn no_region_before_the_first_layout() {
+        let mut fr = FrameRegion::default();
+        assert!(fr.present(1, |_| panic!("no hole to derive against")).is_none());
     }
 }

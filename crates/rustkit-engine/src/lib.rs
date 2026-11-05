@@ -304,6 +304,10 @@ mod restyle_invalidation;
 mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
+mod painted_region;
+pub use painted_region::painted_boxes;
+#[cfg(test)]
+mod painted_region_tests;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use presenter::WindowSurface;
 mod page_protocol;
