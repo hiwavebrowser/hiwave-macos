@@ -89,6 +89,10 @@ pub struct RustKitView {
     /// The view's region when it is stacked over another view (CH3.A3b,
     /// the RustKit chrome over the page): `None` for every other view.
     region: RefCell<Option<rustkit_viewhost::FrameRegion>>,
+    /// Drawn as a transparent surface (CH3.A3c): its region is a hit
+    /// region only, so a frame with an open drop-down can make the whole
+    /// view hit without covering the page (CH2.E6b).
+    transparent: Cell<bool>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
@@ -376,6 +380,7 @@ impl RustKitView {
             script_nav: RefCell::new(None),
             latest_commit: RefCell::new(None),
             region: RefCell::new(None),
+            transparent: Cell::new(false),
             view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
@@ -1414,6 +1419,7 @@ impl RustKitView {
     /// region only, not a mask, so its pixels decide what covers the view
     /// below. The frame on screen is drawn again at once.
     pub fn set_transparent(&self, transparent: bool) {
+        self.transparent.set(transparent);
         if let Some(surface) = &self.surface {
             if let Err(error) = surface.borrow_mut().set_transparent(transparent) {
                 warn!(%error, "transparent surface not cleared");
@@ -1439,7 +1445,12 @@ impl RustKitView {
         };
         let before = region.overlays().to_vec();
         let frame = commit.generation ^ (commit.nav_generation << 40);
-        let next = region.present(frame, false, |hole| {
+        // An open `<select>` drop-down takes every press (CH2.E6b): the
+        // whole view is hit while it is open. Only on the alpha route, where
+        // the region is not a mask: an opaque chrome masked to the whole
+        // window would hide the page.
+        let modal = commit.modal_popup && self.transparent.get();
+        let next = region.present(frame, modal, |hole| {
             let Some(list) = commit.list.as_deref() else {
                 return Vec::new();
             };

@@ -31,7 +31,6 @@ const GROUP_INSET: f32 = 12.0;
 /// Width kept for the scrollbar when the list scrolls.
 const SCROLLBAR_WIDTH: f32 = 8.0;
 
-const POPUP_BACKGROUND: Color = Color { r: 255, g: 255, b: 255, a: 1.0 };
 const POPUP_BORDER: Color = Color { r: 118, g: 118, b: 118, a: 1.0 };
 /// The highlighted row (pointer or keyboard), as Chromium's popup paints
 /// it: the system highlight with white text.
@@ -436,7 +435,7 @@ impl SelectPopup {
                 border_radius: Default::default(),
                 inset: false,
             },
-            DisplayCommand::FillRect { rect: self.rect, color: POPUP_BACKGROUND },
+            DisplayCommand::FillRect { rect: self.rect, color: self.font.background },
             DisplayCommand::Border {
                 color: POPUP_BORDER,
                 rect: self.rect,

@@ -111,7 +111,9 @@ impl FrameRegion {
     /// Frame `frame` is being presented. For a frame not yet applied,
     /// `overlays(hole)` gives the boxes it paints over the hole, and the
     /// region to apply now is returned; `None` when the region stands (the
-    /// same frame, or no layout yet).
+    /// same frame, or no layout yet). A `modal` frame (an open drop-down
+    /// that takes every press) is hit over the whole view; its overlays
+    /// are still derived and reported.
     pub fn present(
         &mut self,
         frame: u64,
@@ -124,6 +126,11 @@ impl FrameRegion {
         }
         self.overlays = overlays(hole);
         self.applied = Some(frame);
+        if modal {
+            // A modal popup (an open `<select>` drop-down, CH2.E6b) takes
+            // every press: the view is hit everywhere until it closes.
+            return Some(compose_region(self.size.0, self.size.1, None, &[]));
+        }
         Some(compose_region(self.size.0, self.size.1, Some(hole), &self.overlays))
     }
 

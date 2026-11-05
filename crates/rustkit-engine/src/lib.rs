@@ -20453,8 +20453,7 @@ impl Engine {
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
                 input: view.input_pending.take(),
                 canvas,
-                // Stub (red): not reported yet.
-                modal_popup: false,
+                modal_popup: view.lay.select_popup.borrow().is_some(),
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };
