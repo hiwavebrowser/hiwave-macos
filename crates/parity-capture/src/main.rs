@@ -103,10 +103,12 @@ struct Args {
     #[arg(long)]
     interrupt_scripts: bool,
 
-    /// After a URL load, turn the live loop as the app does for this many
-    /// milliseconds of real time (timers, script requests, relayouts) and
-    /// report what the turns did as `live_stats`. Off by default; a frame
-    /// taken with it is not comparable with the board.
+    /// After the load, turn the live loop as the app does for this many
+    /// milliseconds of real time (timers, animation frames, observers,
+    /// script requests, relayouts) and report what the turns did as
+    /// `live_stats`. With `--html-file` it also runs the file's scripts, as
+    /// `--run-inline-scripts` does. Off by default; a frame taken with it
+    /// is not comparable with the board.
     #[arg(long)]
     live_ms: Option<u64>,
 
@@ -678,7 +680,9 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     let mut builder = EngineBuilder::new()
         .with_config(capture_config(args, replay_proxy))
         .user_agent(user_agent)
-        .javascript_enabled(url.is_some() || args.actions.is_some() || args.run_inline_scripts);
+        .javascript_enabled(
+            url.is_some() || args.actions.is_some() || args.run_inline_scripts || args.live_ms.is_some(),
+        );
     if let Some(interceptor) = shield_interceptor(args) {
         builder = builder.request_interceptor(interceptor);
     }
@@ -764,6 +768,20 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
                     format!("Inline script failed: {} {:?}", failed.source, failed.outcome),
                 );
             }
+        }
+        // `load_html` runs no timer horizon: what a file page does after its
+        // inline scripts (a `setTimeout`, an animation frame, a
+        // ResizeObserver callback) runs only in the live loop, the one a URL
+        // capture turns (T21).
+        if let Some(live_ms) = args.live_ms {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
+            };
+            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
         }
     }
 
