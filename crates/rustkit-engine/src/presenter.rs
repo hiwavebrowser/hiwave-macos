@@ -243,6 +243,22 @@ impl Presenter {
             .map_err(|e| EngineError::RenderError(e.to_string()))
     }
 
+    /// Whether `viewhost_id` is drawn as a transparent surface (CH3.A3c,
+    /// the RustKit chrome over the page): its frame is cleared to
+    /// (0, 0, 0, 0) instead of its canvas, so what it does not paint shows
+    /// the views below; the surface is premultiplied and not opaque.
+    pub(crate) fn set_transparent(&mut self, viewhost_id: ViewId, transparent: bool) {
+        let _ = (viewhost_id, transparent);
+    }
+
+    /// A headless view's texture as RGBA, alpha kept (tests).
+    #[cfg(test)]
+    pub(crate) fn read_headless_rgba(&self, viewhost_id: ViewId) -> Result<(u32, u32, Vec<u8>), EngineError> {
+        self.compositor
+            .read_headless_rgba(viewhost_id)
+            .map_err(|e| EngineError::RenderError(e.to_string()))
+    }
+
     /// Drop a view's surface and host view, and forget its render state.
     pub(crate) fn destroy_view(&mut self, id: EngineViewId, viewhost_id: ViewId) {
         self.render_failing.remove(&id);

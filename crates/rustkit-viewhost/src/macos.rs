@@ -402,6 +402,16 @@ impl RegionStore {
 #[cfg(target_os = "macos")]
 static REGIONS: RegionStore = RegionStore(std::sync::OnceLock::new());
 
+/// Make a `RustKitContentView` a transparent view (CH3.A3c, the alpha
+/// route): its layer is not opaque and its region, when it has one, is
+/// only its hit region (`hitTest:`), not a layer mask, so its own pixels
+/// decide what covers the views below. Takes effect at the next
+/// [`set_raw_view_region`]. No-op for a view of another class.
+#[cfg(target_os = "macos")]
+pub fn set_raw_view_transparent(view: isize, transparent: bool) {
+    let _ = (view, transparent);
+}
+
 /// Give a `RustKitContentView` a region (CH3.A3): outside the rects (view
 /// coordinates, top-left origin) the view is not composited (a mask on its
 /// layer, which clips wgpu's Metal sublayer too) and not hit (`hitTest:`

@@ -613,6 +613,74 @@ impl Compositor {
         Ok(view)
     }
 
+    /// A headless view's texture as it stands, read back as RGBA rows
+    /// (`width * height * 4` bytes, no padding), alpha kept: what a
+    /// transparent view's frame holds (CH3.A3c). The channels are the
+    /// texture's own, so a premultiplied frame reads back premultiplied.
+    pub fn read_headless_rgba(&self, view_id: ViewId) -> Result<(u32, u32, Vec<u8>), CompositorError> {
+        let headless = self.headless_textures.read().unwrap();
+        let state = headless
+            .get(&view_id)
+            .ok_or(CompositorError::SurfaceNotFound(view_id))?;
+        let (width, height) = (state.width, state.height);
+        let padded = (width * 4 + 255) & !255;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Headless RGBA Readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Headless RGBA Readback") });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &state.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|e| CompositorError::Render(format!("Failed to receive map result: {}", e)))?
+            .map_err(|e| CompositorError::Render(format!("Failed to map buffer: {:?}", e)))?;
+        let bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let data = slice.get_mapped_range();
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let row = &data[(y * padded) as usize..(y * padded + width * 4) as usize];
+            for px in row.chunks_exact(4) {
+                if bgra {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                } else {
+                    rgba.extend_from_slice(px);
+                }
+            }
+        }
+        drop(data);
+        staging.unmap();
+        Ok((width, height, rgba))
+    }
+
     /// Present a surface texture.
     pub fn present(&self, output: wgpu::SurfaceTexture) {
         trace!("Presenting surface texture");

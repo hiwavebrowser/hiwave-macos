@@ -71,3 +71,7 @@ harness = false
 [[test]]
 name = "macos_input_order"
 harness = false
+
+[[test]]
+name = "macos_transparent_region"
+harness = false
