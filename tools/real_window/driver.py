@@ -1447,7 +1447,7 @@ class Driver:
         return self.app.state_file.parent / "settings.json"
 
     def a4_settings(self):
-        """CH3.A4: flag on, the settings window's page is a RustKit view: the sidebar's button opens it, it shows the saved settings, a changed setting is saved to settings.json, Escape closes it."""
+        """CH3.A4: flag on, the settings window's page is a RustKit view: the sidebar's button opens it, it shows the saved settings, takes clicks, the wheel and typing, saves a focus-blocklist domain to focus_mode.json, posts save_settings and shows the reply, and Escape closes it."""
         c = "a4_settings"
         if not self.a4_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A4_SETTINGS_BTN_JS}):
             return
