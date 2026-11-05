@@ -71,7 +71,17 @@ impl Engine {
                 match tag.as_deref() {
                     Some("img") => return Some(n.id.raw()),
                     Some("a") if n.get_attribute("href").is_some() => return Some(n.id.raw()),
+                    // A press in a text control or an editing host selects
+                    // text there, as in Chrome: it does not drag the row
+                    // around it.
+                    Some("input" | "textarea" | "select") => return None,
                     _ => {}
+                }
+                let editable = n
+                    .get_attribute("contenteditable")
+                    .map(|v| v.trim().to_ascii_lowercase());
+                if matches!(editable.as_deref(), Some("" | "true" | "plaintext-only")) {
+                    return None;
                 }
             }
             node = n.parent();
@@ -263,6 +273,35 @@ impl Engine {
             focused: self.focused_tag(id),
             navigate: None,
         })
+    }
+
+    /// End the drag in progress without a drop: the current target hears
+    /// `dragleave` and the source `dragend` with `dropEffect` `none`. For
+    /// a release the engine will never see (the view lost focus, the host
+    /// saw the button come up elsewhere), so the page does not stay in a
+    /// drag. Does nothing when no drag is running; a pending candidate is
+    /// dropped either way.
+    pub fn cancel_drag(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        view.drag.candidate = None;
+        let Some(drag) = view.drag.active.take() else {
+            return;
+        };
+        let (x, y) = view.pointer_at.unwrap_or((0.0, 0.0));
+        view.primary_button_down = false;
+        view.press_target = None;
+        view.press_settled_focus = false;
+        view.compat_mouse_suppressed = false;
+        let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
+        view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+        if let Some(current) = drag.current {
+            self.fire_drag(id, current, "dragleave", x, y, "none", None);
+        }
+        self.fire_drag(id, drag.source, "dragend", x, y, "none", None);
+        self.flush_drag_writes(id);
+        self.settle_pointer_restyle(id);
     }
 
     /// The pointer left the view during a drag: the current target hears

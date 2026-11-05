@@ -253,7 +253,11 @@ fn a_link_is_draggable_by_default_and_its_drag_follows_nothing() {
 #[test]
 fn an_element_made_draggable_by_script_drags() {
     let (mut engine, id) = page();
-    js(&mut engine, id, "document.getElementById('plain').draggable = true; ''");
+    js(
+        &mut engine,
+        id,
+        "document.getElementById('plain').draggable = true; ''",
+    );
     down(&mut engine, id, PLAIN);
     move_to(&mut engine, id, (10.0, 70.0));
     move_to(&mut engine, id, ZONE);
@@ -265,4 +269,49 @@ fn an_element_made_draggable_by_script_drags() {
     );
     // #plain put no data in: the drop reads an empty string.
     assert_eq!(js(&mut engine, id, "dropped"), "");
+}
+
+/// A drag whose release the engine never sees (the view lost focus) is
+/// ended without a drop, and the page hears plain mouse events again.
+#[test]
+fn a_cancelled_drag_ends_without_a_drop_and_moves_resume() {
+    let (mut engine, id) = page();
+    down(&mut engine, id, SRC);
+    move_to(&mut engine, id, (10.0, 30.0));
+    move_to(&mut engine, id, ZONE);
+    taken(&mut engine, id);
+    engine.cancel_drag(id);
+    assert_eq!(taken(&mut engine, id), "dragleave:zone dragend:src:none");
+    assert_eq!(js(&mut engine, id, "String(window.dropped)"), "undefined");
+    move_to(&mut engine, id, (10.0, 105.0));
+    assert_eq!(taken(&mut engine, id), "mousemove:zone");
+    // Nothing to cancel: no event.
+    engine.cancel_drag(id);
+    assert_eq!(taken(&mut engine, id), "");
+}
+
+/// A press in a text field inside a draggable row selects text there; it
+/// does not drag the row (Chrome).
+#[test]
+fn a_press_in_a_text_field_inside_a_draggable_row_does_not_drag_it() {
+    let (mut engine, id) = page();
+    js(
+        &mut engine,
+        id,
+        "var f = document.createElement('input'); f.id = 'field'; \
+         f.style.cssText = 'display:block;width:200px;height:30px;margin:0;padding:0;border:0'; \
+         var e = document.createElement('div'); e.id = 'edit'; e.setAttribute('contenteditable', ''); \
+         e.textContent = 'editable'; e.style.height = '30px'; \
+         var row = document.getElementById('src'); row.textContent = ''; \
+         row.style.height = '60px'; row.appendChild(f); row.appendChild(e); ''",
+    );
+    for (at, target) in [((10.0, 15.0), "field"), ((10.0, 45.0), "edit")] {
+        down(&mut engine, id, at);
+        move_to(&mut engine, id, (at.0 + 20.0, at.1));
+        up(&mut engine, id, (at.0 + 20.0, at.1));
+        assert_eq!(
+            taken(&mut engine, id),
+            format!("mousemove:{target} mouseup:{target} click:{target}")
+        );
+    }
 }

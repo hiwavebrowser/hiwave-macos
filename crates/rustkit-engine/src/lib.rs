@@ -19611,12 +19611,15 @@ impl Engine {
             ViewEvent::Blurred {
                 view_id: viewhost_id,
             } => {
-                if let Some(view) = self
+                if let Some((id, view)) = self
                     .views
-                    .values_mut()
-                    .find(|v| v.viewhost_id == viewhost_id)
+                    .iter_mut()
+                    .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = false;
+                    // A drag whose release went to another window ends here.
+                    let id = *id;
+                    self.cancel_drag(id);
                 }
             }
             ViewEvent::Input {
