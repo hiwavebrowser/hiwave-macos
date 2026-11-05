@@ -1052,6 +1052,249 @@ fn handle_chrome_ipc(
     }
 }
 
+/// The shelf's `window.ipc` messages (the command palette at the bottom).
+/// A function, not the handler closure, so the RustKit shelf (CH3.A4) can
+/// feed it the same messages.
+fn handle_shelf_ipc(
+    body: &str,
+    shelf_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    shelf_state: &Arc<Mutex<AppState>>,
+) {
+    info!("Shelf IPC: {}", body);
+
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg) => {
+            match &msg {
+                IpcMessage::CollapseShelf => {
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+                }
+                IpcMessage::SearchCommands { ref query } => {
+                    let _q = query.clone();
+                    let response = ipc::commands::handle_message(shelf_state, msg);
+                    if let ipc::IpcResponse::Success { data } = response {
+                        let json = serde_json::to_string(&data)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let _ = shelf_proxy.send_event(UserEvent::ShowCommands(json));
+                    }
+                }
+                IpcMessage::ExecuteCommand { ref id } => {
+                    let _cmd_id = id.clone();
+                    let response = ipc::commands::handle_message(shelf_state, msg);
+                    info!("Command execution response: {:?}", response);
+                    // Close shelf after executing command
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+
+                    if let ipc::IpcResponse::Success { data } = response {
+                        if let Some(result) = data.get("result") {
+                            if let Some(action) =
+                                result.get("action").and_then(|a| a.as_str())
+                            {
+                                match action {
+                                    "navigate" => {
+                                        if let Some(url) =
+                                            result.get("url").and_then(|u| u.as_str())
+                                        {
+                                            let _ = shelf_proxy.send_event(
+                                                UserEvent::Navigate(url.to_string()),
+                                            );
+                                        } else {
+                                            let _ =
+                                                shelf_proxy.send_event(UserEvent::NewTab);
+                                        }
+                                    }
+                                    "reload" => {
+                                        let _ = shelf_proxy.send_event(UserEvent::Reload);
+                                    }
+                                    "go_back" => {
+                                        let _ = shelf_proxy.send_event(UserEvent::GoBack);
+                                    }
+                                    "go_forward" => {
+                                        let _ =
+                                            shelf_proxy.send_event(UserEvent::GoForward);
+                                    }
+                                    "open_vault" => {
+                                        // Vault is now accessed via Settings
+                                        let _ =
+                                            shelf_proxy.send_event(UserEvent::OpenSettings);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                IpcMessage::Navigate { url } => {
+                    let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone()));
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse Shelf IPC: {}", e);
+        }
+    }
+}
+
+/// The shelf view's second `with_ipc_handler`: find-in-page results. wry
+/// keeps the last handler a builder is given, so on the WebKit shelf this
+/// is the one that runs and [`handle_shelf_ipc`] never does (CH3.A4 survey).
+fn handle_shelf_find_ipc(body: &str, content_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
+        if let IpcMessage::FindInPageResult { result } = msg {
+            let _ = content_proxy.send_event(UserEvent::FindInPageResult(result));
+        }
+    }
+}
+
+/// The Inspector panel's `window.ipc` messages. A function, not the
+/// handler closure, so the RustKit Inspector (CH3.A4) can feed it the same
+/// messages.
+fn handle_inspector_ipc(body: &str, inspector_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    info!("Inspector IPC: {}", body);
+
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg) => {
+            match &msg {
+                IpcMessage::CloseInspector => {
+                    let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                }
+                IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
+                }
+                IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
+                }
+                IpcMessage::InspectorExpandNode { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
+                }
+                IpcMessage::InspectorHighlightElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
+                }
+                IpcMessage::InspectorClearHighlight => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorClearHighlight);
+                }
+                IpcMessage::InspectorStartPicker => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorStartPicker);
+                }
+                IpcMessage::InspectorStopPicker => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorStopPicker);
+                }
+                IpcMessage::InspectorScrollToElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorScrollToElement { path: path.clone() });
+                }
+                IpcMessage::InspectorConsoleEval { code } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
+                }
+                IpcMessage::InspectorClose => {
+                    let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse Inspector IPC: {}", e);
+        }
+    }
+}
+
+/// The settings window's `window.ipc` messages. A function, not the
+/// handler closure, so the RustKit settings view (CH3.A4) can feed it the
+/// same messages.
+fn handle_settings_ipc(body: &str, settings_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    if let Ok(ipc_msg) = serde_json::from_str::<IpcMessage>(body) {
+        match ipc_msg {
+            IpcMessage::CloseSettings => {
+                let _ = settings_proxy.send_event(UserEvent::CloseSettings);
+            }
+            IpcMessage::GetBrowserProfiles { browser } => {
+                let _ = settings_proxy.send_event(UserEvent::GetBrowserProfiles(browser));
+            }
+            IpcMessage::ImportBookmarks { browser, profile_path } => {
+                let _ = settings_proxy.send_event(UserEvent::ImportBookmarks { browser, profile_path });
+            }
+            IpcMessage::GetSettings => {
+                let _ = settings_proxy.send_event(UserEvent::GetSettings);
+            }
+            IpcMessage::SaveSettings { settings } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveSettings(settings));
+            }
+            IpcMessage::ExportData { include_settings, include_workspaces } => {
+                let _ = settings_proxy.send_event(UserEvent::ExportData { include_settings, include_workspaces });
+            }
+            IpcMessage::SaveExportToFile { data, suggested_name } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveExportToFile { data, suggested_name });
+            }
+            IpcMessage::ImportData { data, replace } => {
+                let _ = settings_proxy.send_event(UserEvent::ImportStateData { data, replace });
+            }
+            IpcMessage::PickImportFile => {
+                let _ = settings_proxy.send_event(UserEvent::PickImportFile);
+            }
+            IpcMessage::ClearBrowsingData { history, downloads, shelf } => {
+                let _ = settings_proxy.send_event(UserEvent::ClearBrowsingData { history, downloads, shelf });
+            }
+            IpcMessage::GetCellar => {
+                let _ = settings_proxy.send_event(UserEvent::GetCellar);
+            }
+            IpcMessage::RestoreFromCellar { id } => {
+                let _ = settings_proxy.send_event(UserEvent::RestoreFromCellar { id });
+            }
+            IpcMessage::ClearCellar => {
+                let _ = settings_proxy.send_event(UserEvent::ClearCellar);
+            }
+            IpcMessage::GetFocusModeConfig => {
+                let _ = settings_proxy.send_event(UserEvent::GetFocusModeConfigForSettings);
+            }
+            IpcMessage::SaveFocusModeConfig { config } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveFocusModeConfigFromSettings(config));
+            }
+            IpcMessage::AddToFocusBlocklist { domain } => {
+                let _ = settings_proxy.send_event(UserEvent::AddToFocusBlocklistFromSettings(domain));
+            }
+            IpcMessage::RemoveFromFocusBlocklist { domain } => {
+                let _ = settings_proxy.send_event(UserEvent::RemoveFromFocusBlocklistFromSettings(domain));
+            }
+            // Vault IPC commands
+            IpcMessage::GetVaultStatus => {
+                let _ = settings_proxy.send_event(UserEvent::GetVaultStatus);
+            }
+            IpcMessage::UnlockVault { password } => {
+                let _ = settings_proxy.send_event(UserEvent::UnlockVault(password));
+            }
+            IpcMessage::LockVault => {
+                let _ = settings_proxy.send_event(UserEvent::LockVault);
+            }
+            IpcMessage::GetAllCredentials => {
+                let _ = settings_proxy.send_event(UserEvent::GetAllCredentials);
+            }
+            IpcMessage::SaveCredential { url, username, password } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveCredential { url, username, password });
+            }
+            IpcMessage::DeleteCredential { id } => {
+                let _ = settings_proxy.send_event(UserEvent::DeleteCredential(id));
+            }
+            // Analytics IPC commands
+            IpcMessage::GetAnalyticsSettings => {
+                let _ = settings_proxy.send_event(UserEvent::GetAnalyticsSettings);
+            }
+            IpcMessage::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
+                let _ = settings_proxy.send_event(UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day });
+            }
+            IpcMessage::ClearAnalyticsData => {
+                let _ = settings_proxy.send_event(UserEvent::ClearAnalyticsData);
+            }
+            IpcMessage::ExportAnalyticsData { format } => {
+                let _ = settings_proxy.send_event(UserEvent::ExportAnalyticsData { format });
+            }
+            _ => {
+                info!("Settings window received unhandled IPC: {:?}", ipc_msg);
+            }
+        }
+    }
+}
+
+
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -2239,88 +2482,10 @@ fn main() {
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(shelf_bounds)
         .with_ipc_handler(move |message| {
-            let body = message.body();
-            info!("Shelf IPC: {}", body);
-
-            match serde_json::from_str::<IpcMessage>(body) {
-                Ok(msg) => {
-                    match &msg {
-                        IpcMessage::CollapseShelf => {
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-                        }
-                        IpcMessage::SearchCommands { ref query } => {
-                            let _q = query.clone();
-                            let response = ipc::commands::handle_message(&shelf_state, msg);
-                            if let ipc::IpcResponse::Success { data } = response {
-                                let json = serde_json::to_string(&data)
-                                    .unwrap_or_else(|_| "[]".to_string());
-                                let _ = shelf_proxy.send_event(UserEvent::ShowCommands(json));
-                            }
-                        }
-                        IpcMessage::ExecuteCommand { ref id } => {
-                            let _cmd_id = id.clone();
-                            let response = ipc::commands::handle_message(&shelf_state, msg);
-                            info!("Command execution response: {:?}", response);
-                            // Close shelf after executing command
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-
-                            if let ipc::IpcResponse::Success { data } = response {
-                                if let Some(result) = data.get("result") {
-                                    if let Some(action) =
-                                        result.get("action").and_then(|a| a.as_str())
-                                    {
-                                        match action {
-                                            "navigate" => {
-                                                if let Some(url) =
-                                                    result.get("url").and_then(|u| u.as_str())
-                                                {
-                                                    let _ = shelf_proxy.send_event(
-                                                        UserEvent::Navigate(url.to_string()),
-                                                    );
-                                                } else {
-                                                    let _ =
-                                                        shelf_proxy.send_event(UserEvent::NewTab);
-                                                }
-                                            }
-                                            "reload" => {
-                                                let _ = shelf_proxy.send_event(UserEvent::Reload);
-                                            }
-                                            "go_back" => {
-                                                let _ = shelf_proxy.send_event(UserEvent::GoBack);
-                                            }
-                                            "go_forward" => {
-                                                let _ =
-                                                    shelf_proxy.send_event(UserEvent::GoForward);
-                                            }
-                                            "open_vault" => {
-                                                // Vault is now accessed via Settings
-                                                let _ =
-                                                    shelf_proxy.send_event(UserEvent::OpenSettings);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        IpcMessage::Navigate { url } => {
-                            let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone()));
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse Shelf IPC: {}", e);
-                }
-            }
+            handle_shelf_ipc(message.body(), &shelf_proxy, &shelf_state)
         })
         .with_ipc_handler(move |message| {
-            if let Ok(msg) = serde_json::from_str::<IpcMessage>(message.body()) {
-                if let IpcMessage::FindInPageResult { result } = msg {
-                    let _ = content_proxy5.send_event(UserEvent::FindInPageResult(result));
-                }
-            }
+            handle_shelf_find_ipc(message.body(), &content_proxy5)
         })
         .build_as_child(&window)
         .expect("Failed to create Shelf WebView");
@@ -2337,52 +2502,7 @@ fn main() {
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(inspector_bounds)
         .with_ipc_handler(move |message| {
-            let body = message.body();
-            info!("Inspector IPC: {}", body);
-
-            match serde_json::from_str::<IpcMessage>(body) {
-                Ok(msg) => {
-                    match &msg {
-                        IpcMessage::CloseInspector => {
-                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
-                        }
-                        IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
-                        }
-                        IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
-                        }
-                        IpcMessage::InspectorExpandNode { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
-                        }
-                        IpcMessage::InspectorHighlightElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
-                        }
-                        IpcMessage::InspectorClearHighlight => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorClearHighlight);
-                        }
-                        IpcMessage::InspectorStartPicker => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorStartPicker);
-                        }
-                        IpcMessage::InspectorStopPicker => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorStopPicker);
-                        }
-                        IpcMessage::InspectorScrollToElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorScrollToElement { path: path.clone() });
-                        }
-                        IpcMessage::InspectorConsoleEval { code } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
-                        }
-                        IpcMessage::InspectorClose => {
-                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse Inspector IPC: {}", e);
-                }
-            }
+            handle_inspector_ipc(message.body(), &inspector_proxy)
         })
         .build_as_child(&window)
         .expect("Failed to create Inspector WebView");
@@ -3797,97 +3917,7 @@ fn main() {
                                 .with_clipboard(true)
                                 .with_initialization_script(JS_BRIDGE)
                                 .with_ipc_handler(move |msg: wry::http::Request<String>| {
-                                    let body = msg.body();
-                                    if let Ok(ipc_msg) = serde_json::from_str::<IpcMessage>(body) {
-                                        match ipc_msg {
-                                            IpcMessage::CloseSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::CloseSettings);
-                                            }
-                                            IpcMessage::GetBrowserProfiles { browser } => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetBrowserProfiles(browser));
-                                            }
-                                            IpcMessage::ImportBookmarks { browser, profile_path } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ImportBookmarks { browser, profile_path });
-                                            }
-                                            IpcMessage::GetSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetSettings);
-                                            }
-                                            IpcMessage::SaveSettings { settings } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveSettings(settings));
-                                            }
-                                            IpcMessage::ExportData { include_settings, include_workspaces } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ExportData { include_settings, include_workspaces });
-                                            }
-                                            IpcMessage::SaveExportToFile { data, suggested_name } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveExportToFile { data, suggested_name });
-                                            }
-                                            IpcMessage::ImportData { data, replace } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ImportStateData { data, replace });
-                                            }
-                                            IpcMessage::PickImportFile => {
-                                                let _ = settings_proxy.send_event(UserEvent::PickImportFile);
-                                            }
-                                            IpcMessage::ClearBrowsingData { history, downloads, shelf } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearBrowsingData { history, downloads, shelf });
-                                            }
-                                            IpcMessage::GetCellar => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetCellar);
-                                            }
-                                            IpcMessage::RestoreFromCellar { id } => {
-                                                let _ = settings_proxy.send_event(UserEvent::RestoreFromCellar { id });
-                                            }
-                                            IpcMessage::ClearCellar => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearCellar);
-                                            }
-                                            IpcMessage::GetFocusModeConfig => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetFocusModeConfigForSettings);
-                                            }
-                                            IpcMessage::SaveFocusModeConfig { config } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveFocusModeConfigFromSettings(config));
-                                            }
-                                            IpcMessage::AddToFocusBlocklist { domain } => {
-                                                let _ = settings_proxy.send_event(UserEvent::AddToFocusBlocklistFromSettings(domain));
-                                            }
-                                            IpcMessage::RemoveFromFocusBlocklist { domain } => {
-                                                let _ = settings_proxy.send_event(UserEvent::RemoveFromFocusBlocklistFromSettings(domain));
-                                            }
-                                            // Vault IPC commands
-                                            IpcMessage::GetVaultStatus => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetVaultStatus);
-                                            }
-                                            IpcMessage::UnlockVault { password } => {
-                                                let _ = settings_proxy.send_event(UserEvent::UnlockVault(password));
-                                            }
-                                            IpcMessage::LockVault => {
-                                                let _ = settings_proxy.send_event(UserEvent::LockVault);
-                                            }
-                                            IpcMessage::GetAllCredentials => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetAllCredentials);
-                                            }
-                                            IpcMessage::SaveCredential { url, username, password } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveCredential { url, username, password });
-                                            }
-                                            IpcMessage::DeleteCredential { id } => {
-                                                let _ = settings_proxy.send_event(UserEvent::DeleteCredential(id));
-                                            }
-                                            // Analytics IPC commands
-                                            IpcMessage::GetAnalyticsSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetAnalyticsSettings);
-                                            }
-                                            IpcMessage::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
-                                                let _ = settings_proxy.send_event(UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day });
-                                            }
-                                            IpcMessage::ClearAnalyticsData => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearAnalyticsData);
-                                            }
-                                            IpcMessage::ExportAnalyticsData { format } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ExportAnalyticsData { format });
-                                            }
-                                            _ => {
-                                                info!("Settings window received unhandled IPC: {:?}", ipc_msg);
-                                            }
-                                        }
-                                    }
+                                    handle_settings_ipc(msg.body(), &settings_proxy)
                                 })
                                 .build(&settings_win)
                                 .expect("Failed to create settings WebView");
