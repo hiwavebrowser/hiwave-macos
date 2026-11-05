@@ -1030,6 +1030,17 @@ const KEY_SEEN_ARM_JS: &str = "(function(){ window.__parityCaptureKeySeen = fals
 const KEY_SEEN_READ_JS: &str =
     "(window.__parityCaptureKeySeen ? 'seen' : 'unseen')";
 
+/// Did the page hear the engine's key? Reads what `KEY_SEEN_READ_JS` returned.
+fn key_was_seen(read: &str) -> bool {
+    read.contains("seen")
+}
+
+/// A `selector` field may name several selectors to try in order, comma
+/// separated, as `click` has always read it.
+fn split_selector_list(selector: &str) -> Vec<String> {
+    selector.split(',').map(|s| s.trim().to_string()).collect()
+}
+
 fn execute_actions(
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
@@ -1272,7 +1283,7 @@ fn execute_actions(
                     let _ = engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt);
                     let seen = engine
                         .execute_script(view_id, KEY_SEEN_READ_JS)
-                        .map(|r| r.contains("seen"))
+                        .map(|r| key_was_seen(&r))
                         .unwrap_or(false);
                     if seen {
                         a_res.method = Some("engine_key".to_string());
@@ -2498,5 +2509,64 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             .execute_script(view, "String(document.getElementById('i').value)")
             .unwrap_or_default();
         assert!(value.contains("abcxy"), "the text landed in the focused control: {value}");
+    }
+
+    // #898 R1 (Prometheus): `KEY_SEEN_READ_JS` answers 'unseen' and the check
+    // was `contains("seen")` — true either way, so the synthetic-key fallback
+    // was dead and every key was labelled engine_key.
+    #[test]
+    fn a_key_the_page_did_not_hear_reads_as_not_seen() {
+        assert!(!key_was_seen("String(\"unseen\")"), "'unseen' is not seen");
+        assert!(key_was_seen("String(\"seen\")"));
+    }
+
+    // The one-shot listener armed for a key the page never heard must not
+    // stay armed: the next key would read as seen before it was pressed.
+    #[test]
+    fn an_unheard_key_leaves_no_armed_listener_behind() {
+        let (mut engine, view) = board_view("<html><body></body></html>");
+        let _ = engine.execute_script(view, KEY_SEEN_ARM_JS);
+        let read = engine.execute_script(view, KEY_SEEN_READ_JS).unwrap_or_default();
+        assert!(!key_was_seen(&read), "nothing pressed: {read}");
+        let later = engine
+            .execute_script(
+                view,
+                "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); \
+                 String(window.__parityCaptureKeySeen)",
+            )
+            .unwrap_or_default();
+        assert!(later.contains("false"), "the stale listener was cleared: {later}");
+    }
+
+    // Meta is Ctrl's equivalent on macOS and the chrome's shortcuts take either
+    // (`e.ctrlKey || e.metaKey`); the engine's keyboard has no meta flag, so a
+    // Meta chord goes through as Ctrl.
+    #[test]
+    fn a_meta_chord_reaches_the_page_as_a_control_chord() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey||e.metaKey?'c':'') + (e.shiftKey?'s':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F","modifiers":["Meta","Shift"]}]"#)
+            .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "Meta+Shift+F reached the page as a modifier chord: {seen}");
+    }
+
+    // A selector list splits on top-level commas only: `:is(a, b)` is one
+    // selector, not two broken ones.
+    #[test]
+    fn a_selector_list_splits_on_top_level_commas_only() {
+        assert_eq!(split_selector_list("#a, .b"), vec!["#a", ".b"]);
+        assert_eq!(
+            split_selector_list(":is(#a, .b) > span, [title=\"x, y\"]"),
+            vec![":is(#a, .b) > span", "[title=\"x, y\"]"]
+        );
     }
 }
