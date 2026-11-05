@@ -288,6 +288,8 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+mod text_input;
+pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
 mod drag_drop;
@@ -497,6 +499,8 @@ mod nav_state_reset_tests;
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod text_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
