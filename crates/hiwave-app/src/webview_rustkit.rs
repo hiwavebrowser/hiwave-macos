@@ -755,7 +755,7 @@ impl RustKitView {
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        self.submit(PageCmd::Input(PageInput::MouseDown { x, y }));
+        self.submit(PageCmd::Input(PageInput::MouseDown { x, y, clicks: 1, shift: false }));
     }
 
     /// Deliver a pointer move to viewport coordinates to the page (the
@@ -1300,7 +1300,11 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
-                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
+                PageEvent::Cursor(_)
+                | PageEvent::Tooltip(_)
+                | PageEvent::ContextMenu { .. }
+                | PageEvent::Unresponsive
+                | PageEvent::Closed => {}
             }
         }
     }
@@ -1342,6 +1346,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Focused(_)
         | PageEvent::TextFocused(_)
         | PageEvent::Cursor(_)
+        | PageEvent::Tooltip(_)
+        | PageEvent::ContextMenu { .. }
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
     };

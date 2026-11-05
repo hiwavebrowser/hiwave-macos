@@ -532,6 +532,8 @@ mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
+mod mouse_surface_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -1617,6 +1619,15 @@ enum PointFocus {
     /// A click with no press before it: the control under the point or
     /// the one its label names, else nothing is focused.
     Click,
+}
+
+/// What the window shows for the element under the pointer (CH2.E4): the
+/// used `cursor` keyword (`auto` resolved to `text` or `default`) and the
+/// nearest `title`, the tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverFeedback {
+    pub cursor: &'static str,
+    pub title: Option<String>,
 }
 
 /// What a primary-button click did once the page's listeners had run.
@@ -3970,6 +3981,19 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_at = None;
         }
+    }
+
+    /// A secondary-button press (CH2.E4). Stub.
+    pub fn context_menu_at_point(&mut self, _id: EngineViewId, _viewport_x: f32, _viewport_y: f32) -> bool {
+        true
+    }
+
+    /// The release of a secondary-button press (CH2.E4). Stub.
+    pub fn context_menu_release(&mut self, _id: EngineViewId, _viewport_x: f32, _viewport_y: f32) {}
+
+    /// What the window shows for the pointer (CH2.E4). Stub.
+    pub fn hover_feedback(&self, _id: EngineViewId) -> Option<HoverFeedback> {
+        None
     }
 
     /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
