@@ -2,10 +2,11 @@
 // queryCommandSupported/Enabled, navigator.clipboard, and the user's edit
 // commands (`__rkUserEdit`, which DomBindings::user_edit calls).
 (function (g) {
-    var I = g.__rkEditInternals, EDIT = __rustkit_edit,
+    var I = g.__rkEditInternals, EDIT = __rustkit_edit, SEL = __rustkit_text_sel,
         READ = __rustkit_clip_read, WRITE = __rustkit_clip_write;
     delete g.__rkEditInternals;
     delete g.__rustkit_edit;
+    delete g.__rustkit_text_sel;
     delete g.__rustkit_clip_read;
     delete g.__rustkit_clip_write;
     var Document = g.Document;
@@ -27,6 +28,16 @@
         I.setSelection(el, r.start, r.end, r.dir);
         return r;
     }
+    // Script's selectionStart/End/select()/setSelectionRange read and move
+    // the engine's edit state, the selection the user's keys and typing
+    // act on (CH2.E12). `start` undefined reads; null answers mean the
+    // control has no edit state yet and script's own copy stands.
+    I.setEngineSelection(function (el, start, end, dir) {
+        var id = slot(el);
+        if (id === null) return null;
+        var r = start === undefined ? SEL(I.gen(), id) : SEL(I.gen(), id, start, end, dir);
+        return typeof r === 'string' ? JSON.parse(r) : null;
+    });
     function fire(el, type, inputType, data, cancelable) {
         if (type === 'input') hidden(el, '__rkEdited', true);
         var ev = new g.InputEvent(type, {

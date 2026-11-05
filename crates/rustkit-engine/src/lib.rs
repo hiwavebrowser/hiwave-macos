@@ -290,6 +290,10 @@ mod relayout_cause;
 mod selection;
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod button_background_tests;
+#[cfg(test)]
+mod text_transform_layout_tests;
 mod drag_drop;
 mod select_popup;
 mod select_popup_engine;
@@ -353,6 +357,7 @@ mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
+mod canvas_paint;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
@@ -416,6 +421,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod load_geometry_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -432,6 +439,16 @@ mod computed_content_tests;
 mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
+#[cfg(test)]
+mod canvas_context_tests;
+#[cfg(test)]
+mod flex_percent_cross_tests;
+#[cfg(test)]
+mod flex_hidden_gap_tests;
+#[cfg(test)]
+mod flex_column_definite_height_tests;
+#[cfg(test)]
+mod percent_height_chain_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
@@ -474,6 +491,13 @@ mod scroll_after_yielded_load_tests;
 mod feed_reveal_trigger_tests;
 #[cfg(all(test, feature = "headless"))]
 mod web_animations_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_animations_tests;
+#[cfg(all(test, feature = "headless"))]
+mod waapi_layer_tests;
+mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
@@ -486,6 +510,8 @@ mod nav_state_reset_tests;
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod text_control_select_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -542,6 +568,8 @@ mod grid_auto_repeat_percent_tests;
 mod nested_layout_matrix_tests;
 #[cfg(test)]
 mod zero_font_size_tests;
+#[cfg(test)]
+mod zero_size_overflow_clip_tests;
 #[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -983,6 +1011,14 @@ struct ViewState {
     input_pending: Option<InputMark>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
+    /// The canvases of the page's bindings, held apart from them: the
+    /// display list reads what they drew while the page's own scripts have
+    /// the bindings out of the view (`run_page_scripts`).
+    canvases: Option<rustkit_bindings::CanvasSource>,
+    /// Each canvas's paint from the last display list, by node
+    /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
+    /// not change is not painted again.
+    canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
     /// The view's stop state: the interrupt word another thread (the
     /// watchdog, later the user's Stop) sets to end its running script.
     /// Lives as long as the view; each new document's bindings get it.
@@ -1191,6 +1227,8 @@ impl ViewState {
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
         self.lay.focused_node.set(None);
+        // Likewise the old page's transitions and their per-node values.
+        self.lay.animations.borrow_mut().reset();
         self.wheel_gesture = None;
         self.scrollbar_drag = None;
         self.scrollbar_hover = None;
@@ -1214,6 +1252,11 @@ impl ViewState {
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
+        // The last document's canvases: the next bindings install their own
+        // (Prometheus, #905 R1: a failed bindings creation must not leave
+        // the old page's canvases painting into same-id nodes).
+        self.canvases = None;
+        self.canvas_paints.clear();
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_modules.clear();
@@ -2753,6 +2796,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2860,6 +2905,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2984,6 +3031,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3902,8 +3951,22 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         // A press on a scrollbar moves no focus.
         if !suppressed && not_cancelled && on_scrollbar.is_none() {
+            let before = self.press_focus_marks(id);
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
-            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            let after = self.press_focus_marks(id);
+            // A press that focused a text control whose focus handler set
+            // its selection (`select()`) keeps that selection, as the
+            // oracle's Chrome does (CH2.E12); otherwise the press places
+            // the caret.
+            let focus_handler_selected = after.0 != before.0 && after.1 != before.1 && after.0.is_some();
+            if focus_handler_selected {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.select_drag = None;
+                }
+                self.relayout_after_press_focus(id);
+            } else {
+                self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            }
             // A press on a drop-down `<select>` opens it, as Chrome's
             // does (a cancelled `mousedown` keeps it shut).
             self.open_select_popup_at_press(id, viewport_x, viewport_y);
@@ -5189,6 +5252,10 @@ impl Engine {
             timer_stopped
         };
         out.yielded_for_frame = frame_yield.get();
+        // The animation clock is the timer clock as the timers left it, so
+        // the layout below (and the one `settle_animations` makes) reads
+        // the transitions at this turn's time.
+        view.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -5420,6 +5487,19 @@ impl Engine {
             // Or the resize above already did.
             Ok(relaid_out) => out.relaid_out |= relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
+        }
+        // Running transitions: a frame of theirs, their events, and the
+        // next turn no later than the next frame.
+        match self.settle_animations(id) {
+            Ok(relaid_out) => out.relaid_out |= relaid_out,
+            Err(e) => debug!(?id, error = %e, "relayout for animations failed"),
+        }
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.lay.animations.borrow().active())
+        {
+            out.next_timer_ms = Some(out.next_timer_ms.map_or(LIVE_FRAME_MS, |ms| ms.min(LIVE_FRAME_MS)));
         }
         // What the callbacks added may show images the load never saw. Their
         // fetch starts here and no turn waits for it (until 2026-10-05 this
@@ -7804,6 +7884,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8238,6 +8322,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8562,6 +8650,10 @@ impl Engine {
         relayout_cause::set_last_build_reused_tree(false);
         relayout_cause::take_stage_ms();
 
+        // Script's pause/play/cancel/finish of CSS animations are taken by
+        // the build itself (`LayoutCtx::with_building`), so a forced
+        // layout sees them too.
+
         let layout_skipped = self.relayout_uncounted(id)?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
@@ -8824,7 +8916,34 @@ impl Engine {
         // image per frame. Rewriting here means the renderer only ever
         // sees keys that match what the loader stored.
         let mut expanded = Vec::with_capacity(dl.commands.len());
+        // The canvases' paints from the last list; what this list does not
+        // reuse or repaint is dropped with it.
+        let (canvas_source, mut last_paints) = match self.views.get_mut(&id) {
+            Some(v) => (v.canvases.clone(), std::mem::take(&mut v.canvas_paints)),
+            None => (None, HashMap::new()),
+        };
+        let mut canvas_paints = HashMap::new();
         for mut cmd in dl.commands.drain(..) {
+            // A canvas paints what script drew on it (canvas_paint), again
+            // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+                if let Some(node) = canvas_paint::canvas_node(url) {
+                    if let Some(source) = &canvas_source {
+                        let paint = canvas_paint::CanvasPaint::reuse_or_paint(
+                            last_paints.remove(&node),
+                            source,
+                            node,
+                            *dest_rect,
+                            *content_box,
+                        );
+                        if let Some(paint) = paint {
+                            expanded.extend(paint.commands.iter().cloned());
+                            canvas_paints.insert(node, paint);
+                        }
+                    }
+                    continue;
+                }
+            }
             match &mut cmd {
                 rustkit_layout::DisplayCommand::Image { url, .. }
                 | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
@@ -8897,6 +9016,9 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        if let Some(v) = self.views.get_mut(&id) {
+            v.canvas_paints = canvas_paints;
+        }
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
@@ -9215,7 +9337,7 @@ impl Engine {
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
         // Elements only: an anonymous block around collapsed white space is
         // no box at all (and no flex item) in Chrome.
-        if !matches!(child.box_type, BoxType::Block) {
+        if !matches!(child.box_type, BoxType::Block) || child.style.display == rustkit_css::Display::None {
             return false;
         }
         let s = &child.style;
@@ -9570,8 +9692,81 @@ impl Engine {
     }
 
     /// What a build of view `id` reads of it, as it is now.
+    /// A frame of the view's transitions (css-transitions-1 §3): lay the
+    /// view out at the animation clock unless this turn already did, fire
+    /// the transition events the builds queued (cancelling first those of
+    /// elements no longer in the document), and lay out again for what
+    /// their listeners wrote. Returns whether the view was laid out.
+    fn settle_animations(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let needs_frame = {
+            let anims = view.lay.animations.borrow();
+            anims.active() && anims.last_build_clock != Some(anims.clock_ms)
+        };
+        let mut laid = false;
+        if needs_frame {
+            self.relayout_for(id, RelayoutCause::Animation)?;
+            laid = true;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return Ok(laid);
+        };
+        let (events, unsupported) = {
+            let document = view.document.clone();
+            let mut anims = view.lay.animations.borrow_mut();
+            anims.prune(|raw| {
+                document
+                    .as_ref()
+                    .is_some_and(|document| Self::node_connected(document, raw))
+            });
+            (anims.take_events(), anims.take_unsupported())
+        };
+        // A `transition` naming a property the engine does not run is a
+        // gap the Inspector lists (`CSSTransition.<property>`).
+        for property in unsupported {
+            view.inspector.unsupported_api("CSSTransition", &property, 1, None);
+        }
+        if events.is_empty() {
+            return Ok(laid);
+        }
+        let Some(bindings) = view.bindings.as_ref() else {
+            return Ok(laid);
+        };
+        for event in &events {
+            let fired = if event.kind.starts_with("animation") {
+                bindings.fire_animation_event(event.node, event.kind, &event.name, event.elapsed_s)
+            } else {
+                bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
+            };
+            if let Err(e) = fired {
+                debug!(?id, error = %e, kind = event.kind, "animation event failed");
+            }
+        }
+        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+        laid |= self.flush_script_dom_writes(id, Some(RelayoutCause::Animation))?;
+        Ok(laid)
+    }
+
+    /// Whether the node of raw id `raw` is in `document`'s tree.
+    fn node_connected(document: &Document, raw: usize) -> bool {
+        let Some(mut node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+            return false;
+        };
+        loop {
+            match node.parent() {
+                Some(parent) => node = parent,
+                None => return matches!(node.node_type, NodeType::Document),
+            }
+        }
+    }
+
     fn build_view(&self, id: EngineViewId) -> layout_ctx::BuildView {
         let view = self.views.get(&id);
+        if let Some(view) = view {
+            view.lay.animations.borrow_mut().disabled = self.config.disable_animations;
+        }
         layout_ctx::BuildView {
             id,
             lay: view.map(|v| v.lay.clone()),
@@ -9771,6 +9966,8 @@ impl layout_ctx::LayoutCtx {
         external_stylesheets: &[Stylesheet],
         javascript_enabled: bool,
     ) -> LayoutBox {
+        // Read by `with_building` once this build is over.
+        relayout_cause::set_last_build_reused_tree(false);
         // A full build replaces the view's styles of boxless elements
         // (`display: contents`, the root). A restyle keeps the ones it does
         // not walk.
@@ -9798,10 +9995,11 @@ impl layout_ctx::LayoutCtx {
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
-        // the sheets relayout built instead of walking the DOM again.
+        // the sheets relayout built instead of walking the DOM again. Not
+        // while a transition runs: its frames come from the walk.
         let traced = self.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
-        if !traced && !self.building_view_has_edits() {
+        if !traced && !self.building_view_has_edits() && !self.building_view_animates() {
             if let Some(tree) = self.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
@@ -10154,6 +10352,13 @@ impl layout_ctx::LayoutCtx {
     fn building_view_has_edits(&self) -> bool {
         self.with_building_lay(|lay| !lay.edit_states.borrow().is_empty()).unwrap_or(false)
     }
+
+    /// A transition is running in the view being built. Its overlaid
+    /// value is one frame's: a tree kept now would replay that frame, and
+    /// a kept tree taken now would skip the frame due.
+    fn building_view_animates(&self) -> bool {
+        self.with_building_lay(|lay| lay.animations.borrow().running()).unwrap_or(false)
+    }
 }
 
 
@@ -10183,7 +10388,10 @@ impl layout_ctx::LayoutCtx {
     /// build has just walked.
     fn snapshot_tree(&self, build: &StyleMemoBuild, root_box: &LayoutBox) {
         let mode = STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_reuse));
-        if matches!(mode, None | Some(TreeReuse::Off)) || self.building_view_has_edits() {
+        if matches!(mode, None | Some(TreeReuse::Off))
+            || self.building_view_has_edits()
+            || self.building_view_animates()
+        {
             return;
         }
         if build.use_ == MemoUse::Record {
@@ -10586,6 +10794,10 @@ impl layout_ctx::LayoutCtx {
                     })
                 });
                 drop(own_rules);
+                // Transitions: start what this cascade's changes call for
+                // and overlay the running ones (after the memo, so the
+                // memo keeps the cascade's own result).
+                self.animate_style(node.id.raw(), &mut style, stylesheets);
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -10671,7 +10883,13 @@ impl layout_ctx::LayoutCtx {
                     let mut styled = LayoutBox::new(BoxType::Block, style);
                     styled.node_id = Some(node.id.raw());
                     self.note_boxless_style(&styled, parent_style);
-                    return LayoutBox::new(BoxType::Block, ComputedStyle::new());
+                    // The empty box handed back says `none`, so the parent
+                    // drops it even where an empty block is kept (a flex or
+                    // grid item): CH2.B10, chrome.html's hidden panels were
+                    // flex items and took a `gap` each.
+                    let mut none = ComputedStyle::new();
+                    none.display = rustkit_css::Display::None;
+                    return LayoutBox::new(BoxType::Block, none);
                 }
 
                 // CSS Display 3 §2.7 / CSS 2.1 §9.7: flex and grid items,
@@ -10784,6 +11002,30 @@ impl layout_ctx::LayoutCtx {
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
                     // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
+                // <canvas> is a replaced element whose natural size is its
+                // bitmap's: the `width`/`height` attributes (300x150 without
+                // them). They are not presentational hints: author CSS
+                // width/height stretch the bitmap over the box, and one CSS
+                // axis gives the other through the bitmap's ratio. What
+                // script draws on its 2D context replaces the image command
+                // in the display list (canvas_paint).
+                if tag_lower == "canvas" {
+                    let (natural_width, natural_height) =
+                        canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: canvas_paint::canvas_key(node.id.raw()),
+                            natural_width,
+                            natural_height,
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
                     b.node_id = Some(node.id.raw());
                     return b;
                 }
@@ -10985,6 +11227,19 @@ impl layout_ctx::LayoutCtx {
 
                     if !has_element_children {
                         let text = node.text_content();
+                        // CSS Text §4.1.1: under a collapsing white-space
+                        // (a button's UA `normal`), runs collapse to one
+                        // space and the line's leading/trailing spaces go.
+                        // The raw text kept template indentation: chrome.html's
+                        // expander measured ~113px for "▾" (Chromium 15.7).
+                        let text = match style.white_space {
+                            rustkit_css::WhiteSpace::Normal
+                            | rustkit_css::WhiteSpace::Nowrap
+                            | rustkit_css::WhiteSpace::PreLine => {
+                                text.split_whitespace().collect::<Vec<_>>().join(" ")
+                            }
+                            _ => text,
+                        };
                         let label = if text.trim().is_empty() {
                             // No text, no children: an empty button renders
                             // empty, not a placeholder word.
@@ -11819,6 +12074,23 @@ impl layout_ctx::LayoutCtx {
                         s
                     };
                     let len = content.chars().count();
+                    // CH2.B6: text-transform changes the text that is laid
+                    // out, not only the text that is painted. Paint applied
+                    // it alone, so an uppercase title measured its lowercase
+                    // width (chrome.html section titles ~15px narrow at 12px;
+                    // the next sibling started inside the painted glyphs).
+                    // Kept raw when the transform changes the character count
+                    // (ß → SS): `text_sources` maps run characters 1:1 to the
+                    // DOM text, and paint still transforms such a run.
+                    let content = {
+                        let transformed =
+                            rustkit_layout::apply_text_transform(&content, style.text_transform);
+                        if transformed.chars().count() == len {
+                            transformed
+                        } else {
+                            content
+                        }
+                    };
                     let mut run = LayoutBox::new(BoxType::Text(content), style);
                     // Where the run's characters came from: mouse
                     // selection and selection paint map through it.
@@ -12549,12 +12821,23 @@ impl layout_ctx::LayoutCtx {
                 // unreachable from the day it landed. The compiler said so on
                 // every build ("unreachable pattern"); nobody read it until
                 // Pete asked what the warnings meant.
-                if tag_name != "button" {
-                    // input/select/textarea get Chrome's white field; buttons
-                    // are ButtonFace-themed, not white — leave them to the
-                    // themed paint path.
-                    style.background_color = rustkit_css::Color::WHITE;
-                }
+                // Buttons (and input type=button/submit/reset, which lay out
+                // as buttons) get ButtonFace, Chrome's rgb(239, 239, 239);
+                // input/select/textarea get the white field. Both live here
+                // so an author `background: transparent` overrides them
+                // (CH2.B3: the painter used to put ButtonFace back under
+                // every alpha-0 button, so chrome.html's transparent
+                // expanders and lock buttons painted as white blocks).
+                let button_like = tag_name == "button"
+                    || (tag_name == "input"
+                        && attributes.get("type").is_some_and(|t| {
+                            matches!(t.to_ascii_lowercase().as_str(), "button" | "submit" | "reset")
+                        }));
+                style.background_color = if button_like {
+                    rustkit_css::Color::new(239, 239, 239, 1.0)
+                } else {
+                    rustkit_css::Color::WHITE
+                };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }
@@ -14391,7 +14674,7 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 1, length.is_some(), value);
                 if let Some(length) = length {
                     style.width = length;
@@ -14406,19 +14689,19 @@ impl layout_ctx::LayoutCtx {
                     .all(|part| part.eq_ignore_ascii_case("auto"));
             }
             "height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.height = length;
                 }
             }
             "min-width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 2, length.is_some(), value);
                 if let Some(length) = length {
                     style.min_width = length;
                 }
             }
             "min-height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.min_height = length;
                 }
             }
@@ -14428,7 +14711,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 container_query::note_width_value(style, 4, length.is_some(), value);
                 if let Some(length) = length {
@@ -14439,7 +14722,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 if let Some(length) = length {
                     style.max_height = length;
@@ -14934,184 +15217,107 @@ impl layout_ctx::LayoutCtx {
                     style.scale = op;
                 }
             }
-            // ==================== Transitions (parsed, not executed) ====================
+            // ==================== Transitions (run by animations.rs) ====================
             "transition" => {
-                // Shorthand: property duration timing-function delay
-                let parts: Vec<&str> = value.split_whitespace().collect();
-                if !parts.is_empty() {
-                    style.transition_property = parts[0].to_string();
-                }
-                if parts.len() > 1 {
-                    if let Some(dur) = parse_time(parts[1]) {
-                        style.transition_duration = dur;
-                    }
-                }
-                if parts.len() > 2 {
-                    style.transition_timing_function = parse_timing_function(parts[2]);
-                }
-                if parts.len() > 3 {
-                    if let Some(delay) = parse_time(parts[3]) {
-                        style.transition_delay = delay;
-                    }
-                }
+                style.transitions =
+                    animations::parse_transition_shorthand(value, parse_time, parse_timing_function);
+                animations::sync_transition_scalars(style, value.trim().eq_ignore_ascii_case("none"));
             }
             "transition-property" => {
-                style.transition_property = value.trim().to_string();
+                animations::set_transition_properties(style, value);
+                animations::sync_transition_scalars(style, value.trim().eq_ignore_ascii_case("none"));
             }
             "transition-duration" => {
-                if let Some(dur) = parse_time(value) {
-                    style.transition_duration = dur;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_transition_component(style, times, |item, t| item.duration = t);
+                animations::sync_transition_scalars(style, false);
             }
             "transition-timing-function" => {
-                style.transition_timing_function = parse_timing_function(value);
+                let timings: Vec<rustkit_css::TimingFunction> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .map(parse_timing_function)
+                    .collect();
+                animations::set_transition_component(style, timings, |item, t| item.timing = t);
+                animations::sync_transition_scalars(style, false);
             }
             "transition-delay" => {
-                if let Some(delay) = parse_time(value) {
-                    style.transition_delay = delay;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_transition_component(style, times, |item, t| item.delay = t);
+                animations::sync_transition_scalars(style, false);
             }
             // ==================== Animations (parsed, not executed) ====================
+            // ==================== Animations (run by animations.rs) ====================
             "animation" => {
-                // Shorthand: name duration timing-function delay iteration-count direction fill-mode play-state
-                // It replaces the whole of an earlier `animation`.
-                let initial = ComputedStyle::new();
-                style.animation_name = String::new();
-                style.animation_duration = initial.animation_duration;
-                style.animation_timing_function = initial.animation_timing_function;
-                style.animation_delay = initial.animation_delay;
-                style.animation_iteration_count = initial.animation_iteration_count;
-                style.animation_direction = initial.animation_direction;
-                style.animation_fill_mode = initial.animation_fill_mode;
-                style.animation_play_state = initial.animation_play_state;
-                // Several animations are not modelled: the list stays whole in
-                // the name, which is enough for layout to leave the box alone.
-                let mut depth = 0usize;
-                let several = value.chars().any(|c| {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => depth = depth.saturating_sub(1),
-                        _ => {}
-                    }
-                    c == ',' && depth == 0
-                });
-                if several {
-                    style.animation_name = value.trim().to_string();
-                }
-                let parts: Vec<&str> =
-                    if several { Vec::new() } else { value.split_whitespace().collect() };
-                for (i, part) in parts.iter().enumerate() {
-                    // First non-time value is usually the name
-                    if i == 0 && !part.ends_with('s') && !part.ends_with("ms") {
-                        style.animation_name = part.to_string();
-                    } else if let Some(t) = parse_time(part) {
-                        if style.animation_duration == 0.0 {
-                            style.animation_duration = t;
-                        } else {
-                            style.animation_delay = t;
-                        }
-                    } else {
-                        match *part {
-                            "infinite" => {
-                                style.animation_iteration_count =
-                                    rustkit_css::AnimationIterationCount::Infinite
-                            }
-                            "normal" => {
-                                style.animation_direction = rustkit_css::AnimationDirection::Normal
-                            }
-                            "reverse" => {
-                                style.animation_direction = rustkit_css::AnimationDirection::Reverse
-                            }
-                            "alternate" => {
-                                style.animation_direction =
-                                    rustkit_css::AnimationDirection::Alternate
-                            }
-                            "alternate-reverse" => {
-                                style.animation_direction =
-                                    rustkit_css::AnimationDirection::AlternateReverse
-                            }
-                            "forwards" => {
-                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Forwards
-                            }
-                            "backwards" => {
-                                style.animation_fill_mode =
-                                    rustkit_css::AnimationFillMode::Backwards
-                            }
-                            "both" => {
-                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Both
-                            }
-                            "paused" => {
-                                style.animation_play_state = rustkit_css::AnimationPlayState::Paused
-                            }
-                            "running" => {
-                                style.animation_play_state =
-                                    rustkit_css::AnimationPlayState::Running
-                            }
-                            _ => {
-                                // Could be an iteration count, timing function or name
-                                if let Some(n) = part.parse::<f32>().ok().filter(|n| *n >= 0.0) {
-                                    style.animation_iteration_count =
-                                        rustkit_css::AnimationIterationCount::Count(n);
-                                } else if i == 0 || style.animation_name.is_empty() {
-                                    style.animation_name = part.to_string();
-                                } else {
-                                    style.animation_timing_function = parse_timing_function(part);
-                                }
-                            }
-                        }
-                    }
-                }
+                style.animations =
+                    animations::parse_animation_shorthand(value, parse_time, parse_timing_function);
+                animations::sync_animation_scalars(style);
             }
             "animation-name" => {
-                style.animation_name = value.trim().to_string();
+                animations::set_animation_names(style, value);
+                animations::sync_animation_scalars(style);
             }
             "animation-duration" => {
-                if let Some(dur) = parse_time(value) {
-                    style.animation_duration = dur;
-                }
-            }
-            "animation-timing-function" => {
-                style.animation_timing_function = parse_timing_function(value);
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_animation_component(style, times, |item, t| item.duration = t);
+                animations::sync_animation_scalars(style);
             }
             "animation-delay" => {
-                if let Some(delay) = parse_time(value) {
-                    style.animation_delay = delay;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_animation_component(style, times, |item, t| item.delay = t);
+                animations::sync_animation_scalars(style);
+            }
+            "animation-timing-function" => {
+                let timings: Vec<rustkit_css::TimingFunction> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .map(parse_timing_function)
+                    .collect();
+                animations::set_animation_component(style, timings, |item, t| item.timing = t);
+                animations::sync_animation_scalars(style);
             }
             "animation-iteration-count" => {
-                let v = value.trim();
-                if v == "infinite" {
-                    style.animation_iteration_count =
-                        rustkit_css::AnimationIterationCount::Infinite;
-                } else if let Ok(n) = v.parse::<f32>() {
-                    style.animation_iteration_count =
-                        rustkit_css::AnimationIterationCount::Count(n);
-                }
+                let counts: Vec<rustkit_css::AnimationIterationCount> =
+                    animations::split_top_level(value, ',')
+                        .into_iter()
+                        .filter_map(animations::parse_iteration_count)
+                        .collect();
+                animations::set_animation_component(style, counts, |item, c| item.iteration_count = c);
+                animations::sync_animation_scalars(style);
             }
             "animation-direction" => {
-                style.animation_direction = match value.trim() {
-                    "normal" => rustkit_css::AnimationDirection::Normal,
-                    "reverse" => rustkit_css::AnimationDirection::Reverse,
-                    "alternate" => rustkit_css::AnimationDirection::Alternate,
-                    "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
-                    _ => rustkit_css::AnimationDirection::Normal,
-                };
+                let directions: Vec<rustkit_css::AnimationDirection> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_direction)
+                    .collect();
+                animations::set_animation_component(style, directions, |item, d| item.direction = d);
+                animations::sync_animation_scalars(style);
             }
             "animation-fill-mode" => {
-                style.animation_fill_mode = match value.trim() {
-                    "none" => rustkit_css::AnimationFillMode::None,
-                    "forwards" => rustkit_css::AnimationFillMode::Forwards,
-                    "backwards" => rustkit_css::AnimationFillMode::Backwards,
-                    "both" => rustkit_css::AnimationFillMode::Both,
-                    _ => rustkit_css::AnimationFillMode::None,
-                };
+                let fills: Vec<rustkit_css::AnimationFillMode> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_fill_mode)
+                    .collect();
+                animations::set_animation_component(style, fills, |item, f| item.fill_mode = f);
+                animations::sync_animation_scalars(style);
             }
             "animation-play-state" => {
-                style.animation_play_state = match value.trim() {
-                    "running" => rustkit_css::AnimationPlayState::Running,
-                    "paused" => rustkit_css::AnimationPlayState::Paused,
-                    _ => rustkit_css::AnimationPlayState::Running,
-                };
+                let states: Vec<rustkit_css::AnimationPlayState> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_play_state)
+                    .collect();
+                animations::set_animation_component(style, states, |item, s| item.play_state = s);
+                animations::sync_animation_scalars(style);
             }
             // ==================== Box Sizing ====================
             "box-sizing" => {
@@ -15170,6 +15376,14 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            "transition" | "transition-property" => {
+                style.transitions.clear();
+                animations::sync_transition_scalars(style, false);
+            }
+            "animation" | "animation-name" => {
+                style.animations.clear();
+                animations::sync_animation_scalars(style);
+            }
             "outline" => {
                 style.outline = rustkit_css::Outline { offset: style.outline.offset.clone(), ..Default::default() };
             }
@@ -20192,12 +20406,14 @@ impl Engine {
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            // A canvas that drew is listed again over the same boxes.
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             // A scroll alone moves what is painted, not the layout.
-            if scrolled || element_scrolled {
+            if scrolled || element_scrolled || canvas_painted {
                 self.render(id)?;
             }
             return Ok(scrolled || element_scrolled);
@@ -20279,6 +20495,9 @@ impl Engine {
         // same path typed text takes.
         for (raw, value) in writes.values.drain(..) {
             match edit_states.get(&raw) {
+                // The same value keeps the selection (HTML §4.10.5.4), so a
+                // `select()` after it stands.
+                Some(state) if state.value() == value => {}
                 Some(state) => state.set_value(value),
                 None => {
                     let state = rustkit_dom::forms::TextEditState::with_value(value);
@@ -20418,8 +20637,9 @@ impl Engine {
                 view.pending_dirty = Some(view.dirty_set(&log));
             }
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             return;
@@ -21824,6 +22044,20 @@ fn resolve_position_pair(a: &str, b: &str) -> (f32, f32) {
 /// calc/min/max/clamp helpers are deleted.
 fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
+}
+
+/// A length for `width`/`height` and their `min-`/`max-` forms.
+///
+/// A unitless `0` parses to `Length::Zero`, the enum's default, and layout's
+/// sizing code reads only `Px` as a specified size: `height: 0` was laid out
+/// as `auto` and `max-height: 0` / `max-width: 0` as `none`, while `0px` was
+/// right (CH2.B7: a `height:0` column flex 84px tall, Chromium 0). Stored as
+/// `Px(0.0)`, the same as `font-size: 0`.
+fn parse_size_length(value: &str) -> Option<rustkit_css::Length> {
+    match parse_length(value)? {
+        rustkit_css::Length::Zero => Some(rustkit_css::Length::Px(0.0)),
+        other => Some(other),
+    }
 }
 
 /// The `ch`-bearing declarations that won their property in the cascade.
@@ -23976,6 +24210,15 @@ fn publish_geometry(
     lay: Rc<layout_ctx::ViewLayout>,
 ) {
     bindings.share_element_scrolls(lay.element_scrolls.clone());
+    // The CSS animations as of this layout, for `getAnimations()`, and the
+    // properties they animate, for computed reads.
+    {
+        let anims = lay.animations.borrow();
+        let mut animated = lay.animated.borrow_mut();
+        animated.css = anims.describe();
+        animated.css_props = anims.animated_props();
+    }
+    bindings.share_animated_styles(lay.animated.clone());
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
@@ -24420,23 +24663,34 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
     // fills the window; html is not. With `height: auto` it is as tall as
     // what it holds (body's margin box), shorter than the viewport on a
     // short page. Only an explicit html height keeps the box's own.
-    let floor = match &root.root_element_height {
-        None | Some(rustkit_css::Length::Auto) => bb.y,
-        Some(_) => bb.y + bb.height,
-    };
-    let bottom = root
+    let content_bottom = root
         .children
         .iter()
         .map(|c| {
             let m = c.dimensions.margin_box();
             m.y + m.height
         })
-        .fold(floor, f32::max);
+        .fold(bb.y, f32::max);
+    // An explicit html height is the rect's height, resolved against the
+    // initial containing block; body's margin box overflows it rather than
+    // growing it, and the root box itself is stretched to the viewport, so
+    // neither can stand in for it (CH2.B8: `html, body { height: 100% }`
+    // with body's 8px margin read 216, Chromium 200; `html { height: 50px }`
+    // read the viewport's 200).
+    let (vw, vh) = root.viewport;
+    let edges = root.dimensions.padding.vertical() + root.dimensions.border.vertical();
+    let height = match &root.root_element_height {
+        None | Some(rustkit_css::Length::Auto) | Some(rustkit_css::Length::FitContent) => {
+            content_bottom - bb.y
+        }
+        Some(l) => l.to_px_with_viewport(16.0, 16.0, vh, vw, vh).max(0.0) + edges,
+    };
+    let bottom = content_bottom;
     rustkit_bindings::BoxGeometry {
         x: bb.x,
         y: bb.y,
         width: bb.width,
-        height: bottom - bb.y,
+        height,
         border_left: root.dimensions.border.left,
         border_top: root.dimensions.border.top,
         client_width: pb.width,
@@ -40082,6 +40336,15 @@ thread_local! {
     /// builds with the compare and the patch, the display list, the
     /// geometry snapshot, the render.
     static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// Whether the build in progress is a pointer restyle's partial build
+/// (`repaint_restyled`): it builds the changed elements and what is under
+/// them, and skips the rest of the page, which is all still there with
+/// its style. `LayoutCtx::with_building` reads it so the animations' end
+/// of build does not take the skipped elements for gone.
+pub(crate) fn restyle_build_active() -> bool {
+    RESTYLE_BUILD.with(|build| build.borrow().is_some())
 }
 
 /// What the build in progress does with `child` of `parent` (raw NodeIds):
