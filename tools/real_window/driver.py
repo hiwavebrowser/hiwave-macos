@@ -936,8 +936,54 @@ class Driver:
                     final in urls and start not in urls, "tab urls %s" % urls)
         self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
 
+    def e12_input_select_all(self):
+        """CH2.E12: click a filled <input>, Cmd+A, type: the typed text replaces the value; a focus handler's select() survives the click."""
+        c = "e12_input_select_all"
+        if not self.open_page(c, "e12_input_select.html"):
+            return
+        if not self.can_input:
+            return self.not_run(c, "click, Cmd+A and type replace the value", self.why_not("Accessibility"))
+        self.fixture.wait("beacon?e12-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        w, h = win["w"], win["h"]
+
+        def last(prefix, mark):
+            seen = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?" + prefix, mark)]
+            return seen[-1].split("?", 1)[1] if seen else None
+
+        # #a: a click right of its text (the caret goes to the end), then
+        # Cmd+A (keycode 0 = A), then "new". Chrome 143: "new".
+        mark = self.fixture.mark()
+        self.hw("click", pid, w * 0.7, h * 0.35)
+        self.expect(c, "#a took the focus", self.fixture.wait("beacon?e12-a-focus", 4, mark))
+        time.sleep(0.4)
+        self.hw("key", pid, 0, "cmd")
+        time.sleep(0.4)
+        self.fixture.wait("beacon?e12-a-v=", 3, mark)
+        after_a = last("e12-a-v=", mark)
+        self.expect(c, "Cmd+A selects the whole value (Chrome: 0,9)",
+                    after_a == "e12-a-v=old-value-s=0,9", str(after_a))
+        self.hw("type", pid, "new")
+        time.sleep(0.8)
+        typed = last("e12-a-v=", mark)
+        self.expect(c, "typing after Cmd+A replaces the value (Chrome: new)",
+                    typed is not None and typed.startswith("e12-a-v=new-"), str(typed))
+        # #b: its focus handler calls select(); a click focuses it and the
+        # selection stands, so typing replaces. Chrome 143: "new".
+        mark = self.fixture.mark()
+        self.hw("click", pid, w * 0.3, h * 0.85)
+        self.expect(c, "#b took the focus", self.fixture.wait("beacon?e12-b-focus", 4, mark))
+        time.sleep(0.4)
+        self.hw("type", pid, "new")
+        time.sleep(0.8)
+        typed = last("e12-b-v=", mark)
+        self.expect(c, "a click into a field whose focus handler select()s, then typing, replaces (Chrome: new)",
+                    typed is not None and typed.startswith("e12-b-v=new-"), str(typed))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect",
+              "e12_input_select_all"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

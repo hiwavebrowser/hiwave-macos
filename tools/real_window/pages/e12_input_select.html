@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E12 input select-all</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* Each input covers half the viewport, so the driver needs only window
+     fractions: #a the top half, #b the bottom half. */
+  input { position: fixed; left: 0; right: 0; width: 100%; margin: 0; padding: 0 0 0 8px; border: 0;
+          box-sizing: border-box; font: 24px Menlo; }
+  #a { top: 0; height: 50%; background: #ffffe0; }
+  #b { top: 50%; height: 50%; background: #e0ffff; }
+</style>
+<input id="a" value="old-value">
+<input id="b" value="old-value">
+<script>
+  // The page reports what it sees: each input's value and selection after
+  // every key press, as beacons the driver reads from the fixture's log.
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  ['a', 'b'].forEach(function (id) {
+    var el = document.getElementById(id);
+    // After the key's default action (a Cmd chord's keyup may not come).
+    el.addEventListener('keydown', function () {
+      setTimeout(function () {
+        beacon('e12-' + id + '-v=' + encodeURIComponent(el.value) + '-s=' + el.selectionStart + ',' + el.selectionEnd);
+      }, 50);
+    });
+    el.addEventListener('focus', function () { beacon('e12-' + id + '-focus'); });
+  });
+  // #b selects all when it gains focus, as chrome.html's address bar does.
+  document.getElementById('b').addEventListener('focus', function () { this.select(); });
+  beacon('e12-ready');
+</script>
