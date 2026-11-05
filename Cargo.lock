@@ -5414,6 +5414,7 @@ name = "rustkit-bindings"
 version = "0.1.0"
 dependencies = [
  "num_cpus",
+ "rustkit-canvas",
  "rustkit-core",
  "rustkit-css",
  "rustkit-dom",

@@ -504,6 +504,12 @@ impl DomHost {
         }
     }
 
+    /// The NodeId of the node `args[0]` (generation) and `args[1]` name,
+    /// if it is in the bound document.
+    pub(crate) fn node_of(host: &SharedDomHost, args: &[JsValue]) -> Option<usize> {
+        host.borrow().node(args).map(|n| n.id.raw())
+    }
+
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
     fn node(&self, args: &[JsValue]) -> Option<Rc<Node>> {
         self.node_at(args, 1)
@@ -2091,12 +2097,15 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
-        // There is no canvas drawing and no media playback here, and a page
-        // must be able to find that out the way it asks: a canvas has no
-        // context of any kind, and a media element is one with nothing to
+        // There is no media playback here, and a page must be able to find
+        // that out the way it asks: a media element is one with nothing to
         // play. Without the methods the question itself threw (github.com's
-        // `getContext("webgl")` and `video.load()`, each in an effect).
-        made.HTMLCanvasElement.prototype.getContext = function getContext() { return null; };
+        // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
+        // which takes this way to a canvas's node and deletes it.
+        Object.defineProperty(g, '__rustkit_canvas_slot', {
+            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
+            configurable: true, writable: true, enumerable: false
+        });
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;

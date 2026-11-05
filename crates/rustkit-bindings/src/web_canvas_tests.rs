@@ -128,3 +128,21 @@ fn measure_text_has_a_width() {
         "[true,true]"
     );
 }
+
+/// What the engine reads: the recording, cleared by a clear of the whole
+/// bitmap and by a resize.
+#[test]
+fn draws_are_recorded_for_the_engine() {
+    let document = Rc::new(Document::parse_html(PAGE).unwrap());
+    let b = bound_with(document.clone());
+    b.evaluate("var x = document.getElementById('c').getContext('2d'); x.fillRect(1, 2, 3, 4); x.fillText('hi', 5, 6);").unwrap();
+    let node = document.get_element_by_id("c").unwrap().id.raw();
+    let snap = b.canvas_snapshot(node).expect("a context");
+    assert_eq!((snap.width, snap.height, snap.commands.len()), (300, 150, 2));
+    assert!(b.take_canvas_painted());
+    b.evaluate("x.clearRect(0, 0, 300, 150); x.fillRect(0, 0, 1, 1);").unwrap();
+    assert_eq!(b.canvas_snapshot(node).unwrap().commands.len(), 1);
+    b.evaluate("x.canvas.width = 10;").unwrap();
+    let snap = b.canvas_snapshot(node).unwrap();
+    assert_eq!((snap.width, snap.commands.len()), (10, 0));
+}
