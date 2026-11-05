@@ -4246,20 +4246,40 @@ fn distribute_span_contributions(
             if extra <= 0.0 {
                 continue;
             }
+            // css-grid-1 §12.5 step 4: an item that spans a flexible track
+            // grows only the flexible tracks it spans, never the
+            // content-sized ones beside them.
+            let covers_flexible = (start..end).any(|i| tracks[i].is_flexible);
             let growable: Vec<usize> = (start..end)
                 .filter(|&i| {
                     let t = &tracks[i];
-                    // `minmax(0, 1fr)`: a fixed minimum, which no item
-                    // of its own grows. Chromium 143 gives two such columns
-                    // 50 each in a 100px grid around 150px words; here each
-                    // was 150. A spanning item still counts the track: left
-                    // out, the whole contribution went to the content track
-                    // beside it, and a header across `auto minmax(0, 1fr)`
-                    // made the sidebar as wide as the header's text (150
-                    // and 450 in 600; Chromium 40 and 560). And with a
-                    // spanning item over a flexible track, every track keeps
-                    // its own items' floor (`a_span_covers_a_flexible_track`).
-                    (span > 1 || !t.flexible_with_fixed_min || span_over_flexible)
+                    let may_grow = if span > 1 {
+                        // §12.5 grows only tracks with an INTRINSIC min
+                        // sizing function. `minmax(0, 1fr)` and
+                        // `minmax(100px, 1fr)` have a fixed one, so a
+                        // spanning item leaves them at their minimum and
+                        // overflows (hub S17, the Google News card row:
+                        // `repeat(12, minmax(0, 1fr))` in 1040 with a 740px
+                        // child in a span-8 item; Chromium 143 keeps every
+                        // column 72 and the item 688, HiWave grew the eight
+                        // to 78.5). Before, such a track counted here, and
+                        // the content track beside it was kept out of a
+                        // header's way only by the floor of
+                        // `a_span_covers_a_flexible_track`; with the
+                        // flexible-only rule above, a header across
+                        // `auto minmax(0, 1fr)` grows neither (Chromium 40
+                        // and 560 in 600).
+                        !t.flexible_with_fixed_min && (t.is_flexible || !covers_flexible)
+                    } else {
+                        // `minmax(0, 1fr)`: no item of its own grows it
+                        // either (Chromium 143: two such columns 50 each in
+                        // a 100px grid around 150px words; here each was
+                        // 150), except that with a spanning item over a
+                        // flexible track every track keeps its own items'
+                        // floor (`a_span_covers_a_flexible_track`).
+                        !t.flexible_with_fixed_min || span_over_flexible
+                    };
+                    may_grow
                         && (t.is_min_content || t.is_max_content || t.is_flexible
                             || t.growth_limit > t.base_size)
                 })
@@ -8002,6 +8022,155 @@ mod tests {
         let (y, h) = apply_align_self(&AlignSelf::Stretch, &AlignItems::Stretch, 20.0, 100.0, &layout_box2);
         assert_eq!(y, 20.0);
         assert_eq!(h, 30.0, "Stretch with explicit height should respect height");
+    }
+
+    // ==================== S17: spanning items and fixed-min fr tracks ====================
+
+    /// The Google News card row (hub S17): a 1040px grid, 16px gaps, twelve
+    /// `track` columns; row 1 holds a `span 8` item (columns 1-8) whose
+    /// child is `child_style` (by default a 740px-wide block, i.e. an
+    /// unbreakable 740 min-content), row 2 one empty marker per column so
+    /// each column's width can be read back. Returns (item width, columns).
+    fn s17_twelve_column_grid(track: TrackSize, item_min_width: Length) -> (f32, Vec<f32>) {
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate::from_sizes(vec![track; 12]);
+        container_style.column_gap = Length::Px(16.0);
+        container_style.row_gap = Length::Px(16.0);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+
+        let mut item_style = ComputedStyle::new();
+        item_style.grid_column_start = GridLine::Number(1);
+        item_style.grid_column_end = GridLine::Number(9);
+        item_style.grid_row_start = GridLine::Number(1);
+        item_style.min_width = item_min_width;
+        let mut item = LayoutBox::new(BoxType::Block, item_style);
+        let mut child_style = ComputedStyle::new();
+        child_style.width = Length::Px(740.0);
+        child_style.height = Length::Px(10.0);
+        item.children.push(LayoutBox::new(BoxType::Block, child_style));
+        container.children.push(item);
+
+        for c in 0..12 {
+            let mut marker_style = ComputedStyle::new();
+            marker_style.grid_column_start = GridLine::Number(c + 1);
+            marker_style.grid_row_start = GridLine::Number(2);
+            container.children.push(LayoutBox::new(BoxType::Block, marker_style));
+        }
+
+        layout_grid_container(&mut container, 1040.0, 800.0);
+        let item_width = container.children[0].dimensions.content.width;
+        let columns = container.children[1..].iter().map(|c| c.dimensions.content.width).collect();
+        (item_width, columns)
+    }
+
+    fn assert_columns(columns: &[f32], expected: &[f32], what: &str) {
+        assert_eq!(columns.len(), expected.len());
+        for (i, (got, want)) in columns.iter().zip(expected).enumerate() {
+            assert!((got - want).abs() < 0.5, "{what}: column {i} should be {want}, got {columns:?}");
+        }
+    }
+
+    #[test]
+    fn s17_a_spanning_item_does_not_grow_minmax_zero_fr_columns() {
+        // Chromium 143 on news.google.com, and Chromium 153 on this page:
+        // every column 72 ((1040 - 11 x 16) / 12), the item 8 x 72 + 7 x 16 =
+        // 688, and the 740px child overflows it. css-grid-1 §12.5 grows only
+        // tracks with an intrinsic min sizing function; `minmax(0, 1fr)`'s is
+        // a fixed 0. HiWave grew the eight spanned columns (item 772).
+        let zero_fr = TrackSize::MinMax(Box::new(TrackSize::Px(0.0)), Box::new(TrackSize::Fr(1.0)));
+        let (item, columns) = s17_twelve_column_grid(zero_fr, Length::Auto);
+        assert_columns(&columns, &[72.0; 12], "repeat(12, minmax(0, 1fr))");
+        assert!((item - 688.0).abs() < 0.5, "the span-8 item should be 688, got {item}");
+    }
+
+    #[test]
+    fn s17_an_explicit_min_width_does_not_grow_minmax_zero_fr_columns_either() {
+        // Chromium 153: `min-width: 740px` on the item, columns still 72.
+        let zero_fr = TrackSize::MinMax(Box::new(TrackSize::Px(0.0)), Box::new(TrackSize::Fr(1.0)));
+        let (_, columns) = s17_twelve_column_grid(zero_fr, Length::Px(740.0));
+        assert_columns(&columns, &[72.0; 12], "repeat(12, minmax(0, 1fr)), min-width 740");
+    }
+
+    #[test]
+    fn s17_a_fixed_nonzero_minimum_does_not_grow_either() {
+        // `minmax(100px, 1fr)`: 12 x 100 + 176 > 1040, so every column is its
+        // 100px minimum and the item 912 (Chromium 153). `minmax(50px, 1fr)`
+        // leaves room, the fr size is 72 and the 740 child must not grow the
+        // spanned columns past it (Chromium 153: 72 each, item 688).
+        let fixed = |px| TrackSize::MinMax(Box::new(TrackSize::Px(px)), Box::new(TrackSize::Fr(1.0)));
+        let (item, columns) = s17_twelve_column_grid(fixed(100.0), Length::Auto);
+        assert_columns(&columns, &[100.0; 12], "repeat(12, minmax(100px, 1fr))");
+        assert!((item - 912.0).abs() < 0.5, "minmax(100px, 1fr) item should be 912, got {item}");
+        let (item, columns) = s17_twelve_column_grid(fixed(50.0), Length::Auto);
+        assert_columns(&columns, &[72.0; 12], "repeat(12, minmax(50px, 1fr))");
+        assert!((item - 688.0).abs() < 0.5, "minmax(50px, 1fr) item should be 688, got {item}");
+    }
+
+    #[test]
+    fn s17_control_auto_columns_do_grow_for_the_spanning_item() {
+        // `repeat(12, auto)`: intrinsic tracks, the spanned eight hold the
+        // 740 (Chromium 153: item 897.31 after the free space is stretched).
+        let (item, columns) = s17_twelve_column_grid(TrackSize::Auto, Length::Auto);
+        assert!(item >= 740.0 - 0.5, "auto columns should grow to hold the 740 child, got {item} ({columns:?})");
+    }
+
+    #[test]
+    fn s17_control_a_plain_1fr_column_does_grow_for_a_spanning_minimum() {
+        // `1fr` is `minmax(auto, 1fr)`: an intrinsic minimum, so a spanning
+        // item's minimum contribution grows it. With `min-width: 740px` on
+        // the item, the eight spanned columns become (740 - 7 x 16) / 8 =
+        // 78.5 and the other four share the rest, 59 (Chromium 153).
+        //
+        // (A span-8 item with only an auto minimum adds nothing even here:
+        // §6.6 gives an item spanning a flexible track no automatic minimum,
+        // and Chromium 153 keeps `repeat(12, 1fr)` at 72 for the 740 child.)
+        let mut expected = vec![78.5; 8];
+        expected.extend([59.0; 4]);
+        let (item, columns) = s17_twelve_column_grid(TrackSize::Fr(1.0), Length::Px(740.0));
+        assert_columns(&columns, &expected, "repeat(12, 1fr), min-width 740");
+        assert!((item - 740.0).abs() < 0.5, "the item should hold its 740 minimum, got {item}");
+    }
+
+    #[test]
+    fn s17_a_header_across_auto_and_minmax_zero_fr_grows_neither_column() {
+        // `auto minmax(0, 1fr)` in 600: a 385px header across both, and a
+        // 40px sidebar item in column 1. Chromium 153: 40 and 560. The
+        // header spans a flexible track, so it may grow only flexible tracks,
+        // and the one it spans has a fixed minimum.
+        let mut container_style = ComputedStyle::new();
+        container_style.display = Display::Grid;
+        container_style.grid_template_columns = GridTemplate::from_sizes(vec![
+            TrackSize::Auto,
+            TrackSize::MinMax(Box::new(TrackSize::Px(0.0)), Box::new(TrackSize::Fr(1.0))),
+        ]);
+        let mut container = LayoutBox::new(BoxType::Block, container_style);
+        let sized = |col_start: i32, col_end: i32, row: i32, w: f32| {
+            let mut style = ComputedStyle::new();
+            style.grid_column_start = GridLine::Number(col_start);
+            style.grid_column_end = GridLine::Number(col_end);
+            style.grid_row_start = GridLine::Number(row);
+            let mut b = LayoutBox::new(BoxType::Block, style);
+            let mut child_style = ComputedStyle::new();
+            child_style.width = Length::Px(w);
+            child_style.height = Length::Px(10.0);
+            b.children.push(LayoutBox::new(BoxType::Block, child_style));
+            b
+        };
+        container.children.push(sized(1, 3, 1, 385.0));
+        container.children.push(sized(1, 2, 2, 40.0));
+        let mut main_style = ComputedStyle::new();
+        main_style.grid_column_start = GridLine::Number(2);
+        main_style.grid_row_start = GridLine::Number(2);
+        container.children.push(LayoutBox::new(BoxType::Block, main_style));
+
+        layout_grid_container(&mut container, 600.0, 800.0);
+        let sidebar = container.children[1].dimensions.content.width;
+        let main = container.children[2].dimensions.content.width;
+        assert!(
+            (sidebar - 40.0).abs() < 0.5 && (main - 560.0).abs() < 0.5,
+            "sidebar / main should be 40 / 560, got {sidebar} / {main}"
+        );
     }
 
     // ==================== Phase 6 Tests ====================

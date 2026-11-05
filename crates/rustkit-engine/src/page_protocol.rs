@@ -264,6 +264,12 @@ pub enum PageInput {
     HasFocus {
         reply: oneshot::Sender<bool>,
     },
+    /// Whether the focused element is a text field (a text input, a
+    /// textarea, editable content): the editing chords go to the page
+    /// only then.
+    HasTextFocus {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// What the page tells the window.
@@ -295,6 +301,8 @@ pub enum PageEvent {
         from_user: bool,
     },
     Focused(bool),
+    /// Whether the focused element is a text field, sent with `Focused`.
+    TextFocused(bool),
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
     Cursor(String),
@@ -340,7 +348,8 @@ pub struct PageEndpoint {
     /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
     /// autofocus or a new document moves focus without any input from the
     /// window, and the window answers its keys from this report.
-    last_focused: Option<bool>,
+    /// The last focus report: (anything focused, a text field focused).
+    last_focused: Option<(bool, bool)>,
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
@@ -664,8 +673,7 @@ impl PageEndpoint {
             }
             PageInput::FocusAt { x, y, reply } => {
                 let tag = self.engine.focus_at_point(view, x, y);
-                self.last_focused = Some(tag.is_some());
-                self.emit(PageEvent::Focused(tag.is_some()));
+                self.emit_focus();
                 let _ = reply.send(tag);
             }
             PageInput::LinkAt { x, y, reply } => {
@@ -716,10 +724,12 @@ impl PageEndpoint {
                 let _ = reply.send(taken);
             }
             PageInput::HasFocus { reply } => {
-                let focused = self.engine.focused_node(view).is_some();
-                self.last_focused = Some(focused);
-                self.emit(PageEvent::Focused(focused));
+                let (focused, _) = self.emit_focus();
                 let _ = reply.send(focused);
+            }
+            PageInput::HasTextFocus { reply } => {
+                let (_, text) = self.emit_focus();
+                let _ = reply.send(text);
             }
         }
         self.publish_commit();
@@ -883,12 +893,27 @@ impl PageEndpoint {
         if !self.wake_window {
             return;
         }
-        let focused = self.engine.focused_node(self.view).is_some();
-        if self.last_focused == Some(focused) {
+        if self.last_focused == Some(self.focus_state()) {
             return;
         }
-        self.last_focused = Some(focused);
-        self.emit(PageEvent::Focused(focused));
+        self.emit_focus();
+    }
+
+    /// (anything focused, a text field focused) in the page now.
+    fn focus_state(&self) -> (bool, bool) {
+        (
+            self.engine.focused_node(self.view).is_some(),
+            self.engine.focused_is_text_control(self.view),
+        )
+    }
+
+    /// Report the page's focus to the window (`Focused`, `TextFocused`).
+    fn emit_focus(&mut self) -> (bool, bool) {
+        let state = self.focus_state();
+        self.last_focused = Some(state);
+        self.emit(PageEvent::Focused(state.0));
+        self.emit(PageEvent::TextFocused(state.1));
+        state
     }
 
     /// A navigation the page's script asked for (`location.href`,
@@ -1202,7 +1227,48 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
             other => out.push(other),
         }
     }
-    out
+    // Pointer input queued ahead of a navigation is for a document the
+    // user has left (Z row S2, reopened: a load held the thread for 11 s
+    // while the pointer moved; the thirty moves, leaves, presses and
+    // clicks waiting when the tab was closed were each a ~100 ms hover
+    // restyle on the leaving page, every listener refused by the
+    // navigation's interrupt word, and the new page loaded three seconds
+    // late). A queued click is answered with nothing: the window does not
+    // wait on it. Keys and scrolls are left alone; input marks stay for
+    // the latency figure; input behind the navigation is the next
+    // document's.
+    let leaving = out.iter().rposition(|cmd| {
+        matches!(
+            cmd,
+            PageCmd::Navigate { .. } | PageCmd::LoadHtml { .. } | PageCmd::Reload { .. } | PageCmd::Close
+        )
+    });
+    let Some(at) = leaving else {
+        return out;
+    };
+    let mut kept = Vec::with_capacity(out.len());
+    let mut dropped = 0usize;
+    for (i, cmd) in out.into_iter().enumerate() {
+        if i < at {
+            match cmd {
+                PageCmd::Input(PageInput::MouseMove { .. } | PageInput::MouseLeave | PageInput::MouseDown { .. }) => {
+                    dropped += 1;
+                    continue;
+                }
+                PageCmd::Input(PageInput::Click { reply, .. }) => {
+                    let _ = reply.send(crate::ClickOutcome::default());
+                    dropped += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        kept.push(cmd);
+    }
+    if dropped > 0 {
+        tracing::info!(dropped, "Pointer input queued ahead of a navigation dropped: the page is being left");
+    }
+    kept
 }
 
 fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {

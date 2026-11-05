@@ -109,7 +109,12 @@ impl LayoutCtx {
         // A selector walk that reads an ancestor's earlier siblings from the
         // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
         let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
-        let _walk_checked = crate::WalkCheckedScope::enter(Some(checked));
+        let pointer = view
+            .lay
+            .as_ref()
+            .map(|lay| (lay.hover_chain.borrow().clone(), lay.active_chain.borrow().clone()))
+            .unwrap_or_default();
+        let _walk_checked = crate::WalkCheckedScope::enter(Some(checked), Some(pointer));
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         build()
@@ -190,7 +195,11 @@ pub(crate) struct ViewLayout {
     /// content attribute: `getAttribute("value")` is the authored default,
     /// this is the live value. Mutating the DOM instead would conflate the
     /// two and break form-reset semantics.
-    pub(crate) edit_states: RefCell<HashMap<usize, rustkit_dom::forms::TextEditState>>,
+    ///
+    /// Shared with the page's bindings (`DomBindings::share_edit_states`):
+    /// `execCommand` and the user's edit commands run on these states, so
+    /// script's undo undoes the user's typing.
+    pub(crate) edit_states: rustkit_bindings::SharedEditStates,
     /// Checkedness of the checkboxes and radio buttons a click or script
     /// has set, keyed by raw NodeId: the other half of the same side table.
     /// A control missing here is checked when it has the `checked`
