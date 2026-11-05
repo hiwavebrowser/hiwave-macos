@@ -32,10 +32,10 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// The two `issue-560-*-whole-card-link*` pages (an empty absolutely
 /// positioned `<a>` overlay) match since box construction blockifies an
 /// absolutely positioned inline (CSS 2.1 section 9.7).
-const GAPS: &[&str] = &[
-    "a-static-item-in-a-relative-grid",
-    "a-static-centred-item-in-a-relative-grid",
-];
+/// No known gaps: the two `a-static-*-item-in-a-relative-grid` pages match
+/// Chrome since an absolute box with only static ancestors is placed from the
+/// initial containing block (C15, #886).
+const GAPS: &[&str] = &[];
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "headless"))]
