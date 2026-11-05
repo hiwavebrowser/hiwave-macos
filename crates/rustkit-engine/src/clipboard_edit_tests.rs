@@ -168,6 +168,12 @@ fn exec_command_copy_and_navigator_clipboard_use_the_engines_clipboard() {
         "true"
     );
     assert_eq!(platform.read_text().as_deref(), Some("hell"));
+    // writeText needs a user activation (a copy button's click).
+    engine.views[&id]
+        .bindings
+        .as_ref()
+        .unwrap()
+        .notify_user_activation();
     js(
         &mut engine,
         id,
@@ -316,4 +322,37 @@ fn write_text_with_activation_resolves() {
     run_jobs(&engine, id);
     assert_eq!(js(&mut engine, id, "got"), "ok");
     assert_eq!(engine.clipboard().read_text().as_deref(), Some("page wrote"));
+}
+
+#[test]
+fn only_a_focused_text_field_takes_the_editing_chords() {
+    let mut engine = Engine::new_page(EngineConfig::default(), None, Arc::new(AtomicU64::new(0)))
+        .expect("engine");
+    let id = engine
+        .create_page_view(Bounds::new(0, 0, 800, 600))
+        .expect("page view");
+    engine
+        .load_html(
+            id,
+            r##"<html><body><input id="t"><input id="n" type="number"><textarea id="ta"></textarea>
+            <div id="ce" contenteditable><span id="inner">x</span></div>
+            <div contenteditable><p id="off" contenteditable="false">y</p></div>
+            <select id="s"><option>cat</option><option>dog</option></select>
+            <a id="a" href="#x">link</a><button id="b">go</button>
+            <input id="c" type="checkbox"></body></html>"##,
+        )
+        .expect("load_html");
+    js(&mut engine, id, "var $ = function (i) { return document.getElementById(i); }; 0");
+    assert!(!engine.focused_is_text_control(id), "nothing focused");
+    // The controls the engine focuses.
+    for (el, text) in [("t", true), ("n", true), ("ta", true), ("s", false), ("c", false)] {
+        focus(&mut engine, id, el);
+        assert_eq!(engine.focused_is_text_control(id), text, "#{el} focused");
+    }
+    // Editable content, links and buttons, by element.
+    let doc = engine.views[&id].document.clone().unwrap();
+    for (el, text) in [("ce", true), ("inner", true), ("off", false), ("a", false), ("b", false)] {
+        let node = doc.get_element_by_id(el).unwrap();
+        assert_eq!(is_text_field(&node), text, "#{el}");
+    }
 }

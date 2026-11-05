@@ -76,6 +76,8 @@ fn exec_command_copy_with_a_selection_fills_the_clipboard() {
 #[test]
 fn navigator_clipboard_write_then_read_resolves_the_text() {
     let p = page();
+    // writeText needs a user activation (a copy button's click).
+    p.b.notify_user_activation();
     p.b.evaluate(
         "window.got = []; navigator.clipboard.writeText('x').then(function (v) { got.push('w:' + v); \
          return navigator.clipboard.readText(); }).then(function (t) { got.push('r:' + t); });",

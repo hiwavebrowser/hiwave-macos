@@ -109,7 +109,13 @@
             return Promise.reject(new TypeError("Failed to execute 'writeText' on 'Clipboard': 1 argument required."));
         }
         var s = String(text);
-        return new Promise(function (resolve) { WRITE(s); resolve(undefined); });
+        // Checked now, while the caller's activation is current: writes
+        // need a user activation (Clipboard API §6.4.1, as in Chrome).
+        var ok = WRITE(s);
+        return new Promise(function (resolve, reject) {
+            if (ok === false) reject(new g.DOMException('Write permission denied.', 'NotAllowedError'));
+            else resolve(undefined);
+        });
     });
     hidden(g, 'Clipboard', Clipboard);
     var clipboard = Object.create(Clipboard.prototype);

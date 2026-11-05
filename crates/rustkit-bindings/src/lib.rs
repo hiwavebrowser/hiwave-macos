@@ -1144,6 +1144,19 @@ impl DomBindings {
         self.edit.script_read.set(allowed);
     }
 
+    /// The user activated the page (a trusted key or mouse press): for
+    /// the next few seconds script may write the clipboard
+    /// (`navigator.clipboard.writeText`). [`Self::fire_key_event`] and
+    /// [`Self::fire_mouse_event`] call it for the events that activate.
+    pub fn notify_user_activation(&self) {
+        self.edit.activate();
+    }
+
+    /// Whether the page has transient user activation.
+    pub fn has_transient_activation(&self) -> bool {
+        self.edit.has_activation()
+    }
+
     /// Run edit commands on `states` (the engine's edit states for this
     /// view) instead of the bindings' own map.
     pub fn share_edit_states(&self, states: SharedEditStates) {
@@ -2038,6 +2051,10 @@ impl DomBindings {
         event_type: &str,
         data: &MouseEventBindingData,
     ) -> Result<bool, BindingError> {
+        // Activation-triggering input events (HTML §6.4.3).
+        if matches!(event_type, "mousedown" | "pointerdown" | "mouseup" | "pointerup") {
+            self.notify_user_activation();
+        }
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
@@ -2072,6 +2089,10 @@ impl DomBindings {
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        // A keydown activates the page, except Escape (HTML §6.4.3).
+        if event_type == "keydown" && data.key != "Escape" {
+            self.notify_user_activation();
+        }
         let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \

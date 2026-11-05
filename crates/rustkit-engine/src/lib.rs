@@ -5700,6 +5700,24 @@ impl Engine {
         self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
+    /// Whether the focused element is a text field: a text-like `<input>`
+    /// (number included), a `<textarea>`, or editable content
+    /// (`contenteditable`). The window sends the editing chords (Cmd+A/C/V/
+    /// X/Z, Cmd+arrows) to the page only then; with a link, button or
+    /// `<select>` focused they stay menu shortcuts (CH2.E1 R1).
+    pub fn focused_is_text_control(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(doc) = view.document.as_ref() else {
+            return false;
+        };
+        let Some(node) = view.lay.focused_node.get().and_then(|n| doc.get_node(n)) else {
+            return false;
+        };
+        is_text_field(&node)
+    }
+
     /// Get the current scroll offset of a view.
     pub fn get_scroll_offset(&self, id: EngineViewId) -> Result<(f32, f32), EngineError> {
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
@@ -24317,6 +24335,35 @@ fn layout_box_body_to_json(
     }
 
     json
+}
+
+/// A text-like `<input>`, a `<textarea>`, or an element in editable content
+/// (the nearest `contenteditable` attribute is "", "true" or
+/// "plaintext-only").
+fn is_text_field(node: &std::rc::Rc<rustkit_dom::Node>) -> bool {
+    use rustkit_dom::forms::InputType;
+    match node.tag_name().map(str::to_ascii_lowercase).as_deref() {
+        Some("textarea") => return true,
+        Some("input") => {
+            let ty = node.get_attribute("type").unwrap_or("").to_ascii_lowercase();
+            return InputType::from_str(&ty).is_text_input();
+        }
+        _ => {}
+    }
+    let mut cur = Some(node.clone());
+    while let Some(n) = cur {
+        if let Some(v) = n.get_attribute("contenteditable") {
+            let v = v.to_ascii_lowercase();
+            if v.is_empty() || v == "true" || v == "plaintext-only" {
+                return true;
+            }
+            if v == "false" {
+                return false;
+            }
+        }
+        cur = n.parent();
+    }
+    false
 }
 
 #[cfg(test)]

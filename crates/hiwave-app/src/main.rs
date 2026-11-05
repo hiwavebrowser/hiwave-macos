@@ -2506,11 +2506,13 @@ fn main() {
                             }
                             rustkit_viewhost::InputKind::Key(key) => {
                             // Cmd chords are menu shortcuts, except the editing
-                            // ones in a focused text control (CH2.E1): Cmd+A/C/V/X/Z
-                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. The
-                            // engine reads Cmd as its command modifier (`ctrl`).
+                            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
+                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
+                            // focused link, button or <select> is not one: its
+                            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
+                            // The engine reads Cmd as its command modifier (`ctrl`).
                             let edit_chord = key.cmd
-                                && view.has_focused_element()
+                                && view.has_focused_text_control()
                                 && (matches!(key.text.to_ascii_lowercase().as_str(), "a" | "c" | "v" | "x" | "z")
                                     || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
                             if key.cmd && !edit_chord {

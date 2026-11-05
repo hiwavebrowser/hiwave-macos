@@ -28,6 +28,28 @@ pub struct EditContext {
     /// in another tab. Trusted views (HiWave's own chrome) opt in. A
     /// user's paste is always allowed.
     pub(crate) script_read: Cell<bool>,
+    /// Until when the page has transient user activation (HTML §6.4.1): a
+    /// trusted key press or mouse press grants it for
+    /// [`ACTIVATION_DURATION`]. `navigator.clipboard.writeText` needs it,
+    /// so a page cannot overwrite the clipboard on its own.
+    pub(crate) activation_until: Cell<Option<std::time::Instant>>,
+}
+
+/// How long a user activation lasts (Chrome's transient activation
+/// duration).
+pub(crate) const ACTIVATION_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl EditContext {
+    pub(crate) fn activate(&self) {
+        self.activation_until
+            .set(Some(std::time::Instant::now() + ACTIVATION_DURATION));
+    }
+
+    pub(crate) fn has_activation(&self) -> bool {
+        self.activation_until
+            .get()
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
 }
 
 impl Default for EditContext {
@@ -36,6 +58,7 @@ impl Default for EditContext {
             clipboard: RefCell::new(MemoryClipboard::shared()),
             states: RefCell::new(Rc::default()),
             script_read: Cell::new(false),
+            activation_until: Cell::new(None),
         }
     }
 }
@@ -103,14 +126,19 @@ pub(crate) fn install(
         }),
     )?;
 
+    // clip_write(text): put `text` on the clipboard; false (nothing
+    // written) without a user activation.
     let c = ctx.clone();
     runtime.register_host_function(
         "__rustkit_clip_write",
         1,
         Box::new(move |args| {
+            if !c.has_activation() {
+                return JsValue::Boolean(false);
+            }
             let clipboard = c.clipboard.borrow().clone();
             clipboard.write_text(string_arg(args, 0).unwrap_or(""));
-            JsValue::Undefined
+            JsValue::Boolean(true)
         }),
     )?;
 
