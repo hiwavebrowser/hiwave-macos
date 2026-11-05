@@ -147,6 +147,19 @@ fn draws_are_recorded_for_the_engine() {
     assert_eq!((snap.width, snap.commands.len()), (10, 0));
 }
 
+/// #905 batch 22 red: binding a document is not a canvas paint. The new
+/// document gets a full layout and list of its own, so a load (with or
+/// without canvases) must not leave the paint mark set: the engine would
+/// list and present the same frame a second time after it.
+#[test]
+fn binding_a_document_is_not_a_paint() {
+    let b = bound();
+    assert!(!b.take_canvas_painted(), "a fresh document drew nothing");
+    b.evaluate("document.getElementById('c').getContext('2d').fillRect(0, 0, 1, 1);").unwrap();
+    b.set_document(Rc::new(Document::parse_html(PAGE).unwrap())).unwrap();
+    assert!(!b.take_canvas_painted(), "the last document's drawing is moot");
+}
+
 /// PR #905 R1 HOLD: a Chart.js-style loop that makes a gradient every
 /// frame and clears the whole bitmap holds no more after 10k frames than a
 /// frame's worth: no gradient is kept beside the recording. A gradient made
