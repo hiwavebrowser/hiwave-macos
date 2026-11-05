@@ -295,6 +295,12 @@ pub enum PageEvent {
         from_user: bool,
     },
     Focused(bool),
+    /// A message the page posted with `window.ipc.postMessage` (CH2.E9),
+    /// pushed to the window as it arrives; nothing polls the page for it.
+    Ipc {
+        payload: String,
+        nav_id: u64,
+    },
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
     Cursor(String),
@@ -873,6 +879,24 @@ impl PageEndpoint {
         self.publish_commit();
         self.report_focus();
         self.report_script_navigation();
+        self.report_ipc();
+    }
+
+    /// Send the window what the page posted on `window.ipc` (CH2.E9).
+    /// Only the content thread reports it; the queue is Rust-side, so an
+    /// empty one costs no script.
+    fn report_ipc(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let messages = self.engine.drain_view_ipc(self.view);
+        if messages.is_empty() {
+            return;
+        }
+        let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        for message in messages {
+            self.emit(PageEvent::Ipc { payload: message.payload, nav_id });
+        }
     }
 
     /// Tell the content thread's window when the page's focus changed on
