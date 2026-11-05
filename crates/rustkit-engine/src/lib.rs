@@ -45455,7 +45455,13 @@ mod clip_path_pins {
                 r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
             ))
         };
-        let cases: [(&str, &str, &str, Option<&str>); 9] = [
+        let cases: [(&str, &str, &str, Option<&str>); 12] = [
+            // polygon(): an axis-aligned rectangle is exact; any other shape clips to
+            // its bounding box (the triangle's is the whole border box); a polygon
+            // with no area (eBay's visually-hidden `polygon(0 0,0 0)`) clips everything.
+            ("clip-path:polygon(20px 20px, 120px 20px, 120px 120px, 20px 120px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 0 100%)", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:polygon(0 0, 0 0)", "PushClip(", "x: 0.0, y: 0.0, width: 0.0, height: 0.0", None),
             ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
             ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
             ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
@@ -45515,8 +45521,8 @@ mod clip_path_pins {
             .unwrap_or_else(|| panic!("no child paint:\n{all}"));
         assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
 
-        // `none`, and shapes that are not a rounded rect, paint as before.
-        for style in ["clip-path:none", "clip-path:polygon(0 0, 100% 0, 0 100%)", ""] {
+        // `none`, and shapes this does not read (`path()`), paint as before.
+        for style in ["clip-path:none", "clip-path:path('M0 0H10V10Z')", ""] {
             let lines = page(style, "");
             assert!(
                 !lines.iter().any(|c| c.starts_with("PushClip")),
