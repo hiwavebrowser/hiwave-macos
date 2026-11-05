@@ -2605,6 +2605,36 @@ fn main() {
                             }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
+                        // CH2.E9: what the page committed, as the WebKit
+                        // content view's handlers report it off macOS. Until
+                        // 2026-11-05 nothing read these on macOS: the address
+                        // bar kept the typed URL after a redirect, and the tab
+                        // never got its title, its spinner's end or a visit.
+                        {
+                            use crate::webview::IWebContent as _;
+                            let updates = view.take_chrome_updates();
+                            if let Some(url) = updates.url {
+                                let _ = click_proxy.send_event(UserEvent::UpdateUrl(url.clone()));
+                                let _ = click_proxy.send_event(UserEvent::UpdateActiveTabUrl(url));
+                                let _ = click_proxy.send_event(UserEvent::NavigationStateChanged {
+                                    can_go_back: view.can_go_back(),
+                                    can_go_forward: view.can_go_forward(),
+                                });
+                            }
+                            if let Some(title) = updates.title {
+                                let _ = click_proxy.send_event(UserEvent::UpdateTitle(title));
+                            }
+                            if updates.started {
+                                let _ = click_proxy.send_event(UserEvent::SetLoading(true));
+                            }
+                            if updates.loading == Some(false) {
+                                let _ = click_proxy.send_event(UserEvent::SetLoading(false));
+                                let _ = click_proxy.send_event(UserEvent::SyncShieldStats);
+                            }
+                            if let Some(url) = updates.finished {
+                                let _ = click_proxy.send_event(UserEvent::RecordVisit { url });
+                            }
+                        }
                         // The page's console lines, and a new tree after it
                         // changed. No clock: the devtools thread wakes the
                         // window when the open panel's view records (T6b).
@@ -2869,7 +2899,11 @@ fn main() {
                             loading
                         );
                         let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
-                        // Inject context menu handler and audio detector when page finishes loading
+                        // Inject context menu handler and audio detector when page finishes loading.
+                        // Not on macOS: the content view is RustKit, which never
+                        // ran these WebKit helpers (no SetLoading was sent there
+                        // before CH2.E9), and they post to the WebKit IPC.
+                        #[cfg(not(target_os = "macos"))]
                         if !loading {
                             info!("Injecting context menu handler into content webview");
                             let _ = content_for_events.evaluate_script(CONTEXT_MENU_HELPER);
