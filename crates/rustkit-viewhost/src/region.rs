@@ -28,13 +28,15 @@ impl RegionRect {
 
     /// Half-open: a point on the right or bottom edge is outside.
     pub fn contains(&self, x: f64, y: f64) -> bool {
-        let _ = (x, y);
-        false
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
     }
 
     fn intersect(&self, other: &RegionRect) -> RegionRect {
-        let _ = other;
-        *self
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.width).min(other.x + other.width);
+        let y1 = (self.y + self.height).min(other.y + other.height);
+        RegionRect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
     }
 }
 
@@ -48,8 +50,23 @@ pub fn compose_region(
     hole: Option<RegionRect>,
     overlays: &[RegionRect],
 ) -> Vec<RegionRect> {
-    let _ = (width, height, hole, overlays);
-    Vec::new()
+    let view = RegionRect::new(0.0, 0.0, width, height);
+    let mut region = Vec::new();
+    match hole.map(|h| h.intersect(&view)).filter(|h| !h.is_empty()) {
+        None => region.push(view),
+        Some(h) => {
+            let (right, bottom) = (h.x + h.width, h.y + h.height);
+            // Full-width bands above and below, then the sides of the
+            // hole's own rows.
+            region.push(RegionRect::new(0.0, 0.0, width, h.y));
+            region.push(RegionRect::new(0.0, bottom, width, height - bottom));
+            region.push(RegionRect::new(0.0, h.y, h.x, h.height));
+            region.push(RegionRect::new(right, h.y, width - right, h.height));
+        }
+    }
+    region.extend(overlays.iter().map(|o| o.intersect(&view)));
+    region.retain(|r| !r.is_empty());
+    region
 }
 
 /// Whether the point is in the region.
