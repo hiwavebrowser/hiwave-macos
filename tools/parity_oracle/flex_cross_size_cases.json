@@ -59,6 +59,11 @@
    "name": "align-items-end-overflows-up",
    "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><div id=w style=display:flex;align-items:flex-end;height:20px;margin-top:50px><div id=t style=height:40px;width:20px></div></div></body></html>",
    "chrome_boxes": "w:0:50:1280:20 t:0:30:20:40"
+  },
+  {
+   "name": "tab-bar-close-button",
+   "html": "<!doctype html><html><head><meta charset=utf-8><style>body{margin:0;background:#111;color:#ccc;font:16px Arial}#bar{display:flex;align-items:center;height:44px;padding:6px 12px;gap:4px;box-sizing:border-box;background:#223}#tabs{display:flex;flex:1;gap:2px;overflow-x:auto;padding:4px 0}.t{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #556;border-bottom:none;max-width:180px;flex-shrink:0;position:relative}.n{flex:1;font-size:12px;white-space:nowrap;overflow:hidden}.x{width:16px;height:16px;display:flex;font-size:14px}</style></head><body><div id=\"bar\"><div id=\"tabs\"><div class=\"t\" id=\"t\"><span class=\"n\" id=\"n\">Title</span><span class=\"x\" id=\"x\">&times;</span></div></div></div></body></html>",
+   "chrome_boxes": "bar:0:0:1280:44 tabs:12:4:1256:37 t:12:8:68:29 n:23:16:22:14 x:53:15:16:16"
   }
  ],
  "chrome": "143.0.7499.4"
