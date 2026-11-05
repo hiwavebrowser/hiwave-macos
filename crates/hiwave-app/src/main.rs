@@ -2505,7 +2505,15 @@ fn main() {
                             }
                             }
                             rustkit_viewhost::InputKind::Key(key) => {
-                            if key.cmd {
+                            // Cmd chords are menu shortcuts, except the editing
+                            // ones in a focused text control (CH2.E1): Cmd+A/C/V/X/Z
+                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. The
+                            // engine reads Cmd as its command modifier (`ctrl`).
+                            let edit_chord = key.cmd
+                                && view.has_focused_element()
+                                && (matches!(key.text.to_ascii_lowercase().as_str(), "a" | "c" | "v" | "x" | "z")
+                                    || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
+                            if key.cmd && !edit_chord {
                                 continue; // menu shortcuts are not text
                             }
                             // Esc leaves select-element mode; the page does not hear it.
@@ -2548,7 +2556,7 @@ fn main() {
                                 }
                             }
                             let focused = view.has_focused_element();
-                            if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
+                            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
                                 view.relayout();
                             } else if !focused {
                                 // Nothing focused and the page did not take

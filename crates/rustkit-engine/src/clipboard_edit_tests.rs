@@ -18,9 +18,11 @@ const LEFT: u32 = 0x25;
 const END: u32 = 0x23;
 
 fn page() -> (Engine, EngineViewId) {
-    let mut engine =
-        Engine::new_page(EngineConfig::default(), None, Arc::new(AtomicU64::new(0))).expect("engine");
-    let id = engine.create_page_view(Bounds::new(0, 0, 800, 600)).expect("page view");
+    let mut engine = Engine::new_page(EngineConfig::default(), None, Arc::new(AtomicU64::new(0)))
+        .expect("engine");
+    let id = engine
+        .create_page_view(Bounds::new(0, 0, 800, 600))
+        .expect("page view");
     engine.load_html(id, PAGE).expect("load_html");
     js(
         &mut engine,
@@ -33,7 +35,9 @@ fn page() -> (Engine, EngineViewId) {
 }
 
 fn js(engine: &mut Engine, id: EngineViewId, script: &str) -> String {
-    let out = engine.execute_script(id, &format!("String(eval({script:?}))")).expect("script");
+    let out = engine
+        .execute_script(id, &format!("String(eval({script:?}))"))
+        .expect("script");
     // execute_script answers the value's Debug form: String("...").
     out.strip_prefix("String(\"")
         .and_then(|s| s.strip_suffix("\")"))
@@ -59,9 +63,20 @@ fn type_text(engine: &mut Engine, id: EngineViewId, text: &str) {
 
 fn value_of(engine: &mut Engine, id: EngineViewId, el: &str) -> String {
     let script_value = js(engine, id, &format!("$('{el}').value"));
-    let raw = engine.views[&id].document.as_ref().unwrap().get_element_by_id(el).unwrap().id.raw();
+    let raw = engine.views[&id]
+        .document
+        .as_ref()
+        .unwrap()
+        .get_element_by_id(el)
+        .unwrap()
+        .id
+        .raw();
     let painted = engine.edit_value_in(id, raw).map(|v| v.0);
-    assert_eq!(painted.as_deref(), Some(script_value.as_str()), "script and paint agree on {el}");
+    assert_eq!(
+        painted.as_deref(),
+        Some(script_value.as_str()),
+        "script and paint agree on {el}"
+    );
     script_value
 }
 
@@ -85,7 +100,10 @@ fn cut_leaves_the_field_empty_and_the_text_on_the_clipboard() {
     assert!(chord(&mut engine, id, "x", false));
     assert_eq!(value_of(&mut engine, id, "q"), "");
     assert_eq!(engine.clipboard().read_text().as_deref(), Some("hello"));
-    assert_eq!(js(&mut engine, id, "log.join(' ')"), "beforeinput:deleteByCut:null input:deleteByCut:null");
+    assert_eq!(
+        js(&mut engine, id, "log.join(' ')"),
+        "beforeinput:deleteByCut:null input:deleteByCut:null"
+    );
 }
 
 #[test]
@@ -139,7 +157,14 @@ fn exec_command_copy_and_navigator_clipboard_use_the_engines_clipboard() {
     let platform = Rc::new(MemoryClipboard::new());
     engine.set_clipboard(platform.clone());
     focus(&mut engine, id, "q");
-    assert_eq!(js(&mut engine, id, "$('q').setSelectionRange(0, 4); document.execCommand('copy')"), "true");
+    assert_eq!(
+        js(
+            &mut engine,
+            id,
+            "$('q').setSelectionRange(0, 4); document.execCommand('copy')"
+        ),
+        "true"
+    );
     assert_eq!(platform.read_text().as_deref(), Some("hell"));
     js(
         &mut engine,
@@ -148,7 +173,12 @@ fn exec_command_copy_and_navigator_clipboard_use_the_engines_clipboard() {
          return navigator.clipboard.readText(); }).then(function (t) { got = t; }); 0",
     );
     // The promise reactions are microtasks; execute_script does not drain them.
-    engine.views[&id].bindings.as_ref().unwrap().run_jobs().unwrap();
+    engine.views[&id]
+        .bindings
+        .as_ref()
+        .unwrap()
+        .run_jobs()
+        .unwrap();
     assert_eq!(js(&mut engine, id, "got"), "x");
     assert_eq!(platform.read_text().as_deref(), Some("x"));
     // The user's paste reads the same clipboard.

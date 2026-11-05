@@ -923,6 +923,8 @@ pub struct DomBindings {
     mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
+    /// The clipboard and edit states edit commands use (see `dom::editing`).
+    edit: Rc<dom::editing::EditContext>,
 }
 
 impl DomBindings {
@@ -969,6 +971,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
+        // execCommand, navigator.clipboard and the user's edit commands over
+        // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
+        let edit = Rc::new(dom::editing::EditContext::default());
+        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
@@ -1000,6 +1006,7 @@ impl DomBindings {
             mutations,
             mutation_log,
             scroll,
+            edit,
         })
     }
 
@@ -1120,25 +1127,25 @@ impl DomBindings {
     /// Use `clipboard` for this page's edit commands and
     /// `navigator.clipboard` (the engine's platform clipboard).
     pub fn set_clipboard(&self, clipboard: rustkit_dom::clipboard::SharedClipboard) {
-        let _ = clipboard;
+        *self.edit.clipboard.borrow_mut() = clipboard;
     }
 
     /// The clipboard this page's edit commands use.
     pub fn clipboard(&self) -> rustkit_dom::clipboard::SharedClipboard {
-        rustkit_dom::clipboard::MemoryClipboard::shared()
+        self.edit.clipboard.borrow().clone()
     }
 
     /// Whether script may read the clipboard (`navigator.clipboard.readText`,
     /// `execCommand('paste')`). On by default; the user's own paste is
     /// always allowed.
     pub fn set_clipboard_read_allowed(&self, allowed: bool) {
-        let _ = allowed;
+        self.edit.script_read.set(allowed);
     }
 
     /// Run edit commands on `states` (the engine's edit states for this
     /// view) instead of the bindings' own map.
     pub fn share_edit_states(&self, states: SharedEditStates) {
-        let _ = states;
+        *self.edit.states.borrow_mut() = states;
     }
 
     /// The user asked for `command` in the control `node` (a shortcut):
@@ -1151,8 +1158,35 @@ impl DomBindings {
         node: usize,
         command: &rustkit_dom::forms::EditCommand,
     ) -> Result<rustkit_dom::forms::EditOutcome, BindingError> {
-        let _ = (node, command);
-        Ok(Default::default())
+        use rustkit_dom::forms::EditCommand as C;
+        let (name, value) = match command {
+            C::Copy => ("copy", None),
+            C::Cut => ("cut", None),
+            C::Paste => ("paste", None),
+            C::SelectAll => ("selectAll", None),
+            C::Undo => ("undo", None),
+            C::Redo => ("redo", None),
+            C::InsertText(t) => ("insertText", Some(t.as_str())),
+            C::DeleteWordBackward => ("deleteWordBackward", None),
+            C::DeleteWordForward => ("deleteWordForward", None),
+        };
+        let value = value.map_or("null".to_string(), |v| {
+            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
+        });
+        let script = format!("document.__rkUserEdit({node}, {name:?}, {value})");
+        let report = match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => json,
+            _ => return Ok(Default::default()),
+        };
+        let r: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
+        let changed = r["changed"].as_bool().unwrap_or(false);
+        Ok(rustkit_dom::forms::EditOutcome {
+            handled: r["handled"].as_bool().unwrap_or(false),
+            changed,
+            selection_changed: !changed && r["handled"].as_bool().unwrap_or(false),
+            input_type: command.input_type().filter(|_| changed),
+            data: r["data"].as_str().map(str::to_string),
+        })
     }
 
     /// Tell script what the user typed into a control, so its `value`

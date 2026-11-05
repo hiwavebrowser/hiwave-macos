@@ -4385,6 +4385,16 @@ const WRAPPERS_JS: &str = r#"
         N.setAdopted(s.gen, s.id, String(json));
     };
 
+    // For dom/editing.js, which deletes it.
+    g.__rkEditInternals = {
+        wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
+        selectionOf: function (el) { return selectionOf(el); },
+        setSelection: function (el, start, end, dir) {
+            var s = selectionOf(el);
+            s.start = start; s.end = end; s.dir = dir;
+        }
+    };
+
     // For node_apis.js, which runs next and deletes it.
     g.__rkNodeInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
