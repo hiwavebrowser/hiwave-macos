@@ -57,6 +57,8 @@ mod min_max_height_unit_tests;
 mod abspos_image_reanchor_tests;
 #[cfg(test)]
 mod inline_image_percent_base_tests;
+#[cfg(test)]
+mod grid_item_percent_base_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
