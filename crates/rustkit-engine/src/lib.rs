@@ -999,6 +999,10 @@ struct ViewState {
     /// display list reads what they drew while the page's own scripts have
     /// the bindings out of the view (`run_page_scripts`).
     canvases: Option<rustkit_bindings::CanvasSource>,
+    /// Each canvas's paint from the last display list, by node
+    /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
+    /// not change is not painted again.
+    canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
     /// The view's stop state: the interrupt word another thread (the
     /// watchdog, later the user's Stop) sets to end its running script.
     /// Lives as long as the view; each new document's bindings get it.
@@ -1232,6 +1236,11 @@ impl ViewState {
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
+        // The last document's canvases: the next bindings install their own
+        // (Prometheus, #905 R1: a failed bindings creation must not leave
+        // the old page's canvases painting into same-id nodes).
+        self.canvases = None;
+        self.canvas_paints.clear();
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_modules.clear();
@@ -2772,6 +2781,7 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2880,6 +2890,7 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3005,6 +3016,7 @@ impl Engine {
             frames_presented: 0,
             bindings: None,
             canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -8874,17 +8886,30 @@ impl Engine {
         // image per frame. Rewriting here means the renderer only ever
         // sees keys that match what the loader stored.
         let mut expanded = Vec::with_capacity(dl.commands.len());
+        // The canvases' paints from the last list; what this list does not
+        // reuse or repaint is dropped with it.
+        let (canvas_source, mut last_paints) = match self.views.get_mut(&id) {
+            Some(v) => (v.canvases.clone(), std::mem::take(&mut v.canvas_paints)),
+            None => (None, HashMap::new()),
+        };
+        let mut canvas_paints = HashMap::new();
         for mut cmd in dl.commands.drain(..) {
-            // A canvas paints what script drew on it (canvas_paint).
+            // A canvas paints what script drew on it (canvas_paint), again
+            // only when its recording or its box changed.
             if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
-                    let snapshot = self
-                        .views
-                        .get(&id)
-                        .and_then(|v| v.canvases.as_ref())
-                        .and_then(|c| c.snapshot(node));
-                    if let Some(snapshot) = snapshot {
-                        expanded.extend(canvas_paint::paint_commands(&snapshot, *dest_rect, *content_box));
+                    if let Some(source) = &canvas_source {
+                        let paint = canvas_paint::CanvasPaint::reuse_or_paint(
+                            last_paints.remove(&node),
+                            source,
+                            node,
+                            *dest_rect,
+                            *content_box,
+                        );
+                        if let Some(paint) = paint {
+                            expanded.extend(paint.commands.iter().cloned());
+                            canvas_paints.insert(node, paint);
+                        }
                     }
                     continue;
                 }
@@ -8961,6 +8986,9 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        if let Some(v) = self.views.get_mut(&id) {
+            v.canvas_paints = canvas_paints;
+        }
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl

@@ -10,14 +10,15 @@
 //! commands (inline SVG is painted the same way), text goes through the
 //! same shaper and glyph cache as the page's own text, and a canvas drawn
 //! at devicePixelRatio stays sharp. The cost is what a vector recording
-//! cannot express (see the module's "not done" list in the PR): a partial
-//! `clearRect`, compositing modes, pixel reads.
+//! cannot express (see the module's "not done" list in the PR): compositing
+//! modes, pixel reads. A partial `clearRect` is painted as clips: what was
+//! drawn before it paints only outside the rects cleared after it.
 
 use rustkit_bindings::canvas::{
-    CanvasFont, CanvasStyle, DrawCommand, LineDash, LinearGradient, TextAlign, TextBaseline,
+    command_extent, CanvasFont, CanvasStyle, DrawCommand, LineDash, LinearGradient, TextAlign, TextBaseline,
     Transform2D,
 };
-use rustkit_bindings::{CanvasSnapshot, CanvasTextExtent, CanvasTextMeasurer};
+use rustkit_bindings::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 use rustkit_css::Color;
 use rustkit_layout::{DisplayCommand, Rect};
 
@@ -79,6 +80,47 @@ fn initial_font() -> CanvasFont {
     CanvasFont::parse("10px sans-serif", 16.0).expect("initial canvas font")
 }
 
+/// A canvas's paint as the last display list built it: for the recording
+/// at `generation`, in a box whose fitted image rect was `dest` and content
+/// box `content`.
+pub(crate) struct CanvasPaint {
+    generation: u64,
+    dest: Rect,
+    content: Rect,
+    pub(crate) commands: Vec<DisplayCommand>,
+}
+
+fn same(a: Rect, b: Rect) -> bool {
+    (a.x, a.y, a.width, a.height) == (b.x, b.y, b.width, b.height)
+}
+
+impl CanvasPaint {
+    /// `last` again when the canvas `node` has not drawn since and its box
+    /// is where it was; otherwise its recording painted afresh. `None`
+    /// with no 2D context.
+    pub(crate) fn reuse_or_paint(
+        last: Option<CanvasPaint>,
+        source: &CanvasSource,
+        node: usize,
+        dest: Rect,
+        content: Rect,
+    ) -> Option<CanvasPaint> {
+        let generation = source.generation(node)?;
+        if let Some(last) = last {
+            if last.generation == generation && same(last.dest, dest) && same(last.content, content) {
+                return Some(last);
+            }
+        }
+        let snapshot = source.snapshot(node)?;
+        Some(CanvasPaint {
+            generation,
+            dest,
+            content,
+            commands: paint_commands(&snapshot, dest, content),
+        })
+    }
+}
+
 thread_local! {
     static PAINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -109,23 +151,154 @@ pub(crate) fn paint_commands(
         dest.height / canvas.height as f32,
     );
     let frame = intersect(content, dest);
+    let bitmap = [0.0, 0.0, canvas.width as f32, canvas.height as f32];
+    let commands = &canvas.commands[..];
+    // What each partial clearRect erases, in bitmap pixels: its rect cut
+    // to the bitmap and the clip it was recorded under (rustkit-canvas
+    // records only axis-aligned partial clears).
+    let mut clip: Option<[f32; 4]> = None;
+    let mut clears: Vec<(usize, [f32; 4])> = Vec::new();
+    for (i, command) in commands.iter().enumerate() {
+        match command {
+            DrawCommand::Clip { rect } => clip = *rect,
+            DrawCommand::ClearRect { transform, .. } if transform.b == 0.0 && transform.c == 0.0 => {
+                let mut r = cut(command_extent(command, bitmap), bitmap);
+                if let Some(c) = clip {
+                    r = cut(r, c);
+                }
+                if r[0] < r[2] && r[1] < r[3] {
+                    clears.push((i, r));
+                }
+            }
+            _ => {}
+        }
+    }
     out.push(DisplayCommand::PushClip(frame));
+    // The commands between one clear and the next paint where none of the
+    // clears after them erased: under each rect of the bitmap less those
+    // clears, the commands that reach that rect.
+    let mut start = 0;
+    let mut clip_in_force = None;
+    for k in 0..=clears.len() {
+        let end = clears.get(k).map_or(commands.len(), |c| c.0);
+        let run = &commands[start..end];
+        if k == clears.len() {
+            emit_run(&mut out, run, clip_in_force, None, &to_box, frame, bitmap);
+        } else {
+            let erased: Vec<[f32; 4]> = clears[k..].iter().map(|c| c.1).collect();
+            for piece in subtract(bitmap, &erased) {
+                let reaches = run.iter().any(|c| {
+                    !matches!(c, DrawCommand::Clip { .. } | DrawCommand::ClearRect { .. })
+                        && overlaps(command_extent(c, bitmap), piece)
+                });
+                if !reaches {
+                    continue;
+                }
+                out.push(DisplayCommand::PushClip(intersect(box_rect(&to_box, piece), frame)));
+                emit_run(&mut out, run, clip_in_force, Some(piece), &to_box, frame, bitmap);
+                out.push(DisplayCommand::PopClip);
+            }
+        }
+        for command in run.iter().chain(commands.get(end)) {
+            if let DrawCommand::Clip { rect } = command {
+                clip_in_force = *rect;
+            }
+        }
+        start = end + 1;
+    }
+    out.push(DisplayCommand::PopClip);
+    out
+}
+
+/// `a` cut to `b` (bitmap `[x0, y0, x1, y1]`).
+fn cut(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])]
+}
+
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+}
+
+/// `from` less every rect of `holes`, as disjoint rects.
+fn subtract(from: [f32; 4], holes: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    let mut left = vec![from];
+    for &h in holes {
+        let mut next = Vec::with_capacity(left.len() + 3);
+        for r in left {
+            if !overlaps(r, h) {
+                next.push(r);
+                continue;
+            }
+            // Above and below the hole, then its left and right in its band.
+            if r[1] < h[1] {
+                next.push([r[0], r[1], r[2], h[1]]);
+            }
+            if h[3] < r[3] {
+                next.push([r[0], h[3], r[2], r[3]]);
+            }
+            let (y0, y1) = (r[1].max(h[1]), r[3].min(h[3]));
+            if r[0] < h[0] {
+                next.push([r[0], y0, h[0], y1]);
+            }
+            if h[2] < r[2] {
+                next.push([h[2], y0, r[2], y1]);
+            }
+        }
+        left = next;
+    }
+    left
+}
+
+fn box_rect(to_box: &Transform2D, [x0, y0, x1, y1]: [f32; 4]) -> Rect {
+    let (ax, ay) = to_box.apply(x0, y0);
+    let (bx, by) = to_box.apply(x1, y1);
+    Rect::new(ax.min(bx), ay.min(by), (bx - ax).abs(), (by - ay).abs())
+}
+
+/// Paint `run`, which starts under the canvas clip `clip` (bitmap px);
+/// with `only`, just the commands that reach that bitmap rect.
+fn emit_run(
+    out: &mut Vec<DisplayCommand>,
+    run: &[DrawCommand],
+    clip: Option<[f32; 4]>,
+    only: Option<[f32; 4]>,
+    to_box: &Transform2D,
+    frame: Rect,
+    bitmap: [f32; 4],
+) {
     let mut clipped = false;
-    for command in &canvas.commands {
+    if let Some(r) = clip {
+        out.push(DisplayCommand::PushClip(intersect(box_rect(to_box, r), frame)));
+        clipped = true;
+    }
+    for command in run {
+        if let (Some(piece), false) = (only, matches!(command, DrawCommand::Clip { .. })) {
+            if !overlaps(command_extent(command, bitmap), piece) {
+                continue;
+            }
+        }
         match command {
             DrawCommand::Clip { rect } => {
                 if clipped {
                     out.push(DisplayCommand::PopClip);
                     clipped = false;
                 }
-                if let Some([x0, y0, x1, y1]) = *rect {
-                    let (ax, ay) = to_box.apply(x0, y0);
-                    let (bx, by) = to_box.apply(x1, y1);
-                    let r = Rect::new(ax.min(bx), ay.min(by), (bx - ax).abs(), (by - ay).abs());
-                    out.push(DisplayCommand::PushClip(intersect(r, frame)));
+                if let Some(r) = *rect {
+                    out.push(DisplayCommand::PushClip(intersect(box_rect(to_box, r), frame)));
                     clipped = true;
                 }
             }
+            other => paint_one(out, other, to_box),
+        }
+    }
+    if clipped {
+        out.push(DisplayCommand::PopClip);
+    }
+}
+
+fn paint_one(out: &mut Vec<DisplayCommand>, command: &DrawCommand, to_box: &Transform2D) {
+        match command {
+            DrawCommand::Clip { .. } => {}
             DrawCommand::FillRect {
                 x,
                 y,
@@ -145,7 +318,7 @@ pub(crate) fn paint_commands(
                     }
                 } else {
                     let contour = vec![(*x, *y), (x + w, *y), (x + w, y + h), (*x, y + h)];
-                    fill(&mut out, &[contour], false, style, &t);
+                    fill(out, &[contour], false, style, &t);
                 }
             }
             DrawCommand::FillPath {
@@ -155,7 +328,7 @@ pub(crate) fn paint_commands(
                 transform,
             } => {
                 fill(
-                    &mut out,
+                    out,
                     segments,
                     *even_odd,
                     style,
@@ -174,7 +347,7 @@ pub(crate) fn paint_commands(
             } => {
                 let contour = vec![(*x, *y), (x + w, *y), (x + w, y + h), (*x, y + h), (*x, *y)];
                 stroke(
-                    &mut out,
+                    out,
                     &[contour],
                     style,
                     *line_width,
@@ -190,7 +363,7 @@ pub(crate) fn paint_commands(
                 transform,
             } => {
                 stroke(
-                    &mut out,
+                    out,
                     segments,
                     style,
                     *line_width,
@@ -223,7 +396,7 @@ pub(crate) fn paint_commands(
             } => {
                 let font = CanvasFont::parse(font, 16.0).unwrap_or_else(initial_font);
                 draw_text(
-                    &mut out,
+                    out,
                     text,
                     *x,
                     *y,
@@ -235,18 +408,12 @@ pub(crate) fn paint_commands(
                     &to_box.multiply(transform),
                 );
             }
-            // A partial clear cannot take paint back out of a vector
-            // recording (a whole-bitmap clear drops the recording instead).
+            // Clears are applied as the runs' clips (paint_commands);
+            // images are not drawn in phase 1.
             DrawCommand::ClearRect { .. }
             | DrawCommand::DrawImage { .. }
             | DrawCommand::PutImageData { .. } => {}
         }
-    }
-    if clipped {
-        out.push(DisplayCommand::PopClip);
-    }
-    out.push(DisplayCommand::PopClip);
-    out
 }
 
 fn intersect(a: Rect, b: Rect) -> Rect {

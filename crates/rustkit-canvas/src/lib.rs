@@ -24,6 +24,7 @@
 
 use rustkit_css::Color;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::f32::consts::PI;
 use thiserror::Error;
 
@@ -779,8 +780,22 @@ pub struct CanvasRenderingContext2D {
     path: Path2D,
     /// Recorded draw commands.
     commands: Vec<DrawCommand>,
+    /// Where each recorded command can paint, in bitmap pixels
+    /// `[x0, y0, x1, y1]` (conservative, cut to the bitmap and the clip it
+    /// was recorded under); `None` for a `Clip`.
+    bounds: Vec<Option<[f32; 4]>>,
+    /// [`command_bytes`] of the recording.
+    bytes: usize,
+    /// See [`Self::generation`].
+    generation: u64,
     /// Pixel buffer (optional, for getImageData).
     pixel_buffer: Option<ImageData>,
+}
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 impl CanvasRenderingContext2D {
@@ -793,8 +808,142 @@ impl CanvasRenderingContext2D {
             state_stack: VecDeque::new(),
             path: Path2D::new(),
             commands: Vec::new(),
+            bounds: Vec::new(),
+            bytes: 0,
+            generation: next_generation(),
             pixel_buffer: None,
         }
+    }
+
+    // ==================== The recording ====================
+    //
+    // The recording is the canvas's content, so it is kept to what can
+    // still be seen (PR #905 R1): a clear or an opaque fill drops the
+    // commands it wholly covers, a clear of the whole bitmap drops them
+    // all, and past RECORDING_BYTE_BUDGET the oldest commands go.
+
+    fn canvas_rect(&self) -> [f32; 4] {
+        [0.0, 0.0, self.width as f32, self.height as f32]
+    }
+
+    /// `rect` cut to the bitmap and the clip in force; `None` when nothing
+    /// of it is left.
+    fn visible(&self, rect: [f32; 4]) -> Option<[f32; 4]> {
+        let mut r = intersect4(rect, self.canvas_rect());
+        if let Some(c) = self.state.clip_rect {
+            r = intersect4(r, c);
+        }
+        (r[0] < r[2] && r[1] < r[3]).then_some(r)
+    }
+
+    fn record(&mut self, command: DrawCommand) {
+        let bounds = match &command {
+            DrawCommand::Clip { .. } => None,
+            other => match self.visible(command_extent(other, self.canvas_rect())) {
+                Some(b) => Some(b),
+                // Nothing of it can show.
+                None => return,
+            },
+        };
+        self.bytes += command_bytes(&command);
+        self.commands.push(command);
+        self.bounds.push(bounds);
+        self.generation = next_generation();
+        if self.bytes > RECORDING_BYTE_BUDGET {
+            self.trim_oldest();
+        }
+    }
+
+    fn record_clip(&mut self) {
+        let rect = self.state.clip_rect;
+        // A clip with nothing drawn under it since the last is replaced.
+        if matches!(self.commands.last(), Some(DrawCommand::Clip { .. })) {
+            self.commands.pop();
+            self.bounds.pop();
+            self.bytes -= std::mem::size_of::<DrawCommand>();
+        }
+        let in_force = self.commands.iter().rev().find_map(|c| match c {
+            DrawCommand::Clip { rect } => Some(*rect),
+            _ => None,
+        });
+        if in_force.unwrap_or(None) == rect {
+            self.generation = next_generation();
+            return;
+        }
+        self.record(DrawCommand::Clip { rect });
+    }
+
+    /// Drop everything recorded (a clear of the whole bitmap, a reset);
+    /// the clip in force is recorded again for what follows.
+    fn drop_all(&mut self) {
+        self.commands.clear();
+        self.bounds.clear();
+        self.bytes = 0;
+        self.generation = next_generation();
+        if self.state.clip_rect.is_some() {
+            self.record_clip();
+        }
+    }
+
+    /// Drop the drawing (and clears) wholly inside `region` (bitmap
+    /// pixels): something painted or cleared over all of it hides it.
+    fn occlude(&mut self, region: [f32; 4]) {
+        let inside = |b: &[f32; 4]| b[0] >= region[0] && b[1] >= region[1] && b[2] <= region[2] && b[3] <= region[3];
+        if !self.bounds.iter().flatten().any(inside) {
+            return;
+        }
+        let commands = std::mem::take(&mut self.commands);
+        let bounds = std::mem::take(&mut self.bounds);
+        self.bytes = 0;
+        for (command, b) in commands.into_iter().zip(bounds) {
+            match b {
+                Some(b) if inside(&b) => continue,
+                Some(_) => {}
+                None => {
+                    // A clip nothing is left under is replaced by this one.
+                    if matches!(self.commands.last(), Some(DrawCommand::Clip { .. })) {
+                        self.commands.pop();
+                        self.bounds.pop();
+                        self.bytes -= std::mem::size_of::<DrawCommand>();
+                    }
+                    if self.commands.is_empty() && matches!(command, DrawCommand::Clip { rect: None }) {
+                        continue;
+                    }
+                }
+            }
+            self.bytes += command_bytes(&command);
+            self.commands.push(command);
+            self.bounds.push(b);
+        }
+        self.generation = next_generation();
+    }
+
+    /// Past the budget: drop the oldest commands down to three quarters of
+    /// it (so this runs once per quarter-budget of drawing, not per
+    /// command), keeping the clip they left in force.
+    fn trim_oldest(&mut self) {
+        let target = RECORDING_BYTE_BUDGET / 4 * 3;
+        let mut freed = 0;
+        let mut cut = 0;
+        let mut clip = None;
+        while cut < self.commands.len() && self.bytes - freed > target {
+            if let DrawCommand::Clip { rect } = &self.commands[cut] {
+                clip = Some(*rect);
+            }
+            freed += command_bytes(&self.commands[cut]);
+            cut += 1;
+        }
+        self.commands.drain(..cut);
+        self.bounds.drain(..cut);
+        self.bytes -= freed;
+        if let Some(rect @ Some(_)) = clip {
+            if !matches!(self.commands.first(), Some(DrawCommand::Clip { .. })) {
+                self.commands.insert(0, DrawCommand::Clip { rect });
+                self.bounds.insert(0, None);
+                self.bytes += std::mem::size_of::<DrawCommand>();
+            }
+        }
+        self.generation = next_generation();
     }
 
     // ==================== State Management ====================
@@ -810,7 +959,7 @@ impl CanvasRenderingContext2D {
             let clip_changed = state.clip_rect != self.state.clip_rect;
             self.state = state;
             if clip_changed {
-                self.commands.push(DrawCommand::Clip { rect: self.state.clip_rect });
+                self.record_clip();
             }
         }
     }
@@ -820,7 +969,7 @@ impl CanvasRenderingContext2D {
         self.state = CanvasState::default();
         self.state_stack.clear();
         self.path = Path2D::new();
-        self.commands.clear();
+        self.drop_all();
     }
 
     // ==================== Transform ====================
@@ -1047,11 +1196,18 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w == 0.0 || h == 0.0 {
             return;
         }
-        self.commands.push(DrawCommand::FillRect {
-            x, y, w, h,
-            style: self.state.fill_style.with_alpha(self.state.global_alpha),
-            transform: self.state.transform,
-        });
+        let style = self.state.fill_style.with_alpha(self.state.global_alpha);
+        let t = self.state.transform;
+        // An opaque axis-aligned fill hides what is wholly under it.
+        let opaque = matches!(style, CanvasStyle::Color(c) if c.a >= 1.0)
+            && self.state.global_composite_operation == CompositeOperation::SourceOver
+            && (self.state.shadow_color.a == 0.0 || self.state.shadow_blur == 0.0 && self.state.shadow_offset_x == 0.0 && self.state.shadow_offset_y == 0.0);
+        if opaque && t.b == 0.0 && t.c == 0.0 {
+            if let Some(region) = self.visible(quad_bounds(&quad(&t, x, y, w, h))) {
+                self.occlude(region);
+            }
+        }
+        self.record(DrawCommand::FillRect { x, y, w, h, style, transform: t });
     }
 
     /// Stroke a rectangle.
@@ -1059,7 +1215,7 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
             return;
         }
-        self.commands.push(DrawCommand::StrokeRect {
+        self.record(DrawCommand::StrokeRect {
             x, y, w, h,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
             line_width: self.state.line_width,
@@ -1072,27 +1228,42 @@ impl CanvasRenderingContext2D {
         LineDash { segments: self.state.line_dash.clone(), offset: self.state.line_dash_offset }
     }
 
-    /// Clear a rectangle. A clear that covers the whole bitmap (Chart.js
-    /// clears that way before every frame) drops everything drawn before
-    /// it; the clip in force is recorded again for what follows.
+    /// Clear a rectangle. A clear that covers the whole bitmap in bitmap
+    /// space, under the transform and the clip in force (Chart.js clears
+    /// that way before every frame), drops everything drawn before it. A
+    /// partial axis-aligned clear drops what it wholly covers and is
+    /// recorded, for the painter to erase, when it still covers something.
+    /// A partial clear under a rotation or skew is not recorded (the
+    /// painter erases axis-aligned regions only).
     pub fn clear_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
         if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
             return;
         }
         let t = self.state.transform;
-        let corners = [t.apply(x, y), t.apply(x + w, y), t.apply(x + w, y + h), t.apply(x, y + h)];
-        let axis_aligned = t.b == 0.0 && t.c == 0.0;
-        let (min_x, max_x) = (corners.iter().map(|p| p.0).fold(f32::INFINITY, f32::min), corners.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max));
-        let (min_y, max_y) = (corners.iter().map(|p| p.1).fold(f32::INFINITY, f32::min), corners.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max));
-        let unclipped = self.state.clip_rect.is_none();
-        if axis_aligned && unclipped && min_x <= 0.0 && min_y <= 0.0 && max_x >= self.width as f32 && max_y >= self.height as f32 {
-            self.commands.clear();
+        let q = quad(&t, x, y, w, h);
+        let canvas = self.canvas_rect();
+        let clip_covers = self.state.clip_rect.is_none_or(|c| contains4(c, canvas));
+        let corners = [(0.0, 0.0), (canvas[2], 0.0), (canvas[2], canvas[3]), (0.0, canvas[3])];
+        if clip_covers && corners.iter().all(|&p| in_convex_quad(&q, p)) {
+            self.drop_all();
             return;
         }
-        self.commands.push(DrawCommand::ClearRect {
-            x, y, w, h,
-            transform: self.state.transform,
-        });
+        if !(t.b == 0.0 && t.c == 0.0) {
+            return;
+        }
+        let Some(region) = self.visible(quad_bounds(&q)) else {
+            return;
+        };
+        self.occlude(region);
+        let overlaps = |b: &[f32; 4]| b[0] < region[2] && b[2] > region[0] && b[1] < region[3] && b[3] > region[1];
+        let erases = self
+            .commands
+            .iter()
+            .zip(&self.bounds)
+            .any(|(c, b)| !matches!(c, DrawCommand::ClearRect { .. }) && b.as_ref().is_some_and(overlaps));
+        if erases {
+            self.record(DrawCommand::ClearRect { x, y, w, h, transform: t });
+        }
     }
 
     /// The bitmap was resized (`canvas.width = n`, even to the same
@@ -1101,6 +1272,7 @@ impl CanvasRenderingContext2D {
         self.width = width;
         self.height = height;
         self.reset();
+        self.generation = next_generation();
     }
 
     // ==================== Drawing Paths ====================
@@ -1116,7 +1288,7 @@ impl CanvasRenderingContext2D {
         if segments.is_empty() {
             return;
         }
-        self.commands.push(DrawCommand::FillPath {
+        self.record(DrawCommand::FillPath {
             segments,
             style: self.state.fill_style.with_alpha(self.state.global_alpha),
             even_odd,
@@ -1130,7 +1302,7 @@ impl CanvasRenderingContext2D {
         if segments.is_empty() {
             return;
         }
-        self.commands.push(DrawCommand::StrokePath {
+        self.record(DrawCommand::StrokePath {
             segments,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
             line_width: self.state.line_width,
@@ -1158,7 +1330,7 @@ impl CanvasRenderingContext2D {
             b[3] = b[3].max(b[1]);
         }
         self.state.clip_rect = Some(b);
-        self.commands.push(DrawCommand::Clip { rect: Some(b) });
+        self.record_clip();
     }
 
     /// Check if point is in path.
@@ -1199,7 +1371,7 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite()) || max_width.is_some_and(|w| !(w > 0.0)) {
             return;
         }
-        self.commands.push(DrawCommand::FillText {
+        self.record(DrawCommand::FillText {
             text: text.to_string(),
             x, y,
             style: self.state.fill_style.with_alpha(self.state.global_alpha),
@@ -1221,7 +1393,7 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite()) || max_width.is_some_and(|w| !(w > 0.0)) {
             return;
         }
-        self.commands.push(DrawCommand::StrokeText {
+        self.record(DrawCommand::StrokeText {
             text: text.to_string(),
             x, y,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
@@ -1260,7 +1432,7 @@ impl CanvasRenderingContext2D {
 
     /// Draw image.
     pub fn draw_image(&mut self, image_id: &str, dx: f32, dy: f32) {
-        self.commands.push(DrawCommand::DrawImage {
+        self.record(DrawCommand::DrawImage {
             image_id: image_id.to_string(),
             sx: 0.0, sy: 0.0, sw: 0.0, sh: 0.0,
             dx, dy, dw: 0.0, dh: 0.0,
@@ -1270,7 +1442,7 @@ impl CanvasRenderingContext2D {
 
     /// Draw image with size.
     pub fn draw_image_sized(&mut self, image_id: &str, dx: f32, dy: f32, dw: f32, dh: f32) {
-        self.commands.push(DrawCommand::DrawImage {
+        self.record(DrawCommand::DrawImage {
             image_id: image_id.to_string(),
             sx: 0.0, sy: 0.0, sw: 0.0, sh: 0.0,
             dx, dy, dw, dh,
@@ -1280,7 +1452,7 @@ impl CanvasRenderingContext2D {
 
     /// Draw image with source and destination.
     pub fn draw_image_full(&mut self, image_id: &str, sx: f32, sy: f32, sw: f32, sh: f32, dx: f32, dy: f32, dw: f32, dh: f32) {
-        self.commands.push(DrawCommand::DrawImage {
+        self.record(DrawCommand::DrawImage {
             image_id: image_id.to_string(),
             sx, sy, sw, sh,
             dx, dy, dw, dh,
@@ -1316,7 +1488,7 @@ impl CanvasRenderingContext2D {
 
     /// Put image data to canvas.
     pub fn put_image_data(&mut self, data: ImageData, x: i32, y: i32) {
-        self.commands.push(DrawCommand::PutImageData { data, x, y });
+        self.record(DrawCommand::PutImageData { data, x, y });
     }
 
     // ==================== Commands ====================
@@ -1325,13 +1497,13 @@ impl CanvasRenderingContext2D {
     /// a resize), unique across every context in the process, so a reader
     /// that cached what it built from the recording knows when to rebuild.
     pub fn generation(&self) -> u64 {
-        0
+        self.generation
     }
 
     /// An estimate of the heap the recording holds, in bytes (see
     /// [`RECORDING_BYTE_BUDGET`]).
     pub fn recorded_bytes(&self) -> usize {
-        self.commands.iter().map(command_bytes).sum()
+        self.bytes
     }
 
     /// Get recorded draw commands.
@@ -1341,16 +1513,105 @@ impl CanvasRenderingContext2D {
 
     /// Take recorded draw commands.
     pub fn take_commands(&mut self) -> Vec<DrawCommand> {
+        self.bounds.clear();
+        self.bytes = 0;
+        self.generation = next_generation();
         std::mem::take(&mut self.commands)
     }
 
     /// Clear commands.
     pub fn clear_commands(&mut self) {
         self.commands.clear();
+        self.bounds.clear();
+        self.bytes = 0;
+        self.generation = next_generation();
     }
 }
 
 // ==================== Helper Functions ====================
+
+fn intersect4(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])]
+}
+
+fn contains4(outer: [f32; 4], inner: [f32; 4]) -> bool {
+    outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
+}
+
+/// The user-space rect (x, y, w, h) under `t`, as its four corners in order.
+fn quad(t: &Transform2D, x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 4] {
+    [t.apply(x, y), t.apply(x + w, y), t.apply(x + w, y + h), t.apply(x, y + h)]
+}
+
+fn quad_bounds(q: &[(f32, f32)]) -> [f32; 4] {
+    q.iter().fold([f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY], |b, &(x, y)| {
+        [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]
+    })
+}
+
+/// Whether `p` is inside (or on) the parallelogram `q` (a rect under an
+/// affine transform: convex, either winding).
+fn in_convex_quad(q: &[(f32, f32); 4], p: (f32, f32)) -> bool {
+    let mut sign = 0.0f32;
+    for i in 0..4 {
+        let (a, b) = (q[i], q[(i + 1) % 4]);
+        let cross = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+        // A tolerance for the float error of the transform (bitmap px).
+        let edge = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if cross.abs() <= 1e-3 * edge.max(1.0) {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where `command` can paint in bitmap pixels, before the clip: a
+/// conservative box (a stroke's width on every side; text an estimate
+/// two ems per character wide either side of its anchor, two ems above
+/// and below its baseline). `canvas` stands for what has no extent of its own.
+pub fn command_extent(command: &DrawCommand, canvas: [f32; 4]) -> [f32; 4] {
+    fn user(t: &Transform2D, b: [f32; 4]) -> [f32; 4] {
+        if !(b[0] <= b[2] && b[1] <= b[3]) {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+        quad_bounds(&quad(t, b[0], b[1], b[2] - b[0], b[3] - b[1]))
+    }
+    fn grow(b: [f32; 4], by: f32) -> [f32; 4] {
+        [b[0] - by, b[1] - by, b[2] + by, b[3] + by]
+    }
+    fn points(segments: &[Vec<(f32, f32)>]) -> [f32; 4] {
+        quad_bounds(&segments.iter().flatten().copied().collect::<Vec<_>>())
+    }
+    let rect = |x: f32, y: f32, w: f32, h: f32| [x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)];
+    match command {
+        DrawCommand::FillRect { x, y, w, h, transform, .. } => user(transform, rect(*x, *y, *w, *h)),
+        DrawCommand::StrokeRect { x, y, w, h, line_width, transform, .. } => {
+            user(transform, grow(rect(*x, *y, *w, *h), *line_width))
+        }
+        DrawCommand::ClearRect { x, y, w, h, transform } => user(transform, rect(*x, *y, *w, *h)),
+        DrawCommand::FillPath { segments, transform, .. } => user(transform, points(segments)),
+        DrawCommand::StrokePath { segments, line_width, transform, .. } => {
+            user(transform, grow(points(segments), *line_width))
+        }
+        DrawCommand::FillText { text, x, y, font, max_width, transform, .. }
+        | DrawCommand::StrokeText { text, x, y, font, max_width, transform, .. } => {
+            let size = CanvasFont::parse(font, 16.0).map_or(16.0, |f| f.size);
+            let mut wide = text.chars().count() as f32 * size * 2.0;
+            if let Some(m) = max_width {
+                if m.is_finite() && *m >= 0.0 {
+                    wide = wide.min(*m);
+                }
+            }
+            user(transform, [x - wide - size, y - 2.0 * size, x + wide + size, y + 2.0 * size])
+        }
+        DrawCommand::Clip { .. } | DrawCommand::DrawImage { .. } | DrawCommand::PutImageData { .. } => canvas,
+    }
+}
 
 /// The most a canvas's recording may hold (estimated by [`command_bytes`]).
 pub const RECORDING_BYTE_BUDGET: usize = 8 << 20;

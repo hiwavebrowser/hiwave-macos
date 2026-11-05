@@ -48,8 +48,6 @@ const FONT_BASE_PX: f32 = 16.0;
 pub(crate) struct CanvasStore {
     /// One context per canvas element, by NodeId.
     contexts: HashMap<usize, CanvasRenderingContext2D>,
-    /// `CanvasGradient` objects, by the index script holds.
-    gradients: Vec<LinearGradient>,
     /// A context drew, cleared or was resized since the engine last took this.
     painted: bool,
     measurer: Option<CanvasTextMeasurer>,
@@ -86,7 +84,6 @@ impl CanvasStore {
     /// A new document: its canvases start with no context.
     pub(crate) fn clear(&mut self) {
         self.contexts.clear();
-        self.gradients.clear();
         self.painted = true;
     }
 
@@ -99,13 +96,7 @@ impl CanvasStore {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        let recordings: usize = self.contexts.values().map(|c| c.recorded_bytes()).sum();
-        let gradients: usize = self
-            .gradients
-            .iter()
-            .map(|g| std::mem::size_of::<LinearGradient>() + g.stops.len() * std::mem::size_of::<rustkit_canvas::ColorStop>())
-            .sum();
-        recordings + gradients
+        self.contexts.values().map(|c| c.recorded_bytes()).sum()
     }
 
     pub(crate) fn take_painted(&mut self) -> bool {
@@ -186,30 +177,17 @@ pub(crate) fn install(
                 return JsValue::Undefined;
             };
             let mut store = s.borrow_mut();
-            // Gradients belong to no canvas in particular.
-            match op {
-                "gradientNew" => {
-                    let Some([x0, y0, x1, y1]) = nums::<4>(args, 3) else {
-                        return JsValue::Null;
-                    };
-                    store.gradients.push(LinearGradient::new(x0, y0, x1, y1));
-                    return JsValue::Number((store.gradients.len() - 1) as f64);
+            // A gradient stop belongs to no canvas: checked here, kept by
+            // the script's CanvasGradient as the colour serialized.
+            if op == "gradientStop" {
+                let offset = num(args, 3);
+                if !(offset.is_finite() && (0.0..=1.0).contains(&offset)) {
+                    return JsValue::String("IndexSizeError".into());
                 }
-                "gradientStop" => {
-                    let index = num(args, 3);
-                    let offset = num(args, 4);
-                    if !(offset.is_finite() && (0.0..=1.0).contains(&offset)) {
-                        return JsValue::String("IndexSizeError".into());
-                    }
-                    let Some(color) = text(args, 5).and_then(parse_canvas_color) else {
-                        return JsValue::String("SyntaxError".into());
-                    };
-                    if let Some(g) = store.gradients.get_mut(index as usize) {
-                        g.add_color_stop(offset, color);
-                    }
-                    return JsValue::String(String::new());
-                }
-                _ => {}
+                return match text(args, 4).and_then(parse_canvas_color) {
+                    Some(color) => JsValue::String(serialize_canvas_color(color)),
+                    None => JsValue::String("SyntaxError".into()),
+                };
             }
             let node = match DomHost::node_of(&h, args) {
                 Some(node) => node,
@@ -235,10 +213,7 @@ pub(crate) fn install(
                 return JsValue::String(format!("{} {} {}", e.width, e.ascent, e.descent));
             }
             let CanvasStore {
-                contexts,
-                gradients,
-                painted,
-                ..
+                contexts, painted, ..
             } = &mut *store;
             let Some(ctx) = contexts.get_mut(&node) else {
                 return JsValue::Undefined;
@@ -302,8 +277,17 @@ pub(crate) fn install(
                 }
                 "fillGradient" | "strokeGradient" => {
                     drew = false;
-                    if let Some(g) = gradients.get(num(args, 3) as usize) {
-                        let style = CanvasStyle::LinearGradient(g.clone());
+                    // x0 y0 x1 y1, then "offset|colour|offset|colour...".
+                    if let Some([x0, y0, x1, y1]) = nums::<4>(args, 3) {
+                        let mut g = LinearGradient::new(x0, y0, x1, y1);
+                        let stops = text(args, 7).unwrap_or("");
+                        let mut parts = stops.split('|').filter(|p| !p.is_empty());
+                        while let (Some(offset), Some(color)) = (parts.next(), parts.next()) {
+                            if let (Ok(offset), Some(color)) = (offset.parse::<f32>(), parse_canvas_color(color)) {
+                                g.add_color_stop(offset, color);
+                            }
+                        }
+                        let style = CanvasStyle::LinearGradient(g);
                         if op == "fillGradient" {
                             ctx.set_fill_style(style);
                         } else {

@@ -78,6 +78,10 @@
     var Gradient = iface('CanvasGradient');
     var Metrics = iface('TextMetrics');
     var DATA = new WeakMap();
+    // A CanvasGradient's geometry and stops live here, on the script side,
+    // and go with it when script lets it go; a fill or stroke style set to
+    // it hands the Rust side a copy (PR #905 R1: no gradient table beside
+    // the recording).
     var GRAD = new WeakMap();
 
     method(Canvas.prototype, 'getContext', function getContext(kind) {
@@ -154,7 +158,7 @@
             var d = data(this);
             var gi = v !== null && typeof v === 'object' ? GRAD.get(v) : undefined;
             if (gi !== undefined) {
-                call(d, gradientOp, gi);
+                call(d, gradientOp, gi.x0, gi.y0, gi.x1, gi.y1, gi.stops.join('|'));
                 d.st[name] = v;
                 return;
             }
@@ -172,18 +176,18 @@
         for (var i = 0; i < 4; i++) {
             if (!isFinite(a[i])) throw new TypeError("Failed to execute 'createLinearGradient' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
         }
-        var index = C(-1, -1, 'gradientNew', a[0], a[1], a[2], a[3]);
         var grad = Object.create(Gradient.prototype);
-        GRAD.set(grad, index);
+        GRAD.set(grad, { x0: a[0], y0: a[1], x1: a[2], y1: a[3], stops: [] });
         return grad;
     });
     method(Gradient.prototype, 'addColorStop', function addColorStop(offset, color) {
         need(2, arguments, 'CanvasGradient', 'addColorStop');
-        var index = GRAD.get(this);
-        if (index === undefined) throw new TypeError('Illegal invocation');
-        var out = C(-1, -1, 'gradientStop', index, +offset, String(color));
+        var gi = GRAD.get(this);
+        if (gi === undefined) throw new TypeError('Illegal invocation');
+        var out = C(-1, -1, 'gradientStop', +offset, String(color));
         if (out === 'IndexSizeError') throw domError('IndexSizeError', "Failed to execute 'addColorStop' on 'CanvasGradient': The provided value (" + offset + ') is outside the range (0.0, 1.0).');
         if (out === 'SyntaxError') throw domError('SyntaxError', "Failed to execute 'addColorStop' on 'CanvasGradient': The value provided ('" + color + "') could not be parsed as a color.");
+        gi.stops.push(+offset, out);
     });
 
     // ---- Line styles
