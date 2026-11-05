@@ -299,3 +299,66 @@ fn protocol_relative_urls_read_back_absolute() {
         "https://www.wikipedia.org/search-redirect.php https://example.test/p?q#f https://example.test/ https://example.test/s"
     );
 }
+
+// CH2.E6: the engine's `<select>` drop-down picks through
+// `DomBindings::pick_option`: selectedness moves, `input` then `change`
+// fire once each (trusted, bubbling), and the engine is told each
+// option's selectedness, which `:checked` and the painted label follow.
+const PICK_PAGE: &str = r#"<!DOCTYPE html><html><body>
+<select id="s"><option>Zero</option><option disabled>One</option><optgroup label="G"><option>Two</option></optgroup>
+<optgroup label="Off" disabled><option>Three</option></optgroup><option>Four</option></select>
+</body></html>"#;
+
+fn bound_pick() -> (DomBindings, usize) {
+    let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html(PICK_PAGE).unwrap());
+    bindings.set_document(doc.clone()).unwrap();
+    let s = doc.get_element_by_id("s").expect("select").id.raw();
+    ev(
+        &bindings,
+        "window.log = []; var s = document.getElementById('s'); \
+         ['input', 'change'].forEach(function (t) { document.addEventListener(t, function (e) { \
+         log.push(t + ':' + e.target.id + ':' + e.isTrusted + ':' + e.bubbles + ':' + s.selectedIndex); }); }); ''",
+    );
+    (bindings, s)
+}
+
+#[test]
+fn picking_an_option_selects_it_and_fires_input_then_change_once() {
+    let (b, s) = bound_pick();
+    b.take_checked_writes();
+    assert!(b.pick_option(s, 2).unwrap());
+    assert_eq!(
+        ev(&b, "[s.selectedIndex, s.value, s.options[2].selected, s.options[0].selected].join(',')"),
+        "2,Two,true,false"
+    );
+    assert_eq!(ev(&b, "log.join(' ')"), "input:s:true:true:2 change:s:true:true:2");
+    // The engine is told: option 2 selected, the others not.
+    let writes = b.take_checked_writes();
+    assert!(writes.iter().any(|(_, v)| *v == Some(true)), "a selected write: {writes:?}");
+    assert!(writes.iter().any(|(_, v)| *v == Some(false)), "a deselected write: {writes:?}");
+    // The same option again changes nothing and fires nothing.
+    assert!(!b.pick_option(s, 2).unwrap());
+    assert_eq!(ev(&b, "String(log.length)"), "2");
+}
+
+#[test]
+fn a_disabled_option_or_one_in_a_disabled_group_cannot_be_picked() {
+    let (b, s) = bound_pick();
+    assert!(!b.pick_option(s, 1).unwrap(), "disabled option");
+    assert!(!b.pick_option(s, 3).unwrap(), "option in a disabled optgroup");
+    assert!(!b.pick_option(s, 9).unwrap(), "no such option");
+    assert_eq!(ev(&b, "s.selectedIndex + ':' + log.length"), "0:0");
+}
+
+#[test]
+fn script_selection_reaches_the_engine_as_option_checkedness() {
+    let (b, _) = bound_pick();
+    b.take_checked_writes();
+    ev(&b, "s.selectedIndex = 4; ''");
+    let writes = b.take_checked_writes();
+    assert_eq!(writes.iter().filter(|(_, v)| *v == Some(true)).count(), 1, "{writes:?}");
+    assert_eq!(writes.iter().filter(|(_, v)| *v == Some(false)).count(), 4, "{writes:?}");
+    // No events for a script change.
+    assert_eq!(ev(&b, "String(log.length)"), "0");
+}
