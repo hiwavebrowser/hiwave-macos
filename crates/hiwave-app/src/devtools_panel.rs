@@ -23,7 +23,7 @@ use crate::webview_rustkit::RustKitView;
 use rustkit_engine::{devtools_node_of, devtools_path, DevtoolsAnswer, DevtoolsConsole, DevtoolsQuery};
 use serde::Serialize;
 use tokio::sync::oneshot;
-use wry::WebView;
+use crate::ChromeUi;
 
 /// How long the console's input line waits for a busy page before it is
 /// given up and cancelled (T6c).
@@ -41,8 +41,8 @@ pub fn panel_call(method: &str, arg: &impl Serialize) -> String {
     format!("window.hiwaveInspector && window.hiwaveInspector.{method}({json})")
 }
 
-fn run(panel: &WebView, script: &str) {
-    let _ = panel.evaluate_script(script);
+fn run(panel: &dyn ChromeUi, script: &str) {
+    let _ = panel.eval(script);
 }
 
 /// Whether the open panel asks for new console lines now: only when the
@@ -280,7 +280,7 @@ impl Devtools {
 
     /// The panel opened: record the page's console from now on, and send
     /// the DOM tree and what the console holds.
-    pub fn open(&mut self, view: &RustKitView, _panel: &WebView) {
+    pub fn open(&mut self, view: &RustKitView, _panel: &dyn ChromeUi) {
         self.open = true;
         self.console_seq = 0;
         self.crash_shown = false;
@@ -295,7 +295,7 @@ impl Devtools {
     }
 
     /// The panel closed: no outline, no picking, no recording.
-    pub fn close(&mut self, view: &RustKitView, panel: &WebView) {
+    pub fn close(&mut self, view: &RustKitView, panel: &dyn ChromeUi) {
         self.close_with(&mut |q| view.devtools_ask(q), &mut |js| run(panel, js));
     }
 
@@ -310,7 +310,7 @@ impl Devtools {
     }
 
     /// The page cleared its console (WebKit content's `console.clear()`).
-    pub fn clear_console(&mut self, panel: &WebView) {
+    pub fn clear_console(&mut self, panel: &dyn ChromeUi) {
         self.clear_console_with(&mut |js| run(panel, js));
     }
 
@@ -357,12 +357,12 @@ impl Devtools {
         self.ask(view, Want::Highlight, DevtoolsQuery::Highlight(path.and_then(devtools_node_of)));
     }
 
-    pub fn start_picker(&mut self, panel: &WebView) {
+    pub fn start_picker(&mut self, panel: &dyn ChromeUi) {
         self.picking = true;
         run(panel, "window.hiwaveInspector && window.hiwaveInspector.setPickerActive(true)");
     }
 
-    pub fn stop_picker(&mut self, view: &RustKitView, panel: &WebView) {
+    pub fn stop_picker(&mut self, view: &RustKitView, panel: &dyn ChromeUi) {
         self.stop_picker_with(&mut |q| view.devtools_ask(q), &mut |js| run(panel, js));
     }
 
@@ -379,7 +379,7 @@ impl Devtools {
     /// Picking, the pointer moved to (`x`, `y`) in the view (or left it):
     /// outline the element under it, and mark its row. One question is out
     /// at a time; a move during it replaces the one waiting.
-    pub fn pick_hover(&mut self, view: &RustKitView, panel: &WebView, at: Option<(f32, f32)>) {
+    pub fn pick_hover(&mut self, view: &RustKitView, panel: &dyn ChromeUi, at: Option<(f32, f32)>) {
         if self.waiting_for(Want::Hover) {
             self.hover_next = Some(at);
             return;
@@ -392,7 +392,7 @@ impl Devtools {
 
     /// Picking, the pointer was released at (`x`, `y`): select the element
     /// there and leave select-element mode.
-    pub fn pick_at(&mut self, view: &RustKitView, panel: &WebView, x: f32, y: f32) {
+    pub fn pick_at(&mut self, view: &RustKitView, panel: &dyn ChromeUi, x: f32, y: f32) {
         self.stop_picker(view, panel);
         self.ask(view, Want::Pick, DevtoolsQuery::NodeAt { x, y });
     }
@@ -406,7 +406,7 @@ impl Devtools {
     /// Act on the answers that have arrived, then ask for new console
     /// lines when the view has recorded any. Called on every live wake of
     /// the content view.
-    pub fn pump(&mut self, view: &RustKitView, panel: &WebView) {
+    pub fn pump(&mut self, view: &RustKitView, panel: &dyn ChromeUi) {
         if !self.open {
             self.asked.clear();
             self.again.clear();
@@ -477,7 +477,7 @@ impl Devtools {
         }
     }
 
-    fn hovered_now(&mut self, view: &RustKitView, panel: &WebView, node: Option<usize>) {
+    fn hovered_now(&mut self, view: &RustKitView, panel: &dyn ChromeUi, node: Option<usize>) {
         if node == self.hovered {
             return;
         }
@@ -486,7 +486,7 @@ impl Devtools {
         run(panel, &panel_call("highlightElement", &node.map(devtools_path)));
     }
 
-    fn answered(&mut self, view: &RustKitView, panel: &WebView, want: Want, answer: DevtoolsAnswer) {
+    fn answered(&mut self, view: &RustKitView, panel: &dyn ChromeUi, want: Want, answer: DevtoolsAnswer) {
         match (want, answer) {
             (Want::Tree, DevtoolsAnswer::Tree(Some(tree))) => {
                 run(panel, &panel_call("setDomTree", &tree));

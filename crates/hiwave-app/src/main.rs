@@ -357,6 +357,147 @@ enum ChromeView {
     RustKit(webview_rustkit::RustKitView),
 }
 
+/// A panel's view: the shelf, the Inspector and the settings window (CH3.A4).
+/// The same two backends as the chrome, and the app does the same two
+/// things with them: run script in them and place them. Only the chrome
+/// has a composition region (`compose`); a panel has none.
+type PanelView = ChromeView;
+
+/// How many scripts a panel that is not built yet keeps for when it is
+/// (CH3.A4b). Past it the oldest go: a panel shows what it was last told.
+const LAZY_PANEL_HELD_MAX: usize = 256;
+
+/// A panel's view, built when the panel first opens (CH3.A4b): with
+/// `HIWAVE_RUSTKIT_CHROME=1` the shelf and the Inspector were RustKit views
+/// from launch, two engine threads and ~40 MB for panels most sessions never
+/// open. Once built it stays, hidden when the panel closes. Flag off the
+/// WebKit view is built at launch, as before (`built`).
+struct LazyPanel<V = PanelView> {
+    view: std::cell::OnceCell<V>,
+    /// Scripts run on it before it was built, oldest first.
+    held: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// Its document and its name in the log.
+    html: &'static str,
+    name: &'static str,
+}
+
+impl<V: ChromeUi> LazyPanel<V> {
+    /// A panel whose view is built now (the WebKit panels).
+    fn built(view: V, html: &'static str, name: &'static str) -> Self {
+        let panel = Self::deferred(html, name);
+        let _ = panel.view.set(view);
+        panel
+    }
+
+    /// A panel built when it first opens.
+    fn deferred(html: &'static str, name: &'static str) -> Self {
+        LazyPanel {
+            view: std::cell::OnceCell::new(),
+            held: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            html,
+            name,
+        }
+    }
+
+    /// Its view, if built.
+    fn get(&self) -> Option<&V> {
+        self.view.get()
+    }
+
+    /// The layout gives the panel `rect`: a panel with a height is open,
+    /// and one not built yet is built there by `build` (its document and
+    /// name), then hears the scripts it was sent meanwhile. A closed one is
+    /// only placed.
+    fn lay_out(&self, rect: Rect, build: impl FnOnce(Rect, &'static str, &'static str) -> Option<V>) {
+        let open = rect.size.to_logical::<f64>(1.0).height > 0.0;
+        if open && self.view.get().is_none() {
+            if let Some(view) = build(rect, self.html, self.name) {
+                for js in self.held.take() {
+                    let _ = view.eval(&js);
+                }
+                let _ = self.view.set(view);
+            }
+        }
+        if let Some(view) = self.view.get() {
+            view.place(rect);
+        }
+    }
+}
+
+impl<V: ChromeUi> ChromeUi for LazyPanel<V> {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        match self.view.get() {
+            Some(view) => view.eval(js),
+            None => {
+                let mut held = self.held.borrow_mut();
+                if held.len() == LAZY_PANEL_HELD_MAX {
+                    held.pop_front();
+                }
+                held.push_back(js.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    fn place(&self, rect: Rect) {
+        if let Some(view) = self.view.get() {
+            view.place(rect);
+        }
+    }
+
+    fn take_keyboard(&self) {
+        if let Some(view) = self.view.get() {
+            view.take_keyboard();
+        }
+    }
+}
+
+/// The `cmd` of an IPC message, for the log (#907 R1 nit 1): `?` when it
+/// has none, or when it is not a command name (letters, digits, `_`; a page
+/// can post anything to the content view's handler).
+fn ipc_cmd(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|msg| msg.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
+        .filter(|cmd| !cmd.is_empty() && cmd.len() <= 64 && cmd.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Whether IPC messages are logged whole: only with `HIWAVE_DEBUG=1` (the
+/// app's verbose switch) or `HIWAVE_TEST_HOOKS=1` (the real-window checks,
+/// which read them). By default a line says the message's `cmd` and size:
+/// a body carries URLs with their queries and find-in-page text. The
+/// RustKit panels' messages are never logged whole (`panel_ipc_log_line`).
+fn ipc_bodies_logged() -> bool {
+    static LOGGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOGGED.get_or_init(|| {
+        ["HIWAVE_DEBUG", "HIWAVE_TEST_HOOKS"]
+            .iter()
+            .any(|name| std::env::var(name).map(|v| v == "1").unwrap_or(false))
+    })
+}
+
+/// One IPC message in the log, as `ipc_bodies_logged` allows.
+fn log_ipc(what: &str, body: &str) {
+    if ipc_bodies_logged() {
+        info!(%body, "{}", what);
+    } else {
+        info!(cmd = %ipc_cmd(body), len = body.len(), "{}", what);
+    }
+}
+
+/// `HIWAVE_RUSTKIT_CHROME_EVAL`, the script the real-window checks run in
+/// the RustKit chrome once it boots: only with the flag on and
+/// `HIWAVE_TEST_HOOKS=1` as well (#907 R1 nit 2), so a release build does
+/// not run a script from the environment in the privileged chrome.
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+fn chrome_boot_eval(flag_on: bool, test_hooks: Option<&str>, eval: Option<String>) -> Option<String> {
+    (flag_on && test_hooks == Some("1"))
+        .then_some(eval)
+        .flatten()
+        .filter(|js| !js.is_empty())
+}
+
 impl ChromeUi for ChromeView {
     fn eval(&self, js: &str) -> Result<(), String> {
         match self {
@@ -520,24 +661,265 @@ fn rustkit_chrome_enabled() -> bool {
         && rustkit_engine::content_thread_enabled()
 }
 
-/// The chrome document for a RustKit view: `JS_BRIDGE` (the WebKit view
-/// runs it as an initialization script) as the head's first script, and
-/// the overlay reporter (CH3.A3) as the body's last.
+/// The chrome document for a RustKit view: the bridge and the overlay
+/// reporter (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
-    let script = format!("<script>{}</script>", JS_BRIDGE);
-    // The overlay reporter needs the body, so it runs at the document's end.
-    let reporter = format!("<script>{}</script>", CHROME_OVERLAY_REPORTER);
-    let html = match CHROME_HTML.rfind("</body>") {
-        Some(at) => format!("{}{}{}", &CHROME_HTML[..at], reporter, &CHROME_HTML[at..]),
-        None => format!("{}{}", CHROME_HTML, reporter),
+    html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER)
+}
+
+/// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
+/// an initialization script) as the head's first script, and `tail`, when
+/// there is one, as the body's last (CH3.A4: the panels' documents).
+fn html_with_bridge(html: &str, tail: &str) -> String {
+    let html = if tail.is_empty() {
+        html.to_string()
+    } else {
+        let tail = format!("<script>{}</script>", tail);
+        match html.rfind("</body>") {
+            Some(at) => format!("{}{}{}", &html[..at], tail, &html[at..]),
+            None => format!("{}{}", html, tail),
+        }
     };
-    let html = html.as_str();
+    let script = format!("<script>{}</script>", JS_BRIDGE);
     match html.find("<head>") {
         Some(at) => {
             let at = at + "<head>".len();
             format!("{}{}{}", &html[..at], script, &html[at..])
         }
         None => format!("{}{}", script, html),
+    }
+}
+
+/// Which view an input event from the viewhost queue is for (CH3.A4): the
+/// RustKit chrome, one of the RustKit panels (by its index in `panels`), or
+/// the page.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputRoute {
+    Chrome,
+    Panel(usize),
+    Page,
+}
+
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn route_input(
+    view: rustkit_viewhost::ViewId,
+    chrome: Option<rustkit_viewhost::ViewId>,
+    panels: &[Option<rustkit_viewhost::ViewId>],
+) -> InputRoute {
+    if chrome == Some(view) {
+        return InputRoute::Chrome;
+    }
+    match panels.iter().position(|id| *id == Some(view)) {
+        Some(at) => InputRoute::Panel(at),
+        None => InputRoute::Page,
+    }
+}
+
+/// `HIWAVE_RUSTKIT_PANEL_PROBE=<selector>,<selector>...` (real-window checks,
+/// flag on; CH3.A4): appended to each RustKit panel's document. Posts the
+/// panel's size and, for each selector, its first match's box, how many
+/// elements match, a checkbox's `checked` and a field's value length,
+/// whenever they change; the app logs that (`RustKit panel probe`, through
+/// `panel_probe_log_line`) and does not hand it to the panel's handler.
+/// Shapes only: no text, no values (#910 R1 blocker 2). Compiled into debug
+/// builds and `--features test-hooks` builds only.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
+const PANEL_PROBE: &str = r#"
+(function (selectors) {
+    var last = null;
+    function report() {
+        var boxes = {};
+        selectors.forEach(function (sel) {
+            var all = document.querySelectorAll(sel);
+            var el = all[0];
+            if (!el) { boxes[sel] = null; return; }
+            var r = el.getBoundingClientRect();
+            boxes[sel] = {
+                box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+                n: all.length,
+                checked: el.type === 'checkbox' ? !!el.checked : null,
+                len: typeof el.value === 'string' ? el.value.length : null
+            };
+        });
+        var s = JSON.stringify({ cmd: 'panel_probe', size: [innerWidth, innerHeight], boxes: boxes });
+        if (s === last) return;
+        last = s;
+        window.ipc.postMessage(s);
+    }
+    setInterval(report, 500);
+    report();
+})(SELECTORS);
+"#;
+
+/// A RustKit panel's `window.ipc` message as the log carries it (#910 R1
+/// blocker 1): its `cmd` and size, never its body, whatever the log level
+/// or switches. The settings page posts `unlock_vault {password}`,
+/// `save_credential {url, username, password}` and the whole state export;
+/// the Inspector the console's code; the shelf search queries and URLs.
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+fn panel_ipc_log_line(panel: &str, body: &str) -> String {
+    format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
+}
+
+/// A panel probe report as the log carries it (#910 R1 blocker 2), or
+/// `None` for one that is not a report: rebuilt from its shapes only (the
+/// size, and for each of `selectors` the box, the match count, `checked`
+/// and the value length), so nothing else the document put in it is
+/// logged.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "rustkit", any(debug_assertions, feature = "test-hooks"))),
+    allow(dead_code)
+)]
+fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
+    use serde_json::{json, Map, Value};
+    let report: Value = serde_json::from_str(body).ok()?;
+    if report.get("cmd").and_then(Value::as_str) != Some("panel_probe") {
+        return None;
+    }
+    let numbers = |v: Option<&Value>| -> Value {
+        match v.and_then(Value::as_array) {
+            Some(items) if items.iter().all(Value::is_number) => Value::Array(items.clone()),
+            _ => Value::Null,
+        }
+    };
+    let mut boxes = Map::new();
+    for &sel in selectors {
+        let shape = match report.get("boxes").and_then(|b| b.get(sel)) {
+            Some(Value::Object(el)) => json!({
+                "box": numbers(el.get("box")),
+                "n": el.get("n").filter(|v| v.is_u64()).cloned().unwrap_or(Value::Null),
+                "checked": el.get("checked").filter(|v| v.is_boolean()).cloned().unwrap_or(Value::Null),
+                "len": el.get("len").filter(|v| v.is_u64()).cloned().unwrap_or(Value::Null),
+            }),
+            _ => Value::Null,
+        };
+        boxes.insert(sel.to_string(), shape);
+    }
+    Some(json!({ "size": numbers(report.get("size")), "boxes": boxes }).to_string())
+}
+
+/// A URL for the log (#910 R1 nit 3): without its query or fragment.
+fn url_for_log(url: &str) -> &str {
+    url.find(['?', '#']).map_or(url, |at| &url[..at])
+}
+
+/// The selectors of `HIWAVE_RUSTKIT_PANEL_PROBE`, in a build with the
+/// probe; none otherwise.
+#[cfg_attr(not(any(debug_assertions, feature = "test-hooks")), allow(dead_code))]
+fn panel_probe_selectors() -> Vec<String> {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Ok(list) = std::env::var("HIWAVE_RUSTKIT_PANEL_PROBE") {
+        return list.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    }
+    Vec::new()
+}
+
+/// Says once at launch whether `HIWAVE_RUSTKIT_PANEL_PROBE` is honoured:
+/// a release build without `--features test-hooks` has no probe, and the
+/// real-window checks that read it say so instead of failing.
+fn announce_panel_probe() {
+    if std::env::var_os("HIWAVE_RUSTKIT_PANEL_PROBE").is_none() {
+        return;
+    }
+    if cfg!(any(debug_assertions, feature = "test-hooks")) {
+        info!("HIWAVE_RUSTKIT_PANEL_PROBE: on (shapes only)");
+    } else {
+        warn!("HIWAVE_RUSTKIT_PANEL_PROBE ignored: this build has no test hooks");
+    }
+}
+
+/// The probe for the RustKit panels' documents, or nothing without
+/// `HIWAVE_RUSTKIT_PANEL_PROBE` or in a build without the probe.
+fn panel_probe_script() -> String {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if std::env::var_os("HIWAVE_RUSTKIT_PANEL_PROBE").is_some() {
+        let selectors = panel_probe_selectors();
+        return PANEL_PROBE.replace("SELECTORS", &serde_json::to_string(&selectors).unwrap_or_else(|_| "[]".into()));
+    }
+    String::new()
+}
+
+/// With `HIWAVE_RUSTKIT_CHROME=1`, a panel (the shelf, the Inspector, the
+/// settings window's page; CH3.A4) is a RustKit view in `window` at `rect`,
+/// loading `html` with the bridge first, as the WebKit view ran it. `None`
+/// otherwise: the caller builds the WebKit view, as before.
+fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &str) -> Option<PanelView> {
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    if rustkit_chrome_enabled() {
+        let at = rect.position.to_logical::<f64>(1.0);
+        let size = rect.size.to_logical::<f64>(1.0);
+        // A hidden panel is 0 pt tall. Its surface is made 1 pt at least;
+        // `place` then gives the view the panel's own rect.
+        let bounds = rustkit_viewhost::Bounds::new(
+            at.x as i32,
+            at.y as i32,
+            (size.width as u32).max(1),
+            (size.height as u32).max(1),
+        );
+        let view = webview_rustkit::RustKitView::new(window, bounds)
+            .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
+        view.load_html_internal(&html_with_bridge(html, &panel_probe_script()))
+            .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
+        info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
+        let panel = PanelView::RustKit(view);
+        panel.place(rect);
+        return Some(panel);
+    }
+    let _ = (window, rect, html, name);
+    None
+}
+
+/// One turn of a RustKit panel (CH3.A4), as the chrome's arm does for the
+/// chrome: its clock, its input, its `window.ipc` messages to `handle`
+/// (the WebKit view's handler), and a frame. The panel's input view, if it
+/// is a RustKit view.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn pump_rustkit_panel(
+    panel: &PanelView,
+    name: &str,
+    handle: &mut dyn FnMut(&str),
+    devtools: &mut devtools_panel::Devtools,
+    inspector: &dyn ChromeUi,
+    click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Option<rustkit_viewhost::ViewId> {
+    let PanelView::RustKit(ref view) = *panel else {
+        return None;
+    };
+    view.process_events();
+    if let Some(id) = view.input_view() {
+        for event in rustkit_viewhost::drain_input_view(id) {
+            view.note_input(event.at, event.seq);
+            dispatch_view_input(view, InputTarget::Panel, event.kind, devtools, inspector, click_proxy);
+        }
+    }
+    for body in view.take_ipc_messages() {
+        #[cfg(any(debug_assertions, feature = "test-hooks"))]
+        if body.starts_with("{\"cmd\":\"panel_probe\"") {
+            let selectors = panel_probe_selectors();
+            let selectors: Vec<&str> = selectors.iter().map(String::as_str).collect();
+            if let Some(report) = panel_probe_log_line(&body, &selectors) {
+                info!(panel = name, body = %report, "RustKit panel probe");
+            }
+            continue;
+        }
+        info!("RustKit panel IPC {}", panel_ipc_log_line(name, &body));
+        handle(&body);
+    }
+    // A link or `location` in a panel would replace its own document.
+    if let Some((url, _)) = view.take_script_navigation() {
+        warn!(panel = name, url = url_for_log(&url), "RustKit panel navigation not followed");
+    }
+    view.render();
+    view.input_view()
+}
+
+/// A RustKit panel that closed gives the keyboard back to the page (CH3.A4).
+/// A WebKit panel: nothing, as before.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn panel_closed(panel: &LazyPanel, content: &UnifiedContentWebView) {
+    if let (Some(PanelView::RustKit(_)), UnifiedContentWebView::RustKit(page)) = (panel.get(), content) {
+        page.grab_keyboard();
     }
 }
 
@@ -564,8 +946,8 @@ fn apply_layout(
     chrome: &impl ChromeUi,
     #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
     #[cfg(not(target_os = "macos"))] content: &WebView,
-    shelf: &WebView,
-    inspector: &WebView,
+    shelf: &LazyPanel,
+    inspector: &LazyPanel,
     chrome_height: f64,
     shelf_height: f64,
     inspector_height: f64,
@@ -614,8 +996,10 @@ fn apply_layout(
     // column (page, Inspector, shelf) to the views below it.
     chrome.compose(width, height, (sidebar_width, chrome_height, content_width, (height - chrome_height).max(0.0)));
     let _ = content.set_bounds(content_rect);
-    let _ = inspector.set_bounds(inspector_rect);
-    let _ = shelf.set_bounds(shelf_rect);
+    // A RustKit panel is built when it first opens (CH3.A4b).
+    let build = |rect: Rect, html: &'static str, name: &'static str| rustkit_panel(window, rect, html, name);
+    inspector.lay_out(inspector_rect, build);
+    shelf.lay_out(shelf_rect, build);
 }
 
 /// The chrome's `window.ipc` messages, as the WebKit chrome view hands
@@ -626,7 +1010,6 @@ fn handle_chrome_ipc(
     chrome_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
     chrome_state: &Arc<Mutex<AppState>>,
 ) {
-    info!("Chrome IPC: {}", body);
 
     match serde_json::from_str::<IpcMessage>(body) {
         Ok(msg) => match &msg {
@@ -1052,6 +1435,247 @@ fn handle_chrome_ipc(
     }
 }
 
+/// The shelf's `window.ipc` messages (the command palette at the bottom).
+/// A function, not the handler closure, so the RustKit shelf (CH3.A4) can
+/// feed it the same messages.
+fn handle_shelf_ipc(
+    body: &str,
+    shelf_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    shelf_state: &Arc<Mutex<AppState>>,
+) {
+
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg) => {
+            match &msg {
+                IpcMessage::CollapseShelf => {
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+                }
+                IpcMessage::SearchCommands { ref query } => {
+                    let _q = query.clone();
+                    let response = ipc::commands::handle_message(shelf_state, msg);
+                    if let ipc::IpcResponse::Success { data } = response {
+                        let json = serde_json::to_string(&data)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let _ = shelf_proxy.send_event(UserEvent::ShowCommands(json));
+                    }
+                }
+                IpcMessage::ExecuteCommand { ref id } => {
+                    let _cmd_id = id.clone();
+                    let response = ipc::commands::handle_message(shelf_state, msg);
+                    info!("Command execution response: {:?}", response);
+                    // Close shelf after executing command
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+
+                    if let ipc::IpcResponse::Success { data } = response {
+                        if let Some(result) = data.get("result") {
+                            if let Some(action) =
+                                result.get("action").and_then(|a| a.as_str())
+                            {
+                                match action {
+                                    "navigate" => {
+                                        if let Some(url) =
+                                            result.get("url").and_then(|u| u.as_str())
+                                        {
+                                            let _ = shelf_proxy.send_event(
+                                                UserEvent::Navigate(url.to_string()),
+                                            );
+                                        } else {
+                                            let _ =
+                                                shelf_proxy.send_event(UserEvent::NewTab);
+                                        }
+                                    }
+                                    "reload" => {
+                                        let _ = shelf_proxy.send_event(UserEvent::Reload);
+                                    }
+                                    "go_back" => {
+                                        let _ = shelf_proxy.send_event(UserEvent::GoBack);
+                                    }
+                                    "go_forward" => {
+                                        let _ =
+                                            shelf_proxy.send_event(UserEvent::GoForward);
+                                    }
+                                    "open_vault" => {
+                                        // Vault is now accessed via Settings
+                                        let _ =
+                                            shelf_proxy.send_event(UserEvent::OpenSettings);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                IpcMessage::Navigate { url } => {
+                    let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone()));
+                    let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse Shelf IPC: {}", e);
+        }
+    }
+}
+
+/// The shelf view's second `with_ipc_handler`: find-in-page results. wry
+/// keeps the last handler a builder is given, so on the WebKit shelf this
+/// is the one that runs and [`handle_shelf_ipc`] never does (CH3.A4 survey).
+fn handle_shelf_find_ipc(body: &str, content_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
+        if let IpcMessage::FindInPageResult { result } = msg {
+            let _ = content_proxy.send_event(UserEvent::FindInPageResult(result));
+        }
+    }
+}
+
+/// The Inspector panel's `window.ipc` messages. A function, not the
+/// handler closure, so the RustKit Inspector (CH3.A4) can feed it the same
+/// messages.
+fn handle_inspector_ipc(body: &str, inspector_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg) => {
+            match &msg {
+                IpcMessage::CloseInspector => {
+                    let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                }
+                IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
+                }
+                IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
+                }
+                IpcMessage::InspectorExpandNode { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
+                }
+                IpcMessage::InspectorHighlightElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
+                }
+                IpcMessage::InspectorClearHighlight => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorClearHighlight);
+                }
+                IpcMessage::InspectorStartPicker => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorStartPicker);
+                }
+                IpcMessage::InspectorStopPicker => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorStopPicker);
+                }
+                IpcMessage::InspectorScrollToElement { path } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorScrollToElement { path: path.clone() });
+                }
+                IpcMessage::InspectorConsoleEval { code } => {
+                    let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
+                }
+                IpcMessage::InspectorClose => {
+                    let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            error!("Failed to parse Inspector IPC: {}", e);
+        }
+    }
+}
+
+/// The settings window's `window.ipc` messages. A function, not the
+/// handler closure, so the RustKit settings view (CH3.A4) can feed it the
+/// same messages.
+fn handle_settings_ipc(body: &str, settings_proxy: &tao::event_loop::EventLoopProxy<UserEvent>) {
+    if let Ok(ipc_msg) = serde_json::from_str::<IpcMessage>(body) {
+        match ipc_msg {
+            IpcMessage::CloseSettings => {
+                let _ = settings_proxy.send_event(UserEvent::CloseSettings);
+            }
+            IpcMessage::GetBrowserProfiles { browser } => {
+                let _ = settings_proxy.send_event(UserEvent::GetBrowserProfiles(browser));
+            }
+            IpcMessage::ImportBookmarks { browser, profile_path } => {
+                let _ = settings_proxy.send_event(UserEvent::ImportBookmarks { browser, profile_path });
+            }
+            IpcMessage::GetSettings => {
+                let _ = settings_proxy.send_event(UserEvent::GetSettings);
+            }
+            IpcMessage::SaveSettings { settings } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveSettings(settings));
+            }
+            IpcMessage::ExportData { include_settings, include_workspaces } => {
+                let _ = settings_proxy.send_event(UserEvent::ExportData { include_settings, include_workspaces });
+            }
+            IpcMessage::SaveExportToFile { data, suggested_name } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveExportToFile { data, suggested_name });
+            }
+            IpcMessage::ImportData { data, replace } => {
+                let _ = settings_proxy.send_event(UserEvent::ImportStateData { data, replace });
+            }
+            IpcMessage::PickImportFile => {
+                let _ = settings_proxy.send_event(UserEvent::PickImportFile);
+            }
+            IpcMessage::ClearBrowsingData { history, downloads, shelf } => {
+                let _ = settings_proxy.send_event(UserEvent::ClearBrowsingData { history, downloads, shelf });
+            }
+            IpcMessage::GetCellar => {
+                let _ = settings_proxy.send_event(UserEvent::GetCellar);
+            }
+            IpcMessage::RestoreFromCellar { id } => {
+                let _ = settings_proxy.send_event(UserEvent::RestoreFromCellar { id });
+            }
+            IpcMessage::ClearCellar => {
+                let _ = settings_proxy.send_event(UserEvent::ClearCellar);
+            }
+            IpcMessage::GetFocusModeConfig => {
+                let _ = settings_proxy.send_event(UserEvent::GetFocusModeConfigForSettings);
+            }
+            IpcMessage::SaveFocusModeConfig { config } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveFocusModeConfigFromSettings(config));
+            }
+            IpcMessage::AddToFocusBlocklist { domain } => {
+                let _ = settings_proxy.send_event(UserEvent::AddToFocusBlocklistFromSettings(domain));
+            }
+            IpcMessage::RemoveFromFocusBlocklist { domain } => {
+                let _ = settings_proxy.send_event(UserEvent::RemoveFromFocusBlocklistFromSettings(domain));
+            }
+            // Vault IPC commands
+            IpcMessage::GetVaultStatus => {
+                let _ = settings_proxy.send_event(UserEvent::GetVaultStatus);
+            }
+            IpcMessage::UnlockVault { password } => {
+                let _ = settings_proxy.send_event(UserEvent::UnlockVault(password));
+            }
+            IpcMessage::LockVault => {
+                let _ = settings_proxy.send_event(UserEvent::LockVault);
+            }
+            IpcMessage::GetAllCredentials => {
+                let _ = settings_proxy.send_event(UserEvent::GetAllCredentials);
+            }
+            IpcMessage::SaveCredential { url, username, password } => {
+                let _ = settings_proxy.send_event(UserEvent::SaveCredential { url, username, password });
+            }
+            IpcMessage::DeleteCredential { id } => {
+                let _ = settings_proxy.send_event(UserEvent::DeleteCredential(id));
+            }
+            // Analytics IPC commands
+            IpcMessage::GetAnalyticsSettings => {
+                let _ = settings_proxy.send_event(UserEvent::GetAnalyticsSettings);
+            }
+            IpcMessage::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
+                let _ = settings_proxy.send_event(UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day });
+            }
+            IpcMessage::ClearAnalyticsData => {
+                let _ = settings_proxy.send_event(UserEvent::ClearAnalyticsData);
+            }
+            IpcMessage::ExportAnalyticsData { format } => {
+                let _ = settings_proxy.send_event(UserEvent::ExportAnalyticsData { format });
+            }
+            _ => {
+                info!("Settings window received unhandled IPC: {:?}", ipc_msg);
+            }
+        }
+    }
+}
+
+
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -1251,6 +1875,39 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+/// The browser's context menu over the page (CH2.E4), shown where the
+/// page let a right press through: Back, Forward and Reload, the items of
+/// WebKit's default menu on a page (the content view was WebKit before
+/// RustKit). Each item is a main-menu id, so the menu-event arm runs it.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn show_page_context_menu(view: &webview_rustkit::RustKitView, x: f32, y: f32) {
+    use crate::webview::IWebContent as _;
+    use muda::{ContextMenu as _, MenuItem, PredefinedMenuItem};
+    let menu = Menu::new();
+    let items: [&dyn muda::IsMenuItem; 4] = [
+        &MenuItem::with_id(menu_ids::GO_BACK, "Back", view.can_go_back(), None),
+        &MenuItem::with_id(menu_ids::GO_FORWARD, "Forward", view.can_go_forward(), None),
+        &PredefinedMenuItem::separator(),
+        &MenuItem::with_id(menu_ids::RELOAD, "Reload Page", true, None),
+    ];
+    if let Err(e) = menu.append_items(&items) {
+        warn!(error = %e, "context menu not built");
+        return;
+    }
+    info!(x, y, "page context menu shown");
+    let at = muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x as f64, y as f64));
+    // SAFETY: the content view is a live NSView in the window.
+    unsafe { menu.show_context_menu_for_nsview(view.host_view() as *const std::ffi::c_void, Some(at)) };
+}
+
+/// `wheel_burst_started` for a wheel on `target`: the page's only. The
+/// h6 check reads the burst line after its first wheel over the page; a
+/// wheel over the RustKit chrome or a panel must not take it (#907 R1 nit 4).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn wheel_starts_burst(target: InputTarget) -> bool {
+    target == InputTarget::Page && wheel_burst_started()
+}
+
 /// Which RustKit view an input event is for: the page, or the browser's
 /// own chrome (`HIWAVE_RUSTKIT_CHROME=1`, CH3.A2).
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
@@ -1258,6 +1915,9 @@ fn wheel_burst_started() -> bool {
 enum InputTarget {
     Page,
     Chrome,
+    /// The shelf, the Inspector or the settings page as RustKit views
+    /// (CH3.A4): like the chrome, not the page.
+    Panel,
 }
 
 /// One input event for a RustKit view, as drained from the viewhost queue:
@@ -1271,7 +1931,7 @@ fn dispatch_view_input(
     target: InputTarget,
     kind: rustkit_viewhost::InputKind,
     devtools: &mut devtools_panel::Devtools,
-    inspector_for_events: &WebView,
+    inspector_for_events: &dyn ChromeUi,
     click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
 ) {
     match kind {
@@ -1290,15 +1950,15 @@ fn dispatch_view_input(
                 let at = (click.x as f32, click.y as f32);
                 match click.input {
                     rustkit_viewhost::PointerInput::Move => {
-                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                        devtools.pick_hover(view, inspector_for_events, Some(at))
                     }
                     rustkit_viewhost::PointerInput::Leave => {
-                        devtools.pick_hover(view, &inspector_for_events, None)
+                        devtools.pick_hover(view, inspector_for_events, None)
                     }
                     rustkit_viewhost::PointerInput::Button if !click.down => {
-                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                        devtools.pick_at(view, inspector_for_events, at.0, at.1)
                     }
-                    rustkit_viewhost::PointerInput::Button => {}
+                    rustkit_viewhost::PointerInput::Button | rustkit_viewhost::PointerInput::Secondary => {}
                 }
                 return;
             }
@@ -1311,15 +1971,26 @@ fn dispatch_view_input(
                     view.mouse_leave();
                     return;
                 }
+                // CH2.E4: `contextmenu`; the browser's menu, if the page
+                // lets it through, is shown after the drain.
+                rustkit_viewhost::PointerInput::Secondary => {
+                    if click.down {
+                        view.secondary_down(click.x as f32, click.y as f32);
+                    } else {
+                        view.secondary_up(click.x as f32, click.y as f32);
+                    }
+                    return;
+                }
                 rustkit_viewhost::PointerInput::Button => {}
             }
             if click.down {
-                view.mouse_down_at_point(click.x as f32, click.y as f32);
+                view.mouse_down_with(click.x as f32, click.y as f32, click.clicks, click.shift);
                 return;
             }
             match target {
                 InputTarget::Page => info!(x = click.x, y = click.y, "content click (view-local)"),
                 InputTarget::Chrome => info!(x = click.x, y = click.y, "chrome click (view-local)"),
+                InputTarget::Panel => info!(x = click.x, y = click.y, "panel click (view-local)"),
             }
             let outcome = view.click_at_point(click.x as f32, click.y as f32);
             // ENGINE focus is not APPKIT focus: without making
@@ -1348,7 +2019,7 @@ fn dispatch_view_input(
         // its steps included, so a drain costs one scroll per
         // burst and one present (#692), not one per step.
         rustkit_viewhost::InputKind::Wheel(scroll) => {
-            if wheel_burst_started() {
+            if wheel_starts_burst(target) {
                 info!(
                     dx = scroll.dx,
                     dy = scroll.dy,
@@ -1383,7 +2054,7 @@ fn dispatch_view_input(
             // Esc leaves select-element mode; the page does not hear it.
             if target == InputTarget::Page && devtools.picking() && key.mac_keycode == 53 {
                 if !key.up {
-                    devtools.stop_picker(view, &inspector_for_events);
+                    devtools.stop_picker(view, inspector_for_events);
                 }
                 return;
             }
@@ -1443,6 +2114,106 @@ fn dispatch_view_input(
     }
 }
 
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod panel_tests {
+    use super::*;
+    use rustkit_viewhost::ViewId;
+
+    const DOC: &str = "<html><head><title>t</title></head><body><p>x</p></body></html>";
+
+    #[test]
+    fn a_panel_document_gets_the_bridge_first_in_its_head_and_the_tail_last_in_its_body() {
+        let out = html_with_bridge(DOC, "TAIL()");
+        assert!(out.starts_with(&format!("<html><head><script>{}</script><title>", JS_BRIDGE)));
+        assert!(out.ends_with("<p>x</p><script>TAIL()</script></body></html>"), "{out}");
+    }
+
+    #[test]
+    fn no_tail_adds_no_script_to_the_body() {
+        let out = html_with_bridge(DOC, "");
+        assert!(out.ends_with("<title>t</title></head><body><p>x</p></body></html>"), "{out}");
+        assert_eq!(out.matches("<script>").count(), 1);
+    }
+
+    #[test]
+    fn the_chrome_document_is_the_bridge_and_the_overlay_reporter() {
+        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER));
+    }
+
+    #[test]
+    fn input_goes_to_the_view_it_was_recorded_on() {
+        let (page, chrome, shelf, settings) = (ViewId::new(), ViewId::new(), ViewId::new(), ViewId::new());
+        // The Inspector is a WebKit view here: no id.
+        let panels = [Some(shelf), None, Some(settings)];
+        assert_eq!(route_input(chrome, Some(chrome), &panels), InputRoute::Chrome);
+        assert_eq!(route_input(shelf, Some(chrome), &panels), InputRoute::Panel(0));
+        assert_eq!(route_input(settings, None, &panels), InputRoute::Panel(2));
+        assert_eq!(route_input(page, Some(chrome), &panels), InputRoute::Page);
+        assert_eq!(route_input(page, None, &[None, None, None]), InputRoute::Page);
+    }
+}
+
+// #910 R1: what the log carries of a RustKit panel's messages: shapes only,
+// never a body, page text, a field's value or a URL's query.
+#[cfg(test)]
+mod panel_log_tests {
+    use super::*;
+
+    const SECRET: &str = "hunter2-a4-secret";
+
+    #[test]
+    fn a_panel_ipc_line_names_the_cmd_and_size_never_the_body() {
+        let bodies = [
+            format!(r#"{{"cmd":"unlock_vault","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"save_credential","url":"https://a.test/login?next={SECRET}","username":"{SECRET}","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"inspector_console_eval","code":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"search_commands","query":"{SECRET}"}}"#),
+        ];
+        for body in &bodies {
+            let line = panel_ipc_log_line("settings", body);
+            assert!(!line.contains(SECRET), "{line}");
+            assert!(!line.contains("password") && !line.contains("https"), "{line}");
+            assert!(line.contains(&format!("len={}", body.len())), "{line}");
+        }
+        assert_eq!(
+            panel_ipc_log_line("settings", &bodies[0]),
+            format!("panel=\"settings\" cmd=unlock_vault len={}", bodies[0].len())
+        );
+        // Not JSON, or a cmd that is not a command name: `?`.
+        let line = panel_ipc_log_line("shelf", SECRET);
+        assert_eq!(line, format!("panel=\"shelf\" cmd=? len={}", SECRET.len()));
+        let line = panel_ipc_log_line("shelf", &format!(r#"{{"cmd":"{SECRET} x"}}"#));
+        assert!(line.contains("cmd=?") && !line.contains(SECRET), "{line}");
+    }
+
+    #[test]
+    fn a_probe_report_in_the_log_is_shapes_only() {
+        let body = format!(
+            r##"{{"cmd":"panel_probe","size":[800,280],"text":"{SECRET}","boxes":{{"#vaultPassword":{{"box":[1,2,3,4],"n":1,"checked":null,"len":17,"value":"{SECRET}"}},"#cb":{{"box":[5,6,7,8],"n":1,"checked":true,"len":2}},"#gone":null,"#{SECRET}":{{"box":[0,0,0,0],"n":1}}}}}}"##
+        );
+        let line = panel_probe_log_line(&body, &["#vaultPassword", "#cb", "#gone"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert!(!line.contains("text") && !line.contains("value"), "{line}");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["size"], serde_json::json!([800, 280]));
+        assert_eq!(v["boxes"]["#vaultPassword"], serde_json::json!({"box": [1, 2, 3, 4], "n": 1, "checked": null, "len": 17}));
+        assert_eq!(v["boxes"]["#cb"]["checked"], serde_json::json!(true));
+        assert_eq!(v["boxes"]["#gone"], serde_json::Value::Null);
+        // A text where a shape belongs is dropped, not logged.
+        let body = format!(r##"{{"cmd":"panel_probe","size":["{SECRET}",1],"boxes":{{"#cb":{{"box":["{SECRET}"],"len":"{SECRET}"}}}}}}"##);
+        let line = panel_probe_log_line(&body, &["#cb"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert_eq!(panel_probe_log_line(SECRET, &["#cb"]), None);
+    }
+
+    #[test]
+    fn a_url_in_the_log_has_no_query_or_fragment() {
+        assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
+        assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
+        assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+}
+
 // The real-window driver's h6 check reads "wheel burst started" from the app
 // log after the first wheel it sends to a freshly launched app.
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
@@ -1454,6 +2225,20 @@ mod wheel_burst_tests {
         // The clock is per thread, so this test thread is a fresh launch.
         assert!(wheel_burst_started(), "the first wheel event after launch starts a burst");
         assert!(!wheel_burst_started(), "an event right behind it belongs to the same burst");
+    }
+
+    #[test]
+    fn a_wheel_over_the_chrome_or_a_panel_leaves_the_page_its_burst() {
+        use super::{wheel_starts_burst, InputTarget};
+        // A fresh thread: a fresh launch's clock.
+        std::thread::spawn(|| {
+            assert!(!wheel_starts_burst(InputTarget::Chrome), "the chrome's wheel is not the page's burst");
+            assert!(!wheel_starts_burst(InputTarget::Panel), "nor a panel's");
+            assert!(wheel_starts_burst(InputTarget::Page), "the page's first wheel still starts one");
+            assert!(!wheel_starts_burst(InputTarget::Page));
+        })
+        .join()
+        .unwrap();
     }
 }
 
@@ -1487,6 +2272,110 @@ fn should_record_history_url(url: &str) -> bool {
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
 
+// CH3.A4b and the #907 R1 nits: lazy panels, IPC log lines, the eval hook.
+#[cfg(test)]
+mod lazy_panel_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A panel view that records what the app did with it.
+    struct Fake(Rc<RefCell<Vec<String>>>);
+
+    impl ChromeUi for Fake {
+        fn eval(&self, js: &str) -> Result<(), String> {
+            self.0.borrow_mut().push(format!("eval {js}"));
+            Ok(())
+        }
+        fn place(&self, rect: Rect) {
+            let h = rect.size.to_logical::<f64>(1.0).height;
+            self.0.borrow_mut().push(format!("place {h}"));
+        }
+    }
+
+    fn rect(height: u32) -> Rect {
+        Rect {
+            position: LogicalPosition::new(0, 600).into(),
+            size: LogicalSize::new(800, height).into(),
+        }
+    }
+
+    #[test]
+    fn a_deferred_panel_is_built_when_it_first_opens_and_kept_after_it_closes() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let builds = Rc::new(RefCell::new(0));
+        let shelf: LazyPanel<Fake> = LazyPanel::deferred("<p>shelf</p>", "shelf");
+        let build = |log: &Rc<RefCell<Vec<String>>>, builds: &Rc<RefCell<i32>>| {
+            let (log, builds) = (Rc::clone(log), Rc::clone(builds));
+            move |_: Rect, html: &'static str, name: &'static str| {
+                assert_eq!((html, name), ("<p>shelf</p>", "shelf"));
+                *builds.borrow_mut() += 1;
+                Some(Fake(log))
+            }
+        };
+        // Launch: the layout places the panels closed (0 pt tall), and the
+        // app sends a hidden panel scripts.
+        shelf.lay_out(rect(SHELF_HEIGHT_DEFAULT), build(&log, &builds));
+        let _ = shelf.eval("showCommands([])");
+        shelf.take_keyboard();
+        assert!(shelf.get().is_none(), "no panel view after launch");
+        assert_eq!(*builds.borrow(), 0);
+        // expand_shelf: the layout gives it its height.
+        shelf.lay_out(rect(SHELF_HEIGHT_EXPANDED), build(&log, &builds));
+        assert!(shelf.get().is_some(), "the open command built the panel view");
+        assert_eq!(*builds.borrow(), 1);
+        assert_eq!(
+            *log.borrow(),
+            vec!["eval showCommands([])".to_string(), format!("place {}", SHELF_HEIGHT_EXPANDED)],
+            "it hears what it was sent while not built, then takes its place"
+        );
+        // Closed and opened again: the same view, not a second one.
+        shelf.lay_out(rect(SHELF_HEIGHT_DEFAULT), build(&log, &builds));
+        shelf.lay_out(rect(SHELF_HEIGHT_EXPANDED), build(&log, &builds));
+        assert_eq!(*builds.borrow(), 1, "kept after close");
+        assert_eq!(log.borrow().last().map(String::as_str), Some("place 280"));
+    }
+
+    #[test]
+    fn a_panel_built_at_launch_is_placed_as_before() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let panel = LazyPanel::built(Fake(Rc::clone(&log)), "", "Inspector");
+        panel.lay_out(rect(0), |_, _, _| panic!("a built panel is not built again"));
+        let _ = panel.eval("x()");
+        assert_eq!(*log.borrow(), vec!["place 0".to_string(), "eval x()".to_string()]);
+    }
+
+    #[test]
+    fn a_panel_not_built_keeps_only_its_last_scripts() {
+        let panel: LazyPanel<Fake> = LazyPanel::deferred("", "Inspector");
+        for i in 0..LAZY_PANEL_HELD_MAX + 10 {
+            let _ = panel.eval(&format!("line({i})"));
+        }
+        let held = panel.held.borrow();
+        assert_eq!(held.len(), LAZY_PANEL_HELD_MAX);
+        assert_eq!(held.front().map(String::as_str), Some("line(10)"));
+    }
+
+    #[test]
+    fn an_ipc_log_line_names_the_cmd_not_the_body() {
+        let body = r#"{"cmd":"navigate","url":"https://example.test/a?q=secret"}"#;
+        assert_eq!(ipc_cmd(body), "navigate");
+        assert_eq!(ipc_cmd(r#"{"cmd":"find_in_page","query":"secret"}"#), "find_in_page");
+        assert_eq!(ipc_cmd("not json, secret"), "?");
+        assert_eq!(ipc_cmd(r#"{"url":"secret"}"#), "?");
+    }
+
+    #[test]
+    fn the_chrome_eval_hook_needs_the_test_hooks_switch() {
+        let js = || Some("sendIpc('x')".to_string());
+        assert_eq!(chrome_boot_eval(true, None, js()), None, "flag on, no test hooks: not run");
+        assert_eq!(chrome_boot_eval(true, Some("0"), js()), None);
+        assert_eq!(chrome_boot_eval(false, Some("1"), js()), None, "flag off: not run");
+        assert_eq!(chrome_boot_eval(true, Some("1"), Some(String::new())), None);
+        assert_eq!(chrome_boot_eval(true, Some("1"), js()), js());
+    }
+}
+
 #[cfg(test)]
 mod rust_log_tests {
     use super::rust_log_filter;
@@ -1501,6 +2390,110 @@ mod rust_log_tests {
         assert_eq!(rust_log_filter(Some("debug")).max_level_hint(), Some(LevelFilter::DEBUG));
         assert_eq!(rust_log_filter(Some("warn")).max_level_hint(), Some(LevelFilter::WARN));
         assert_eq!(rust_log_filter(Some("info,rustkit_engine=debug")).max_level_hint(), Some(LevelFilter::DEBUG));
+    }
+}
+
+/// The settings page's `save_settings` payload applied to `state` and written
+/// to settings.json; the value is the reply posted back to the page, whose
+/// `ok` says whether the file was written (`error` says why not).
+fn save_settings_reply(state: &mut AppState, payload: serde_json::Value) -> serde_json::Value {
+    let result = serde_json::from_value::<crate::state::UserSettings>(payload)
+        .map_err(|e| format!("invalid settings: {e}"))
+        .and_then(|s| state.update_settings(s).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => serde_json::json!({ "type": "settings_saved", "ok": true }),
+        Err(e) => {
+            warn!("Settings not saved: {}", e);
+            serde_json::json!({ "type": "settings_saved", "ok": false, "error": e })
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_save_tests {
+    use super::*;
+
+    /// The keys `collectSettingsFromUI()` in settings.html puts in the
+    /// `save_settings` payload, read from the page the app ships.
+    fn page_save_keys() -> Vec<String> {
+        let start = SETTINGS_HTML
+            .find("function collectSettingsFromUI()")
+            .expect("settings.html has collectSettingsFromUI");
+        let body = &SETTINGS_HTML[start..];
+        let open = body.find("return {").expect("collectSettingsFromUI returns an object literal") + "return {".len();
+        let close = open + body[open..].find("};").expect("the object literal ends");
+        body[open..close]
+            .lines()
+            .filter_map(|line| {
+                let key = line.trim().split(':').next()?.trim();
+                (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| key.to_string())
+            })
+            .collect()
+    }
+
+    fn state_in(dir: &std::path::Path) -> AppState {
+        let config = crate::state::AppConfig {
+            data_dir: dir.to_path_buf(),
+            download_dir: dir.join("downloads"),
+            ..Default::default()
+        };
+        AppState::new(config).expect("app state in a temp dir")
+    }
+
+    /// CH2.B11: 'Save Settings' with the payload the page sends writes
+    /// settings.json (it was rejected for missing focus_* fields while the
+    /// page said 'Settings saved!').
+    #[test]
+    fn the_settings_pages_save_payload_is_written() {
+        let keys = page_save_keys();
+        assert!(keys.contains(&"sidebar_default_open".to_string()), "page keys {keys:?}");
+        // The page's payload: its keys, each with a value of the field's type,
+        // and the toggle the person flipped.
+        let defaults = serde_json::to_value(crate::state::UserSettings::default()).unwrap();
+        let mut payload = serde_json::Map::new();
+        for key in &keys {
+            if let Some(value) = defaults.get(key) {
+                payload.insert(key.clone(), value.clone());
+            }
+        }
+        payload.insert("sidebar_default_open".into(), serde_json::Value::Bool(false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_in(dir.path());
+        let _ = std::fs::remove_file(state.settings_path());
+        let reply = save_settings_reply(&mut state, serde_json::Value::Object(payload));
+        assert_eq!(reply["type"], "settings_saved");
+        assert!(reply.get("error").is_none(), "the save was rejected: {reply}");
+        assert_eq!(reply["ok"], true);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.settings_path()).expect("settings.json written")).unwrap();
+        assert_eq!(written["sidebar_default_open"], false);
+    }
+
+    /// A save the app cannot apply is answered with ok:false and the reason,
+    /// so the page does not say 'Settings saved!'; nothing is written.
+    #[test]
+    fn a_rejected_save_replies_not_ok_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_in(dir.path());
+        let _ = std::fs::remove_file(state.settings_path());
+        let reply = save_settings_reply(&mut state, serde_json::json!({ "theme": "dark" }));
+        assert_eq!(reply["type"], "settings_saved");
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().is_some_and(|e| e.contains("missing field")), "{reply}");
+        assert!(!state.settings_path().exists());
+    }
+
+    /// Every field the app's settings need is in the page's payload, so a
+    /// field added to one side and not the other fails here.
+    #[test]
+    fn the_page_sends_every_settings_field() {
+        let keys = page_save_keys();
+        let defaults = serde_json::to_value(crate::state::UserSettings::default()).unwrap();
+        let fields: Vec<&String> = defaults.as_object().unwrap().keys().collect();
+        let missing: Vec<&&String> = fields.iter().filter(|f| !keys.contains(f)).collect();
+        let unknown: Vec<&String> = keys.iter().filter(|k| !fields.contains(k)).collect();
+        assert!(missing.is_empty() && unknown.is_empty(), "page omits {missing:?}, sends unknown {unknown:?}");
     }
 }
 
@@ -1732,6 +2725,9 @@ fn main() {
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(chrome_bounds)
         .with_ipc_handler(move |message| {
+            // Logged here, not in the handler: the RustKit chrome logs its
+            // own (#907 R1 nit 1: once, without the body by default).
+            log_ipc("Chrome IPC", message.body());
             handle_chrome_ipc(message.body(), &chrome_proxy, &chrome_state)
         })
         .build_as_child(&window)
@@ -2068,7 +3064,7 @@ fn main() {
         })
         .with_ipc_handler(move |message| {
             let body = message.body();
-            info!("Content IPC: {}", body);
+            log_ipc("Content IPC", body);
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
                 match &msg {
                     IpcMessage::GoBack => {
@@ -2232,163 +3228,45 @@ fn main() {
     // === SHELF WEBVIEW (created third, at bottom) ===
     let shelf_proxy = proxy.clone();
     let shelf_state = Arc::clone(&state);
-    let shelf_webview = WebViewBuilder::new()
+    // With HIWAVE_RUSTKIT_CHROME=1 the shelf and the Inspector are RustKit
+    // views built when they first open (CH3.A4b, `apply_layout`).
+    let shelf_webview = if rustkit_chrome_enabled() { LazyPanel::deferred(SHELF_HTML, "shelf") } else { LazyPanel::built(PanelView::WebKit(WebViewBuilder::new()
         .with_html(SHELF_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(shelf_bounds)
         .with_ipc_handler(move |message| {
-            let body = message.body();
-            info!("Shelf IPC: {}", body);
-
-            match serde_json::from_str::<IpcMessage>(body) {
-                Ok(msg) => {
-                    match &msg {
-                        IpcMessage::CollapseShelf => {
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-                        }
-                        IpcMessage::SearchCommands { ref query } => {
-                            let _q = query.clone();
-                            let response = ipc::commands::handle_message(&shelf_state, msg);
-                            if let ipc::IpcResponse::Success { data } = response {
-                                let json = serde_json::to_string(&data)
-                                    .unwrap_or_else(|_| "[]".to_string());
-                                let _ = shelf_proxy.send_event(UserEvent::ShowCommands(json));
-                            }
-                        }
-                        IpcMessage::ExecuteCommand { ref id } => {
-                            let _cmd_id = id.clone();
-                            let response = ipc::commands::handle_message(&shelf_state, msg);
-                            info!("Command execution response: {:?}", response);
-                            // Close shelf after executing command
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-
-                            if let ipc::IpcResponse::Success { data } = response {
-                                if let Some(result) = data.get("result") {
-                                    if let Some(action) =
-                                        result.get("action").and_then(|a| a.as_str())
-                                    {
-                                        match action {
-                                            "navigate" => {
-                                                if let Some(url) =
-                                                    result.get("url").and_then(|u| u.as_str())
-                                                {
-                                                    let _ = shelf_proxy.send_event(
-                                                        UserEvent::Navigate(url.to_string()),
-                                                    );
-                                                } else {
-                                                    let _ =
-                                                        shelf_proxy.send_event(UserEvent::NewTab);
-                                                }
-                                            }
-                                            "reload" => {
-                                                let _ = shelf_proxy.send_event(UserEvent::Reload);
-                                            }
-                                            "go_back" => {
-                                                let _ = shelf_proxy.send_event(UserEvent::GoBack);
-                                            }
-                                            "go_forward" => {
-                                                let _ =
-                                                    shelf_proxy.send_event(UserEvent::GoForward);
-                                            }
-                                            "open_vault" => {
-                                                // Vault is now accessed via Settings
-                                                let _ =
-                                                    shelf_proxy.send_event(UserEvent::OpenSettings);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        IpcMessage::Navigate { url } => {
-                            let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone()));
-                            let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse Shelf IPC: {}", e);
-                }
-            }
+            log_ipc("Shelf IPC", message.body());
+            handle_shelf_ipc(message.body(), &shelf_proxy, &shelf_state)
         })
         .with_ipc_handler(move |message| {
-            if let Ok(msg) = serde_json::from_str::<IpcMessage>(message.body()) {
-                if let IpcMessage::FindInPageResult { result } = msg {
-                    let _ = content_proxy5.send_event(UserEvent::FindInPageResult(result));
-                }
-            }
+            handle_shelf_find_ipc(message.body(), &content_proxy5)
         })
         .build_as_child(&window)
-        .expect("Failed to create Shelf WebView");
+        .expect("Failed to create Shelf WebView")), SHELF_HTML, "shelf") };
 
     info!("Shelf WebView created (bottom, starts hidden)");
 
     // === INSPECTOR WEBVIEW (created fourth, between content and shelf) ===
     let inspector_proxy = proxy.clone();
     let _inspector_state = Arc::clone(&state);
-    let inspector_webview = WebViewBuilder::new()
+    let inspector_webview = if rustkit_chrome_enabled() { LazyPanel::deferred(INSPECTOR_HTML, "Inspector") } else { LazyPanel::built(PanelView::WebKit(WebViewBuilder::new()
         .with_html(INSPECTOR_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(inspector_bounds)
         .with_ipc_handler(move |message| {
-            let body = message.body();
-            info!("Inspector IPC: {}", body);
-
-            match serde_json::from_str::<IpcMessage>(body) {
-                Ok(msg) => {
-                    match &msg {
-                        IpcMessage::CloseInspector => {
-                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
-                        }
-                        IpcMessage::InspectorGetDomTree | IpcMessage::InspectorRefresh => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorRefreshTree);
-                        }
-                        IpcMessage::InspectorGetElementStyles { path } | IpcMessage::InspectorSelectElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorSelect { path: path.clone() });
-                        }
-                        IpcMessage::InspectorExpandNode { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorExpand { path: path.clone() });
-                        }
-                        IpcMessage::InspectorHighlightElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorHighlightElement { path: path.clone() });
-                        }
-                        IpcMessage::InspectorClearHighlight => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorClearHighlight);
-                        }
-                        IpcMessage::InspectorStartPicker => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorStartPicker);
-                        }
-                        IpcMessage::InspectorStopPicker => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorStopPicker);
-                        }
-                        IpcMessage::InspectorScrollToElement { path } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorScrollToElement { path: path.clone() });
-                        }
-                        IpcMessage::InspectorConsoleEval { code } => {
-                            let _ = inspector_proxy.send_event(UserEvent::InspectorConsoleEval { code: code.clone() });
-                        }
-                        IpcMessage::InspectorClose => {
-                            let _ = inspector_proxy.send_event(UserEvent::CloseInspector);
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse Inspector IPC: {}", e);
-                }
-            }
+            log_ipc("Inspector IPC", message.body());
+            handle_inspector_ipc(message.body(), &inspector_proxy)
         })
         .build_as_child(&window)
-        .expect("Failed to create Inspector WebView");
+        .expect("Failed to create Inspector WebView")), INSPECTOR_HTML, "Inspector") };
 
     info!("Inspector WebView created (between content and shelf, starts hidden)");
     info!("Four-WebView architecture initialized");
+    announce_panel_probe();
 
     // DIAGNOSTIC: dump the contentView subview stack, bottom to top. Subview
     // array order IS z-order (later = on top). A full session of clicking
@@ -2537,7 +3415,7 @@ fn main() {
     });
 
     // Track settings window (created on demand)
-    let settings_window: Arc<Mutex<Option<(tao::window::Window, wry::WebView)>>> =
+    let settings_window: Arc<Mutex<Option<(tao::window::Window, PanelView)>>> =
         Arc::new(Mutex::new(None));
     let settings_window_for_events = Arc::clone(&settings_window);
 
@@ -2586,10 +3464,11 @@ fn main() {
     let mut devtools = devtools_panel::Devtools::default();
     // A script for the RustKit chrome once it has booted (real-window checks).
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
-    let mut chrome_boot_eval = rustkit_chrome_enabled()
-        .then(|| std::env::var("HIWAVE_RUSTKIT_CHROME_EVAL").ok())
-        .flatten()
-        .filter(|js| !js.is_empty());
+    let mut chrome_boot_eval = chrome_boot_eval(
+        rustkit_chrome_enabled(),
+        std::env::var("HIWAVE_TEST_HOOKS").ok().as_deref(),
+        std::env::var("HIWAVE_RUSTKIT_CHROME_EVAL").ok(),
+    );
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2866,6 +3745,25 @@ fn main() {
 
                 }
             }
+            // The RustKit settings page follows its own window (CH3.A4).
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                window_id,
+                ..
+            } if window_id != main_window_id && rustkit_chrome_enabled() => {
+                if let Ok(guard) = settings_window_for_events.lock() {
+                    if let Some((ref settings_win, ref settings)) = *guard {
+                        if settings_win.id() == window_id {
+                            let scale = settings_win.scale_factor();
+                            settings.place(Rect {
+                                position: LogicalPosition::new(0, 0).into(),
+                                size: LogicalSize::new(size.width as f64 / scale, size.height as f64 / scale).into(),
+                            });
+                        }
+                    }
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_new_size),
                 ..
@@ -2916,16 +3814,17 @@ fn main() {
                         if take_chrome_overlays(&body, chrome) {
                             continue;
                         }
-                        info!(%body, "RustKit chrome IPC");
+                        log_ipc("RustKit chrome IPC", &body);
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
                         booted = true;
                     }
-                    // `HIWAVE_RUSTKIT_CHROME_EVAL`: a script for the chrome
-                    // once its own script has posted, for the real-window
-                    // checks that cannot type (a2_chrome_navigate).
+                    // `HIWAVE_RUSTKIT_CHROME_EVAL` (with `HIWAVE_TEST_HOOKS=1`):
+                    // a script for the chrome once its own script has posted,
+                    // for the real-window checks that cannot type
+                    // (a2_chrome_navigate).
                     if booted {
                         if let Some(js) = chrome_boot_eval.take() {
-                            info!(%js, "RustKit chrome: running HIWAVE_RUSTKIT_CHROME_EVAL");
+                            info!(len = js.len(), "RustKit chrome: running HIWAVE_RUSTKIT_CHROME_EVAL");
                             let _ = chrome.wry_evaluate_script(&js);
                         }
                     }
@@ -2935,10 +3834,51 @@ fn main() {
                         warn!(%url, "RustKit chrome navigation not followed");
                     }
                     chrome.render();
+                    // A right press the chrome's script let through (the
+                    // sidebar's) gets no menu: the WebKit chrome's would be
+                    // WebKit's own (CH2.E4).
+                    if chrome.take_context_menu().is_some() {
+                        tracing::debug!("RustKit chrome: contextmenu not cancelled, no menu shown");
+                    }
                     chrome.input_view()
                 } else {
                     None
                 };
+                // The RustKit panels (CH3.A4): the same turn as the chrome's,
+                // their messages to the WebKit views' handlers.
+                // One not opened yet has no view (CH3.A4b) and no turn.
+                let panel_inputs = [
+                    shelf_for_events.get().and_then(|shelf| pump_rustkit_panel(
+                        shelf,
+                        "shelf",
+                        &mut |body| {
+                            handle_shelf_ipc(body, &chrome_ipc_proxy, &chrome_ipc_state);
+                            handle_shelf_find_ipc(body, &chrome_ipc_proxy);
+                        },
+                        &mut devtools,
+                        &*inspector_for_events,
+                        &click_proxy,
+                    )),
+                    inspector_for_events.get().and_then(|inspector| pump_rustkit_panel(
+                        inspector,
+                        "Inspector",
+                        &mut |body| handle_inspector_ipc(body, &chrome_ipc_proxy),
+                        &mut devtools,
+                        &*inspector_for_events,
+                        &click_proxy,
+                    )),
+                    match settings_window_for_events.lock().as_deref() {
+                        Ok(Some((_, settings))) => pump_rustkit_panel(
+                            settings,
+                            "settings",
+                            &mut |body| handle_settings_ipc(body, &chrome_ipc_proxy),
+                            &mut devtools,
+                            &*inspector_for_events,
+                            &click_proxy,
+                        ),
+                        _ => None,
+                    },
+                ];
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     // A load in progress gets one slice, then the loop goes back to
@@ -2970,7 +3910,29 @@ fn main() {
                             // Input on the RustKit chrome's view is not the
                             // page's: the chrome's arm above takes it, and
                             // one that came since goes to the chrome too.
-                            if chrome_input == Some(event.view) {
+                            let route = route_input(event.view, chrome_input, &panel_inputs);
+                            if let InputRoute::Panel(at) = route {
+                                // A RustKit panel's (CH3.A4), as the chrome's.
+                                let settings = settings_window_for_events.lock();
+                                let panel = match at {
+                                    0 => shelf_for_events.get(),
+                                    1 => inspector_for_events.get(),
+                                    _ => settings.as_deref().ok().and_then(|s| s.as_ref()).map(|(_, v)| v),
+                                };
+                                if let Some(PanelView::RustKit(view)) = panel {
+                                    view.note_input(event.at, event.seq);
+                                    dispatch_view_input(
+                                        view,
+                                        InputTarget::Panel,
+                                        event.kind,
+                                        &mut devtools,
+                                        &*inspector_for_events,
+                                        &click_proxy,
+                                    );
+                                }
+                                continue;
+                            }
+                            if route == InputRoute::Chrome {
                                 if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
                                     chrome.note_input(event.at, event.seq);
                                     dispatch_view_input(
@@ -3052,6 +4014,10 @@ fn main() {
                         // window when the open panel's view records (T6b).
                         devtools.pump(view, &inspector_for_events);
                         view.render();
+                        // CH2.E4: a right press the page let through.
+                        if let Some((x, y)) = view.take_context_menu() {
+                            show_page_context_menu(view, x, y);
+                        }
                     }
                 }
             }
@@ -3412,7 +4378,7 @@ fn main() {
                             "if(window.hiwaveShelf) {{ hiwaveShelf.showCommands({}); }}",
                             json
                         );
-                        let _ = shelf_for_events.evaluate_script(&script);
+                        let _ = shelf_for_events.eval(&script);
                     }
                     UserEvent::ExpandChrome if rustkit_chrome_enabled() => {
                         // CH3.A3: the RustKit chrome is over the page; its
@@ -3505,7 +4471,7 @@ fn main() {
                         );
 
                         // Focus the command palette input and trigger initial search
-                        let _ = shelf_for_events.evaluate_script(r#"
+                        let _ = shelf_for_events.eval(r#"
                             if(window.hiwaveShelf) {
                                 hiwaveShelf.clear();
                                 hiwaveShelf.focus();
@@ -3518,6 +4484,8 @@ fn main() {
                                 }, 50);
                             }
                         "#);
+                        // The RustKit shelf takes the keyboard (CH3.A4).
+                        shelf_for_events.take_keyboard();
                     }
                     UserEvent::CollapseShelf => {
                         let ch = *chrome_height_for_events.lock().unwrap();
@@ -3540,6 +4508,9 @@ fn main() {
                             sidebar_open,
                             right_sidebar_open,
                         );
+                        // The RustKit shelf gives the keyboard back to the page (CH3.A4).
+                        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                        panel_closed(&shelf_for_events, &content_for_events);
                     }
                     UserEvent::SetSidebarOpen(open) => {
                         // Get current width or use default when opening
@@ -3791,106 +4762,23 @@ fn main() {
                                 .expect("Failed to create settings window");
 
                             let settings_proxy = settings_proxy_for_handler.clone();
-                            let settings_webview = WebViewBuilder::new()
+                            let settings_rect = Rect {
+                                position: LogicalPosition::new(0, 0).into(),
+                                size: {
+                                    let (size, scale) = (settings_win.inner_size(), settings_win.scale_factor());
+                                    LogicalSize::new(size.width as f64 / scale, size.height as f64 / scale).into()
+                                },
+                            };
+                            let settings_webview = if let Some(view) = rustkit_panel(&settings_win, settings_rect, SETTINGS_HTML, "settings page") { view } else { PanelView::WebKit(WebViewBuilder::new()
                                 .with_html(SETTINGS_HTML)
                                 .with_devtools(cfg!(debug_assertions))
                                 .with_clipboard(true)
                                 .with_initialization_script(JS_BRIDGE)
                                 .with_ipc_handler(move |msg: wry::http::Request<String>| {
-                                    let body = msg.body();
-                                    if let Ok(ipc_msg) = serde_json::from_str::<IpcMessage>(body) {
-                                        match ipc_msg {
-                                            IpcMessage::CloseSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::CloseSettings);
-                                            }
-                                            IpcMessage::GetBrowserProfiles { browser } => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetBrowserProfiles(browser));
-                                            }
-                                            IpcMessage::ImportBookmarks { browser, profile_path } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ImportBookmarks { browser, profile_path });
-                                            }
-                                            IpcMessage::GetSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetSettings);
-                                            }
-                                            IpcMessage::SaveSettings { settings } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveSettings(settings));
-                                            }
-                                            IpcMessage::ExportData { include_settings, include_workspaces } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ExportData { include_settings, include_workspaces });
-                                            }
-                                            IpcMessage::SaveExportToFile { data, suggested_name } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveExportToFile { data, suggested_name });
-                                            }
-                                            IpcMessage::ImportData { data, replace } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ImportStateData { data, replace });
-                                            }
-                                            IpcMessage::PickImportFile => {
-                                                let _ = settings_proxy.send_event(UserEvent::PickImportFile);
-                                            }
-                                            IpcMessage::ClearBrowsingData { history, downloads, shelf } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearBrowsingData { history, downloads, shelf });
-                                            }
-                                            IpcMessage::GetCellar => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetCellar);
-                                            }
-                                            IpcMessage::RestoreFromCellar { id } => {
-                                                let _ = settings_proxy.send_event(UserEvent::RestoreFromCellar { id });
-                                            }
-                                            IpcMessage::ClearCellar => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearCellar);
-                                            }
-                                            IpcMessage::GetFocusModeConfig => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetFocusModeConfigForSettings);
-                                            }
-                                            IpcMessage::SaveFocusModeConfig { config } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveFocusModeConfigFromSettings(config));
-                                            }
-                                            IpcMessage::AddToFocusBlocklist { domain } => {
-                                                let _ = settings_proxy.send_event(UserEvent::AddToFocusBlocklistFromSettings(domain));
-                                            }
-                                            IpcMessage::RemoveFromFocusBlocklist { domain } => {
-                                                let _ = settings_proxy.send_event(UserEvent::RemoveFromFocusBlocklistFromSettings(domain));
-                                            }
-                                            // Vault IPC commands
-                                            IpcMessage::GetVaultStatus => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetVaultStatus);
-                                            }
-                                            IpcMessage::UnlockVault { password } => {
-                                                let _ = settings_proxy.send_event(UserEvent::UnlockVault(password));
-                                            }
-                                            IpcMessage::LockVault => {
-                                                let _ = settings_proxy.send_event(UserEvent::LockVault);
-                                            }
-                                            IpcMessage::GetAllCredentials => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetAllCredentials);
-                                            }
-                                            IpcMessage::SaveCredential { url, username, password } => {
-                                                let _ = settings_proxy.send_event(UserEvent::SaveCredential { url, username, password });
-                                            }
-                                            IpcMessage::DeleteCredential { id } => {
-                                                let _ = settings_proxy.send_event(UserEvent::DeleteCredential(id));
-                                            }
-                                            // Analytics IPC commands
-                                            IpcMessage::GetAnalyticsSettings => {
-                                                let _ = settings_proxy.send_event(UserEvent::GetAnalyticsSettings);
-                                            }
-                                            IpcMessage::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
-                                                let _ = settings_proxy.send_event(UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day });
-                                            }
-                                            IpcMessage::ClearAnalyticsData => {
-                                                let _ = settings_proxy.send_event(UserEvent::ClearAnalyticsData);
-                                            }
-                                            IpcMessage::ExportAnalyticsData { format } => {
-                                                let _ = settings_proxy.send_event(UserEvent::ExportAnalyticsData { format });
-                                            }
-                                            _ => {
-                                                info!("Settings window received unhandled IPC: {:?}", ipc_msg);
-                                            }
-                                        }
-                                    }
+                                    handle_settings_ipc(msg.body(), &settings_proxy)
                                 })
                                 .build(&settings_win)
-                                .expect("Failed to create settings WebView");
+                                .expect("Failed to create settings WebView")) };
 
                             *settings_guard = Some((settings_win, settings_webview));
                         }
@@ -3915,7 +4803,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -3937,13 +4825,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportBrowserProfilesResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportBookmarks { browser, profile_path } => {
@@ -3959,7 +4847,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -3981,7 +4869,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -3998,7 +4886,7 @@ fn main() {
                             }).to_string();
                             if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                 let script = format!("window.postMessage({}, '*');", result_json);
-                                let _ = settings_wv.evaluate_script(&script);
+                                let _ = settings_wv.eval(&script);
                             }
                             return;
                         }
@@ -4058,7 +4946,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
 
                         info!("Import complete: {} workspaces, {} tabs", workspaces_created, tabs_created);
@@ -4066,7 +4954,7 @@ fn main() {
                     UserEvent::ImportBookmarksResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetSettings => {
@@ -4080,38 +4968,31 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SettingsResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveSettings(settings_value) => {
-                        let settings: Result<crate::state::UserSettings, _> = serde_json::from_value(settings_value);
-                        let result_json = match settings {
-                            Ok(s) => {
-                                let mut state = state_for_events.lock().unwrap();
-                                match state.update_settings(s) {
-                                    Ok(_) => serde_json::json!({ "type": "settings_saved" }),
-                                    Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
-                                }
-                            }
-                            Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
+                        let result_json = {
+                            let mut state = state_for_events.lock().unwrap();
+                            save_settings_reply(&mut state, settings_value)
                         }.to_string();
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SettingsSaved => {
                         let result_json = serde_json::json!({ "type": "settings_saved" }).to_string();
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportData { include_settings, include_workspaces } => {
@@ -4132,13 +5013,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveExportToFile { data, suggested_name } => {
@@ -4180,7 +5061,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::PickImportFile => {
@@ -4221,7 +5102,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportStateData { data, replace } => {
@@ -4250,13 +5131,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportStateDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearBrowsingData { history, downloads, shelf } => {
@@ -4287,13 +5168,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearBrowsingDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetCellar => {
@@ -4321,7 +5202,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::RestoreFromCellar { id } => {
@@ -4352,7 +5233,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearCellar => {
@@ -4367,7 +5248,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetFocusModeConfigForSettings => {
@@ -4381,7 +5262,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveFocusModeConfigFromSettings(config_value) => {
@@ -4404,7 +5285,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::AddToFocusBlocklistFromSettings(domain) => {
@@ -4427,7 +5308,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::RemoveFromFocusBlocklistFromSettings(domain) => {
@@ -4450,7 +5331,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     // Vault settings events
@@ -4466,7 +5347,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::UnlockVault(password) => {
@@ -4494,7 +5375,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::LockVault => {
@@ -4510,7 +5391,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetAllCredentials => {
@@ -4543,7 +5424,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveCredential { url, username, password } => {
@@ -4577,7 +5458,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::DeleteCredential(id) => {
@@ -4605,7 +5486,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     // Analytics settings events
@@ -4626,7 +5507,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
@@ -4662,7 +5543,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearAnalyticsData => {
@@ -4689,7 +5570,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportAnalyticsData { format } => {
@@ -4749,7 +5630,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::WindowThreadPing => {
@@ -4990,6 +5871,10 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        // The RustKit Inspector takes the keyboard, as the
+                        // shelf does: its console without a click first
+                        // (#910 R1 nit 6).
+                        inspector_for_events.take_keyboard();
                         if with_rustkit_content!(content_for_events, view => devtools.open(view, &inspector_for_events)) {
                             return;
                         }
@@ -5032,6 +5917,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        // The RustKit Inspector gives the keyboard back to the page (CH3.A4).
+                        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                        panel_closed(&inspector_for_events, &content_for_events);
                         if with_rustkit_content!(content_for_events, view => devtools.close(view, &inspector_for_events)) {
                             return;
                         }
@@ -5054,7 +5942,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.setDomTree({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorSendElementStyles(json) => {
                         // Send element styles to inspector panel
@@ -5062,7 +5950,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.setElementStyles({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorElementPicked { path, styles } => {
                         // Element was picked in content webview, update inspector
@@ -5072,10 +5960,10 @@ fn main() {
                             path.replace("'", "\\'"),
                             styles_json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorPickerStopped => {
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
                         );
                     }
@@ -5104,7 +5992,7 @@ fn main() {
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(true); }"
                         );
                     }
@@ -5115,7 +6003,7 @@ fn main() {
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
                         );
                     }
@@ -5190,7 +6078,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.addConsoleEntry({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorConsoleClear => {
                         // Clear console in inspector panel

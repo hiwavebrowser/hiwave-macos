@@ -9,15 +9,24 @@
 //   hwdrive preflight
 //   hwdrive request                       (show the system's grant prompts)
 //   hwdrive window   <pid>
+//   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
+//   hwdrive find     <pid> <text>|role:<AXRole>  (elements by their accessible text or role)
 //   hwdrive activate <pid>
 //   hwdrive move     <pid> <x> <y>
 //   hwdrive click    <pid> <x> <y>
 //   hwdrive press    <pid> <x> <y>          (button down, no release)
 //   hwdrive release  <pid> <x> <y>
+//   hwdrive dblclick <pid> <x> <y>          (two clicks, click counts 1 and 2)
+//   hwdrive rightclick   <pid> <x> <y>      (secondary button down and up)
+//   hwdrive rightpress   <pid> <x> <y>      (secondary button down only)
+//   hwdrive drag     <pid> <x0> <y0> <x1> <y1> (press, dragged moves, release)
+//   hwdrive menus    <pid>                  (the process's on-screen windows above layer 0)
+//   hwdrive cursor                          (which AppKit cursor is showing)
 //   hwdrive scroll   <pid> <x> <y> <dx> <dy> (pixels; dy < 0 moves the page down)
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>
+//   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //
 // x, y are points from the top-left corner of the window's frame (title bar
 // included). Every command prints one JSON object.
@@ -107,12 +116,22 @@ func post(_ e: CGEvent?) {
     usleep(30_000)
 }
 
-func mouse(_ type: CGEventType, _ p: CGPoint) {
-    let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
-    if type == .leftMouseDown || type == .leftMouseUp {
-        e?.setIntegerValueField(.mouseEventClickState, value: 1)
+func mouse(_ type: CGEventType, _ p: CGPoint, clicks: Int64 = 1) {
+    let right = type == .rightMouseDown || type == .rightMouseUp || type == .rightMouseDragged
+    let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p,
+                    mouseButton: right ? .right : .left)
+    if [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp].contains(type) {
+        e?.setIntegerValueField(.mouseEventClickState, value: clicks)
     }
     post(e)
+}
+
+/// The system cursors a page's `cursor` maps to (CH2.E4), by name.
+func knownCursors() -> [(String, NSCursor)] {
+    return [("arrow", .arrow), ("pointingHand", .pointingHand), ("IBeam", .iBeam),
+            ("resizeLeftRight", .resizeLeftRight), ("resizeUpDown", .resizeUpDown),
+            ("operationNotAllowed", .operationNotAllowed), ("openHand", .openHand),
+            ("closedHand", .closedHand), ("crosshair", .crosshair)]
 }
 
 func num(_ s: String) -> Double {
@@ -124,6 +143,22 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let cmd = args.first else { emit(["error": "usage: hwdrive <command> ..."], code: 2) }
 
 if cmd == "preflight" { emit(preflight()) }
+
+// The cursor on screen, matched against the system cursors by image and
+// hot spot. Needs no grant.
+if cmd == "cursor" {
+    // The arrow and the I-beam have no image until AppKit is set up.
+    _ = NSApplication.shared
+    guard let now = NSCursor.currentSystem else { emit(["error": "no current system cursor"], code: 2) }
+    let tiff = now.image.tiffRepresentation
+    var name = "unknown"
+    for (n, c) in knownCursors() where c.hotSpot == now.hotSpot && c.image.tiffRepresentation == tiff {
+        name = n
+        break
+    }
+    emit(["cursor": name, "hot_spot": [now.hotSpot.x, now.hotSpot.y],
+          "size": [now.image.size.width, now.image.size.height]])
+}
 
 // Asks macOS for the three grants. The system shows its own prompts and adds
 // the program that started this tool to the lists in System Settings, which
@@ -151,6 +186,88 @@ switch cmd {
 case "window":
     emit(windowJSON(requireWindow(pid)))
 
+case "windows":
+    // Every ordinary (layer 0) window the process owns, largest first: a
+    // second window (settings) is found here, and clicked at through the
+    // main window's coordinates (its offset from the main window's origin).
+    let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+    var list: [(id: CGWindowID, frame: CGRect, onScreen: Bool)] = []
+    for w in all {
+        guard (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) == pid,
+              (w[kCGWindowLayer as String] as? Int) == 0,
+              let b = w[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: b),
+              let id = w[kCGWindowNumber as String] as? Int
+        else { continue }
+        list.append((CGWindowID(id), frame, (w[kCGWindowIsOnscreen as String] as? Bool) ?? false))
+    }
+    list.sort { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }
+    emit(["windows": list.map(windowJSON)])
+
+case "find":
+    // Where elements are, found through Accessibility, depth first over every
+    // window of the process. `find <pid> <text>`: the first element whose
+    // title, value or description is exactly <text>, scrolled into view first
+    // when it offers that. `find <pid> role:<AXRole>`: every element of that
+    // role (no scrolling), with its value. Boxes are in the main window's
+    // coordinates (the ones `click` takes), so a second window's element is
+    // clicked at directly. This only finds; clicks stay real HID events.
+    guard args.count >= 3 else { emit(["error": "find needs text or role:<AXRole>"], code: 2) }
+    if !AXIsProcessTrusted() {
+        emit(["error": "no Accessibility grant (System Settings > Privacy & Security > Accessibility)"], code: 3)
+    }
+    let query = args[2]
+    let role = query.hasPrefix("role:") ? String(query.dropFirst(5)) : nil
+    func attr(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+    }
+    func matches(_ e: AXUIElement) -> Bool {
+        if let role = role { return (attr(e, kAXRoleAttribute as String) as? String) == role }
+        for name in [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
+            if let s = attr(e, name as String) as? String, s == query { return true }
+        }
+        return false
+    }
+    var seen = 0
+    var hits: [AXUIElement] = []
+    func search(_ e: AXUIElement, _ depth: Int) {
+        seen += 1
+        if seen > 20_000 || depth > 60 || (role == nil && !hits.isEmpty) { return }
+        if matches(e) { hits.append(e); if role == nil { return } }
+        for child in (attr(e, kAXChildrenAttribute as String) as? [AXUIElement]) ?? [] {
+            search(child, depth + 1)
+        }
+    }
+    let app = AXUIElementCreateApplication(pid)
+    // A web view builds its accessibility tree only once an assistive
+    // client says it is there; ask, then look again for up to 3 s.
+    AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    for _ in 0..<15 {
+        seen = 0
+        hits = []
+        for win in (attr(app, kAXWindowsAttribute as String) as? [AXUIElement]) ?? [] { search(win, 0) }
+        if !hits.isEmpty { break }
+        usleep(200_000)
+    }
+    if hits.isEmpty { emit(["error": "nothing matches \(query)", "searched": seen], code: 2) }
+    if role == nil {
+        AXUIElementPerformAction(hits[0], "AXScrollToVisible" as CFString)
+        usleep(300_000)
+    }
+    let origin = requireWindow(pid).frame.origin
+    func describe(_ el: AXUIElement) -> [String: Any] {
+        var pos = CGPoint.zero, size = CGSize.zero
+        if let v = attr(el, kAXPositionAttribute as String) { AXValueGetValue(v as! AXValue, .cgPoint, &pos) }
+        if let v = attr(el, kAXSizeAttribute as String) { AXValueGetValue(v as! AXValue, .cgSize, &size) }
+        var out: [String: Any] = ["role": (attr(el, kAXRoleAttribute as String) as? String) ?? "",
+                                  "box": [pos.x - origin.x, pos.y - origin.y, size.width, size.height]]
+        if let n = attr(el, kAXValueAttribute as String) as? NSNumber { out["value"] = n.intValue }
+        return out
+    }
+    emit(role == nil ? describe(hits[0]) : ["found": hits.prefix(50).map(describe)])
+
 case "activate":
     requireInput()
     let ok = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows]) ?? false
@@ -170,6 +287,46 @@ case "click", "press", "release":
     if cmd != "release" { mouse(.leftMouseDown, p) }
     if cmd != "press" { mouse(.leftMouseUp, p) }
     emit([cmd: [p.x, p.y]])
+
+case "dblclick":
+    requireInput()
+    let p = point(2)
+    mouse(.mouseMoved, p)
+    for n in [Int64(1), 2] {
+        mouse(.leftMouseDown, p, clicks: n)
+        mouse(.leftMouseUp, p, clicks: n)
+    }
+    emit([cmd: [p.x, p.y]])
+
+case "rightclick", "rightpress":
+    requireInput()
+    let p = point(2)
+    mouse(.mouseMoved, p)
+    mouse(.rightMouseDown, p)
+    if cmd == "rightclick" { mouse(.rightMouseUp, p) }
+    emit([cmd: [p.x, p.y]])
+
+case "drag":
+    requireInput()
+    guard args.count >= 6 else { emit(["error": "drag needs x0 y0 x1 y1"], code: 2) }
+    let a = point(2), b = point(4)
+    mouse(.mouseMoved, a)
+    mouse(.leftMouseDown, a)
+    for i in 1...8 {
+        let t = Double(i) / 8
+        mouse(.leftMouseDragged, CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t))
+    }
+    mouse(.leftMouseUp, b)
+    emit([cmd: [[a.x, a.y], [b.x, b.y]]])
+
+case "menus":
+    let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    var layers: [Int] = []
+    for w in all where (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) == pid {
+        let layer = w[kCGWindowLayer as String] as? Int ?? 0
+        if layer != 0 { layers.append(layer) }
+    }
+    emit(["count": layers.count, "layers": layers])
 
 case "scroll":
     requireInput()
