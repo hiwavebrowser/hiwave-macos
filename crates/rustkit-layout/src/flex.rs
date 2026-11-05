@@ -338,6 +338,13 @@ fn clear_percent_height_marks(b: &mut LayoutBox) {
     }
 }
 
+/// Whether `container_box` is `container`'s own content box (what every
+/// production caller passes) rather than its containing block.
+fn is_own_box(container_box: &Dimensions, container: &LayoutBox) -> bool {
+    let (a, b) = (&container_box.content, &container.dimensions.content);
+    a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height
+}
+
 /// Layout a flex container and its children.
 pub fn layout_flex_container(container: &mut LayoutBox, container_box: &Dimensions) {
     layout_flex_container_in(container, container_box, None)
@@ -547,13 +554,26 @@ fn layout_flex_container_at(
                     Some(v)
                 }
             }
-            // `container_cross_size` is the CONTAINING BLOCK's content size,
-            // not this container's. For the `width: auto` case above, the
-            // used inner cross size is that minus the container's OWN margin,
-            // border and padding — handing back the raw containing-block
-            // number stretches every child past the container by exactly its
-            // own edges. That is #81's defect inverted: items grew by their
-            // padding instead of shrinking by it.
+            // `container_box` is the container's OWN content box on every
+            // production path (see `layout_flex_container`): the block pass,
+            // the grid's item and grandchild passes and the nested-flex
+            // passes all hand over `container.dimensions.clone()`. Its width
+            // already excludes the container's edges, so it IS the inner
+            // cross size. Subtracting the edges again took them off twice: a
+            // `padding: 16px` column card 656 wide resolved `width: 100%` to
+            // 624 and stretched its rows to 624 (Chromium 143: 656 and 656).
+            None if cross_axis == Axis::Horizontal
+                && container_cross_size > 0.0
+                && is_own_box(container_box, container) =>
+            {
+                Some(container_cross_size)
+            }
+            // A caller that hands over the CONTAINING BLOCK instead (the unit
+            // tests below do) gets the inner size as that less the
+            // container's own margin, border and padding — handing back the
+            // raw containing-block number stretches every child past the
+            // container by exactly its own edges. That is #81's defect
+            // inverted: items grew by their padding instead of shrinking by it.
             None if container_cross_size > 0.0 => {
                 let own_edges = match cross_axis {
                     Axis::Horizontal => {
@@ -1001,6 +1021,18 @@ fn layout_flex_container_at(
             // settings toggles (inline-flex, height:26px) ballooned to their
             // stacked children's 40.4px whenever they sat in a flex row.
             if item.has_explicit_cross_size {
+                continue;
+            }
+            // Nor does a STRETCHED item of a definite single-line column: it
+            // is exactly the container's width (§9.4.11), and its widest
+            // child's width is at best the same number and at worst the stale
+            // one a wider pre-pass left (see `calculate_cross_sizes`).
+            if cross_axis == Axis::Horizontal
+                && has_definite_cross_size
+                && wrap == FlexWrap::NoWrap
+                && item.stretches(style.align_items)
+                && !is_table_box(item.layout_box)
+            {
                 continue;
             }
             // Only recompute if cross_size is still using fallback (line_height or similar)
@@ -2334,8 +2366,17 @@ fn calculate_cross_sizes(
             // A table is the exception: its height is a minimum (CSS 2.1
             // §17.5.3), so it keeps the content floor. Chromium 143: a
             // table of ten 30px rows in a 200px row is 300.
-            let exact = cross_axis == Axis::Vertical
-                && has_definite_cross_size
+            //
+            // The same holds across a COLUMN (§9.4.11 names no axis): a
+            // stretched item of a column container whose width is definite
+            // is exactly that width less its margins. The floor there read
+            // the width the item was last laid out at, which is stale
+            // whenever an earlier pass ran in a wider containing block: a
+            // grid sizes its tracks by laying each item out in the whole
+            // grid width, so the story rows of a padded column card in a
+            // `span 8` item (688px track of a 1040px grid) kept 1008 against
+            // Chromium 143's 656 and overlapped the next column.
+            let exact = has_definite_cross_size
                 && single_line
                 && !is_table_box(item.layout_box);
             item.cross_size = if exact {
