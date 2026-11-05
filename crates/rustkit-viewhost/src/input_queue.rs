@@ -174,8 +174,10 @@ impl InputQueue {
     /// other views' events queued: the RustKit chrome's input is handled
     /// while the page's waits for its load (CH3.A2 step 3b).
     pub fn drain_view(&mut self, view: ViewId) -> Vec<InputEvent> {
-        let _ = view;
-        Vec::new()
+        let (taken, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.events).into_iter().partition(|e| e.view == view);
+        self.events = kept;
+        taken
     }
 
     /// Drop what is queued for `view`: the view is gone, and an input
