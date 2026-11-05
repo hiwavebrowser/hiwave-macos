@@ -701,6 +701,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    // The virtual clock as it stands: the engine's animation clock.
+    window.__rustkit_now = function () { return now; };
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
@@ -2428,6 +2430,38 @@ impl DomBindings {
             JsValue::Number(n) => (n as u32, false),
             _ => (0, false),
         })
+    }
+
+    /// The page's virtual clock, in ms: what its timers and animation
+    /// frames have run up to. The engine's CSS transitions run on it.
+    pub fn clock_now_ms(&self) -> f64 {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping("window.__rustkit_now()")
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() => n,
+            _ => 0.0,
+        }
+    }
+
+    /// Fire a `TransitionEvent` (`transitionrun`, `transitionstart`,
+    /// `transitionend`, `transitioncancel`) at an element (by node id), as
+    /// the engine's transitions change phase. Bubbles; `transitionend` can
+    /// be cancelled. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_transition_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        property: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
     }
 
     /// Milliseconds until the page's next timer is due on the virtual clock

@@ -96,6 +96,14 @@ impl LayoutCtx {
     /// Runs `build` with `view` as the view being built. What was there
     /// before is put back when `build` returns or unwinds, so a build that
     /// panics leaves no view (and no `ViewLayout`) held by the context.
+    ///
+    /// `build` must be a complete build of the view: the transitions of
+    /// every element it did not reach are cancelled when it returns, so a
+    /// build cut short would cancel what it never got to. Two builds are
+    /// known not to be complete and are not swept: one that took the kept
+    /// box tree, and a pointer restyle's partial build
+    /// (`crate::restyle_build_active`), which skips everything that is not
+    /// under a changed element.
     pub(crate) fn with_building<R>(&self, view: BuildView, build: impl FnOnce() -> R) -> R {
         struct Restore<'a> {
             ctx: &'a LayoutCtx,
@@ -115,9 +123,37 @@ impl LayoutCtx {
             .map(|lay| (lay.hover_chain.borrow().clone(), lay.active_chain.borrow().clone()))
             .unwrap_or_default();
         let _walk_checked = crate::WalkCheckedScope::enter(Some(checked), Some(pointer));
+        let lay = view.lay.clone();
+        if let Some(lay) = lay.as_ref() {
+            let mut anims = lay.animations.borrow_mut();
+            anims.last_build_clock = Some(anims.clock_ms);
+            anims.begin_build();
+        }
+        // A pointer restyle sets this before its builds and takes it
+        // after them: read before `build`, while it is certainly set.
+        let partial_build = crate::restyle_build_active();
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
-        build()
+        let built = build();
+        // What the build did not visit has no computed style: its
+        // transitions end here. Not after a build that took the kept box
+        // tree (it visited nothing) or a partial restyle build (it skipped
+        // what is not under a changed element): every element is still
+        // there with its style.
+        if let Some(lay) = lay.as_ref() {
+            let reused_tree = crate::relayout_cause::last_build_reused_tree();
+            lay.animations.borrow_mut().end_build(reused_tree, partial_build);
+        }
+        built
+    }
+
+    /// The transitions' hand-off for one element of the view being built
+    /// (`Animations::on_style`); nothing outside a build.
+    pub(crate) fn animate_style(&self, node: usize, style: &mut crate::ComputedStyle) {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone());
+        if let Some(lay) = lay {
+            lay.animations.borrow_mut().on_style(node, style);
+        }
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`
@@ -248,6 +284,9 @@ pub(crate) struct ViewLayout {
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+    /// This view's running CSS transitions and the values they compare
+    /// against, read and advanced by every build (`animations.rs`).
+    pub(crate) animations: RefCell<crate::animations::Animations>,
     /// CH2.E7: the `overflow: auto` scrollers the last layout gave a styled
     /// bar (raw NodeId → vertical, horizontal), and whether the viewport
     /// had one. The next layout starts from them, so a relayout does not
