@@ -30,8 +30,8 @@ pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
 pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls};
 pub use input_queue::{
-    drain_input, drain_input_view, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
-    PendingScroll, PointerInput,
+    drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
+    ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
 
 // Screenshot capture (Windows: GPU readback of a hosted view)

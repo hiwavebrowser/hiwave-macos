@@ -64,12 +64,80 @@ pub struct PendingScroll {
     pub dy: f64,
 }
 
+/// What the platform's input method handed the content view through
+/// `NSTextInputClient` (CH2.E3): a dead key or an IME composing, and the
+/// text it commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeInput {
+    /// `setMarkedText:` — compose `text`; an empty string cancels.
+    SetMarked(String),
+    /// `insertText:` — commit `text`. With text marked it replaces the
+    /// marked text. With nothing marked, `replace` is the UTF-16 range
+    /// (start, length) of the value it replaces, as the press-and-hold
+    /// accent popover replaces the letter typed before it; `None` inserts
+    /// at the selection.
+    Insert { text: String, replace: Option<(usize, usize)> },
+    /// `unmarkText` — keep what is marked and end the composition.
+    Unmark,
+}
+
+/// An Edit menu item's action sent to the content view, the first
+/// responder (`copy:`, `cut:`, `paste:`, `undo:`, `redo:`, `selectAll:`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+    SelectAll,
+}
+
 /// One recorded input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputKind {
     Pointer(PendingClick),
     Key(PendingKey),
     Wheel(PendingScroll),
+    /// Marked or committed text from the input method (CH2.E3).
+    Ime(ImeInput),
+    /// An Edit menu item (CH2.E3).
+    Edit(EditAction),
+    /// A Cmd chord the view took in `performKeyEquivalent:` so the page
+    /// hears its keydown before the menu does (CH2.E3, Chromium's order).
+    /// The app hands `token` to `finish_key_equivalent`: a chord the page
+    /// did not claim goes on to the main menu.
+    KeyEquivalent { key: PendingKey, token: u64 },
+}
+
+/// A focused text field's state as the page last reported it, kept for the
+/// input method's synchronous questions (`selectedRange`, `markedRange`,
+/// `firstRectForCharacterRange:`), which AppKit asks inside its own event
+/// dispatch where the page cannot be asked. Offsets are UTF-16; the caret
+/// is view-local top-left points: x, y (top) and height.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TextInputMirror {
+    pub marked: Option<(usize, usize)>,
+    pub selected: (usize, usize),
+    pub caret: Option<(f64, f64, f64)>,
+}
+
+static TEXT_INPUT: Mutex<Vec<(ViewId, TextInputMirror)>> = Mutex::new(Vec::new());
+
+/// Record what the page reported for `view`'s focused text field; `None`
+/// when no text field has focus.
+pub fn set_text_input_state(view: ViewId, state: Option<TextInputMirror>) {
+    let mut all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(v, _)| *v != view);
+    if let Some(state) = state {
+        all.push((view, state));
+    }
+}
+
+/// The last state recorded for `view`.
+pub fn text_input_state(view: ViewId) -> Option<TextInputMirror> {
+    let all = TEXT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    all.iter().find(|(v, _)| *v == view).map(|(_, s)| *s)
 }
 
 /// An input as the app drains it: `seq` is its place in arrival order
@@ -259,6 +327,7 @@ mod tests {
                 InputKind::Pointer(_) => "pointer",
                 InputKind::Wheel(_) => "wheel",
                 InputKind::Key(_) => "key",
+                _ => "other",
             })
             .collect()
     }

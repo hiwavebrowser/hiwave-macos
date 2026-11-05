@@ -1217,6 +1217,10 @@ fn dispatch_view_input(
                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
             }
         }
+        // Not routed yet (CH2.E3 red).
+        rustkit_viewhost::InputKind::Ime(_)
+        | rustkit_viewhost::InputKind::Edit(_)
+        | rustkit_viewhost::InputKind::KeyEquivalent { .. } => {}
         rustkit_viewhost::InputKind::Key(key) => {
             // Cmd chords are menu shortcuts, except the editing
             // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
