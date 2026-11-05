@@ -67,6 +67,40 @@ fn an_unstyled_button_keeps_buttonface() {
     }
 }
 
+/// The second half of the same rows: chrome.html's expander is
+/// `<button>\n<32 spaces>▾\n<28 spaces></button>`, and the label kept every
+/// space, so the button measured ~113 px and its `flex: 1` sibling (the
+/// workspace name) got 0. Chromium 143: the label collapses to "v" and both
+/// buttons below are 14 px wide (`padding: 4px; border: none`, 12px Arial).
+#[test]
+fn a_button_label_collapses_its_whitespace() {
+    let mut engine =
+        Engine::new_page(EngineConfig::default(), None, Arc::new(AtomicU64::new(0))).expect("engine");
+    let view = engine.create_page_view(Bounds::new(0, 0, 600, 400)).expect("page view");
+    engine
+        .load_html(
+            view,
+            "<body style=\"font:12px Arial\">\
+             <button style=\"border:none;padding:4px\">\n                    v\n            </button>\
+             <button style=\"border:none;padding:4px\">v</button></body>",
+        )
+        .expect("load");
+    let buttons: Vec<(String, f32)> = engine.views[&view]
+        .display_list
+        .as_ref()
+        .expect("display list")
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            DisplayCommand::Button { label, rect, .. } => Some((label.clone(), rect.width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(buttons.len(), 2, "{buttons:?}");
+    assert_eq!(buttons[0].0, "v", "label keeps no whitespace: {buttons:?}");
+    assert!((buttons[0].1 - buttons[1].1).abs() < 0.5, "same width as a bare label: {buttons:?}");
+}
+
 #[test]
 fn an_authored_button_colour_is_kept() {
     let list = button_backgrounds(r#"<body><button style="background:rgb(1,2,3)">c</button></body>"#);
