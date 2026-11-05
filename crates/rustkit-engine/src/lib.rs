@@ -5604,7 +5604,6 @@ impl Engine {
         alt: bool,
     ) -> bool {
         let _hold = wgate::hold("key");
-        use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         // An open `<select>` drop-down takes the keys; the page hears none.
         if let Some(changed) = self.select_popup_key(id, key_code, key, ctrl, alt) {
@@ -5622,12 +5621,29 @@ impl Engine {
         {
             return false;
         }
+        self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
+    }
+
+    /// What a key does in the focused element `focused` once its keydown
+    /// was not cancelled: edit a contenteditable host, a drop-down or a
+    /// text control. Whether a value or caret changed.
+    pub(crate) fn text_key_default(
+        &mut self,
+        id: EngineViewId,
+        focused: usize,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        use rustkit_dom::forms::{keyboard, KeyHandleResult};
         // A contenteditable host: the page's DOM is what is edited.
-        if self.is_editing_host(id, focused.raw()) {
-            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        if self.is_editing_host(id, focused) {
+            return self.editable_key(id, focused, key_code, key, ctrl);
         }
         // A focused, closed drop-down: keys open it or change its value.
-        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, ctrl, alt) {
+        if let Some(changed) = self.closed_select_key(id, focused, key_code, key, ctrl, alt) {
             return changed;
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
@@ -5636,7 +5652,7 @@ impl Engine {
         // `ctrl` is the command modifier: the window passes Ctrl-or-Cmd.
         let platform = rustkit_dom::forms::KeyPlatform::current();
         if let Some(command) = keyboard::command_for_key(platform, key_code, key, ctrl, shift, alt) {
-            if let Some(changed) = self.user_edit_command(id, focused.raw(), &command) {
+            if let Some(changed) = self.user_edit_command(id, focused, &command) {
                 return changed;
             }
         }
@@ -5644,7 +5660,7 @@ impl Engine {
         // writes script's control values into the same map.
         let (result, value) = {
             let edit_states = lay.edit_states.borrow();
-            let Some(state) = edit_states.get(&focused.raw()) else {
+            let Some(state) = edit_states.get(&focused) else {
                 return false;
             };
             let result = keyboard::handle_key(
@@ -5658,7 +5674,7 @@ impl Engine {
             let mut stopped = None;
             if let Some(view) = self.views.get(&id) {
                 if let Some(bindings) = view.bindings.as_ref() {
-                    bindings.sync_control_value(focused.raw(), value);
+                    bindings.sync_control_value(focused, value);
                     // As `fire_mouse`: a document being left hears no
                     // `input`; its control's value is kept current all the
                     // same.
@@ -5666,7 +5682,7 @@ impl Engine {
                         let typed = (!key.is_empty() && !ctrl).then_some(key);
                         let _turn = rustkit_js::DiagTurn::enter("live");
                         let armed = arm_live_turn(&self.config, bindings);
-                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                        if let Err(e) = bindings.fire_input_event(focused, typed) {
                             debug!(?id, error = %e, "input listener threw");
                         }
                         stopped = end_live_turn(&self.config, armed, bindings, "event:input");
@@ -5831,6 +5847,21 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) -> bool {
+        self.fire_key_mods(id, node, event_type, key_code, text, (ctrl, shift, alt, false))
+    }
+
+    /// [`Self::fire_key`] with the Meta key as well: `mods` is
+    /// (ctrl, shift, alt, meta). A macOS Cmd chord is `metaKey` (CH2.E3).
+    pub(crate) fn fire_key_mods(
+        &mut self,
+        id: EngineViewId,
+        node: Option<usize>,
+        event_type: &str,
+        key_code: u32,
+        text: &str,
+        mods: (bool, bool, bool, bool),
+    ) -> bool {
+        let (ctrl, shift, alt, meta) = mods;
         let key = match key_code {
             0x08 => "Backspace",
             0x09 => "Tab",
@@ -5866,6 +5897,7 @@ impl Engine {
             ctrl_key: ctrl,
             alt_key: alt,
             shift_key: shift,
+            meta_key: meta,
             ..Default::default()
         };
         let _turn = rustkit_js::DiagTurn::enter("live");

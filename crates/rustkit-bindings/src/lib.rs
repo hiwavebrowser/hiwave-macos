@@ -1237,6 +1237,26 @@ impl DomBindings {
         })
     }
 
+    /// The platform's marked text in the text control `node` (CH2.E3,
+    /// macOS `NSTextInputClient`): `action` is "mark" (`setMarkedText:`),
+    /// "commit" (`insertText:` while text is marked), "unmark"
+    /// (`unmarkText`) or "state". Composition events, `beforeinput` and
+    /// `input` fire as Chrome's do. The JSON report, or `None` when `node`
+    /// is not a text control or, for "commit", nothing is marked.
+    pub fn user_compose(
+        &self,
+        node: usize,
+        action: &str,
+        text: &str,
+    ) -> Result<Option<serde_json::Value>, BindingError> {
+        let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        let script = format!("document.__rkCompose({node}, {action:?}, {text})");
+        Ok(match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => serde_json::from_str(&json).ok(),
+            _ => None,
+        })
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {

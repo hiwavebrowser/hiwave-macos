@@ -57,8 +57,8 @@ fn focus_end(engine: &mut Engine, id: EngineViewId, el: &str) {
 
 /// The log since the last call, one event a line.
 fn take_log(engine: &mut Engine, id: EngineViewId) -> Vec<String> {
-    let joined = js(engine, id, "var l = log.join('\\n'); log = []; l");
-    joined.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
+    let joined = js(engine, id, "var l = log.join(' | '); log = []; l");
+    joined.split(" | ").filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
 fn value(engine: &mut Engine, id: EngineViewId, el: &str) -> String {
@@ -185,6 +185,8 @@ fn the_text_input_state_reports_the_marked_range_and_a_caret_rect() {
     assert_eq!(before.marked, None);
     assert_eq!(before.selected, (2, 2));
     engine.set_marked_text(id, "\u{4f60}\u{597d}");
+    // The caret is read from the last frame built, as the window draws it.
+    engine.render_view(id).expect("frame");
     let state = engine.text_input_state(id).expect("state");
     assert_eq!(state.marked, Some((2, 4)), "UTF-16 start and end of what is marked");
     assert_eq!(state.selected, (4, 4));
