@@ -210,3 +210,90 @@ fn a_list_box_does_not_pop_up() {
     assert!(!engine.select_popup_open(id));
 }
 
+
+// R1 on #899, nit 1: the popup opens where the window shows the control,
+// inside a scrolled element and under a fixed toolbar on a scrolled page,
+// and its rows take the pointer there.
+
+const SCROLLED_PAGE: &str = r#"<!DOCTYPE html><html><body style="margin:0;height:2000px">
+<div id="bar" style="position:fixed;left:0;top:0;width:800px;height:40px;background:#eee">
+  <select id="fx" style="margin:8px 0 0 10px;width:150px;height:24px">
+    <option>f0</option><option>f1</option><option>f2</option>
+  </select>
+</div>
+<div id="panel" style="position:absolute;left:300px;top:100px;width:200px;height:100px;overflow:auto">
+  <div style="height:200px"></div>
+  <select id="inner" style="display:block;width:150px;height:24px">
+    <option>i0</option><option>i1</option><option>i2</option>
+  </select>
+  <div style="height:200px"></div>
+</div>
+<script>
+  window.log = [];
+  document.addEventListener('change', function (e) { log.push(e.target.id + ':' + e.target.selectedIndex); });
+</script>
+</body></html>"#;
+
+fn scrolled_page() -> Option<(Engine, EngineViewId)> {
+    let (mut engine, id) = page()?;
+    engine.load_html(id, SCROLLED_PAGE).expect("load_html");
+    Some((engine, id))
+}
+
+#[test]
+fn a_select_in_a_scrolled_element_opens_its_popup_where_it_is_shown() {
+    let Some((mut engine, id)) = scrolled_page() else { return };
+    js(&mut engine, id, "document.getElementById('panel').scrollTop = 150; ''");
+    // In the document the select is at 100 + 200 = 300; the panel's
+    // scroll shows it at 150.
+    click(&mut engine, id, 375.0, 162.0);
+    assert!(engine.select_popup_open(id), "a click where the select is shown opens it");
+    let popup = engine.views[&id].lay.select_popup.borrow().clone().unwrap();
+    assert_eq!(popup.rect.y, 174.0, "the popup hangs under the select as it is shown");
+    assert_eq!(popup.rect.x, 300.0);
+    let (x, y) = row_point(&engine, id, 2);
+    click(&mut engine, id, x, y);
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "inner:2");
+}
+
+#[test]
+fn a_select_in_a_fixed_bar_on_a_scrolled_page_opens_its_popup_under_it() {
+    let Some((mut engine, id)) = scrolled_page() else { return };
+    engine.set_scroll_offset(id, 0.0, 500.0).expect("scroll");
+    click(&mut engine, id, 85.0, 20.0);
+    assert!(engine.select_popup_open(id), "a click on the fixed select opens it");
+    let popup = engine.views[&id].lay.select_popup.borrow().clone().unwrap();
+    assert_eq!(popup.rect.y, 500.0 + 32.0, "under the control where the window shows it, in document coordinates");
+    // The rows take the pointer at viewport coordinates.
+    let (x, y) = row_point(&engine, id, 1);
+    click(&mut engine, id, x, y - 500.0);
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "fx:1");
+}
+
+// Nit 2: a Ctrl (or Cmd) chord is no type-to-select.
+#[test]
+fn a_ctrl_chord_does_not_type_to_select() {
+    let Some((mut engine, id)) = page() else { return };
+    js(&mut engine, id, "s.focus(); ''");
+    assert!(!engine.handle_text_key(id, 0, "f", true, false, false));
+    assert_eq!(js(&mut engine, id, "String(s.selectedIndex)"), "0");
+    open(&mut engine, id);
+    engine.handle_text_key(id, 0, "f", true, false, false);
+    let popup = engine.views[&id].lay.select_popup.borrow().clone().unwrap();
+    assert_eq!(popup.highlighted, Some(0), "the highlight stays");
+}
+
+// Nit 5: a closed select builds a prefix as the popup does.
+#[test]
+fn a_closed_select_types_a_prefix() {
+    let Some((mut engine, id)) = page() else { return };
+    js(
+        &mut engine,
+        id,
+        "s.innerHTML = '<option>Apple</option><option>Banana</option><option>Blueberry</option><option>Bean</option>'; \
+         s.focus(); ''",
+    );
+    engine.handle_text_key(id, 0, "b", false, false, false);
+    engine.handle_text_key(id, 0, "l", false, false, false);
+    assert_eq!(js(&mut engine, id, "s.value"), "Blueberry");
+}

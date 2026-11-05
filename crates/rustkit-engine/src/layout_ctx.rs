@@ -206,6 +206,9 @@ pub(crate) struct ViewLayout {
     /// How many commands at the end of the view's display list are the
     /// popup's (0 when none).
     pub(crate) select_popup_painted: Cell<usize>,
+    /// Type-to-select on a focused, closed drop-down: the select (raw
+    /// NodeId) and what has been typed at it.
+    pub(crate) select_typeahead: RefCell<(usize, crate::select_popup::TypeAhead)>,
     /// Where script scrolled this view's elements (shared with the bindings).
     pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.

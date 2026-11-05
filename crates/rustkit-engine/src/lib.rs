@@ -5149,7 +5149,7 @@ impl Engine {
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         // An open `<select>` drop-down takes the keys; the page hears none.
-        if let Some(changed) = self.select_popup_key(id, key_code, key, alt) {
+        if let Some(changed) = self.select_popup_key(id, key_code, key, ctrl, alt) {
             return changed;
         }
 
@@ -5165,7 +5165,7 @@ impl Engine {
             return false;
         }
         // A focused, closed drop-down: keys open it or change its value.
-        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, alt) {
+        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, ctrl, alt) {
             return changed;
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {

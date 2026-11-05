@@ -67,15 +67,19 @@ pub(crate) fn options_of(select: &Rc<Node>) -> Vec<SelectOption> {
     fn element(node: &Rc<Node>, tag: &str) -> bool {
         matches!(&node.node_type, NodeType::Element { tag_name, .. } if tag_name.eq_ignore_ascii_case(tag))
     }
-    fn label_of(node: &Rc<Node>) -> String {
-        if let Some(label) = node.get_attribute("label") {
-            return label.to_string();
-        }
-        node.text_content()
-            .split(|c: char| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' '))
+    fn collapsed(text: &str) -> String {
+        text.split(|c: char| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' '))
             .filter(|w| !w.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+    // Shown with its ASCII whitespace collapsed either way, as Chrome
+    // draws a popup row.
+    fn label_of(node: &Rc<Node>) -> String {
+        match node.get_attribute("label") {
+            Some(label) => collapsed(label),
+            None => collapsed(&node.text_content()),
+        }
     }
     let option = |node: &Rc<Node>, group: Option<(&String, bool)>| SelectOption {
         node: node.id.raw(),
@@ -157,6 +161,43 @@ pub(crate) fn typeahead(options: &[SelectOption], from: Option<usize>, prefix: &
         .find(|&i| !options[i].disabled && options[i].label.trim_start().to_lowercase().starts_with(&prefix))
 }
 
+/// The keys typed for type-to-select (HTML leaves it to the UA; this is
+/// Chromium's): keys less than [`TYPEAHEAD_TIMEOUT`] apart make a prefix,
+/// and one letter repeated cycles through the options it starts. An open
+/// popup and a focused closed select search the same way.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeAhead {
+    typed: String,
+    at: Option<std::time::Instant>,
+}
+
+impl TypeAhead {
+    /// Whether a prefix is being typed at `now` (a Space then extends it
+    /// instead of picking).
+    pub fn active(&self, now: std::time::Instant) -> bool {
+        !self.typed.is_empty() && self.at.is_some_and(|at| now.duration_since(at) <= TYPEAHEAD_TIMEOUT)
+    }
+
+    /// `c` typed at `now`: the option it leads to from `from`.
+    pub fn find(
+        &mut self,
+        options: &[SelectOption],
+        from: Option<usize>,
+        c: char,
+        now: std::time::Instant,
+    ) -> Option<usize> {
+        if !self.active(now) {
+            self.typed.clear();
+        }
+        self.at = Some(now);
+        self.typed.push(c);
+        let mut chars = self.typed.chars();
+        let first = chars.next();
+        let prefix = if chars.all(|k| Some(k) == first) { c.to_string() } else { self.typed.clone() };
+        typeahead(options, from, &prefix)
+    }
+}
+
 /// A row of the popup: a group label, or an option (its index in the list
 /// of options).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,9 +235,8 @@ pub(crate) struct SelectPopup {
     /// How many rows show at once.
     pub visible_rows: usize,
     pub font: PopupFont,
-    /// What was typed for type-to-select, and when the last key came.
-    pub typed: String,
-    pub typed_at: Option<std::time::Instant>,
+    /// What was typed for type-to-select.
+    pub typed: TypeAhead,
 }
 
 /// How long a pause ends a type-to-select prefix (Chromium: 1 s).
@@ -278,8 +318,7 @@ impl SelectPopup {
             first_row: 0,
             visible_rows,
             font,
-            typed: String::new(),
-            typed_at: None,
+            typed: TypeAhead::default(),
         };
         popup.scroll_to_highlight();
         popup
@@ -351,16 +390,7 @@ impl SelectPopup {
 
     /// A typed character for type-to-select at `now`.
     pub fn type_char(&mut self, c: char, now: std::time::Instant) -> bool {
-        if self.typed_at.is_none_or(|at| now.duration_since(at) > TYPEAHEAD_TIMEOUT) {
-            self.typed.clear();
-        }
-        self.typed_at = Some(now);
-        self.typed.push(c);
-        // Repeating one letter cycles, as Chromium's type-ahead does.
-        let mut chars = self.typed.chars();
-        let first = chars.next();
-        let prefix = if chars.all(|k| Some(k) == first) { c.to_string() } else { self.typed.clone() };
-        let found = typeahead(&self.options, self.highlighted, &prefix);
+        let found = self.typed.find(&self.options, self.highlighted, c, now);
         self.highlight(found)
     }
 

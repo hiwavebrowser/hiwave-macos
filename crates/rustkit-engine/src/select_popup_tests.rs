@@ -161,3 +161,16 @@ fn the_displayed_option_follows_the_selectedness_rule() {
     assert_eq!(displayed_index(&o, |_| false), Some(1), "the first enabled one");
     assert_eq!(displayed_index(&o, |x| x.label != "One"), Some(2), "the last selected one");
 }
+
+// R1 on #899, nit 6: a `label` attribute is shown with its whitespace
+// collapsed, as text labels are.
+#[test]
+fn label_attributes_are_collapsed_like_text() {
+    let doc = rustkit_dom::Document::parse_html(
+        "<select id=s><option label='  Two \n words '>x</option><option> a\n b </option></select>",
+    )
+    .unwrap();
+    let s = doc.get_element_by_id("s").unwrap();
+    let labels: Vec<String> = options_of(&s).into_iter().map(|o| o.label).collect();
+    assert_eq!(labels, ["Two words", "a b"]);
+}

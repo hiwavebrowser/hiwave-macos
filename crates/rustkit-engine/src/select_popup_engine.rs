@@ -20,7 +20,7 @@
 //! a headless capture shows it and it paints over everything.
 
 use super::*;
-use crate::select_popup::{edge_enabled, next_enabled, typeahead, PopupFont, SelectOption, SelectPopup};
+use crate::select_popup::{edge_enabled, next_enabled, PopupFont, SelectOption, SelectPopup, TypeAhead};
 
 /// Win32 virtual keys, as `handle_text_key` takes them.
 const VK_TAB: u32 = 0x09;
@@ -66,12 +66,32 @@ fn key_of(key_code: u32, key: &str) -> (u32, Option<char>) {
     }
 }
 
-/// The first box `node` generated.
-fn box_of(b: &LayoutBox, node: usize) -> Option<&LayoutBox> {
-    if b.node_id == Some(node) {
-        return Some(b);
+/// The border box of the first box `node` generated, where the window
+/// shows it at the page scroll `window_scroll`: moved by the scroll of
+/// every element scroller above it, and by the page's scroll unless a
+/// `position: fixed` box (here or above) holds it to the window, whose
+/// layout coordinates are already the window's. Transforms are not
+/// applied.
+fn viewport_rect_of(root: &LayoutBox, node: usize, window_scroll: (f32, f32)) -> Option<(&LayoutBox, Rect)> {
+    fn walk(b: &LayoutBox, node: usize, scrolled: (f32, f32), fixed: bool) -> Option<(&LayoutBox, Rect, bool)> {
+        // A fixed box is held to the window: no scroller above it moves it.
+        let scrolled = if b.position == Position::Fixed { (0.0, 0.0) } else { scrolled };
+        let fixed = fixed || b.position == Position::Fixed;
+        if b.node_id == Some(node) {
+            let r = b.dimensions.border_box();
+            return Some((b, Rect::new(r.x - scrolled.0, r.y - scrolled.1, r.width, r.height), fixed));
+        }
+        // A scroller's own box stays put; what it holds moves.
+        let inner = if b.is_element_scroller() {
+            let (x, y) = b.element_scroll.get();
+            (scrolled.0 + x, scrolled.1 + y)
+        } else {
+            scrolled
+        };
+        b.children.iter().find_map(|c| walk(c, node, inner, fixed))
     }
-    b.children.iter().find_map(|c| box_of(c, node))
+    let (b, r, fixed) = walk(root, node, (0.0, 0.0), false)?;
+    Some(if fixed { (b, r) } else { (b, Rect::new(r.x - window_scroll.0, r.y - window_scroll.1, r.width, r.height)) })
 }
 
 impl Engine {
@@ -120,10 +140,18 @@ impl Engine {
         let Some(layout) = view.layout.as_ref() else {
             return false;
         };
-        let Some(b) = box_of(layout, raw) else {
+        // Placed where the window shows the control, then written in
+        // document coordinates (the display list's, and what the pointer
+        // routing above adds the page scroll back to).
+        let Some((b, on_screen)) = viewport_rect_of(layout, raw, view.scroll_offset) else {
             return false;
         };
-        let anchor = b.dimensions.border_box();
+        let anchor = Rect::new(
+            on_screen.x + view.scroll_offset.0,
+            on_screen.y + view.scroll_offset.1,
+            on_screen.width,
+            on_screen.height,
+        );
         let (w, h) = view
             .laid_with
             .as_ref()
@@ -366,7 +394,14 @@ impl Engine {
     /// A key while a drop-down is open: the popup's (the page hears no
     /// `keydown`). `None` when no popup is open; else whether anything
     /// changed.
-    pub(crate) fn select_popup_key(&mut self, id: EngineViewId, key_code: u32, key: &str, alt: bool) -> Option<bool> {
+    pub(crate) fn select_popup_key(
+        &mut self,
+        id: EngineViewId,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        alt: bool,
+    ) -> Option<bool> {
         let view = self.views.get(&id)?;
         if view.lay.select_popup.borrow().is_none() {
             return None;
@@ -381,8 +416,7 @@ impl Engine {
             let mut popup = view.lay.select_popup.borrow_mut();
             let popup = popup.as_mut()?;
             let page = popup.visible_rows.saturating_sub(1).max(1) as isize;
-            let typing = !popup.typed.is_empty()
-                && popup.typed_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1000));
+            let typing = popup.typed.active(std::time::Instant::now());
             match (code, typed) {
                 (VK_UP | VK_DOWN, _) if alt => Then::Commit,
                 (VK_UP, _) => Then::Repaint(popup.step(-1)),
@@ -394,6 +428,9 @@ impl Engine {
                 (VK_SPACE, _) if typing => Then::Repaint(popup.type_char(' ', std::time::Instant::now())),
                 (VK_ENTER | VK_SPACE | VK_TAB | VK_F4, _) => Then::Commit,
                 (VK_ESCAPE, _) => Then::Close,
+                // A Ctrl (or Cmd, which arrives as Ctrl) chord is a
+                // shortcut, not type-to-select.
+                (0, Some(_)) if ctrl => Then::Repaint(false),
                 (0, Some(c)) => Then::Repaint(popup.type_char(c, std::time::Instant::now())),
                 _ => Then::Repaint(false),
             }
@@ -423,6 +460,7 @@ impl Engine {
         select: usize,
         key_code: u32,
         key: &str,
+        ctrl: bool,
         alt: bool,
     ) -> Option<bool> {
         let node = self.drop_down_select(id, select)?;
@@ -435,7 +473,16 @@ impl Engine {
             (VK_DOWN | VK_RIGHT, _) => next_enabled(&options, shown, 1),
             (VK_HOME | VK_PAGE_UP, _) => edge_enabled(&options, false),
             (VK_END | VK_PAGE_DOWN, _) => edge_enabled(&options, true),
-            (0, Some(c)) => typeahead(&options, shown, &c.to_string()),
+            // A Ctrl (or Cmd) chord is a shortcut, not type-to-select.
+            (0, Some(_)) if ctrl => return None,
+            (0, Some(c)) => {
+                let view = self.views.get(&id)?;
+                let mut typed = view.lay.select_typeahead.borrow_mut();
+                if typed.0 != select {
+                    *typed = (select, TypeAhead::default());
+                }
+                typed.1.find(&options, shown, c, std::time::Instant::now())
+            }
             _ => return None,
         };
         Some(match target {
