@@ -50,7 +50,21 @@ CHROMIUM_ARM = ORACLE_DIR / "chrome_board.mjs"
 CENSUS_DIR = REPO_ROOT / "docs" / "census"
 PIXEL_GATE_PCT = 0.5
 TOP_N = 3
-NODE_ENV = {**os.environ, "PATH": f"/opt/homebrew/bin:{os.environ.get('PATH', '')}"}
+
+
+def _node_env() -> Dict[str, str]:
+    """The environment for node: the Homebrew prefix is added only when it
+    exists and is not already on PATH (launchd lanes start without it)."""
+    env = dict(os.environ)
+    path = env.get("PATH", "")
+    for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if os.path.isdir(prefix) and prefix not in path.split(os.pathsep):
+            path = f"{prefix}{os.pathsep}{path}" if path else prefix
+    env["PATH"] = path
+    return env
+
+
+NODE_ENV = _node_env()
 
 
 # The oracle context freezes transitions, animations and the caret for every
@@ -330,8 +344,12 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
                 row = by_name.get(name, {})
                 hits.append({"property": name, "class": row.get("class"), "sites": row.get("sites")})
         pages[page] = {"declared": len(declared), "red": hits}
+    # The json may live in a build dir; name it, and point at the committed
+    # report of the same run when trench/chrome/census/ holds it.
+    report = Path("trench/chrome/census") / census_path.with_suffix(".md").name
     return {
-        "source": str(census_path.relative_to(repo_root)) if census_path.is_relative_to(repo_root) else str(census_path),
+        "source": census_path.name,
+        "report": str(report) if (repo_root / report).exists() else None,
         "date": census.get("meta", {}).get("date"),
         "oracle": census.get("meta", {}).get("oracle"),
         "red_total": len(red),
@@ -351,19 +369,22 @@ def summarize(row: Row, result: Dict[str, Any]) -> Dict[str, Any]:
     }
     chromium = result.get("chromium", {})
     rustkit = result.get("rustkit", {})
+    # Shapes only (the board is committed): arm, step, status, the error's
+    # class and length — never its text, which can quote a value.
     for arm, rec in (("chromium", chromium), ("rustkit", rustkit)):
         if rec.get("status") != "ok":
-            entry["notes"].append(f"{arm}: {rec.get('status')} {rec.get('error') or ''}".strip()[:200])
+            entry["notes"].append(f"{arm}: {rec.get('status')} {error_shape(rec.get('error'))}".strip())
         for a in rec.get("action_results") or []:
             if a.get("status") != "ok":
                 entry["notes"].append(f"{arm} action {a.get('step')} {a.get('type')}: {a.get('status')}")
     for err in chromium.get("page_errors") or []:
-        entry["notes"].append(f"chromium pageerror: {err[:120]}")
+        entry["notes"].append(f"chromium pageerror: {error_shape(err)}")
     for err in chromium.get("fixture_errors") or []:
-        entry["notes"].append(f"fixture: {err[:120]}")
+        cmd = str(err).split(":", 1)[0].strip()
+        entry["notes"].append(f"fixture: {cmd} handler threw {error_shape(str(err).split(':', 1)[1] if ':' in str(err) else '')}")
     if result["status"] != "ok":
         if "pixels" in result and "error" in result["pixels"]:
-            entry["notes"].append("diff: " + str(result["pixels"]["error"])[:160])
+            entry["notes"].append("diff: " + error_shape(result["pixels"]["error"]))
         return entry
     pixels = result["pixels"]
     entry["pixel_diff_pct"] = round(float(pixels["diffPercent"]), 3)
@@ -384,6 +405,16 @@ def summarize(row: Row, result: Dict[str, Any]) -> Dict[str, Any]:
     entry["top"] = top
     entry["worst_geometry"] = geometry.get("worst_selectors", [])[:TOP_N]
     return entry
+
+
+def error_shape(text: Optional[str]) -> str:
+    """An error's class and length, not its text: `TypeError (71 chars)`."""
+    if not text:
+        return ""
+    text = str(text).strip()
+    head = re.match(r"\s*([A-Z][A-Za-z]*(?:Error|Exception))\b", text)
+    kind = head.group(1) if head else "error"
+    return f"{kind} ({len(text)} chars)"
 
 
 def _fmt_top(top: List[Dict[str, Any]]) -> str:
@@ -415,7 +446,8 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     lines = [
         "# Chrome board — HiWave's own UI pages, RustKit vs Chromium (CH3.A1)",
         "",
-        f"Run: {board_json['run']['at']} · develop `{board_json['run']['sha']}` · oracle Chromium "
+        f"Run: {board_json['run']['at']} · head `{board_json['run']['sha']}` on develop "
+        f"`{board_json['run'].get('base') or '?'}` · oracle Chromium "
         f"{board_json['run'].get('chromium') or '?'} · parity-capture `{board_json['run']['parity_capture']}`",
         "",
         f"Gate (PLAN-z CH0): every row ≤ {PIXEL_GATE_PCT}% pixel diff. "
@@ -450,7 +482,7 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     census = board_json.get("census") or {}
     lines += ["", "## CSS census red list per page", ""]
     if census.get("source"):
-        lines.append(f"Census {census.get('date')} (`{census['source']}`, oracle {census.get('oracle')}): "
+        lines.append(f"Census {census.get('date')} (`{census.get('report') or census['source']}`, oracle {census.get('oracle')}): "
                      f"{census.get('red_total')} red properties. Per page, the red properties the page declares "
                      "(in its `<style>` blocks and `style=` attributes).")
         lines.append("")
@@ -471,11 +503,21 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def git_sha(repo_root: Path) -> str:
+def git_sha(repo_root: Path, ref: str = "HEAD") -> str:
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+        return subprocess.run(["git", "rev-parse", "--short", ref], capture_output=True, text=True,
                               cwd=repo_root, timeout=10).stdout.strip() or "?"
     except Exception:  # noqa: BLE001 — a missing git is a label, not a failure
+        return "?"
+
+
+def git_develop_base(repo_root: Path) -> str:
+    """The develop commit this head is built on (merge-base with origin/develop)."""
+    try:
+        base = subprocess.run(["git", "merge-base", "HEAD", "origin/develop"], capture_output=True,
+                              text=True, cwd=repo_root, timeout=10).stdout.strip()
+        return git_sha(repo_root, base) if base else "?"
+    except Exception:  # noqa: BLE001
         return "?"
 
 
@@ -534,6 +576,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         "run": {
             "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "sha": git_sha(REPO_ROOT),
+            "base": git_develop_base(REPO_ROOT),
             "chromium": chromium_version,
             "parity_capture": str(binary),
             "gate_pct": PIXEL_GATE_PCT,

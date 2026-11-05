@@ -38,6 +38,38 @@ function readActions(path) {
   return Array.isArray(parsed) ? parsed : parsed.actions || [];
 }
 
+// A `selector` may list several selectors to try in order. Split on
+// top-level commas only, as parity-capture's split_selector_list does:
+// `:is(a, b)` and `[title="x, y"]` stay whole.
+function splitSelectorList(selector) {
+  const out = [];
+  let depth = 0;
+  let quote = null;
+  let current = '';
+  for (const ch of String(selector)) {
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+    } else if (ch === '(' || ch === '[') {
+      depth += 1;
+      current += ch;
+    } else if (ch === ')' || ch === ']') {
+      depth = Math.max(0, depth - 1);
+      current += ch;
+    } else if (ch === ',' && depth === 0) {
+      out.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
 function keyChord(a) {
   const mods = (a.modifiers || []).map((m) => {
     const name = String(m);
@@ -59,7 +91,7 @@ async function runActions(page, actions, outDir) {
         else await page.waitForTimeout(a.ms || 500);
       } else if (a.type === 'click' || a.type === 'hover') {
         if (a.selector) {
-          const candidates = a.selector.split(',').map((s) => s.trim());
+          const candidates = splitSelectorList(a.selector);
           let done = false;
           for (const s of candidates) {
             const el = await page.$(s);
