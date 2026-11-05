@@ -118,6 +118,8 @@ mod web_match_media_tests;
 mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
+#[cfg(test)]
+mod web_named_access_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
@@ -452,7 +454,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
     ("Element", "animate(composite)"),
     ("Element", "animate(pseudoElement)"),
     ("Animation", "playbackRate"),
@@ -463,6 +465,7 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("CustomElementRegistry", "define(extends)"),
     ("ReadableStream", "getReader(byob)"),
     ("DOMParser", "parseFromString(XML)"),
+    ("Window", "named access (iframe name)"),
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
@@ -949,6 +952,10 @@ impl DomBindings {
         // A constructible DataTransfer and the drag data store the engine's drag and
         // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
         runtime.evaluate_script(include_str!("web_dnd.js"))?;
+        // Named access on the Window object: `<div id=x>` makes bare `x` the
+        // element, through a WindowProperties object on the prototype chain
+        // that asks the document when read (web_named_access.js).
+        runtime.evaluate_with_host(include_str!("web_named_access.js"))?;
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
@@ -3016,6 +3023,7 @@ mod tests {
             include_str!("web_xhr.js"),
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
+            include_str!("web_named_access.js"),
             include_str!("web_animations.js"),
             dom::WRAPPERS_JS_FOR_TESTS,
         ]
