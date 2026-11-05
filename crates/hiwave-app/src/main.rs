@@ -321,9 +321,39 @@ enum UserEvent {
     InspectorConsoleEval { code: String },
 }
 
+/// The browser chrome's view: the WebKit view today; a RustKit view behind
+/// `HIWAVE_RUSTKIT_CHROME` (CH3.A2). The app only runs script in it and
+/// places it.
+trait ChromeUi {
+    /// Run `js` in the chrome's document, without waiting for its value.
+    fn eval(&self, js: &str) -> Result<(), String>;
+    /// Move and size the chrome view.
+    fn place(&self, rect: Rect);
+}
+
+impl ChromeUi for WebView {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        wry::WebView::evaluate_script(self, js).map_err(|e| e.to_string())
+    }
+
+    fn place(&self, rect: Rect) {
+        let _ = wry::WebView::set_bounds(self, rect);
+    }
+}
+
+impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        (**self).eval(js)
+    }
+
+    fn place(&self, rect: Rect) {
+        (**self).place(rect)
+    }
+}
+
 fn apply_layout(
     window: &tao::window::Window,
-    chrome: &WebView,
+    chrome: &impl ChromeUi,
     #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
     #[cfg(not(target_os = "macos"))] content: &WebView,
     shelf: &WebView,
@@ -371,7 +401,7 @@ fn apply_layout(
         size: LogicalSize::new(content_width, shelf_height).into(),
     };
 
-    let _ = wry::WebView::set_bounds(chrome, chrome_rect);
+    let _ = chrome.place(chrome_rect);
     let _ = content.set_bounds(content_rect);
     let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
@@ -811,7 +841,7 @@ fn handle_chrome_ipc(
     }
 }
 
-fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
         let workspace_id = s.shell.get_active_workspace().map(|w| w.id);
@@ -842,11 +872,11 @@ fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderTabs({}); }}",
             tabs_json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_ws_id = s.shell.get_active_workspace().map(|w| w.id);
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -887,11 +917,11 @@ fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderWorkspaces({}); }}",
             ws_json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let stats = s.shield.get_stats();
         let payload = serde_json::json!({
@@ -904,11 +934,11 @@ fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateShieldStats({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView, scope: ShelfScope) {
+fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi, scope: ShelfScope) {
     if let Ok(s) = state.lock() {
         let (items, workspace_name) = match scope {
             ShelfScope::All => (s.shelf_items_all(), None),
@@ -929,11 +959,11 @@ fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView, scope: S
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderShelf({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let domains: Vec<&String> = s.user_blocklist.domains.iter().collect();
         let json = serde_json::to_string(&domains).unwrap_or_else(|_| "[]".to_string());
@@ -941,11 +971,11 @@ fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateBlocklist({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let payload = serde_json::json!({
             "downloads": s.downloads_snapshot(),
@@ -956,11 +986,11 @@ fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateDownloads({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let history = s.visit_history_snapshot();
         let json = serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string());
@@ -968,7 +998,7 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateHistory({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
@@ -2030,7 +2060,7 @@ fn main() {
     // Check for debug mode via environment variable
     if std::env::var("HIWAVE_DEBUG").map(|v| v == "1").unwrap_or(false) {
         info!("Debug mode enabled via HIWAVE_DEBUG=1");
-        let _ = wry::WebView::evaluate_script(&chrome_webview, "window.enableDebugMode && window.enableDebugMode();");
+        let _ = chrome_webview.eval("window.enableDebugMode && window.enableDebugMode();");
     }
 
     // Store WebViews in Arcs for event loop access
@@ -2614,8 +2644,7 @@ fn main() {
                             load_new_tab(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_new_tab(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                             );
                             sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                         } else if is_about_url(&url) {
@@ -2632,8 +2661,7 @@ fn main() {
                             load_about_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_about_page(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
                             );
                         } else if is_report_url(&url) {
                             // Update tab URL BEFORE loading the report page
@@ -2648,8 +2676,7 @@ fn main() {
                             load_report_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_report_page(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
                             );
                         } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
                             // Skip about: URLs (about:blank, about:srcdoc, etc.)
@@ -2691,7 +2718,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
                                 full_url.replace("'", "\\'")
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
                     }
                     UserEvent::GoBack => {
@@ -2788,8 +2815,7 @@ fn main() {
                         load_new_tab(&*content_for_events);
                         #[cfg(not(target_os = "macos"))]
                         load_new_tab(&*content_for_events);
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                            "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
+                        let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                         );
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
@@ -2813,7 +2839,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
                                 title.replace("'", "\\'")
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
                             sync_workspaces_to_chrome(&state_for_events, &chrome_for_events);
@@ -2824,7 +2850,7 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
                             url.replace("'", "\\'")
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
                     UserEvent::UpdateActiveTabUrl(url) => {
@@ -2853,14 +2879,14 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.updateNavState({}, {}); }}",
                             can_go_back, can_go_forward
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::SetLoading(loading) => {
                         let script = format!(
                             "if(window.hiwaveChrome) {{ hiwaveChrome.setLoading({}); }}",
                             loading
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                         // Inject context menu handler and audio detector when page finishes loading
                         if !loading {
                             info!("Injecting context menu handler into content webview");
@@ -2917,7 +2943,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateFindState({}); }}",
                                 json
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &update_script);
+                            let _ = chrome_for_events.eval(&update_script);
                         }
                     }
                     UserEvent::FindInPage { query, case_sensitive, direction } => {
@@ -3180,7 +3206,7 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.setFocusMode(true, {}); }}",
                             config
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::ExitFocusMode => {
                         info!("Exiting focus mode - restoring chrome UI");
@@ -3203,8 +3229,7 @@ fn main() {
                             right_sidebar_open,
                         );
                         // Notify chrome of focus mode state - call setFocusMode immediately
-                        match wry::WebView::evaluate_script(&chrome_for_events, 
-                            "if(window.hiwaveChrome) { \
+                        match chrome_for_events.eval("if(window.hiwaveChrome) { \
                                 console.log('[Focus] ExitFocusMode event - calling setFocusMode(false)'); \
                                 hiwaveChrome.setFocusMode(false); \
                             } else { \
@@ -3241,7 +3266,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateFocusModeStatus({}); }}",
                                 status
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
                     }
                     UserEvent::ShowFocusPeek => {
@@ -4344,7 +4369,7 @@ fn main() {
                                 "if(window.hiwave && window.hiwave.updateDecay) {{ window.hiwave.updateDecay({}); }}",
                                 update_json
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
 
                         // Auto-shelf expired tabs in Zen mode
@@ -4382,7 +4407,7 @@ fn main() {
                         }
                     }
                     UserEvent::EvaluateScript(script) => {
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::EvaluateContentScript(script) => {
                         let _ = content_for_events.evaluate_script(&script);
@@ -4411,7 +4436,7 @@ fn main() {
                                 zoom_pct
                             ));
                             // Notify chrome of zoom level change
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4428,7 +4453,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4445,7 +4470,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4461,7 +4486,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4791,31 +4816,30 @@ fn main() {
             match id {
                 id if id == menu_ids::NEW_TAB => {
                     // Send create_tab IPC to properly create tab in shell and sync
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "sendIpc('create_tab');");
+                    let _ = chrome_for_events.eval("sendIpc('create_tab');");
                 }
                 id if id == menu_ids::CLOSE_TAB => {
                     // Send close_tab command to Chrome
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                        "const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }"
+                    let _ = chrome_for_events.eval("const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }"
                     );
                 }
                 id if id == menu_ids::RELOAD => {
                     let _ = proxy.send_event(UserEvent::Reload);
                 }
                 id if id == menu_ids::FIND => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "openFindModal(); performFind('reset');");
+                    let _ = chrome_for_events.eval("openFindModal(); performFind('reset');");
                 }
                 id if id == menu_ids::COMMAND_PALETTE => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "openCommandPalette();");
+                    let _ = chrome_for_events.eval("openCommandPalette();");
                 }
                 id if id == menu_ids::HISTORY => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "toggleHistoryPanel();");
+                    let _ = chrome_for_events.eval("toggleHistoryPanel();");
                 }
                 id if id == menu_ids::TOGGLE_SIDEBAR => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "toggleSidebar();");
+                    let _ = chrome_for_events.eval("toggleSidebar();");
                 }
                 id if id == menu_ids::FOCUS_URL => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "document.getElementById('urlInput').focus(); document.getElementById('urlInput').select();");
+                    let _ = chrome_for_events.eval("document.getElementById('urlInput').focus(); document.getElementById('urlInput').select();");
                 }
                 id if id == menu_ids::GO_BACK => {
                     let _ = proxy.send_event(UserEvent::GoBack);
