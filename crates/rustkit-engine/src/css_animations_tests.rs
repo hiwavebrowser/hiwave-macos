@@ -446,9 +446,16 @@ fn a_reused_box_tree_keeps_a_running_animation() {
         "an animation runs: the tree is walked (its frame is due), not taken"
     );
     pump(&mut engine, view, 16, 16);
-    assert_eq!(log(&mut engine, view), "start:fade@0", "no cancel, no restart");
+    assert_eq!(
+        log(&mut engine, view),
+        "start:fade@0",
+        "no cancel, no restart"
+    );
     let after = opacity(&mut engine, view);
-    assert!(after > before && after < 1.0, "fresh frame: {before} -> {after}");
+    assert!(
+        after > before && after < 1.0,
+        "fresh frame: {before} -> {after}"
+    );
     pump(&mut engine, view, 200, 16);
     assert_eq!(opacity(&mut engine, view), 1.0);
     assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.2");

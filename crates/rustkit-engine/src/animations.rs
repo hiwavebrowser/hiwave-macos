@@ -511,10 +511,11 @@ impl Animations {
         });
     }
 
-    /// Whether a transition is running: a build must then walk the DOM,
-    /// since a kept box tree would carry the overlaid value of one frame.
+    /// Whether a transition or an animation is moving: a build must then
+    /// walk the DOM, since a kept box tree would carry the overlaid value
+    /// of one frame. (A paused or filled animation holds its value.)
     pub(crate) fn running(&self) -> bool {
-        !self.transitions.is_empty()
+        !self.transitions.is_empty() || self.css.iter().any(CssAnimation::moving)
     }
 
     /// A full build of the view starts: what it visits is noted.
@@ -593,10 +594,11 @@ impl Animations {
         }
     }
 
-    /// `animationcancel` for an animation taken away, once its active
-    /// phase had begun (Chrome fires none for one still in its delay).
+    /// `animationcancel` for an animation taken away while in its active
+    /// phase: none for one still in its delay, none after its
+    /// `animationend` (css-animations-2 event dispatch; Chrome).
     fn cancel_animation_event(&mut self, a: &CssAnimation) {
-        if a.started {
+        if a.started && !a.ended {
             let elapsed = a.elapsed_at(self.clock_ms);
             self.push_animation_event(a, "animationcancel", elapsed);
         }
