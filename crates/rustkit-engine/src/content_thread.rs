@@ -1210,6 +1210,37 @@ mod tests {
         );
     }
 
+    /// The newest `TextFocused` report among the events seen within `budget`.
+    fn last_text_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::TextFocused(text) = event {
+                    last = Some(text);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn the_window_hears_whether_the_focused_element_is_a_text_field() {
+        // CH2.E1 R1: the window sends Cmd+A/C/V/X/Z and Cmd+arrows to the
+        // page only for a focused text field, not a focused <select>.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><select id=\"s\"><option>a</option></select>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(true), "input");
+        let mut select = page.eval("document.getElementById('s').focus(); 1");
+        assert!(wait_recv(&mut select, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(false), "select");
+    }
+
     #[test]
     fn a_superseded_navigation_drops_the_late_result() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1444,13 +1475,13 @@ mod tests {
     /// listener calls were then cut by the navigation. Chromium dispatches
     /// one move per frame from the latest position (coalesced pointer
     /// events). A move replaces an earlier one when only input marks and
-    /// renders sit between; a press, key, click or navigation is never
-    /// passed.
+    /// renders sit between; a press, key or click is never passed. (A
+    /// navigation is not passed either; since S2's reopening the moves
+    /// ahead of one are dropped outright, the test below.)
     #[test]
     fn coalesce_keeps_only_the_latest_of_adjacent_moves() {
         let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
         let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
-        let url = Url::parse("https://example.com/").unwrap();
         let batch = vec![
             note(1),
             mv(1.0),
@@ -1459,7 +1490,7 @@ mod tests {
             PageCmd::Render { every: false },
             note(3),
             mv(3.0),
-            PageCmd::Navigate { url, nav_id: 7 },
+            PageCmd::Input(PageInput::MouseDown { x: 3.0, y: 0.0 }),
         ];
         let out = coalesce(batch);
         let moves: Vec<f32> = out
@@ -1475,7 +1506,7 @@ mod tests {
             3,
             "every input mark is kept for the latency figure"
         );
-        assert!(matches!(out.last(), Some(PageCmd::Navigate { nav_id: 7, .. })), "the navigation stays last");
+        assert!(matches!(out.last(), Some(PageCmd::Input(PageInput::MouseDown { .. }))), "the press stays last");
 
         // A press between moves keeps both: the page hears where it went down.
         let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0 }), mv(2.0)];
@@ -1483,6 +1514,59 @@ mod tests {
         assert_eq!(out.len(), 3, "a move jumped the press");
         assert!(matches!(out[0], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 1.0));
         assert!(matches!(out[1], PageCmd::Input(PageInput::MouseDown { .. })));
+    }
+
+    /// Z row S2, reopened (Pete's hand test 11-04, reddit): a load held the
+    /// page thread for 11 s while the pointer moved; the user closed the
+    /// tab; the thread then dispatched thirty queued moves, leaves, presses
+    /// and clicks to the document being left (a ~100 ms hover restyle each,
+    /// every listener refused by the navigation's interrupt word and logged
+    /// as a budget stop, 678 lines) before it loaded the new page, three
+    /// seconds late. Pointer input queued ahead of a navigation is for a
+    /// document the user has left: it is dropped, a queued click answered
+    /// with nothing. Input marks stay for the latency figure, and input
+    /// behind the navigation is kept.
+    #[test]
+    fn coalesce_drops_pointer_input_queued_ahead_of_a_navigation() {
+        let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
+        let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
+        let (click_reply, mut clicked) = oneshot::channel();
+        let (html_reply, _) = oneshot::channel();
+        let batch = vec![
+            note(1),
+            mv(1.0),
+            PageCmd::Input(PageInput::MouseLeave),
+            note(2),
+            PageCmd::Input(PageInput::MouseDown { x: 2.0, y: 0.0 }),
+            mv(2.0),
+            PageCmd::Input(PageInput::Click { x: 2.0, y: 0.0, reply: click_reply }),
+            PageCmd::LoadHtml { html: "<p>next</p>".into(), nav_id: 9, reply: html_reply },
+            mv(3.0),
+        ];
+        let out = coalesce(batch);
+        let kinds: Vec<&str> = out
+            .iter()
+            .map(|c| match c {
+                PageCmd::NoteInput { .. } => "note",
+                PageCmd::Input(PageInput::MouseMove { .. }) => "move",
+                PageCmd::Input(PageInput::MouseLeave) => "leave",
+                PageCmd::Input(PageInput::MouseDown { .. }) => "down",
+                PageCmd::Input(PageInput::Click { .. }) => "click",
+                PageCmd::LoadHtml { .. } => "load_html",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["note", "note", "load_html", "move"], "{kinds:?}");
+        assert!(matches!(out[2], PageCmd::LoadHtml { nav_id: 9, .. }));
+        assert!(matches!(out[3], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 3.0));
+        let outcome = clicked.try_recv().expect("the dropped click is answered");
+        assert!(outcome.navigate.is_none() && outcome.focused.is_none(), "{outcome:?}");
+
+        // A navigation command is what the pointer input waits behind; a
+        // Stop keeps the document and its input.
+        let (stop_reply, _) = oneshot::channel();
+        let out = coalesce(vec![mv(1.0), PageCmd::Stop { reply: stop_reply }]);
+        assert_eq!(out.len(), 2, "a Stop dropped the move");
     }
 
     fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {

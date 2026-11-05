@@ -18,6 +18,9 @@ use std::sync::Arc;
 use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
+/// The clipboard edit commands use (CH2.E1); a platform one plugs in with
+/// [`Engine::set_clipboard`].
+pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -284,6 +287,14 @@ pub mod inspector;
 mod inspector_glue;
 mod console_log;
 mod relayout_cause;
+mod selection;
+#[cfg(test)]
+mod selection_tests;
+mod drag_drop;
+mod select_popup;
+mod select_popup_engine;
+#[cfg(test)]
+mod select_popup_engine_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
@@ -315,6 +326,8 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
+#[cfg(all(test, feature = "headless"))]
+mod nested_body_tests;
 mod inspector_page;
 pub use inspector_page::{
     diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,
@@ -472,6 +485,10 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod clipboard_edit_tests;
+#[cfg(all(test, feature = "headless"))]
+mod leaving_input_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
@@ -501,6 +518,8 @@ mod fixed_under_scroll_tests;
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
+mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1017,6 +1036,16 @@ struct ViewState {
     primary_button_down: bool,
     /// The element the press in progress landed on (raw NodeId).
     press_target: Option<usize>,
+    /// The document selection as the engine paints it (`selection.rs`),
+    /// and the drag that is moving it.
+    doc_selection: Option<selection::DocSelection>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
+    /// HTML drag and drop: the press's drag candidate, or the drag in
+    /// progress (drag_drop.rs).
+    drag: drag_drop::DragState,
     /// The press in progress has had its say on the focus (it moved it, or
     /// a listener cancelled the press): the release leaves the focus alone.
     press_settled_focus: bool,
@@ -1155,6 +1184,9 @@ impl ViewState {
         // (Prometheus, #110 R1 must-fix.)
         self.lay.edit_states.borrow_mut().clear();
         self.lay.checked_states.borrow_mut().clear();
+        self.lay.select_popup.borrow_mut().take();
+        self.lay.select_popup_release.set(false);
+        self.lay.select_popup_opening_press.set(false);
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.scrollbar_marks.borrow_mut().clear();
         self.lay.root_scrollbar.set(false);
@@ -1175,7 +1207,10 @@ impl ViewState {
         self.pointer_at = None;
         self.primary_button_down = false;
         self.press_target = None;
+        self.drag = drag_drop::DragState::default();
         self.press_settled_focus = false;
+        self.doc_selection = None;
+        self.select_drag = None;
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
@@ -2375,6 +2410,11 @@ pub struct Engine {
     /// `Some` replaces Boa's host re-entry cap for runtimes this engine creates.
     /// `None` leaves the default (1024) alone.
     host_reentry_override: Option<usize>,
+    /// The clipboard every view's edit commands use (CH2.E1).
+    clipboard: SharedClipboard,
+    /// Views whose script may read the clipboard (HiWave's own chrome).
+    /// Web content may not: the clipboard is shared by every view.
+    clipboard_readers: std::collections::HashSet<EngineViewId>,
     loader: Arc<ResourceLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
@@ -2631,6 +2671,8 @@ impl Engine {
             page_commits: HashMap::new(),
             nav_seq,
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
             event_tx,
@@ -2730,7 +2772,11 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2833,7 +2879,11 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2953,7 +3003,11 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -3005,6 +3059,7 @@ impl Engine {
     /// all now. The app's live loop uses [`Engine::set_view_bounds`] and
     /// lays out once per turn instead.
     pub fn resize_view(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.close_select_popup_on_resize(id, bounds);
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = None;
@@ -3036,6 +3091,7 @@ impl Engine {
     }
 
     pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.close_select_popup_on_resize(id, bounds);
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = Some(bounds);
@@ -3120,34 +3176,41 @@ impl Engine {
         }
 
         if let Some(view) = self.views.get_mut(&id) {
+            // As `fire_mouse`: a document being left hears no `resize`;
+            // `innerWidth`/`innerHeight` are kept current all the same.
+            let leaving = view.control.stops_all();
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                let fired = sized.and_then(|()| {
-                    bindings.fire_lifecycle_event(
-                        rustkit_bindings::LifecycleTarget::Window,
-                        "resize",
-                    )
-                });
-                // Then the media query lists whose answer flipped hear
-                // `change` (after `resize`, as in the rendering update).
-                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
-                let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
-                // A stopped listener's error is the stop itself, which has
-                // its own record.
-                let fired = if stopped.is_some() { Ok(()) } else { fired };
-                view.script_log.extend(stopped);
-                if let Err(e) = fired {
-                    let record = ScriptRecord {
-                        source: "event:resize".into(),
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(e.to_string()),
-                    };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                if leaving {
+                    debug!(?id, "Resize event not dispatched: the document is being left");
+                } else {
+                    let _turn = rustkit_js::DiagTurn::enter("live");
+                    let armed = arm_live_turn(&self.config, bindings);
+                    let fired = sized.and_then(|()| {
+                        bindings.fire_lifecycle_event(
+                            rustkit_bindings::LifecycleTarget::Window,
+                            "resize",
+                        )
+                    });
+                    // Then the media query lists whose answer flipped hear
+                    // `change` (after `resize`, as in the rendering update).
+                    let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
+                    let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
+                    // A stopped listener's error is the stop itself, which has
+                    // its own record.
+                    let fired = if stopped.is_some() { Ok(()) } else { fired };
+                    view.script_log.extend(stopped);
+                    if let Err(e) = fired {
+                        let record = ScriptRecord {
+                            source: "event:resize".into(),
+                            bytes: 0,
+                            elapsed_ms: 0,
+                            outcome: ScriptOutcome::Threw(e.to_string()),
+                        };
+                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    }
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
                 }
-                inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
         }
 
@@ -3266,6 +3329,10 @@ impl Engine {
         delta_x: f32,
         delta_y: f32,
     ) -> Result<bool, EngineError> {
+        // An open `<select>` drop-down takes the wheel.
+        if let Some(moved) = self.select_popup_wheel(id, x, y, delta_y) {
+            return Ok(moved);
+        }
         let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
         let held = view.wheel_gesture.filter(|g| g.last.elapsed() < WHEEL_GESTURE_HOLD);
         let held_target = held
@@ -3597,7 +3664,8 @@ impl Engine {
                 let view = self.views.get(&id)?;
                 let doc = view.document.as_ref()?;
                 let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-                let control = Self::form_control(&node);
+                // A contenteditable host takes the focus like a control.
+                let control = Self::form_control(&node).or_else(|| Self::editing_host_of(&node));
                 // A click on a label is a click for the control it labels.
                 let labeled = match control {
                     Some(_) => None,
@@ -3705,7 +3773,11 @@ impl Engine {
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                    if matches!(tag.as_str(), "input" | "textarea" | "select") {
+                        Some((raw, tag))
+                    } else {
+                        Self::editing_host_of(&node).filter(|(host, _)| *host == raw)
+                    }
                 }
                 _ => None,
             }
@@ -3746,6 +3818,15 @@ impl Engine {
                     .unwrap_or_default();
                 let state = rustkit_dom::forms::TextEditState::with_value(seed);
                 state.move_to_end(false);
+                // Paste and copy rules (input type, maxlength, readonly).
+                if let Some(node) = self
+                    .views
+                    .get(&id)
+                    .and_then(|v| v.document.as_ref())
+                    .and_then(|d| d.get_node(rustkit_dom::NodeId::new(raw)))
+                {
+                    state.sync_attributes(&node);
+                }
                 if let Some(v) = self.views.get_mut(&id) {
                     v.lay.edit_states.borrow_mut().insert(raw, state);
                 }
@@ -3773,7 +3854,29 @@ impl Engine {
     /// listener that cancels either event keeps the focus where it is.
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        self.mouse_down_with(id, viewport_x, viewport_y, 1, false)
+    }
+
+    /// [`Self::mouse_down_at_point`] for the `clicks`-th press of a
+    /// multi-click (2 selects a word, 3 a paragraph) and with Shift held
+    /// (the selection extends to the point). The press's default action
+    /// moves the selection after the focus (`selection.rs`).
+    pub fn mouse_down_with(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        clicks: u32,
+        shift: bool,
+    ) -> bool {
         let _hold = wgate::hold("press");
+        // An open `<select>` drop-down takes the press.
+        if let Some(took) = self.select_popup_press(id, viewport_x, viewport_y) {
+            return took;
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_clicks = clicks;
+        }
         self.press_scrollbar(id, viewport_x, viewport_y);
         let on_scrollbar = self.views.get(&id).and_then(|v| v.scrollbar_pressed);
         let target = on_scrollbar.or_else(|| self.element_at_point(id, viewport_x, viewport_y));
@@ -3800,7 +3903,14 @@ impl Engine {
         // A press on a scrollbar moves no focus.
         if !suppressed && not_cancelled && on_scrollbar.is_none() {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            // A press on a drop-down `<select>` opens it, as Chrome's
+            // does (a cancelled `mousedown` keeps it shut).
+            self.open_select_popup_at_press(id, viewport_x, viewport_y);
         }
+        // A press the page let through on a draggable element may become
+        // a drag (drag_drop.rs).
+        self.note_drag_candidate(id, target, !suppressed && not_cancelled, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
         }
@@ -3818,8 +3928,18 @@ impl Engine {
     /// listeners wrote to the DOM is laid out before this returns.
     pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
         let _hold = wgate::hold("move");
+        // A drag's moves are drag events only (drag_drop.rs).
+        if self.drag_move(id, viewport_x, viewport_y) {
+            return;
+        }
+        // An open `<select>` drop-down takes the pointer.
+        if self.select_popup_move(id, viewport_x, viewport_y) {
+            return;
+        }
         self.scrollbar_pointer_moved(id, viewport_x, viewport_y);
         self.pointer_moved(id, viewport_x, viewport_y, true);
+        // With the button held, the selection the press started follows.
+        self.drag_selects(id, viewport_x, viewport_y);
     }
 
     /// The pointer left the view: the page hears the out and leave events
@@ -3827,6 +3947,7 @@ impl Engine {
     /// was last seen.
     pub fn mouse_leave(&mut self, id: EngineViewId) {
         let _hold = wgate::hold("leave");
+        self.drag_left_view(id);
         let last = self.views.get(&id).and_then(|view| view.pointer_at);
         if let Some((x, y)) = last {
             self.pointer_moved(id, x, y, false);
@@ -3876,6 +3997,12 @@ impl Engine {
             let changed = Self::in_one_chain(&before, &now);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
             *view.lay.hover_chain.borrow_mut() = now.clone();
+        }
+        // During a drag the page hears drag events, not these
+        // (drag_drop.rs); `:hover` above still follows the pointer.
+        if view.drag.dragging() {
+            self.settle_pointer_restyle(id);
+            return;
         }
 
         // (target, type, relatedTarget)
@@ -3957,26 +4084,35 @@ impl Engine {
         if reads.anywhere {
             return !changed.is_empty();
         }
-        let Some(document) = view.document.as_ref() else {
-            return false;
+        changed.iter().any(|raw| Self::change_reach(view, reads, *raw).is_some())
+    }
+
+    /// How far a rule can restyle from the element `raw` (raw NodeId)
+    /// gaining or losing the pseudo-class `reads` is of: `None` when no
+    /// compound with it matches the element by tag, classes and id, else
+    /// the most later siblings a matching rule reaches (0: the element and
+    /// what is under it only).
+    fn change_reach(view: &ViewState, reads: &PointerReads, raw: usize) -> Option<usize> {
+        if reads.compounds.is_empty() {
+            return None;
+        }
+        let document = view.document.as_ref()?;
+        let Some(node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+            return Some(0);
         };
-        !reads.compounds.is_empty()
-            && changed.iter().any(|raw| {
-                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
-                    return true;
-                };
-                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
-                    return false;
-                };
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
-                reads
-                    .compounds
-                    .iter()
-                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
-            })
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return None;
+        };
+        let classes: Vec<String> = attributes
+            .get("class")
+            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        reads
+            .compounds
+            .iter()
+            .filter(|filed| filed.compound.matches(tag_name, &classes, attributes.get("id")))
+            .map(|filed| filed.reach)
+            .max()
     }
 
     /// Restyle the view when the hovered or the pressed chain changed, a
@@ -4122,9 +4258,22 @@ impl Engine {
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         let _hold = wgate::hold("click");
+        // The release of a drag ends it: `drop` and `dragend`, and no
+        // `pointerup`, `mouseup` or `click` (drag_drop.rs).
+        if let Some(outcome) = self.drag_release(id, viewport_x, viewport_y) {
+            return outcome;
+        }
+        // An open `<select>` drop-down takes the release (and so does the
+        // release of a press that closed one).
+        if self.select_popup_release(id, viewport_x, viewport_y).is_some() {
+            return ClickOutcome { focused: self.focused_tag(id), navigate: None };
+        }
+        let mut clicks = 1;
         if let Some(view) = self.views.get_mut(&id) {
             view.scrollbar_drag = None;
             view.primary_button_down = false;
+            view.select_drag = None;
+            clicks = std::mem::replace(&mut view.press_clicks, 1);
             let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
@@ -4194,6 +4343,10 @@ impl Engine {
                     && self.click_element(id, target, viewport_x, viewport_y)
             }
         };
+        // The second click of a double-click: `dblclick` after `click`.
+        if clicks == 2 && elsewhere.is_none() && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
+            self.dispatch_mouse_at_point(id, "dblclick", viewport_x, viewport_y);
+        }
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -4471,19 +4624,51 @@ impl Engine {
         event_type: &str,
         data: &rustkit_bindings::MouseEventBindingData,
     ) -> bool {
+        let not_cancelled = self.run_listeners(id, target, event_type, true, |bindings| {
+            bindings.fire_mouse_event(target, event_type, data)
+        });
+        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
+        not_cancelled
+    }
+
+    /// Run the listeners of one input event `fire` dispatches, in a live
+    /// turn, and file what they threw. `fallback` is the answer when there
+    /// is no page, a listener threw, or the document is being left.
+    /// `target` (a raw NodeId) is for the log only.
+    fn run_listeners<T>(
+        &mut self,
+        id: EngineViewId,
+        target: usize,
+        event_type: &str,
+        fallback: T,
+        fire: impl FnOnce(&DomBindings) -> Result<T, rustkit_bindings::BindingError>,
+    ) -> T {
         let Some(view) = self.views.get_mut(&id) else {
-            return true;
+            return fallback;
         };
         let Some(bindings) = view.bindings.as_ref() else {
-            return true;
+            return fallback;
         };
+        // The window has asked to leave this document (`navigate`,
+        // `load_html`, a reload's cancel): its interrupt word is ALL until
+        // the next document commits, and a listener run now is refused at
+        // its first opcode. Not dispatched at all: until S2's reopening
+        // each refusal was a "stopped at the script budget" line, an
+        // over-budget record in the Inspector and a stop note of its own
+        // (959 lines in one hand test, all for the page being left). A
+        // navigation that ends without a commit lifts the word, and the
+        // document hears input again.
+        if view.control.stops_all() {
+            debug!(?id, event_type, target, "Input event not dispatched: the document is being left");
+            return fallback;
+        }
         let source = format!("event:{event_type}");
         let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
-        let fired = bindings.fire_mouse_event(target, event_type, data);
+        let fired = fire(bindings);
         let stopped = end_live_turn(&self.config, armed, bindings, &source);
-        let not_cancelled = match fired {
-            Ok(not_cancelled) => not_cancelled,
+        let answer = match fired {
+            Ok(answer) => answer,
             Err(e) => {
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
@@ -4496,13 +4681,12 @@ impl Engine {
                     };
                     inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
-                true
+                fallback
             }
         };
         inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
         view.script_log.extend(stopped);
-        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
-        not_cancelled
+        answer
     }
 
     /// One turn of the live loop for a loaded page: run the timers that came
@@ -5318,6 +5502,50 @@ impl Engine {
         out
     }
 
+    /// Use `clipboard` for every view's copy/cut/paste and
+    /// `navigator.clipboard`. The default is an in-memory clipboard
+    /// ([`MemoryClipboard`]); the macOS `NSPasteboard` one (CH2.E3) is
+    /// installed here by the app.
+    pub fn set_clipboard(&mut self, clipboard: SharedClipboard) {
+        for view in self.views.values() {
+            if let Some(bindings) = view.bindings.as_ref() {
+                bindings.set_clipboard(clipboard.clone());
+            }
+        }
+        self.clipboard = clipboard;
+    }
+
+    /// The clipboard this engine's views edit with.
+    pub fn clipboard(&self) -> SharedClipboard {
+        self.clipboard.clone()
+    }
+
+    /// Let script in view `id` read the clipboard
+    /// (`navigator.clipboard.readText`, `execCommand('paste')`), for this
+    /// and later documents. Off by default: a web page must not read what
+    /// the user copied in another tab. HiWave's own chrome views opt in.
+    /// The user's own paste works either way.
+    pub fn set_script_clipboard_read_allowed(&mut self, id: EngineViewId, allowed: bool) {
+        if allowed {
+            self.clipboard_readers.insert(id);
+        } else {
+            self.clipboard_readers.remove(&id);
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_clipboard_read_allowed(allowed);
+        }
+    }
+
+    /// A new page's bindings edit with this engine's clipboard and the
+    /// view's edit states (the ones layout paints).
+    fn attach_editing(&self, id: EngineViewId, bindings: &DomBindings) {
+        bindings.set_clipboard(self.clipboard.clone());
+        bindings.set_clipboard_read_allowed(self.clipboard_readers.contains(&id));
+        if let Some(view) = self.views.get(&id) {
+            bindings.share_edit_states(view.lay.edit_states.clone());
+        }
+    }
+
     /// Deliver a key to the focused form control.
     ///
     /// `key_code` uses the Win32 virtual-key numbering that
@@ -5342,6 +5570,11 @@ impl Engine {
         let _hold = wgate::hold("key");
         use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
+        // An open `<select>` drop-down takes the keys; the page hears none.
+        if let Some(changed) = self.select_popup_key(id, key_code, key, ctrl, alt) {
+            return changed;
+        }
+
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
             return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
@@ -5353,9 +5586,24 @@ impl Engine {
         {
             return false;
         }
+        // A contenteditable host: the page's DOM is what is edited.
+        if self.is_editing_host(id, focused.raw()) {
+            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        }
+        // A focused, closed drop-down: keys open it or change its value.
+        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, ctrl, alt) {
+            return changed;
+        }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
+        // `ctrl` is the command modifier: the window passes Ctrl-or-Cmd.
+        let platform = rustkit_dom::forms::KeyPlatform::current();
+        if let Some(command) = keyboard::command_for_key(platform, key_code, key, ctrl, shift, alt) {
+            if let Some(changed) = self.user_edit_command(id, focused.raw(), &command) {
+                return changed;
+            }
+        }
         // The edit state is borrowed for the key only: the flush below
         // writes script's control values into the same map.
         let (result, value) = {
@@ -5363,22 +5611,31 @@ impl Engine {
             let Some(state) = edit_states.get(&focused.raw()) else {
                 return false;
             };
-            let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+            let result = keyboard::handle_key(
+                state, None, &*self.clipboard, platform, key_code, key, ctrl, shift, alt,
+            );
             (result, state.value())
         };
         if matches!(result, KeyHandleResult::ValueChanged) {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
-            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.sync_control_value(focused.raw(), value);
-                let typed = (!key.is_empty() && !ctrl).then_some(key);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
-                    debug!(?id, error = %e, "input listener threw");
+            if let Some(view) = self.views.get(&id) {
+                if let Some(bindings) = view.bindings.as_ref() {
+                    bindings.sync_control_value(focused.raw(), value);
+                    // As `fire_mouse`: a document being left hears no
+                    // `input`; its control's value is kept current all the
+                    // same.
+                    if !view.control.stops_all() {
+                        let typed = (!key.is_empty() && !ctrl).then_some(key);
+                        let _turn = rustkit_js::DiagTurn::enter("live");
+                        let armed = arm_live_turn(&self.config, bindings);
+                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                            debug!(?id, error = %e, "input listener threw");
+                        }
+                        stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+                    }
                 }
-                stopped = end_live_turn(&self.config, armed, bindings, "event:input");
             }
             if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
                 view.script_log.push(stopped);
@@ -5391,6 +5648,35 @@ impl Engine {
             result,
             KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
         )
+    }
+
+    /// An edit command (a clipboard, history or delete-word shortcut) in the
+    /// focused control `node`, through the page's bindings: `beforeinput`,
+    /// the edit on the shared edit state, `input`, then a layout of what
+    /// changed. Whether the value or selection changed; `None` when the
+    /// page has no bindings (the caller applies the key to the edit state
+    /// itself, without events).
+    fn user_edit_command(
+        &mut self,
+        id: EngineViewId,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Option<bool> {
+        let bindings = self.views.get(&id)?.bindings.as_ref()?;
+        let _turn = rustkit_js::DiagTurn::enter("live");
+        let armed = arm_live_turn(&self.config, bindings);
+        let outcome = bindings.user_edit(node, command).unwrap_or_else(|e| {
+            debug!(?id, error = %e, "edit command listener threw");
+            Default::default()
+        });
+        let stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after edit command failed");
+        }
+        Some(outcome.changed || outcome.selection_changed)
     }
 
     /// The key was released: `keyup` at the focused element, or at the
@@ -5456,6 +5742,11 @@ impl Engine {
     /// A page without script submits as before.
     pub fn submit_focused_form(&mut self, id: EngineViewId) -> Option<String> {
         let _hold = wgate::hold("submit");
+        // Enter in an open `<select>` drop-down picks an option
+        // (`handle_text_key`); it submits nothing.
+        if self.select_popup_open(id) {
+            return None;
+        }
         let focused = self.views.get(&id)?.lay.focused_node.get()?.raw();
         if !self.fire_key(id, Some(focused), "keydown", 0x0D, "", false, false, false) {
             return None;
@@ -5520,9 +5811,17 @@ impl Engine {
             0x2E => "Delete",
             _ => text,
         };
-        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+        let Some(view) = self.views.get(&id) else {
             return true;
         };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
+        // As `fire_mouse`: a document being left hears no key.
+        if view.control.stops_all() {
+            debug!(?id, event_type, "Key event not dispatched: the document is being left");
+            return true;
+        }
         let data = rustkit_bindings::KeyboardEventBindingData {
             key: key.to_string(),
             // A named key's code is its name; a character's physical key
@@ -5656,6 +5955,22 @@ impl Engine {
 }
 
 impl layout_ctx::LayoutCtx {
+    /// The selected characters `[start, end)` of a text control in the view
+    /// being laid out, when its selection is not collapsed. The edit state
+    /// counts bytes; the painter counts characters.
+    fn edit_selection(&self, node_raw: usize) -> Option<(usize, usize)> {
+        self.with_building_lay(|lay| {
+            let states = lay.edit_states.borrow();
+            let state = states.get(&node_raw)?;
+            let sel = state.selection().normalize();
+            let value = state.value();
+            (!sel.is_collapsed()).then(|| {
+                (selection::char_of_byte(&value, sel.start), selection::char_of_byte(&value, sel.end))
+            })
+        })
+        .flatten()
+    }
+
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -5746,11 +6061,11 @@ impl layout_ctx::LayoutCtx {
     ) -> std::borrow::Cow<'a, HashMap<String, String>> {
         let read = self.with_building_lay(|lay| {
             let checked = match tag_lower {
-                "input" => lay
+                "input" | "option" => lay
                     .checked_states.borrow()
                     .get(&node_raw)
                     .copied()
-                    .filter(|checked| *checked != attributes.contains_key("checked")),
+                    .filter(|checked| *checked != attributes.contains_key(checkedness_attribute(tag_lower))),
                 _ => None,
             };
             let hovered = lay.hover_chain.borrow().contains(&node_raw);
@@ -5766,10 +6081,10 @@ impl layout_ctx::LayoutCtx {
         let mut attributes = attributes.clone();
         match checked {
             Some(true) => {
-                attributes.insert("checked".to_string(), String::new());
+                attributes.insert(checkedness_attribute(tag_lower).to_string(), String::new());
             }
             Some(false) => {
-                attributes.remove("checked");
+                attributes.remove(checkedness_attribute(tag_lower));
             }
             None => {}
         }
@@ -5817,6 +6132,24 @@ impl Engine {
     /// The DOM node currently holding focus in a view, if any.
     pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
         self.views.get(&id).and_then(|v| v.lay.focused_node.get())
+    }
+
+    /// Whether the focused element is a text field: a text-like `<input>`
+    /// (number included), a `<textarea>`, or editable content
+    /// (`contenteditable`). The window sends the editing chords (Cmd+A/C/V/
+    /// X/Z, Cmd+arrows) to the page only then; with a link, button or
+    /// `<select>` focused they stay menu shortcuts (CH2.E1 R1).
+    pub fn focused_is_text_control(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(doc) = view.document.as_ref() else {
+            return false;
+        };
+        let Some(node) = view.lay.focused_node.get().and_then(|n| doc.get_node(n)) else {
+            return false;
+        };
+        is_text_field(&node)
     }
 
     /// Get the current scroll offset of a view.
@@ -7490,6 +7823,7 @@ impl Engine {
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
             inspector_glue::attach(&bindings, &inspector);
+            self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -7913,6 +8247,7 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
             inspector_glue::attach(&bindings, &inspector);
+            self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -8228,6 +8563,9 @@ impl Engine {
         relayout_cause::take_stage_ms();
 
         let layout_skipped = self.relayout_uncounted(id)?;
+        // A drop-down whose select left the document, lost the focus or
+        // was disabled closes (Chrome).
+        self.close_stale_select_popup(id);
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
         let stages = relayout_cause::take_stage_ms();
@@ -8267,6 +8605,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            view.relayout_stats.last_build_ms = stages.build;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -8448,7 +8787,29 @@ impl Engine {
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
-        let mut dl = DisplayList::build(root_box);
+        let selected = self.selection_paint(id, root_box);
+        let caret = self.caret_paint(id, root_box);
+        let text_caret = match caret {
+            Some(selection::CaretPaint::Text(node, offset)) => Some((node, offset)),
+            _ => None,
+        };
+        let mut dl = DisplayList::build_with_selection(root_box, selected, text_caret);
+        // A host with no text where the caret is: the caret at the start of
+        // its content box.
+        if let Some(selection::CaretPaint::Box(host)) = caret {
+            if let Some(b) = box_of_node(root_box, host) {
+                let size = match b.style.font_size {
+                    rustkit_css::Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                dl.commands.push(rustkit_layout::DisplayCommand::Caret {
+                    x: b.dimensions.content.x,
+                    y: b.dimensions.content.y,
+                    height: size * 1.2,
+                    color: b.style.color,
+                });
+            }
+        }
         // Splice cached SVG documents in place of their Image commands.
         // Done once per layout (not per frame): the renderer only speaks
         // raster textures, so vector images become their own command
@@ -8536,6 +8897,8 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        // An open `<select>` drop-down paints over the page.
+        self.append_select_popup(id, &mut dl);
         dl
     }
 
@@ -8543,11 +8906,13 @@ impl Engine {
     /// repainted without a layout, `false` when it has to be laid out.
     ///
     /// Only the elements that gained or lost `:hover` or `:active` since
-    /// the last layout, and what is under them, can be styled differently
-    /// (a sheet with the pseudo-class before a sibling combinator, or where
-    /// the index cannot place it, takes the full path). Those subtrees are
-    /// built twice, with the chains the layout was built with and with the
-    /// chains as they are now; nothing else of the page is built. When the
+    /// the last layout, what is under them, and the later siblings a rule
+    /// with a sibling combinator right of the pseudo-class reaches
+    /// (`PointerCompound::reach`) can be styled differently (a sheet that
+    /// reads the pseudo-class where the index cannot place it takes the
+    /// full path). Those subtrees are built twice, with the chains the
+    /// layout was built with and with the chains as they are now; nothing
+    /// else of the page is built. When the
     /// two differ only in paint properties (`ComputedStyle::copy_paint_only`)
     /// layout would give every box the size and place it already has: the
     /// properties are copied onto the laid-out boxes, the display list is
@@ -8580,29 +8945,36 @@ impl Engine {
         if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
             return miss("focus moved");
         }
-        let unplaced = view.lay.rule_reads.borrow().as_ref().is_none_or(|index| {
-            [&index.reads.hover, &index.reads.active]
-                .iter()
-                .any(|reads| reads.anywhere || reads.siblings)
-        });
-        if unplaced {
-            return miss("a rule reads the pseudo-class beyond the element's subtree");
+        let index = view.lay.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| &index.reads) else {
+            return miss("no rule index");
+        };
+        if reads.hover.anywhere || reads.active.anywhere {
+            return miss("a rule reads the pseudo-class where no compound shows it");
         }
         let before = (with.hover.clone(), with.active.clone());
         let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
         // Of the elements in one chain only, the ones a compound with the
-        // pseudo-class can match: no rule sees the others change.
-        let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
+        // pseudo-class can match, each with how many later siblings a rule
+        // can style from it: no rule sees the others change.
+        let mut changed: Vec<(usize, usize)> = Self::in_one_chain(&before.0, &now.0)
             .into_iter()
-            .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.hover, &[*raw]))
+            .filter_map(|raw| Self::change_reach(view, &reads.hover, raw).map(|reach| (raw, reach)))
             .collect();
         changed.extend(
             Self::in_one_chain(&before.1, &now.1)
                 .into_iter()
-                .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.active, &[*raw])),
+                .filter_map(|raw| Self::change_reach(view, &reads.active, raw).map(|reach| (raw, reach))),
         );
+        drop(index);
         changed.sort_unstable();
-        changed.dedup();
+        changed.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(later.1);
+            }
+            same
+        });
         if changed.is_empty() {
             // The pointer went and came back between two layouts.
             if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
@@ -8611,11 +8983,36 @@ impl Engine {
             return Ok(true);
         }
 
-        // The topmost changed elements, and the elements above them: the
+        // The elements to build again: each changed element, and the later
+        // siblings a rule with a sibling combinator right of the
+        // pseudo-class can style from it (`.a:hover + .b`, S22).
+        let mut restyled: Vec<usize> = Vec::with_capacity(changed.len());
+        for (raw, reach) in &changed {
+            restyled.push(*raw);
+            if *reach == 0 {
+                continue;
+            }
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a changed element left the document");
+            };
+            let mut left = *reach;
+            let mut next = node.next_sibling();
+            while let Some(sibling) = next.filter(|_| left > 0) {
+                if sibling.is_element() {
+                    restyled.push(sibling.id.raw());
+                    left -= 1;
+                }
+                next = sibling.next_sibling();
+            }
+        }
+        restyled.sort_unstable();
+        restyled.dedup();
+
+        // The topmost restyled elements, and the elements above them: the
         // build walks down those and builds only what is under a root.
         let body = document.body().map(|body| body.id.raw());
         let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
-        for raw in &changed {
+        for raw in &restyled {
             let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
                 return miss("a changed element left the document");
             };
@@ -8627,10 +9024,10 @@ impl Engine {
             }
             above.insert(*raw, chain);
         }
-        let roots: Vec<usize> = changed
+        let roots: Vec<usize> = restyled
             .iter()
             .copied()
-            .filter(|raw| !above[raw].iter().any(|up| changed.contains(up)))
+            .filter(|raw| !above[raw].iter().any(|up| restyled.contains(up)))
             .collect();
         let mut path = std::collections::HashSet::new();
         for root in &roots {
@@ -8693,14 +9090,21 @@ impl Engine {
         let Some(mut laid) = view.layout.take() else {
             return Ok(false);
         };
-        let placed = roots
+        // A root with no box of its own in either build (`display: none`,
+        // a sibling the reach took in) has nothing laid out to patch.
+        let boxed: Vec<usize> = roots
+            .iter()
+            .copied()
+            .filter(|root| is[root].node_id.is_some() || was[root].node_id.is_some())
+            .collect();
+        let placed = boxed
             .iter()
             .all(|root| box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, &is[root])));
         if !placed {
             view.layout = Some(laid);
             return miss("layout moved boxes");
         }
-        for root in &roots {
+        for root in &boxed {
             if let Some(laid) = box_of_node_mut(Rc::make_mut(&mut laid), *root) {
                 copy_changed_paint(laid, &was[root], &is[root]);
             }
@@ -10561,6 +10965,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10654,41 +11059,33 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
 
                 if tag_lower == "select" {
-                    // Get options from children
-                    let entries: Vec<(String, bool)> = node
-                        .children()
-                        .into_iter()
-                        .filter_map(|child| {
-                            if let rustkit_dom::NodeType::Element {
-                                tag_name, attributes, ..
-                            } = &child.node_type
-                            {
-                                if tag_name.to_lowercase() == "option" {
-                                    let text = child.text_content();
-                                    if !text.is_empty() {
-                                        return Some((text, attributes.contains_key("selected")));
-                                    }
-                                }
-                            }
-                            None
-                        })
-                        .collect();
+                    // The list of options (HTML §4.10.7: option children and
+                    // the options of optgroup children, empty ones too, so
+                    // indices are `selectedIndex`'s), each selected as
+                    // script or the user last set it, else by its
+                    // `selected` attribute.
+                    let list = select_popup::options_of(node);
+                    let live_selected = |o: &select_popup::SelectOption| {
+                        self.with_building_lay(|lay| lay.checked_states.borrow().get(&o.node).copied())
+                            .flatten()
+                            .unwrap_or(o.default_selected)
+                    };
+                    let entries: Vec<(String, bool)> =
+                        list.iter().map(|o| (o.label.clone(), live_selected(o))).collect();
 
                     // HTML §4.10.10 selectedness: the option carrying
-                    // `selected` (the last one, if several) is displayed.
-                    // Index 0 was hardcoded, so settings' Tab Decay unit
-                    // showed "hours" where `<option value="days" selected>`
-                    // makes Chrome show "days".
-                    let selected_index = if entries.is_empty() {
-                        None
-                    } else {
-                        Some(entries.iter().rposition(|(_, s)| *s).unwrap_or(0))
-                    };
+                    // `selected` (the last one, if several) is displayed,
+                    // else the first enabled one. Index 0 was hardcoded, so
+                    // settings' Tab Decay unit showed "hours" where
+                    // `<option value="days" selected>` makes Chrome show
+                    // "days".
+                    let selected_index = select_popup::displayed_index(&list, live_selected);
                     // What a list box highlights: with `multiple`, every
                     // option carrying `selected`; without, only the last
                     // one. No fallback to the first option — that is the
@@ -10732,6 +11129,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10807,6 +11205,7 @@ impl layout_ctx::LayoutCtx {
                 // focus ring without reaching back into engine state.
                 if self.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    layout_box.focused_selection = self.edit_selection(node.id.raw());
                 }
 
                 // Links carry their RAW href so a hit test can navigate
@@ -10929,13 +11328,10 @@ impl layout_ctx::LayoutCtx {
                     .count();
                 let mut preceding_siblings: Vec<SiblingKey> =
                     Vec::with_capacity(child_element_count);
-                // Selector segments are computed here, not in the child, because
-                // `:nth-of-type` needs the full same-tag sibling count.
                 let children_are_foreign =
                     in_foreign_content || Engine::enters_foreign_content(&tag_lower);
-                let child_segments =
-                    Engine::child_selector_segments(&child_nodes, children_are_foreign);
-                // Same-tag totals feed the `-of-type` pseudo-classes.
+                // Same-tag totals feed the `-of-type` pseudo-classes and the
+                // selector segments (`:nth-of-type` needs the full count).
                 let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
                     if let NodeType::Element { tag_name, .. } = &c.node_type {
@@ -10977,10 +11373,45 @@ impl layout_ctx::LayoutCtx {
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = Engine::child_selector_path(
-                        selector_path,
-                        child_segments.get(child_index).and_then(|s| s.as_deref()),
-                    );
+                    let restyle = restyle_child(node.id.raw(), child.id.raw());
+                    if restyle == RestyleChild::Skip {
+                        // A restyle build skips what no root is under: the
+                        // child is only recorded as its later siblings'
+                        // earlier one (S22: a feed of hundreds of posts
+                        // paid a selector path, a children clone and a
+                        // placeholder style per post, twice per move).
+                        if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
+                            let t = lower_tag(tag_name);
+                            *type_seen.entry(t.clone()).or_insert(0) += 1;
+                            let live = self.live_attributes(child.id.raw(), &t, attributes);
+                            let child_classes = element_classes(&live);
+                            let state = ElementState::of(&t, &live);
+                            preceding_siblings.push((
+                                t.into_owned(),
+                                child_classes,
+                                attributes.get("id").cloned(),
+                                state,
+                            ));
+                        }
+                        continue;
+                    }
+                    // The child's selector segment, spelled as
+                    // `child_selector_segments` does, for the children that
+                    // are built (S22: not for the hundreds a restyle skips).
+                    let child_path = match &child.node_type {
+                        NodeType::Element { tag_name, attributes, .. } if !selector_path.is_empty() => {
+                            let t = lower_tag(tag_name);
+                            let segment = Engine::selector_segment(
+                                &t,
+                                attributes,
+                                type_seen.get(&*t).copied().unwrap_or(0) + 1,
+                                type_totals.get(&*t).copied().unwrap_or(1),
+                                children_are_foreign || Engine::enters_foreign_content(&t),
+                            );
+                            Engine::child_selector_path(selector_path, Some(&segment))
+                        }
+                        _ => String::new(),
+                    };
                     let child_sib = match &child.node_type {
                         NodeType::Element { tag_name, .. } => {
                             let t = lower_tag(tag_name);
@@ -10995,9 +11426,8 @@ impl layout_ctx::LayoutCtx {
                         }
                         _ => SiblingContext::SOLE,
                     };
-                    let restyle = restyle_child(node.id.raw(), child.id.raw());
                     let mut child_box = match restyle {
-                        RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
+                        RestyleChild::Skip => unreachable!("skipped above"),
                         _ => self.build_layout_from_parent_style_and_path(
                             child,
                             children_sheets,
@@ -11210,10 +11640,15 @@ impl layout_ctx::LayoutCtx {
                         joined.push(child);
                         continue;
                     }
+                    let next_sources = child.text_sources;
                     let BoxType::Text(next) = child.box_type else {
                         unreachable!("joins_previous requires a text box");
                     };
                     let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let at = match &last.box_type {
+                        BoxType::Text(run) => run.chars().count(),
+                        _ => 0,
+                    };
                     let collapsible = !matches!(
                         last.style.white_space,
                         rustkit_css::WhiteSpace::Pre
@@ -11221,13 +11656,16 @@ impl layout_ctx::LayoutCtx {
                             | rustkit_css::WhiteSpace::PreLine
                             | rustkit_css::WhiteSpace::BreakSpaces
                     );
+                    let mut dropped = 0;
                     if let BoxType::Text(ref mut run) = last.box_type {
                         if collapsible && run.ends_with(' ') && next.starts_with(' ') {
                             run.push_str(&next[1..]);
+                            dropped = 1;
                         } else {
                             run.push_str(&next);
                         }
                     }
+                    last.append_text_sources(&next_sources, at, next.chars().count(), dropped);
                 }
                 layout_box.children = joined;
 
@@ -11259,14 +11697,23 @@ impl layout_ctx::LayoutCtx {
                     if preserved {
                         continue;
                     }
-                    if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                    let child = &mut layout_box.children[i];
+                    if let BoxType::Text(ref mut t) = child.box_type {
                         // Strip the collapsed SPACE only: `trim_start()` also
                         // eats a following nbsp, which is content.
+                        let before = t.chars().count();
+                        let mut from = 0;
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start_matches(' ').to_string();
+                            let kept = t.trim_start_matches(' ').to_string();
+                            from = before - kept.chars().count();
+                            *t = kept;
                         }
                         if !next_inline && t.ends_with(' ') {
                             *t = t.trim_end_matches(' ').to_string();
+                        }
+                        if t.chars().count() != before {
+                            let len = t.chars().count();
+                            child.keep_text_sources(from, len);
                         }
                     }
                 }
@@ -11371,7 +11818,18 @@ impl layout_ctx::LayoutCtx {
                         s.color = rustkit_css::Color::BLACK;
                         s
                     };
-                    LayoutBox::new(BoxType::Text(content), style)
+                    let len = content.chars().count();
+                    let mut run = LayoutBox::new(BoxType::Text(content), style);
+                    // Where the run's characters came from: mouse
+                    // selection and selection paint map through it.
+                    run.text_sources = vec![rustkit_layout::TextSource {
+                        node: node.id.raw(),
+                        at: 0,
+                        skip: 0,
+                        len,
+                        collapsible,
+                    }];
+                    run
                 }
             }
             NodeType::Comment(_) => {
@@ -17249,13 +17707,14 @@ impl SelectorMatcher {
         // `:checked` reads the attribute map; a control whose checkedness
         // has left its attribute is matched with the attribute as it would
         // be (the cascade does the same, `Engine::live_attributes`).
+        let attr = checkedness_attribute(&tag);
         let live = |raw: usize, attributes: &HashMap<String, String>| match checked.get(&raw) {
-            Some(&on) if on != attributes.contains_key("checked") => {
+            Some(&on) if on != attributes.contains_key(attr) => {
                 let mut attributes = attributes.clone();
                 if on {
-                    attributes.insert("checked".to_string(), String::new());
+                    attributes.insert(attr.to_string(), String::new());
                 } else {
-                    attributes.remove("checked");
+                    attributes.remove(attr);
                 }
                 Some(attributes)
             }
@@ -17283,7 +17742,7 @@ impl SelectorMatcher {
         QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
         // An ancestor's earlier siblings are read from the DOM, with this
         // checkedness (`dom_sibling_key`).
-        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()));
+        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()), None);
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -18546,6 +19005,41 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
+        // The end of the identifier starting at `i` (CSS Syntax §4.3.11),
+        // escapes included: Tailwind's `.dark\:bg-black:is(.dark *)` is one
+        // class then `:is()`, (0,2,0) in Chrome, not a class, a `:bg-black`
+        // pseudo-class and `:is()`. An escape is `\` and either 1-6 hex
+        // digits plus one optional whitespace, or any other character.
+        fn skip_css_ident(chars: &[char], mut i: usize) -> usize {
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' {
+                    // `\` then a newline (or the end) is not an escape
+                    // (§4.3.8): the identifier ends before the backslash.
+                    if chars.get(i + 1).is_none_or(|&n| matches!(n, '\n' | '\r' | '\u{c}')) {
+                        break;
+                    }
+                    i += 1;
+                    if chars[i].is_ascii_hexdigit() {
+                        let start = i;
+                        while i < chars.len() && i - start < 6 && chars[i].is_ascii_hexdigit() {
+                            i += 1;
+                        }
+                        if i < chars.len() && chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else if c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            i
+        }
+
         // A selector list takes the specificity of its most specific member.
         // Split on top-level commas only: `:is( a, b)` is one member, and a
         // plain `split(',')` cut it into `:is( a` and `b)`. Then the
@@ -18580,24 +19074,12 @@ impl SelectorMatcher {
                     '#' => {
                         // ID selector
                         ids += 1;
-                        i += 1;
-                        // Skip the ID name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '.' => {
                         // Class selector
                         classes += 1;
-                        i += 1;
-                        // Skip the class name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '[' => {
                         // Attribute selector
@@ -18710,13 +19192,7 @@ impl SelectorMatcher {
                     _ if chars[i].is_alphabetic() || chars[i] == '_' => {
                         // Type selector (element name)
                         tags += 1;
-                        i += 1;
-                        // Skip the element name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     _ => {
                         i += 1;
@@ -19688,6 +20164,10 @@ impl Engine {
             self.relayout_for(id, RelayoutCause::HoverOrFocus)?;
             laid = true;
         }
+        // A selection script moved is painted again over the same boxes.
+        if self.follow_script_selection(id) {
+            self.repaint_selection(id);
+        }
         Ok(laid)
     }
 
@@ -20050,12 +20530,15 @@ impl Engine {
             ViewEvent::Blurred {
                 view_id: viewhost_id,
             } => {
-                if let Some(view) = self
+                if let Some((id, view)) = self
                     .views
-                    .values_mut()
-                    .find(|v| v.viewhost_id == viewhost_id)
+                    .iter_mut()
+                    .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = false;
+                    // A drag whose release went to another window ends here.
+                    let id = *id;
+                    self.cancel_drag(id);
                 }
             }
             ViewEvent::Input {
@@ -24719,6 +25202,35 @@ fn layout_box_body_to_json(
     json
 }
 
+/// A text-like `<input>`, a `<textarea>`, or an element in editable content
+/// (the nearest `contenteditable` attribute is "", "true" or
+/// "plaintext-only").
+fn is_text_field(node: &std::rc::Rc<rustkit_dom::Node>) -> bool {
+    use rustkit_dom::forms::InputType;
+    match node.tag_name().map(str::to_ascii_lowercase).as_deref() {
+        Some("textarea") => return true,
+        Some("input") => {
+            let ty = node.get_attribute("type").unwrap_or("").to_ascii_lowercase();
+            return InputType::from_str(&ty).is_text_input();
+        }
+        _ => {}
+    }
+    let mut cur = Some(node.clone());
+    while let Some(n) = cur {
+        if let Some(v) = n.get_attribute("contenteditable") {
+            let v = v.to_ascii_lowercase();
+            if v.is_empty() || v == "true" || v == "plaintext-only" {
+                return true;
+            }
+            if v == "false" {
+                return false;
+            }
+        }
+        cur = n.parent();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24871,6 +25383,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25611,6 +26125,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25680,6 +26196,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25766,6 +26284,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -25978,6 +26498,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26070,6 +26592,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26182,6 +26706,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26258,6 +26784,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26328,6 +26856,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26412,6 +26942,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26512,6 +27044,8 @@ mod tests {
                 page_commits: HashMap::new(),
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
+                clipboard: MemoryClipboard::shared(),
+                clipboard_readers: Default::default(),
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
                 event_tx,
                 event_rx: Some(event_rx),
@@ -26613,6 +27147,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26692,6 +27228,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26773,6 +27311,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26854,6 +27394,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26926,6 +27468,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26976,6 +27520,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -27166,6 +27712,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -27244,6 +27792,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -29808,6 +30358,8 @@ mod web_font_tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -30620,12 +31172,11 @@ mod node_identity_tests {
             drag(&mut engine, 10.0, 12.0),
             (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
         );
-        // Two elements of one link: the click is the link's, and the link
-        // is not followed (Chrome starts a drag of the link here and sends
-        // no click at all; the engine has no drag).
-        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string("mouseup:s2:10 click:one:30"), None));
-        // From one link onto another: the click is the body's; neither is followed.
-        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // Past the drag threshold a link is dragged (drag_drop.rs): as in
+        // Chrome, the release ends the drag, with no `mouseup` and no
+        // `click`, and no link is followed, within one link or onto another.
+        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string(""), None));
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string(""), None));
         // A release with no press before it is a click where it lands.
         let outcome = engine.click_at_point(id, 12.0, 60.0);
         assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
@@ -31094,13 +31645,30 @@ mod node_identity_tests {
         assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
         assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
 
-        // `:hover` where the compounds do not show it: every change counts.
+        // `:hover` inside `:not()`: the compound around it is what can
+        // flip (S22: before, every change counted).
         engine
             .load_html(
                 id,
                 concat!(
                     r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
                     r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: #b:not(:hover) cannot flip");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#b to #c");
+
+        // `:hover` where the compounds cannot show it (`:has()`): every
+        // change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:has(:hover) { width: 300px }</style></head><body>"#,
                     r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
                 ),
             )
@@ -36901,6 +37469,11 @@ struct WalkState {
     /// script), by raw NodeId (`dom_sibling_key`). The subject's own
     /// siblings come with their live state from the build.
     checked: HashMap<usize, bool>,
+    /// The hovered and the pressed chain (raw NodeIds): an earlier sibling
+    /// read from the DOM carries [`HOVER_MARK`] / [`ACTIVE_MARK`] among its
+    /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
+    hover: Vec<usize>,
+    active: Vec<usize>,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -36914,15 +37487,20 @@ thread_local! {
 }
 
 /// Sets [`WALK`] for its lifetime, with an empty memo, and puts the
-/// previous state back: around a view's build (its `checked_states`) and a
-/// script query. `None` keeps the enclosing scope's checkedness.
+/// previous state back: around a view's build (its `checked_states` and
+/// its pointer chains) and a script query. `None` keeps the enclosing
+/// scope's checkedness (chains).
 pub(crate) struct WalkCheckedScope(WalkState);
 
 impl WalkCheckedScope {
-    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>) -> Self {
+    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>, pointer: Option<(Vec<usize>, Vec<usize>)>) -> Self {
         WalkCheckedScope(WALK.with(|w| {
             let checked = checked.unwrap_or_else(|| w.borrow().checked.clone());
-            w.replace(WalkState { checked, memo: Some(HashMap::new()) })
+            let (hover, active) = pointer.unwrap_or_else(|| {
+                let w = w.borrow();
+                (w.hover.clone(), w.active.clone())
+            });
+            w.replace(WalkState { checked, hover, active, memo: Some(HashMap::new()) })
         }))
     }
 }
@@ -36968,7 +37546,16 @@ fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
         }
         _ => ElementState::of(&tag, attributes),
     };
-    Some((tag, element_classes(attributes), attributes.get("id").cloned(), state))
+    let mut classes = element_classes(attributes);
+    WALK.with(|w| {
+        let w = w.borrow();
+        for (chain, mark) in [(&w.hover, HOVER_MARK), (&w.active, ACTIVE_MARK)] {
+            if chain.contains(&node.id.raw()) {
+                classes.push(mark.to_string());
+            }
+        }
+    });
+    Some((tag, classes, attributes.get("id").cloned(), state))
 }
 
 /// The nearest element sibling before `from` that `test` (a `~` step's
@@ -37242,6 +37829,16 @@ fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
 /// An earlier sibling as `+` / `~` see it: tag, classes, id, and the form
 /// state its attributes decide.
 type SiblingKey = (String, Vec<String>, Option<String>, ElementState);
+
+/// The attribute that carries a control's default checkedness: `selected`
+/// on an `<option>`, `checked` on an `<input>`.
+fn checkedness_attribute(tag_lower: &str) -> &'static str {
+    if tag_lower == "option" {
+        "selected"
+    } else {
+        "checked"
+    }
+}
 
 /// The form-control state an element's own attributes decide, for
 /// `:checked` / `:disabled` / `:enabled` on a compound left of a sibling
@@ -38638,18 +39235,32 @@ struct SelectorReads {
 /// a rule's match from.
 #[derive(Default)]
 struct PointerReads {
-    /// The compounds that carry it, without it: an element none of them
-    /// matches by tag, classes and id gains or loses the pseudo-class
-    /// without any rule noticing.
-    compounds: Vec<AncestorCompound>,
-    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// The compounds that carry it, without it, each with how far a rule
+    /// reaches past a matching element's later siblings: an element none
+    /// of them matches by tag, classes and id gains or loses the
+    /// pseudo-class without any rule noticing.
+    compounds: Vec<PointerCompound>,
+    /// Index into `compounds` by tag, classes and id.
+    seen: HashMap<PointerCompoundKey, usize>,
     /// Some selector names it where `compounds` does not show it (inside
-    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
-    /// element may count.
+    /// `:has()`, or a `:not()` / `:is()` member the compound parser leaves
+    /// permissive): any element may count.
     anywhere: bool,
-    /// Some selector has a sibling combinator: the pseudo-class on one
-    /// element may style its later siblings and what is under them.
-    siblings: bool,
+}
+
+/// A [`PointerCompound`]'s tag, classes and id.
+type PointerCompoundKey = (Option<String>, Vec<String>, Option<String>);
+
+/// One compound a pointer pseudo-class is read on (S22, reddit: one
+/// `:hover` rule with a sibling combinator anywhere in the sheets made
+/// every pointer move a full build and layout).
+struct PointerCompound {
+    compound: AncestorCompound,
+    /// How many later siblings of a matching element the rule can style
+    /// (and what is under them): one per `+` right of the compound up to
+    /// the first descendant or child combinator, `usize::MAX` past a `~`,
+    /// 0 for the subject or a compound left of ` ` or `>`.
+    reach: usize,
 }
 
 impl PointerReads {
@@ -38665,41 +39276,118 @@ impl PointerReads {
             if named == 0 {
                 continue;
             }
-            self.siblings |= member.contains(['+', '~']);
             // A `::before` / `::after` rule is matched by its base selector.
             let base = [(":before", "::before"), (":after", "::after")]
                 .into_iter()
                 .find(|(suffix, _)| member.ends_with(suffix))
                 .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
             let prepared = SelectorMatcher.prepared_selector(base);
-            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+            if matches!(&*prepared, PreparedSelector::Never) {
                 // Invalid, or some other pseudo-element's: it styles nothing.
                 continue;
-            };
-            let mut found = 0;
-            for compound in compounds {
-                let marks = compound.classes.iter().filter(|c| *c == mark).count();
-                if marks == 0 {
-                    continue;
-                }
-                found += marks;
-                let classes: Vec<String> = compound
-                    .classes
-                    .iter()
-                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
-                    .cloned()
-                    .collect();
-                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
-                    self.compounds.push(AncestorCompound {
-                        never: compound.never,
-                        tag: compound.tag.clone(),
-                        classes,
-                        id: compound.id.clone(),
-                        ..Default::default()
-                    });
-                }
             }
+            let found = self.note_prepared(&prepared, mark, 0);
             self.anywhere |= found != named;
+        }
+    }
+
+    /// File every compound of `prepared` that carries `mark`, each with its
+    /// sibling reach plus `outer` (the reach of the compound an `:is()`
+    /// member sits in). Returns how many marks were found: fewer than the
+    /// selector names means one sits where the parser left it permissive.
+    fn note_prepared(&mut self, prepared: &PreparedSelector, mark: &str, outer: usize) -> usize {
+        match prepared {
+            PreparedSelector::Never => 0,
+            PreparedSelector::List(members) => members.iter().map(|m| self.note_prepared(m, mark, outer)).sum(),
+            PreparedSelector::Complex { tokens, compounds, .. } => {
+                let mut found = 0;
+                for (i, compound) in compounds.iter().enumerate() {
+                    // The sibling steps right of this compound, up to the
+                    // first descendant or child one: past that, everything
+                    // the selector names is under the element.
+                    let mut reach = 0usize;
+                    for (_, combinator) in &tokens[i..] {
+                        match combinator.as_str() {
+                            "+" => reach = reach.saturating_add(1),
+                            "~" => {
+                                reach = usize::MAX;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    found += self.note_compound(compound, None, mark, reach.saturating_add(outer));
+                }
+                found
+            }
+        }
+    }
+
+    /// File `compound` (merged with `outer`, the compound a `:not()` or
+    /// `:is()` member sits in) if it carries `mark`, then its members.
+    fn note_compound(
+        &mut self,
+        compound: &AncestorCompound,
+        outer: Option<&AncestorCompound>,
+        mark: &str,
+        reach: usize,
+    ) -> usize {
+        let merged = Self::merged(outer, compound);
+        let own = compound.classes.iter().filter(|c| *c == mark).count();
+        let mut found = own;
+        if own > 0 {
+            self.file(Self::merged(None, &merged), reach);
+        }
+        if compound.none_of.is_empty() && compound.any_of.is_empty() {
+            return found;
+        }
+        // `:not(.a:hover)` flips only on an element `.a` matches;
+        // `:is(.a:hover, .b)` likewise: the element is both compounds.
+        for inner in &compound.none_of {
+            found += self.note_compound(inner, Some(&merged), mark, reach);
+        }
+        for alts in &compound.any_of {
+            for inner in &alts.compounds {
+                found += self.note_compound(inner, Some(&merged), mark, reach);
+            }
+            // A complex member is matched with the element as its subject:
+            // its own compounds read the pseudo-class from there.
+            for complex in &alts.complex {
+                found += self.note_prepared(complex, mark, reach);
+            }
+        }
+        found
+    }
+
+    /// The tag, classes (marks left out) and id of `outer` and `inner`
+    /// together: what an element must be for both to match it.
+    fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
+        let mut classes: Vec<String> = Vec::new();
+        for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
+            if !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK) && !classes.contains(c) {
+                classes.push(c.clone());
+            }
+        }
+        AncestorCompound {
+            never: inner.never || outer.is_some_and(|o| o.never),
+            tag: inner.tag.clone().or_else(|| outer.and_then(|o| o.tag.clone())),
+            classes,
+            id: inner.id.clone().or_else(|| outer.and_then(|o| o.id.clone())),
+            ..Default::default()
+        }
+    }
+
+    fn file(&mut self, compound: AncestorCompound, reach: usize) {
+        let key = (compound.tag.clone(), compound.classes.clone(), compound.id.clone());
+        match self.seen.get(&key) {
+            Some(&at) => {
+                let filed = &mut self.compounds[at].reach;
+                *filed = (*filed).max(reach);
+            }
+            None => {
+                self.seen.insert(key, self.compounds.len());
+                self.compounds.push(PointerCompound { compound, reach });
+            }
         }
     }
 }
@@ -39551,6 +40239,8 @@ fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
         && a.identity == b.identity
         && a.link_href == b.link_href
         && a.focused_caret == b.focused_caret
+        && a.focused_selection == b.focused_selection
+        && a.text_sources == b.text_sources
         && rest(a) == rest(b)
 }
 
@@ -39622,6 +40312,7 @@ fn count_tree_differences(kept: &LayoutBox, fresh: &LayoutBox, differences: &mut
                 (&b.box_type, &b.dimensions, &b.position, &b.offsets, &b.float, &b.clear),
                 (b.z_index, &b.stacking_context, &b.viewport, &b.sticky_state, &b.element_id),
                 (&b.identity, &b.link_href, &b.focused_caret, &b.node_id, &b.text_lines),
+                (&b.focused_selection, &b.text_sources),
                 (&b.text_flow_first_offset, &b.root_element_height, b.children.len()),
             )
         )

@@ -450,6 +450,22 @@ impl DirtySet {
                     };
                     set.mark(&node, bits);
                     set.apply(&node, index.attribute_state_flags());
+                    // An option's selectedness is drawn by its select (the
+                    // label a drop-down shows, the rows a list box marks):
+                    // the select's box is built again.
+                    if node.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("option")) {
+                        let mut up = node.parent();
+                        while let Some(p) = up {
+                            match p.tag_name().map(|t| t.to_ascii_lowercase()).as_deref() {
+                                Some("select") => {
+                                    set.mark(&p, STYLE | BOX | LAYOUT);
+                                    break;
+                                }
+                                Some("optgroup") => up = p.parent(),
+                                _ => break,
+                            }
+                        }
+                    }
                 }
             }
         }
