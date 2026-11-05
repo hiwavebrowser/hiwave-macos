@@ -53,6 +53,10 @@ MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
 
 # ── fixture server ──────────────────────────────────────────────────────────
 
+class HidUnsafe(Exception):
+    """The seat is not safe to drive: the app is not frontmost, or a person is using it."""
+
+
 def flat_png(rgb, width=120, height=60):
     """A flat-colour PNG, built by hand so the fixture needs no image library."""
     def chunk(tag, data):
@@ -283,8 +287,66 @@ class Driver:
             sys.exit("hwdrive did not compile:\n" + r.stderr[-2000:])
         return exe
 
+    # HID events go to whatever window is under the pointer or has the
+    # keyboard, not to a pid: before each one, the app must be frontmost and
+    # nobody else must be using the machine (11-05 HID-safety rule).
+    HID_COMMANDS = {"move", "click", "press", "release", "dblclick", "rightclick", "rightpress", "drag",
+                    "scroll", "key", "type"}
+    MIN_IDLE_S = 30
+
+    @staticmethod
+    def frontmost_pid():
+        r = subprocess.run(["lsappinfo", "info", "-only", "pid", subprocess.run(
+            ["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()], capture_output=True, text=True)
+        m = re.search(r"=(\d+)", r.stdout)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def hid_idle_seconds():
+        r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
+        m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
+        return int(m.group(1)) / 1e9 if m else 0.0
+
+    def hid_guard(self, argv):
+        """Raise HidUnsafe unless the target pid is frontmost and the seat is idle."""
+        pid = int(argv[1])
+        # Our own events reset the idle clock: the seat is someone else's when
+        # it went idle more recently than our last event (or than the floor).
+        idle = self.hid_idle_seconds()
+        since_ours = time.time() - self.last_hid()
+        if idle + 1.0 < min(self.MIN_IDLE_S, since_ours):
+            raise HidUnsafe("someone is using this Mac (HID idle %.1f s, our last event %.1f s ago)"
+                            % (idle, since_ours))
+        if self.frontmost_pid() != pid:
+            subprocess.run([str(self.hwdrive), "activate", str(pid)], capture_output=True, text=True)
+            if self.frontmost_pid() != pid:
+                raise HidUnsafe("pid %d is not frontmost (frontmost %s)" % (pid, self.frontmost_pid()))
+
+    # Our last event's time is kept beside the real-window lock, so the next
+    # run's first event does not read our own as a person's.
+    LAST_HID = pathlib.Path.home() / ".claude" / "realwindow.lock" / "last_hid"
+
+    def last_hid(self):
+        try:
+            return float(self.LAST_HID.read_text())
+        except (OSError, ValueError):
+            return getattr(self, "_last_hid", 0.0)
+
+    def note_hid(self):
+        self._last_hid = time.time()
+        try:
+            self.LAST_HID.write_text(str(self._last_hid))
+        except OSError:
+            pass
+
     def hw(self, *argv):
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.hid_guard(argv)
         r = subprocess.run([str(self.hwdrive)] + [str(a) for a in argv], capture_output=True, text=True)
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.note_hid()
+            if r.returncode == 5:
+                raise HidUnsafe(r.stdout.strip()[-300:])
         try:
             return r.returncode, json.loads(r.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -2033,6 +2095,11 @@ class Driver:
             print("%s: %s" % (name, check.__doc__.strip()), flush=True)
             try:
                 check()
+            except HidUnsafe as e:
+                self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                print("  STOP (HID safety): %s" % e, flush=True)
+                self.close_page()
+                break
             finally:
                 self.close_page()
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
