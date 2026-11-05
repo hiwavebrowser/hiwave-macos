@@ -248,6 +248,18 @@ pub(crate) struct ViewLayout {
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+    /// CH2.E7: the `overflow: auto` scrollers the last layout gave a styled
+    /// bar (raw NodeId → vertical, horizontal), and whether the viewport
+    /// had one. The next layout starts from them, so a relayout does not
+    /// pay the overflow pass again, and a bar stays once shown, as in
+    /// Chrome. Cleared with the document.
+    pub(crate) scrollbar_marks: RefCell<HashMap<usize, (bool, bool)>>,
+    pub(crate) root_scrollbar: Cell<bool>,
+    /// How many layout passes this view's builds have run in all (one per
+    /// build, or more while styled bars appear or go), and how many builds
+    /// ran them. Read by tests to pin that a relayout takes one pass.
+    pub(crate) layout_passes: Cell<u32>,
+    pub(crate) layout_builds: Cell<u32>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box
