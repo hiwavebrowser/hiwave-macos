@@ -390,7 +390,10 @@ fn a_reused_box_tree_keeps_a_running_transition() {
     pump(&mut engine, view, 48, 16);
     let before = opacity(&mut engine, view);
     assert!(before > 0.05 && before < 0.95, "midway opacity {before}");
-    reused_tree_relayout(&mut engine, view);
+    assert!(
+        !reused_tree_relayout(&mut engine, view),
+        "a transition runs: the tree is walked (its frame is due), not taken"
+    );
     pump(&mut engine, view, 16, 16);
     assert_eq!(
         log(&mut engine, view),
