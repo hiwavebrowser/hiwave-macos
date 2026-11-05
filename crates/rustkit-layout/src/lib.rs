@@ -2380,7 +2380,7 @@ impl LayoutBox {
             }
             BoxType::Inline => {
                 // Inline boxes: position at containing block's current content area
-                self.layout_inline(containing_block);
+                self.layout_inline(containing_block, definite_height);
             }
             BoxType::Text(text) => {
                 // Text boxes: calculate dimensions based on text content
@@ -2421,7 +2421,14 @@ impl LayoutBox {
     }
 
     /// Layout an inline box.
-    fn layout_inline(&mut self, containing_block: &Dimensions) {
+    /// Lay out a non-replaced inline box and its children. An inline box is
+    /// not a containing block (CSS 2.1 §10.1): its children's percentage
+    /// heights refer to the nearest block container, whose definite content
+    /// height the caller passes as `percent_height_base` and the children
+    /// receive unchanged. Until S9 they were laid out with no base, so
+    /// google's doodle (`<a><picture><img style="max-height:100%">` in a
+    /// 230px block) lost its `max-height` and drew 992x397 over the footer.
+    fn layout_inline(&mut self, containing_block: &Dimensions, percent_height_base: Option<f32>) {
         // Calculate margins, padding, and borders for the inline box
         let d = &mut self.dimensions;
         let container_width = containing_block.content.width;
@@ -2504,7 +2511,7 @@ impl LayoutBox {
             cb.content.width = available_width; // Pass parent's available width
             cb.content.height = 0.0;
 
-            child.layout_with_definite_height(&cb, cb.content.height);
+            child.layout_with_percent_base(&cb, percent_height_base);
 
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
@@ -4016,7 +4023,7 @@ impl LayoutBox {
                 );
             }
             BoxType::Inline => {
-                self.layout_inline(containing_block);
+                self.layout_inline(containing_block, percent_height_base);
             }
             BoxType::Text(text) => {
                 self.layout_text(text.clone(), containing_block);
