@@ -21,14 +21,21 @@ pub struct PendingClick {
     pub y: f64,
     pub down: bool,
     pub input: PointerInput,
+    /// A press or release: which click of a multi-click it is (AppKit's
+    /// `clickCount`, 1 for a single click). 1 for the rest.
+    pub clicks: u32,
+    /// Shift was held (a press extends the selection).
+    pub shift: bool,
 }
 
 /// What a [`PendingClick`] records: a press or release of the primary
-/// button (`down` says which), the pointer moving over the view, or the
-/// pointer leaving it.
+/// button (`down` says which), of the secondary button (the context
+/// menu, CH2.E4), the pointer moving over the view (with a button held or
+/// not: the page knows which), or the pointer leaving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
     Button,
+    Secondary,
     Move,
     Leave,
 }
@@ -301,11 +308,11 @@ mod tests {
     }
 
     fn click(down: bool) -> InputKind {
-        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button })
+        InputKind::Pointer(PendingClick { x: 5.0, y: 5.0, down, input: PointerInput::Button, clicks: 1, shift: false })
     }
 
     fn mv(x: f64) -> InputKind {
-        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move })
+        InputKind::Pointer(PendingClick { x, y: 5.0, down: false, input: PointerInput::Move, clicks: 1, shift: false })
     }
 
     fn key(text: &str) -> InputKind {
@@ -476,7 +483,7 @@ mod tests {
         let out = q.drain();
         assert_eq!(kinds(&out), ["wheel", "pointer", "wheel"], "another view's move keeps the sides apart");
         q.push(view, mv(1.0));
-        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave }));
+        q.push(view, InputKind::Pointer(PendingClick { x: 0.0, y: 0.0, down: false, input: PointerInput::Leave, clicks: 1, shift: false }));
         q.push(view, mv(2.0));
         assert_eq!(q.drain().len(), 3, "the pointer leaving keeps the sides apart");
     }

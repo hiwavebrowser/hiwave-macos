@@ -19,6 +19,8 @@
 mod traits;
 
 pub mod input_queue;
+pub mod region;
+pub mod cursor;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -28,11 +30,17 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord};
+pub use macos::{
+    drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord, set_view_cursor,
+    set_view_tooltip,
+};
+#[cfg(target_os = "macos")]
+pub use macos::{raise_raw_view_above, set_raw_view_region};
 pub use input_queue::{
     drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
     ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
+pub use region::{compose_region, region_contains, RegionRect};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
 #[cfg(windows)]

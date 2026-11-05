@@ -135,6 +135,10 @@ pub struct RustKitView {
     host_view: isize,
     /// Set once Close has been asked. Later commands are dropped.
     closed: Cell<bool>,
+    /// Where the page let a right press through (CH2.E4,
+    /// `PageEvent::ContextMenu`): the browser's menu goes there. Taken by
+    /// [`RustKitView::take_context_menu`].
+    context_menu: Cell<Option<(f32, f32)>>,
     /// The load in progress, polled a slice at a time by the event loop
     /// ([`RustKitView::step_load`]).
     pending_load: RefCell<Option<PendingLoad>>,
@@ -393,6 +397,7 @@ impl RustKitView {
                 .ok(),
             host_view,
             closed: Cell::new(false),
+            context_menu: Cell::new(None),
             pending_load: RefCell::new(None),
             pending_bounds: Cell::new(None),
             pending_attach: Cell::new(None),
@@ -439,11 +444,12 @@ impl RustKitView {
     fn drop_events(&self) {
         let Some(handle) = self.handle.as_ref() else { return };
         let events = handle.drain_events();
-        // A Cmd chord the page did not claim goes on to the menu (CH2.E3).
         for event in &events {
+            // A Cmd chord the page did not claim goes on to the menu (CH2.E3).
             if let PageEvent::KeyEquivalentDone { token, claimed } = event {
                 rustkit_viewhost::finish_key_equivalent(*token, *claimed);
             }
+            self.pointer_event(event);
         }
         #[cfg(test)]
         self.seen_events.borrow_mut().extend(events);
@@ -687,13 +693,6 @@ impl RustKitView {
             .flatten()
     }
 
-    /// Where the page's own script asked to go since the last call
-    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
-    /// from a timer). The caller navigates.
-    /// A reload, `location.replace()` or a meta refresh replaces the
-    /// current history entry when it is loaded, as in Chrome.
-    /// The URL, and whether the user activated the navigation (a click or
-    /// a form submit) rather than the page's script.
     /// What the chrome must be told since the last call (CH2.E9).
     /// Filled from the content thread's events, so only with the page on
     /// its own thread (the default); flag off the events are dropped.
@@ -704,16 +703,16 @@ impl RustKitView {
         std::mem::take(&mut *self.chrome_updates.borrow_mut())
     }
 
-    /// The messages the page posted with `window.ipc.postMessage` since
-    /// the last call, oldest first (CH2.E9). Content thread only. The app
-    /// must hand these to its command handler only for a view showing the
-    /// app's own documents (chrome, shelf): a web page can post here too.
     /// The viewhost id the input of this view's NSView is tagged with.
     /// Content thread only (the flag-off engine owns its host view).
     pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
         self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
     }
 
+    /// The messages the page posted with `window.ipc.postMessage` since
+    /// the last call, oldest first (CH2.E9). Content thread only. The app
+    /// must hand these to its command handler only for a view showing the
+    /// app's own documents (chrome, shelf): a web page can post here too.
     pub fn take_ipc_messages(&self) -> Vec<String> {
         if self.content.is_some() {
             self.harvest();
@@ -721,6 +720,13 @@ impl RustKitView {
         std::mem::take(&mut *self.ipc_inbox.borrow_mut())
     }
 
+    /// Where the page's own script asked to go since the last call
+    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
+    /// from a timer). The caller navigates.
+    /// A reload, `location.replace()` or a meta refresh replaces the
+    /// current history entry when it is loaded, as in Chrome.
+    /// The URL, and whether the user activated the navigation (a click or
+    /// a form submit) rather than the page's script.
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
@@ -787,7 +793,25 @@ impl RustKitView {
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        self.submit(PageCmd::Input(PageInput::MouseDown { x, y }));
+        self.mouse_down_with(x, y, 1, false);
+    }
+
+    /// A press that is the `clicks`-th of a multi-click (AppKit's
+    /// `clickCount`: 2 selects a word and fires `dblclick` on release),
+    /// with Shift held or not (CH2.E4).
+    pub fn mouse_down_with(&self, x: f32, y: f32, clicks: u32, shift: bool) {
+        self.submit(PageCmd::Input(PageInput::MouseDown { x, y, clicks, shift }));
+    }
+
+    /// A secondary-button press: the page's `contextmenu`. A press the page
+    /// lets through comes back from [`Self::take_context_menu`] (CH2.E4).
+    pub fn secondary_down(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryDown { x, y }));
+    }
+
+    /// The secondary button's release (the menu did not take it).
+    pub fn secondary_up(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryUp { x, y }));
     }
 
     /// Deliver a pointer move to viewport coordinates to the page (the
@@ -998,6 +1022,12 @@ impl RustKitView {
         );
         self.set_bounds_internal(bounds)
             .map_err(|e| format!("Failed to set bounds: {}", e))
+    }
+
+    /// The host `NSView`'s pointer (0 when there is none): for stacking
+    /// and the chrome's region (CH3.A3).
+    pub fn host_view_raw(&self) -> isize {
+        self.host_view
     }
 
     /// Get the view ID.
@@ -1336,7 +1366,10 @@ impl RustKitView {
                     rustkit_viewhost::finish_key_equivalent(token, claimed);
                 }
                 PageEvent::TextInput(state) => self.mirror_text_input(state),
-                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
+                PageEvent::Cursor(_) | PageEvent::Tooltip(_) | PageEvent::ContextMenu { .. } => {
+                    self.pointer_event(&event)
+                }
+                PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
     }
@@ -1353,6 +1386,31 @@ impl RustKitView {
             caret: s.caret.map(|c| (c.x as f64, c.y as f64, c.height as f64)),
         });
         rustkit_viewhost::set_text_input_state(surface.borrow().viewhost_id(), mirror);
+    }
+
+    /// What the pointer is over (CH2.E4): the cursor and the tooltip go to
+    /// the content view at once; a context menu waits for the event loop.
+    fn pointer_event(&self, event: &PageEvent) {
+        match event {
+            #[cfg(target_os = "macos")]
+            PageEvent::Cursor(css) => rustkit_viewhost::set_view_cursor(self.host_view, css),
+            #[cfg(target_os = "macos")]
+            PageEvent::Tooltip(title) => rustkit_viewhost::set_view_tooltip(self.host_view, title.as_deref()),
+            PageEvent::ContextMenu { x, y } => self.context_menu.set(Some((*x, *y))),
+            _ => {}
+        }
+    }
+
+    /// Where the page let a right press through since the last call: the
+    /// browser shows its context menu there (CH2.E4).
+    pub fn take_context_menu(&self) -> Option<(f32, f32)> {
+        self.harvest();
+        self.context_menu.take()
+    }
+
+    /// The content `NSView`, for a native menu shown over it.
+    pub fn host_view(&self) -> isize {
+        self.host_view
     }
 
     fn present_latest(&self) {
@@ -1394,6 +1452,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::KeyEquivalentDone { .. }
         | PageEvent::TextInput(_)
         | PageEvent::Cursor(_)
+        | PageEvent::Tooltip(_)
+        | PageEvent::ContextMenu { .. }
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
     };

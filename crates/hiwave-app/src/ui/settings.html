@@ -1148,12 +1148,18 @@
                 theme: elements.theme.value,
                 default_mode: elements.defaultMode.value,
                 sidebar_default_open: elements.sidebarDefaultOpen.checked,
-                sidebar_auto_hide_secs: null,
-                url_bar_auto_hide_secs: null,
+                // Settings this page shows no control for are sent back as
+                // they were loaded: the app needs every field, and a default
+                // here would overwrite what the person set elsewhere.
+                sidebar_auto_hide_secs: currentSettings.sidebar_auto_hide_secs ?? null,
+                sidebar_width: currentSettings.sidebar_width || 220,
+                url_bar_auto_hide_secs: currentSettings.url_bar_auto_hide_secs ?? null,
                 tab_decay_days: calculateDecayDays(),
                 auto_shelf_days: parseInt(elements.autoShelfDays.value) || null,
                 new_tab_url: elements.newTabUrl.value,
                 shield_enabled: elements.shieldEnabled.checked,
+                focus_duration_minutes: currentSettings.focus_duration_minutes || 25,
+                focus_break_minutes: currentSettings.focus_break_minutes || 5,
                 import_prefix_style: currentSettings.import_prefix_style || 'abbreviation',
                 devtools_enabled: currentSettings.devtools_enabled || false,
                 workspace_save_interval_secs: currentSettings.workspace_save_interval_secs || 30
@@ -1503,8 +1509,12 @@
                 case 'settings_saved':
                     elements.saveBtn.textContent = 'Save Settings';
                     elements.saveBtn.disabled = false;
-                    showStatus(elements.backupStatus, 'success', 'Settings saved!');
-                    setTimeout(() => hideStatus(elements.backupStatus), 2000);
+                    if (data.ok === false || data.error) {
+                        showStatus(elements.backupStatus, 'error', 'Settings not saved: ' + (data.error || 'unknown error'));
+                    } else {
+                        showStatus(elements.backupStatus, 'success', 'Settings saved!');
+                        setTimeout(() => hideStatus(elements.backupStatus), 2000);
+                    }
                     break;
 
                 case 'profiles_result':

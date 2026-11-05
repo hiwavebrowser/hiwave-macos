@@ -1490,7 +1490,7 @@ mod tests {
                 scale: 1.0,
                 reply: b,
             },
-            PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 2.0 }),
+            PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 2.0, clicks: 1, shift: false }),
             PageCmd::Resize {
                 bounds: bounds(30),
                 scale: 2.0,
@@ -1530,7 +1530,7 @@ mod tests {
             PageCmd::Render { every: false },
             note(3),
             mv(3.0),
-            PageCmd::Input(PageInput::MouseDown { x: 3.0, y: 0.0 }),
+            PageCmd::Input(PageInput::MouseDown { x: 3.0, y: 0.0, clicks: 1, shift: false }),
         ];
         let out = coalesce(batch);
         let moves: Vec<f32> = out
@@ -1549,7 +1549,7 @@ mod tests {
         assert!(matches!(out.last(), Some(PageCmd::Input(PageInput::MouseDown { .. }))), "the press stays last");
 
         // A press between moves keeps both: the page hears where it went down.
-        let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0 }), mv(2.0)];
+        let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0, clicks: 1, shift: false }), mv(2.0)];
         let out = coalesce(batch);
         assert_eq!(out.len(), 3, "a move jumped the press");
         assert!(matches!(out[0], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 1.0));
@@ -1577,7 +1577,7 @@ mod tests {
             mv(1.0),
             PageCmd::Input(PageInput::MouseLeave),
             note(2),
-            PageCmd::Input(PageInput::MouseDown { x: 2.0, y: 0.0 }),
+            PageCmd::Input(PageInput::MouseDown { x: 2.0, y: 0.0, clicks: 1, shift: false }),
             mv(2.0),
             PageCmd::Input(PageInput::Click { x: 2.0, y: 0.0, reply: click_reply }),
             PageCmd::LoadHtml { html: "<p>next</p>".into(), nav_id: 9, reply: html_reply },
