@@ -799,9 +799,26 @@ fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
     Some(json!({ "size": numbers(report.get("size")), "boxes": boxes }).to_string())
 }
 
-/// A URL for the log (#910 R1 nit 3): without its query or fragment.
-fn url_for_log(url: &str) -> &str {
-    url.find(['?', '#']).map_or(url, |at| &url[..at])
+/// A URL for the log (#910 R1 nit 3, CH3.A6): scheme, host and path —
+/// without its query, fragment or userinfo; a `data:` URL only up to its
+/// media type (the rest is the page).
+fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(url.find(['?', '#']).map_or(url, |at| &url[..at]))
+}
+
+/// A page URL for an info line (CH3.A6): whole only when IPC bodies are
+/// logged whole (`HIWAVE_DEBUG=1`, or `HIWAVE_TEST_HOOKS=1` for the
+/// real-window checks, which read queries); `url_for_log` otherwise.
+fn page_url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
+    page_url_for_log_as(url, ipc_bodies_logged())
+}
+
+fn page_url_for_log_as(url: &str, whole: bool) -> std::borrow::Cow<'_, str> {
+    if whole {
+        std::borrow::Cow::Borrowed(url)
+    } else {
+        url_for_log(url)
+    }
 }
 
 /// The selectors of `HIWAVE_RUSTKIT_PANEL_PROBE`, in a build with the
@@ -908,7 +925,7 @@ fn pump_rustkit_panel(
     }
     // A link or `location` in a panel would replace its own document.
     if let Some((url, _)) = view.take_script_navigation() {
-        warn!(panel = name, url = url_for_log(&url), "RustKit panel navigation not followed");
+        warn!(panel = name, url = %url_for_log(&url), "RustKit panel navigation not followed");
     }
     view.render();
     view.input_view()
@@ -2211,6 +2228,27 @@ mod panel_log_tests {
         assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
         assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
         assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+
+    #[test]
+    fn a_page_url_in_the_log_keeps_scheme_host_and_path_only() {
+        // CH3.A6: userinfo is a credential; a data: URL's payload is the page.
+        assert_eq!(url_for_log(&format!("https://u:{SECRET}@a.test/p?q=1")), "https://a.test/p");
+        assert_eq!(url_for_log(&format!("https://{SECRET}@a.test")), "https://a.test");
+        // An '@' in the path is not userinfo.
+        assert_eq!(url_for_log("https://a.test/@user/x"), "https://a.test/@user/x");
+        assert_eq!(url_for_log(&format!("data:text/html,<p>{SECRET}</p>")), "data:text/html");
+        assert_eq!(url_for_log(&format!("data:text/html;base64,{SECRET}")), "data:text/html;base64");
+        assert_eq!(url_for_log("hiwave://newtab"), "hiwave://newtab");
+    }
+
+    #[test]
+    fn a_navigation_line_has_the_full_url_only_when_bodies_are_logged() {
+        let url = format!("https://a.test/login?token={SECRET}#{SECRET}");
+        assert_eq!(page_url_for_log_as(&url, false), "https://a.test/login");
+        // HIWAVE_DEBUG=1 / HIWAVE_TEST_HOOKS=1: whole (the real-window
+        // checks read queries, h16's `?from=a2`).
+        assert_eq!(page_url_for_log_as(&url, true), url);
     }
 }
 
