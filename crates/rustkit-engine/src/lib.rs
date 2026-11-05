@@ -5512,7 +5512,6 @@ impl layout_ctx::LayoutCtx {
     ///
     /// Layout reads through this so an edited field renders its typed text
     /// while the DOM attribute stays untouched.
-
     pub fn edit_value(&self, node_raw: usize) -> Option<(String, usize)> {
         // Resolves against the view currently being laid out; outside a
         // build there is no unambiguous answer, so it declines rather than

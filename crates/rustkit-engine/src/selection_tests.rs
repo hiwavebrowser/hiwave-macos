@@ -274,3 +274,130 @@ fn byte_and_char_offsets_convert_on_boundaries() {
     assert_eq!(char_of_byte("café", 4), 3, "inside é rounds down");
     assert_eq!(char_of_byte("café", 99), 4);
 }
+
+// R1 HOLD @ be0dd001: every selection write into the byte-indexed
+// `TextEditState` and every read feeding `calculate_selection_rects` must
+// convert between characters and bytes. These run on non-ASCII values.
+
+const WIDE: &str = "<html><body style='margin:0'><input id=f value='héllo wörld' style='font-size:16px;width:300px'></body></html>";
+const EMOJI: &str = "<html><body style='margin:0'><input id=f value='a😀b c' style='font-size:16px;width:300px'></body></html>";
+
+/// The input's content-box x and a measure of text in its font, summed per
+/// character the way `control_char_at` hit-tests.
+fn field_metrics(engine: &Engine, view: EngineViewId) -> (f32, impl Fn(&str) -> f32) {
+    let tree = engine.views[&view].layout.clone().unwrap();
+    let raw = engine.views[&view].document.as_ref().unwrap().get_element_by_id("f").unwrap().id.raw();
+    let b = box_of_node(&tree, raw).unwrap();
+    let style = b.style.clone();
+    let measure = move |t: &str| -> f32 {
+        t.chars()
+            .map(|c| rustkit_layout::measure_text_advanced(&c.to_string(), &style.font_family, 16.0, style.font_weight, style.font_style).width)
+            .sum()
+    };
+    (b.dimensions.content.x, measure)
+}
+
+fn field_value(engine: &Engine, view: EngineViewId) -> String {
+    engine.edit_value_in(view, engine.focused_node(view).expect("focused").raw()).expect("edit state").0
+}
+
+#[test]
+fn non_ascii_click_after_e_acute_then_typing_inserts_there() {
+    let (mut engine, view) = page(WIDE);
+    let (cx, w) = field_metrics(&engine, view);
+    let x = cx + w("hé") + 0.5;
+    engine.mouse_down_at_point(view, x, 10.0);
+    engine.click_at_point(view, x, 10.0);
+    assert!(engine.handle_text_key(view, 0x58, "x", false, false, false));
+    assert_eq!(field_value(&engine, view), "héxllo wörld");
+    // The caret followed the insert: one more key lands after the 'x'.
+    assert!(engine.handle_text_key(view, 0x59, "y", false, false, false));
+    assert_eq!(field_value(&engine, view), "héxyllo wörld");
+}
+
+#[test]
+fn non_ascii_click_after_an_emoji_then_typing_inserts_there() {
+    let (mut engine, view) = page(EMOJI);
+    let (cx, w) = field_metrics(&engine, view);
+    let x = cx + w("a😀") + 0.5;
+    engine.mouse_down_at_point(view, x, 10.0);
+    engine.click_at_point(view, x, 10.0);
+    assert!(engine.handle_text_key(view, 0x58, "x", false, false, false));
+    assert_eq!(field_value(&engine, view), "a😀xb c");
+    // A double-click on "xb", past the emoji, selects that word (characters
+    // 2..4, bytes 5..7); typing replaces exactly it.
+    engine.mouse_down_with(view, cx + w("a😀x") + 1.0, 10.0, 2, false);
+    engine.click_at_point(view, cx + w("a😀x") + 1.0, 10.0);
+    assert_eq!(text_input(&engine, view).1, Some((2, 4)), "in characters");
+    assert!(engine.handle_text_key(view, 0x5A, "z", false, false, false));
+    assert_eq!(field_value(&engine, view), "a😀z c");
+}
+
+#[test]
+fn non_ascii_drag_across_a_multibyte_char_paints_at_the_right_x() {
+    let (mut engine, view) = page(WIDE);
+    let (cx, w) = field_metrics(&engine, view);
+    // From after 'h' to after 'ö': characters 1..8 ("éllo wö").
+    let (from, to) = (cx + w("h") + 0.5, cx + w("héllo wö") + 0.5);
+    engine.mouse_down_at_point(view, from, 10.0);
+    engine.mouse_move_at_point(view, to, 10.0);
+    engine.click_at_point(view, to, 10.0);
+    let (value, selection) = text_input(&engine, view);
+    assert_eq!(value, "héllo wörld");
+    assert_eq!(selection, Some((1, 8)), "characters, not bytes");
+    // The painter measures from the value's start: the highlight begins
+    // after 'h' and covers exactly "éllo wö".
+    let rects = rustkit_layout::forms::calculate_selection_rects(&value, 1, 8, cx, 0.0, 18.0, &w);
+    assert_eq!(rects.len(), 1, "{rects:?}");
+    assert!((rects[0].x - (cx + w("h"))).abs() < 0.01, "{rects:?}");
+    assert!((rects[0].width - w("éllo wö")).abs() < 0.01, "{rects:?}");
+    // The edit state holds the same range: typing replaces exactly it.
+    assert!(engine.handle_text_key(view, 0x58, "x", false, false, false));
+    assert_eq!(field_value(&engine, view), "hxrld");
+}
+
+#[test]
+fn non_ascii_shift_click_extends_the_field_selection() {
+    let (mut engine, view) = page(WIDE);
+    let (cx, w) = field_metrics(&engine, view);
+    let (a, b) = (cx + w("hé") + 0.5, cx + w("héllo wö") + 0.5);
+    engine.mouse_down_at_point(view, a, 10.0);
+    engine.click_at_point(view, a, 10.0);
+    engine.mouse_down_with(view, b, 10.0, 1, true);
+    engine.click_at_point(view, b, 10.0);
+    assert_eq!(text_input(&engine, view).1, Some((2, 8)));
+    // A shift-click before the range extends it from its far end.
+    engine.mouse_down_with(view, cx + w("h") + 0.5, 10.0, 1, true);
+    engine.click_at_point(view, cx + w("h") + 0.5, 10.0);
+    assert_eq!(text_input(&engine, view).1, Some((1, 8)), "after 'h' to after 'ö'");
+    assert!(engine.handle_text_key(view, 0x58, "x", false, false, false));
+    assert_eq!(field_value(&engine, view), "hxrld");
+}
+
+#[test]
+fn non_ascii_triple_click_selects_the_whole_value() {
+    let (mut engine, view) = page(EMOJI);
+    let (cx, w) = field_metrics(&engine, view);
+    engine.mouse_down_with(view, cx + w("a") + 1.0, 10.0, 3, false);
+    engine.click_at_point(view, cx + w("a") + 1.0, 10.0);
+    assert_eq!(text_input(&engine, view).1, Some((0, 5)), "a😀b c is 5 characters");
+    assert!(engine.handle_text_key(view, 0x58, "x", false, false, false));
+    assert_eq!(field_value(&engine, view), "x");
+}
+
+#[test]
+fn non_ascii_get_selection_to_string_returns_the_dragged_substring() {
+    let (mut engine, view) =
+        page("<html><body style='margin:0'><p id=p style='margin:0;font-size:20px'>héllo wörld 😀 end</p></body></html>");
+    // Characters 1..13: "éllo wörld 😀" (the emoji is two UTF-16 units).
+    let (x1, y) = char_x(&engine, view, "héllo", 1);
+    let (x13, _) = char_x(&engine, view, "héllo", 13);
+    engine.mouse_down_at_point(view, x1 + 0.5, y);
+    engine.mouse_move_at_point(view, x13 - 0.5, y);
+    engine.click_at_point(view, x13 - 0.5, y);
+    assert_eq!(read(&mut engine, view, "getSelection().toString()"), "éllo wörld 😀");
+    assert_eq!(read(&mut engine, view, "[getSelection().anchorOffset, getSelection().focusOffset].join()"), "1,14");
+    let rects = highlight(&engine, view);
+    assert_eq!(rects.len(), 1, "{rects:?}");
+    assert!((rects[0].0 - x1).abs() < 0.5, "{rects:?} from {x1}");
+}
