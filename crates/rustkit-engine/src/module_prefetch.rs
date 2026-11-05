@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use futures::future::{FutureExt, LocalBoxFuture, Shared};
 use futures::stream::{FuturesUnordered, StreamExt};
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::ResourceLoader;
@@ -33,24 +34,32 @@ use crate::script_net::{fetch_module, MAX_MODULES_PER_PAGE};
 /// A module's answer as the module host's fetch gives it.
 pub(crate) type ModuleOutcome = Result<rustkit_bindings::FetchedModule, String>;
 
-/// Prefetched module answers by requested URL. Taken (removed) on use: a
-/// URL Boa asks for is asked for once.
+/// A prefetch: answered, or still out. Shared, so the walker and the run
+/// can both wait on the one request.
+pub(crate) type PrefetchedModule = Shared<LocalBoxFuture<'static, ModuleOutcome>>;
+
+/// Prefetched modules by requested URL, answered or still in flight. Taken
+/// (removed) on use: a URL Boa asks for is asked for once.
 #[derive(Clone, Default)]
-pub(crate) struct ModulePrefetch(Rc<RefCell<HashMap<String, ModuleOutcome>>>);
+pub(crate) struct ModulePrefetch(Rc<RefCell<HashMap<String, PrefetchedModule>>>);
 
 impl ModulePrefetch {
-    pub(crate) fn take(&self, url: &str) -> Option<ModuleOutcome> {
+    /// The prefetch for `url`, if one was started. Awaiting it finishes the
+    /// one request already out (or answers at once).
+    pub(crate) fn take(&self, url: &str) -> Option<PrefetchedModule> {
         self.0.borrow_mut().remove(url)
     }
 
-    fn put(&self, url: String, outcome: ModuleOutcome) {
-        self.0.borrow_mut().entry(url).or_insert(outcome);
+    fn put(&self, url: String, module: PrefetchedModule) {
+        self.0.borrow_mut().entry(url).or_insert(module);
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.0.borrow().len()
-    }
+/// Whether a prefetched answer is only the prefetch's own deadline (which
+/// started at discovery, earlier than the run's would): the run fetches
+/// again under its own deadline rather than take it.
+pub(crate) fn is_deadline_error(outcome: &ModuleOutcome) -> bool {
+    matches!(outcome, Err(reason) if reason == crate::script_net::MODULE_FETCH_TIMED_OUT)
 }
 
 /// A module script the page's script fetch has: the URL it was asked for
@@ -62,9 +71,16 @@ pub(crate) struct DiscoveredModule {
     pub(crate) source: String,
 }
 
-/// Walk the static import graphs of the modules `discovered` yields until
-/// it closes and nothing is out. Answers land in `prefetch`. `import_maps`
-/// are the document's inline import maps' texts, merged in order.
+/// Walk the static import graphs of the modules `discovered` yields, while
+/// the page's script fetch is going on. Every fetch it starts goes into
+/// `prefetch` at once, as a shared future. When `discovered` closes (the
+/// page's scripts are all in) the walk stops: it does not wait for the
+/// fetches still out, so no script waits on a slow import. Those stay in
+/// `prefetch` and the run awaits the one it needs when Boa asks for it;
+/// imports of modules that arrive after that are found by Boa, level by
+/// level, as before. `import_maps` are the document's inline import maps'
+/// texts, merged in order.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn walk(
     mut discovered: futures::channel::mpsc::UnboundedReceiver<DiscoveredModule>,
     prefetch: ModulePrefetch,
@@ -85,14 +101,12 @@ pub(crate) async fn walk(
     // Every URL fetched or already in hand, so a URL is requested once.
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = FuturesUnordered::new();
-    let mut open = true;
     let mut started = 0usize;
-    let fetch = |url: String| {
+    let fetch = |url: String| -> PrefetchedModule {
         let (policy, loader, document, inspector) = (policy.clone(), loader.clone(), document.clone(), inspector.clone());
-        async move {
-            let outcome = fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await;
-            (url, outcome)
-        }
+        async move { fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await }
+            .boxed_local()
+            .shared()
     };
     let follow = |base: &Url, source: &str, seen: &mut HashSet<String>, started: &mut usize| -> Vec<String> {
         let mut next = Vec::new();
@@ -113,44 +127,48 @@ pub(crate) async fn walk(
         }
         next
     };
+    let start = |url: String, out: &mut FuturesUnordered<_>| {
+        let module = fetch(url.clone());
+        prefetch.put(url, module.clone());
+        out.push(module);
+    };
     loop {
-        if !open && out.is_empty() {
-            return;
-        }
         tokio::select! {
-            root = discovered.next(), if open => match root {
+            root = discovered.next() => match root {
                 Some(root) => {
                     if let Some(requested) = &root.requested {
                         // The tag's own fetch answered this URL: an import of
                         // it is answered from here, not fetched again.
                         let requested = requested.to_string();
                         if seen.insert(requested.clone()) {
-                            prefetch.put(
-                                requested,
-                                Ok(rustkit_bindings::FetchedModule {
-                                    final_url: root.base.to_string(),
-                                    source: root.source.clone(),
-                                }),
-                            );
+                            let answer: ModuleOutcome = Ok(rustkit_bindings::FetchedModule {
+                                final_url: root.base.to_string(),
+                                source: root.source.clone(),
+                            });
+                            prefetch.put(requested, futures::future::ready(answer).boxed_local().shared());
                         }
                     }
                     for url in follow(&root.base, &root.source, &mut seen, &mut started) {
-                        out.push(fetch(url));
+                        start(url, &mut out);
                     }
                 }
-                None => open = false,
+                // The page's scripts are all in: stop here, whatever is out.
+                None => return,
             },
-            Some((url, outcome)) = out.next(), if !out.is_empty() => {
+            Some(outcome) = out.next(), if !out.is_empty() => {
                 if let Ok(module) = &outcome {
                     if let Ok(base) = Url::parse(&module.final_url) {
-                        // A redirect's final URL names the same module.
+                        // A redirect's final URL names the same module, but
+                        // the answer is kept only under the URL asked for:
+                        // an import that names the final URL directly is
+                        // fetched again at run time (rare; not worth a
+                        // second key).
                         seen.insert(module.final_url.clone());
                         for next in follow(&base, &module.source, &mut seen, &mut started) {
-                            out.push(fetch(next));
+                            start(next, &mut out);
                         }
                     }
                 }
-                prefetch.put(url, outcome);
             }
         }
     }
@@ -256,7 +274,10 @@ fn is_ident_part(c: u8) -> bool {
     is_ident_start(c) || c.is_ascii_digit()
 }
 
-/// A `/` here starts a regular expression rather than dividing.
+/// A `/` here starts a regular expression rather than dividing. The usual
+/// heuristic, not a parser: after `)` it is division, so the regex in
+/// `if (x) /import 'y'/.test(s)` would be read as code. A false import
+/// costs one unused request, never a run.
 fn regex_allowed(last: u8, last_word: &str) -> bool {
     if !last_word.is_empty() {
         return matches!(
@@ -297,7 +318,8 @@ fn skip_string(b: &[u8], mut i: usize) -> usize {
             _ => i += 1,
         }
     }
-    i
+    // An escape at the very end (a body cut off) stepped past it.
+    i.min(b.len())
 }
 
 fn skip_regex(b: &[u8], mut i: usize) -> usize {
@@ -325,7 +347,7 @@ fn skip_regex(b: &[u8], mut i: usize) -> usize {
             _ => i += 1,
         }
     }
-    i
+    i.min(b.len())
 }
 
 /// From just inside a template (after `` ` `` or a substitution's `}`) to
@@ -343,7 +365,7 @@ fn skip_template(b: &[u8], mut i: usize, template_braces: &mut Vec<usize>, brace
             _ => i += 1,
         }
     }
-    i
+    i.min(b.len())
 }
 
 /// Skip whitespace and comments.

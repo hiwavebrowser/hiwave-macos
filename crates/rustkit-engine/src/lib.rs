@@ -5762,9 +5762,11 @@ impl Engine {
         >;
         let mut module_fetches: HashMap<Url, SharedModuleFetch> = HashMap::new();
         // S15: each module script's static import graph is fetched as soon
-        // as the script's source is in hand, all of it concurrently with
-        // the page's other script fetches (see `module_prefetch`). Boa
-        // takes the answers when it asks for those imports at run time.
+        // as the script's source is in hand, concurrently with the page's
+        // other script fetches (see `module_prefetch`). The walk stops when
+        // the scripts are all in; it never holds them. Boa takes the
+        // answers (or awaits the one still out) when it asks for those
+        // imports at run time.
         let prefetch = module_prefetch::ModulePrefetch::default();
         let (discovered, discoveries) = futures::channel::mpsc::unbounded::<module_prefetch::DiscoveredModule>();
         let walker = match &policy {

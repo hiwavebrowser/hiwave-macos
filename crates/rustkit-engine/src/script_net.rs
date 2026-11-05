@@ -796,8 +796,14 @@ pub(crate) async fn pump_modules(
             }
             // Fetched when the module script was discovered (S15): the
             // same fetch's answer, without another round trip.
-            if let Some(answer) = prefetched.and_then(|p| p.take(url)) {
-                return answer;
+            // Still out, it is awaited here: the one request, not a second.
+            // A prefetch that ran out of its own (earlier) deadline is
+            // fetched again under this one.
+            if let Some(module) = prefetched.and_then(|p| p.take(url)) {
+                let answer = module.await;
+                if !crate::module_prefetch::is_deadline_error(&answer) {
+                    return answer;
+                }
             }
             fetch_module(policy, loader, url, document, deadline, inspector).await
         }))
@@ -843,9 +849,12 @@ pub(crate) async fn fetch_module(
             debug!(%url, ?denial, "Module fetch denied");
             Err(NETWORK_ERROR.to_string())
         }
-        Err(_) => Err("timed out".to_string()),
+        Err(_) => Err(MODULE_FETCH_TIMED_OUT.to_string()),
     }
 }
+
+/// Why a module fetch failed when its deadline passed.
+pub(crate) const MODULE_FETCH_TIMED_OUT: &str = "timed out";
 
 /// A module a dynamic `import()` asked for that is out: the URL as asked
 /// for and, in the end, its source or why there is none.
