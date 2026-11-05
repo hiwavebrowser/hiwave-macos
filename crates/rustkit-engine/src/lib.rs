@@ -3915,8 +3915,22 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         // A press on a scrollbar moves no focus.
         if !suppressed && not_cancelled && on_scrollbar.is_none() {
+            let before = self.press_focus_marks(id);
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
-            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            let after = self.press_focus_marks(id);
+            // A press that focused a text control whose focus handler set
+            // its selection (`select()`) keeps that selection, as the
+            // oracle's Chrome does (CH2.E12); otherwise the press places
+            // the caret.
+            let focus_handler_selected = after.0 != before.0 && after.1 != before.1 && after.0.is_some();
+            if focus_handler_selected {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.select_drag = None;
+                }
+                self.relayout_after_press_focus(id);
+            } else {
+                self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            }
             // A press on a drop-down `<select>` opens it, as Chrome's
             // does (a cancelled `mousedown` keeps it shut).
             self.open_select_popup_at_press(id, viewport_x, viewport_y);
@@ -20334,6 +20348,9 @@ impl Engine {
         // same path typed text takes.
         for (raw, value) in writes.values.drain(..) {
             match edit_states.get(&raw) {
+                // The same value keeps the selection (HTML §4.10.5.4), so a
+                // `select()` after it stands.
+                Some(state) if state.value() == value => {}
                 Some(state) => state.set_value(value),
                 None => {
                     let state = rustkit_dom::forms::TextEditState::with_value(value);
