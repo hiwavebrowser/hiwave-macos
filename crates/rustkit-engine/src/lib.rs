@@ -284,6 +284,9 @@ pub mod inspector;
 mod inspector_glue;
 mod console_log;
 mod relayout_cause;
+mod selection;
+#[cfg(test)]
+mod selection_tests;
 mod drag_drop;
 mod restyle_invalidation;
 #[cfg(test)]
@@ -316,6 +319,8 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
+#[cfg(all(test, feature = "headless"))]
+mod nested_body_tests;
 mod inspector_page;
 pub use inspector_page::{
     diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,
@@ -1010,6 +1015,13 @@ struct ViewState {
     primary_button_down: bool,
     /// The element the press in progress landed on (raw NodeId).
     press_target: Option<usize>,
+    /// The document selection as the engine paints it (`selection.rs`),
+    /// and the drag that is moving it.
+    doc_selection: Option<selection::DocSelection>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
     /// HTML drag and drop: the press's drag candidate, or the drag in
     /// progress (drag_drop.rs).
     drag: drag_drop::DragState,
@@ -1168,6 +1180,8 @@ impl ViewState {
         self.press_target = None;
         self.drag = drag_drop::DragState::default();
         self.press_settled_focus = false;
+        self.doc_selection = None;
+        self.select_drag = None;
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
@@ -2721,6 +2735,9 @@ impl Engine {
             press_target: None,
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2822,6 +2839,9 @@ impl Engine {
             press_target: None,
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2940,6 +2960,9 @@ impl Engine {
             press_target: None,
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -3418,7 +3441,8 @@ impl Engine {
                 let view = self.views.get(&id)?;
                 let doc = view.document.as_ref()?;
                 let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-                let control = Self::form_control(&node);
+                // A contenteditable host takes the focus like a control.
+                let control = Self::form_control(&node).or_else(|| Self::editing_host_of(&node));
                 // A click on a label is a click for the control it labels.
                 let labeled = match control {
                     Some(_) => None,
@@ -3526,7 +3550,11 @@ impl Engine {
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                    if matches!(tag.as_str(), "input" | "textarea" | "select") {
+                        Some((raw, tag))
+                    } else {
+                        Self::editing_host_of(&node).filter(|(host, _)| *host == raw)
+                    }
                 }
                 _ => None,
             }
@@ -3594,7 +3622,25 @@ impl Engine {
     /// listener that cancels either event keeps the focus where it is.
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        self.mouse_down_with(id, viewport_x, viewport_y, 1, false)
+    }
+
+    /// [`Self::mouse_down_at_point`] for the `clicks`-th press of a
+    /// multi-click (2 selects a word, 3 a paragraph) and with Shift held
+    /// (the selection extends to the point). The press's default action
+    /// moves the selection after the focus (`selection.rs`).
+    pub fn mouse_down_with(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        clicks: u32,
+        shift: bool,
+    ) -> bool {
         let _hold = wgate::hold("press");
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_clicks = clicks;
+        }
         let target = self.element_at_point(id, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
@@ -3618,6 +3664,7 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         if !suppressed && not_cancelled {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
         }
         // A press the page let through on a draggable element may become
         // a drag (drag_drop.rs).
@@ -3644,6 +3691,8 @@ impl Engine {
             return;
         }
         self.pointer_moved(id, viewport_x, viewport_y, true);
+        // With the button held, the selection the press started follows.
+        self.drag_selects(id, viewport_x, viewport_y);
     }
 
     /// The pointer left the view: the page hears the out and leave events
@@ -3788,26 +3837,35 @@ impl Engine {
         if reads.anywhere {
             return !changed.is_empty();
         }
-        let Some(document) = view.document.as_ref() else {
-            return false;
+        changed.iter().any(|raw| Self::change_reach(view, reads, *raw).is_some())
+    }
+
+    /// How far a rule can restyle from the element `raw` (raw NodeId)
+    /// gaining or losing the pseudo-class `reads` is of: `None` when no
+    /// compound with it matches the element by tag, classes and id, else
+    /// the most later siblings a matching rule reaches (0: the element and
+    /// what is under it only).
+    fn change_reach(view: &ViewState, reads: &PointerReads, raw: usize) -> Option<usize> {
+        if reads.compounds.is_empty() {
+            return None;
+        }
+        let document = view.document.as_ref()?;
+        let Some(node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+            return Some(0);
         };
-        !reads.compounds.is_empty()
-            && changed.iter().any(|raw| {
-                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
-                    return true;
-                };
-                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
-                    return false;
-                };
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
-                reads
-                    .compounds
-                    .iter()
-                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
-            })
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return None;
+        };
+        let classes: Vec<String> = attributes
+            .get("class")
+            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        reads
+            .compounds
+            .iter()
+            .filter(|filed| filed.compound.matches(tag_name, &classes, attributes.get("id")))
+            .map(|filed| filed.reach)
+            .max()
     }
 
     /// Restyle the view when the hovered or the pressed chain changed, a
@@ -3958,8 +4016,11 @@ impl Engine {
         if let Some(outcome) = self.drag_release(id, viewport_x, viewport_y) {
             return outcome;
         }
+        let mut clicks = 1;
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
+            view.select_drag = None;
+            clicks = std::mem::replace(&mut view.press_clicks, 1);
             let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
@@ -4011,6 +4072,10 @@ impl Engine {
                     && self.click_element(id, target, viewport_x, viewport_y)
             }
         };
+        // The second click of a double-click: `dblclick` after `click`.
+        if clicks == 2 && elsewhere.is_none() && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
+            self.dispatch_mouse_at_point(id, "dblclick", viewport_x, viewport_y);
+        }
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -5200,6 +5265,10 @@ impl Engine {
         {
             return false;
         }
+        // A contenteditable host: the page's DOM is what is edited.
+        if self.is_editing_host(id, focused.raw()) {
+            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
@@ -5518,6 +5587,22 @@ impl Engine {
 }
 
 impl layout_ctx::LayoutCtx {
+    /// The selected characters `[start, end)` of a text control in the view
+    /// being laid out, when its selection is not collapsed. The edit state
+    /// counts bytes; the painter counts characters.
+    fn edit_selection(&self, node_raw: usize) -> Option<(usize, usize)> {
+        self.with_building_lay(|lay| {
+            let states = lay.edit_states.borrow();
+            let state = states.get(&node_raw)?;
+            let sel = state.selection().normalize();
+            let value = state.value();
+            (!sel.is_collapsed()).then(|| {
+                (selection::char_of_byte(&value, sel.start), selection::char_of_byte(&value, sel.end))
+            })
+        })
+        .flatten()
+    }
+
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -8129,6 +8214,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            view.relayout_stats.last_build_ms = stages.build;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -8310,7 +8396,29 @@ impl Engine {
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
-        let mut dl = DisplayList::build(root_box);
+        let selected = self.selection_paint(id, root_box);
+        let caret = self.caret_paint(id, root_box);
+        let text_caret = match caret {
+            Some(selection::CaretPaint::Text(node, offset)) => Some((node, offset)),
+            _ => None,
+        };
+        let mut dl = DisplayList::build_with_selection(root_box, selected, text_caret);
+        // A host with no text where the caret is: the caret at the start of
+        // its content box.
+        if let Some(selection::CaretPaint::Box(host)) = caret {
+            if let Some(b) = box_of_node(root_box, host) {
+                let size = match b.style.font_size {
+                    rustkit_css::Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                dl.commands.push(rustkit_layout::DisplayCommand::Caret {
+                    x: b.dimensions.content.x,
+                    y: b.dimensions.content.y,
+                    height: size * 1.2,
+                    color: b.style.color,
+                });
+            }
+        }
         // Splice cached SVG documents in place of their Image commands.
         // Done once per layout (not per frame): the renderer only speaks
         // raster textures, so vector images become their own command
@@ -8405,11 +8513,13 @@ impl Engine {
     /// repainted without a layout, `false` when it has to be laid out.
     ///
     /// Only the elements that gained or lost `:hover` or `:active` since
-    /// the last layout, and what is under them, can be styled differently
-    /// (a sheet with the pseudo-class before a sibling combinator, or where
-    /// the index cannot place it, takes the full path). Those subtrees are
-    /// built twice, with the chains the layout was built with and with the
-    /// chains as they are now; nothing else of the page is built. When the
+    /// the last layout, what is under them, and the later siblings a rule
+    /// with a sibling combinator right of the pseudo-class reaches
+    /// (`PointerCompound::reach`) can be styled differently (a sheet that
+    /// reads the pseudo-class where the index cannot place it takes the
+    /// full path). Those subtrees are built twice, with the chains the
+    /// layout was built with and with the chains as they are now; nothing
+    /// else of the page is built. When the
     /// two differ only in paint properties (`ComputedStyle::copy_paint_only`)
     /// layout would give every box the size and place it already has: the
     /// properties are copied onto the laid-out boxes, the display list is
@@ -8442,29 +8552,36 @@ impl Engine {
         if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
             return miss("focus moved");
         }
-        let unplaced = view.lay.rule_reads.borrow().as_ref().is_none_or(|index| {
-            [&index.reads.hover, &index.reads.active]
-                .iter()
-                .any(|reads| reads.anywhere || reads.siblings)
-        });
-        if unplaced {
-            return miss("a rule reads the pseudo-class beyond the element's subtree");
+        let index = view.lay.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| &index.reads) else {
+            return miss("no rule index");
+        };
+        if reads.hover.anywhere || reads.active.anywhere {
+            return miss("a rule reads the pseudo-class where no compound shows it");
         }
         let before = (with.hover.clone(), with.active.clone());
         let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
         // Of the elements in one chain only, the ones a compound with the
-        // pseudo-class can match: no rule sees the others change.
-        let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
+        // pseudo-class can match, each with how many later siblings a rule
+        // can style from it: no rule sees the others change.
+        let mut changed: Vec<(usize, usize)> = Self::in_one_chain(&before.0, &now.0)
             .into_iter()
-            .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.hover, &[*raw]))
+            .filter_map(|raw| Self::change_reach(view, &reads.hover, raw).map(|reach| (raw, reach)))
             .collect();
         changed.extend(
             Self::in_one_chain(&before.1, &now.1)
                 .into_iter()
-                .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.active, &[*raw])),
+                .filter_map(|raw| Self::change_reach(view, &reads.active, raw).map(|reach| (raw, reach))),
         );
+        drop(index);
         changed.sort_unstable();
-        changed.dedup();
+        changed.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(later.1);
+            }
+            same
+        });
         if changed.is_empty() {
             // The pointer went and came back between two layouts.
             if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
@@ -8473,11 +8590,36 @@ impl Engine {
             return Ok(true);
         }
 
-        // The topmost changed elements, and the elements above them: the
+        // The elements to build again: each changed element, and the later
+        // siblings a rule with a sibling combinator right of the
+        // pseudo-class can style from it (`.a:hover + .b`, S22).
+        let mut restyled: Vec<usize> = Vec::with_capacity(changed.len());
+        for (raw, reach) in &changed {
+            restyled.push(*raw);
+            if *reach == 0 {
+                continue;
+            }
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a changed element left the document");
+            };
+            let mut left = *reach;
+            let mut next = node.next_sibling();
+            while let Some(sibling) = next.filter(|_| left > 0) {
+                if sibling.is_element() {
+                    restyled.push(sibling.id.raw());
+                    left -= 1;
+                }
+                next = sibling.next_sibling();
+            }
+        }
+        restyled.sort_unstable();
+        restyled.dedup();
+
+        // The topmost restyled elements, and the elements above them: the
         // build walks down those and builds only what is under a root.
         let body = document.body().map(|body| body.id.raw());
         let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
-        for raw in &changed {
+        for raw in &restyled {
             let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
                 return miss("a changed element left the document");
             };
@@ -8489,10 +8631,10 @@ impl Engine {
             }
             above.insert(*raw, chain);
         }
-        let roots: Vec<usize> = changed
+        let roots: Vec<usize> = restyled
             .iter()
             .copied()
-            .filter(|raw| !above[raw].iter().any(|up| changed.contains(up)))
+            .filter(|raw| !above[raw].iter().any(|up| restyled.contains(up)))
             .collect();
         let mut path = std::collections::HashSet::new();
         for root in &roots {
@@ -8555,14 +8697,21 @@ impl Engine {
         let Some(mut laid) = view.layout.take() else {
             return Ok(false);
         };
-        let placed = roots
+        // A root with no box of its own in either build (`display: none`,
+        // a sibling the reach took in) has nothing laid out to patch.
+        let boxed: Vec<usize> = roots
+            .iter()
+            .copied()
+            .filter(|root| is[root].node_id.is_some() || was[root].node_id.is_some())
+            .collect();
+        let placed = boxed
             .iter()
             .all(|root| box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, &is[root])));
         if !placed {
             view.layout = Some(laid);
             return miss("layout moved boxes");
         }
-        for root in &roots {
+        for root in &boxed {
             if let Some(laid) = box_of_node_mut(Rc::make_mut(&mut laid), *root) {
                 copy_changed_paint(laid, &was[root], &is[root]);
             }
@@ -10333,6 +10482,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10426,6 +10576,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10504,6 +10655,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10579,6 +10731,7 @@ impl layout_ctx::LayoutCtx {
                 // focus ring without reaching back into engine state.
                 if self.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    layout_box.focused_selection = self.edit_selection(node.id.raw());
                 }
 
                 // Links carry their RAW href so a hit test can navigate
@@ -10687,13 +10840,10 @@ impl layout_ctx::LayoutCtx {
                     .count();
                 let mut preceding_siblings: Vec<SiblingKey> =
                     Vec::with_capacity(child_element_count);
-                // Selector segments are computed here, not in the child, because
-                // `:nth-of-type` needs the full same-tag sibling count.
                 let children_are_foreign =
                     in_foreign_content || Engine::enters_foreign_content(&tag_lower);
-                let child_segments =
-                    Engine::child_selector_segments(&child_nodes, children_are_foreign);
-                // Same-tag totals feed the `-of-type` pseudo-classes.
+                // Same-tag totals feed the `-of-type` pseudo-classes and the
+                // selector segments (`:nth-of-type` needs the full count).
                 let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
                     if let NodeType::Element { tag_name, .. } = &c.node_type {
@@ -10735,10 +10885,45 @@ impl layout_ctx::LayoutCtx {
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = Engine::child_selector_path(
-                        selector_path,
-                        child_segments.get(child_index).and_then(|s| s.as_deref()),
-                    );
+                    let restyle = restyle_child(node.id.raw(), child.id.raw());
+                    if restyle == RestyleChild::Skip {
+                        // A restyle build skips what no root is under: the
+                        // child is only recorded as its later siblings'
+                        // earlier one (S22: a feed of hundreds of posts
+                        // paid a selector path, a children clone and a
+                        // placeholder style per post, twice per move).
+                        if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
+                            let t = lower_tag(tag_name);
+                            *type_seen.entry(t.clone()).or_insert(0) += 1;
+                            let live = self.live_attributes(child.id.raw(), &t, attributes);
+                            let child_classes = element_classes(&live);
+                            let state = ElementState::of(&t, &live);
+                            preceding_siblings.push((
+                                t.into_owned(),
+                                child_classes,
+                                attributes.get("id").cloned(),
+                                state,
+                            ));
+                        }
+                        continue;
+                    }
+                    // The child's selector segment, spelled as
+                    // `child_selector_segments` does, for the children that
+                    // are built (S22: not for the hundreds a restyle skips).
+                    let child_path = match &child.node_type {
+                        NodeType::Element { tag_name, attributes, .. } if !selector_path.is_empty() => {
+                            let t = lower_tag(tag_name);
+                            let segment = Engine::selector_segment(
+                                &t,
+                                attributes,
+                                type_seen.get(&*t).copied().unwrap_or(0) + 1,
+                                type_totals.get(&*t).copied().unwrap_or(1),
+                                children_are_foreign || Engine::enters_foreign_content(&t),
+                            );
+                            Engine::child_selector_path(selector_path, Some(&segment))
+                        }
+                        _ => String::new(),
+                    };
                     let child_sib = match &child.node_type {
                         NodeType::Element { tag_name, .. } => {
                             let t = lower_tag(tag_name);
@@ -10753,9 +10938,8 @@ impl layout_ctx::LayoutCtx {
                         }
                         _ => SiblingContext::SOLE,
                     };
-                    let restyle = restyle_child(node.id.raw(), child.id.raw());
                     let mut child_box = match restyle {
-                        RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
+                        RestyleChild::Skip => unreachable!("skipped above"),
                         _ => self.build_layout_from_parent_style_and_path(
                             child,
                             children_sheets,
@@ -10968,10 +11152,15 @@ impl layout_ctx::LayoutCtx {
                         joined.push(child);
                         continue;
                     }
+                    let next_sources = child.text_sources;
                     let BoxType::Text(next) = child.box_type else {
                         unreachable!("joins_previous requires a text box");
                     };
                     let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let at = match &last.box_type {
+                        BoxType::Text(run) => run.chars().count(),
+                        _ => 0,
+                    };
                     let collapsible = !matches!(
                         last.style.white_space,
                         rustkit_css::WhiteSpace::Pre
@@ -10979,13 +11168,16 @@ impl layout_ctx::LayoutCtx {
                             | rustkit_css::WhiteSpace::PreLine
                             | rustkit_css::WhiteSpace::BreakSpaces
                     );
+                    let mut dropped = 0;
                     if let BoxType::Text(ref mut run) = last.box_type {
                         if collapsible && run.ends_with(' ') && next.starts_with(' ') {
                             run.push_str(&next[1..]);
+                            dropped = 1;
                         } else {
                             run.push_str(&next);
                         }
                     }
+                    last.append_text_sources(&next_sources, at, next.chars().count(), dropped);
                 }
                 layout_box.children = joined;
 
@@ -11017,14 +11209,23 @@ impl layout_ctx::LayoutCtx {
                     if preserved {
                         continue;
                     }
-                    if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                    let child = &mut layout_box.children[i];
+                    if let BoxType::Text(ref mut t) = child.box_type {
                         // Strip the collapsed SPACE only: `trim_start()` also
                         // eats a following nbsp, which is content.
+                        let before = t.chars().count();
+                        let mut from = 0;
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start_matches(' ').to_string();
+                            let kept = t.trim_start_matches(' ').to_string();
+                            from = before - kept.chars().count();
+                            *t = kept;
                         }
                         if !next_inline && t.ends_with(' ') {
                             *t = t.trim_end_matches(' ').to_string();
+                        }
+                        if t.chars().count() != before {
+                            let len = t.chars().count();
+                            child.keep_text_sources(from, len);
                         }
                     }
                 }
@@ -11129,7 +11330,18 @@ impl layout_ctx::LayoutCtx {
                         s.color = rustkit_css::Color::BLACK;
                         s
                     };
-                    LayoutBox::new(BoxType::Text(content), style)
+                    let len = content.chars().count();
+                    let mut run = LayoutBox::new(BoxType::Text(content), style);
+                    // Where the run's characters came from: mouse
+                    // selection and selection paint map through it.
+                    run.text_sources = vec![rustkit_layout::TextSource {
+                        node: node.id.raw(),
+                        at: 0,
+                        skip: 0,
+                        len,
+                        collapsible,
+                    }];
+                    run
                 }
             }
             NodeType::Comment(_) => {
@@ -16890,7 +17102,7 @@ impl SelectorMatcher {
         QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
         // An ancestor's earlier siblings are read from the DOM, with this
         // checkedness (`dom_sibling_key`).
-        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()));
+        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()), None);
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -19305,6 +19517,10 @@ impl Engine {
         if self.follow_script_focus(id) {
             self.relayout_for(id, RelayoutCause::HoverOrFocus)?;
             laid = true;
+        }
+        // A selection script moved is painted again over the same boxes.
+        if self.follow_script_selection(id) {
+            self.repaint_selection(id);
         }
         Ok(laid)
     }
@@ -30692,13 +30908,30 @@ mod node_identity_tests {
         assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
         assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
 
-        // `:hover` where the compounds do not show it: every change counts.
+        // `:hover` inside `:not()`: the compound around it is what can
+        // flip (S22: before, every change counted).
         engine
             .load_html(
                 id,
                 concat!(
                     r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
                     r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: #b:not(:hover) cannot flip");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#b to #c");
+
+        // `:hover` where the compounds cannot show it (`:has()`): every
+        // change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:has(:hover) { width: 300px }</style></head><body>"#,
                     r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
                 ),
             )
@@ -36499,6 +36732,11 @@ struct WalkState {
     /// script), by raw NodeId (`dom_sibling_key`). The subject's own
     /// siblings come with their live state from the build.
     checked: HashMap<usize, bool>,
+    /// The hovered and the pressed chain (raw NodeIds): an earlier sibling
+    /// read from the DOM carries [`HOVER_MARK`] / [`ACTIVE_MARK`] among its
+    /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
+    hover: Vec<usize>,
+    active: Vec<usize>,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -36512,15 +36750,20 @@ thread_local! {
 }
 
 /// Sets [`WALK`] for its lifetime, with an empty memo, and puts the
-/// previous state back: around a view's build (its `checked_states`) and a
-/// script query. `None` keeps the enclosing scope's checkedness.
+/// previous state back: around a view's build (its `checked_states` and
+/// its pointer chains) and a script query. `None` keeps the enclosing
+/// scope's checkedness (chains).
 pub(crate) struct WalkCheckedScope(WalkState);
 
 impl WalkCheckedScope {
-    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>) -> Self {
+    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>, pointer: Option<(Vec<usize>, Vec<usize>)>) -> Self {
         WalkCheckedScope(WALK.with(|w| {
             let checked = checked.unwrap_or_else(|| w.borrow().checked.clone());
-            w.replace(WalkState { checked, memo: Some(HashMap::new()) })
+            let (hover, active) = pointer.unwrap_or_else(|| {
+                let w = w.borrow();
+                (w.hover.clone(), w.active.clone())
+            });
+            w.replace(WalkState { checked, hover, active, memo: Some(HashMap::new()) })
         }))
     }
 }
@@ -36566,7 +36809,16 @@ fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
         }
         _ => ElementState::of(&tag, attributes),
     };
-    Some((tag, element_classes(attributes), attributes.get("id").cloned(), state))
+    let mut classes = element_classes(attributes);
+    WALK.with(|w| {
+        let w = w.borrow();
+        for (chain, mark) in [(&w.hover, HOVER_MARK), (&w.active, ACTIVE_MARK)] {
+            if chain.contains(&node.id.raw()) {
+                classes.push(mark.to_string());
+            }
+        }
+    });
+    Some((tag, classes, attributes.get("id").cloned(), state))
 }
 
 /// The nearest element sibling before `from` that `test` (a `~` step's
@@ -38236,18 +38488,32 @@ struct SelectorReads {
 /// a rule's match from.
 #[derive(Default)]
 struct PointerReads {
-    /// The compounds that carry it, without it: an element none of them
-    /// matches by tag, classes and id gains or loses the pseudo-class
-    /// without any rule noticing.
-    compounds: Vec<AncestorCompound>,
-    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// The compounds that carry it, without it, each with how far a rule
+    /// reaches past a matching element's later siblings: an element none
+    /// of them matches by tag, classes and id gains or loses the
+    /// pseudo-class without any rule noticing.
+    compounds: Vec<PointerCompound>,
+    /// Index into `compounds` by tag, classes and id.
+    seen: HashMap<PointerCompoundKey, usize>,
     /// Some selector names it where `compounds` does not show it (inside
-    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
-    /// element may count.
+    /// `:has()`, or a `:not()` / `:is()` member the compound parser leaves
+    /// permissive): any element may count.
     anywhere: bool,
-    /// Some selector has a sibling combinator: the pseudo-class on one
-    /// element may style its later siblings and what is under them.
-    siblings: bool,
+}
+
+/// A [`PointerCompound`]'s tag, classes and id.
+type PointerCompoundKey = (Option<String>, Vec<String>, Option<String>);
+
+/// One compound a pointer pseudo-class is read on (S22, reddit: one
+/// `:hover` rule with a sibling combinator anywhere in the sheets made
+/// every pointer move a full build and layout).
+struct PointerCompound {
+    compound: AncestorCompound,
+    /// How many later siblings of a matching element the rule can style
+    /// (and what is under them): one per `+` right of the compound up to
+    /// the first descendant or child combinator, `usize::MAX` past a `~`,
+    /// 0 for the subject or a compound left of ` ` or `>`.
+    reach: usize,
 }
 
 impl PointerReads {
@@ -38263,41 +38529,118 @@ impl PointerReads {
             if named == 0 {
                 continue;
             }
-            self.siblings |= member.contains(['+', '~']);
             // A `::before` / `::after` rule is matched by its base selector.
             let base = [(":before", "::before"), (":after", "::after")]
                 .into_iter()
                 .find(|(suffix, _)| member.ends_with(suffix))
                 .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
             let prepared = SelectorMatcher.prepared_selector(base);
-            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+            if matches!(&*prepared, PreparedSelector::Never) {
                 // Invalid, or some other pseudo-element's: it styles nothing.
                 continue;
-            };
-            let mut found = 0;
-            for compound in compounds {
-                let marks = compound.classes.iter().filter(|c| *c == mark).count();
-                if marks == 0 {
-                    continue;
-                }
-                found += marks;
-                let classes: Vec<String> = compound
-                    .classes
-                    .iter()
-                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
-                    .cloned()
-                    .collect();
-                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
-                    self.compounds.push(AncestorCompound {
-                        never: compound.never,
-                        tag: compound.tag.clone(),
-                        classes,
-                        id: compound.id.clone(),
-                        ..Default::default()
-                    });
-                }
             }
+            let found = self.note_prepared(&prepared, mark, 0);
             self.anywhere |= found != named;
+        }
+    }
+
+    /// File every compound of `prepared` that carries `mark`, each with its
+    /// sibling reach plus `outer` (the reach of the compound an `:is()`
+    /// member sits in). Returns how many marks were found: fewer than the
+    /// selector names means one sits where the parser left it permissive.
+    fn note_prepared(&mut self, prepared: &PreparedSelector, mark: &str, outer: usize) -> usize {
+        match prepared {
+            PreparedSelector::Never => 0,
+            PreparedSelector::List(members) => members.iter().map(|m| self.note_prepared(m, mark, outer)).sum(),
+            PreparedSelector::Complex { tokens, compounds, .. } => {
+                let mut found = 0;
+                for (i, compound) in compounds.iter().enumerate() {
+                    // The sibling steps right of this compound, up to the
+                    // first descendant or child one: past that, everything
+                    // the selector names is under the element.
+                    let mut reach = 0usize;
+                    for (_, combinator) in &tokens[i..] {
+                        match combinator.as_str() {
+                            "+" => reach = reach.saturating_add(1),
+                            "~" => {
+                                reach = usize::MAX;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    found += self.note_compound(compound, None, mark, reach.saturating_add(outer));
+                }
+                found
+            }
+        }
+    }
+
+    /// File `compound` (merged with `outer`, the compound a `:not()` or
+    /// `:is()` member sits in) if it carries `mark`, then its members.
+    fn note_compound(
+        &mut self,
+        compound: &AncestorCompound,
+        outer: Option<&AncestorCompound>,
+        mark: &str,
+        reach: usize,
+    ) -> usize {
+        let merged = Self::merged(outer, compound);
+        let own = compound.classes.iter().filter(|c| *c == mark).count();
+        let mut found = own;
+        if own > 0 {
+            self.file(Self::merged(None, &merged), reach);
+        }
+        if compound.none_of.is_empty() && compound.any_of.is_empty() {
+            return found;
+        }
+        // `:not(.a:hover)` flips only on an element `.a` matches;
+        // `:is(.a:hover, .b)` likewise: the element is both compounds.
+        for inner in &compound.none_of {
+            found += self.note_compound(inner, Some(&merged), mark, reach);
+        }
+        for alts in &compound.any_of {
+            for inner in &alts.compounds {
+                found += self.note_compound(inner, Some(&merged), mark, reach);
+            }
+            // A complex member is matched with the element as its subject:
+            // its own compounds read the pseudo-class from there.
+            for complex in &alts.complex {
+                found += self.note_prepared(complex, mark, reach);
+            }
+        }
+        found
+    }
+
+    /// The tag, classes (marks left out) and id of `outer` and `inner`
+    /// together: what an element must be for both to match it.
+    fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
+        let mut classes: Vec<String> = Vec::new();
+        for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
+            if !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK) && !classes.contains(c) {
+                classes.push(c.clone());
+            }
+        }
+        AncestorCompound {
+            never: inner.never || outer.is_some_and(|o| o.never),
+            tag: inner.tag.clone().or_else(|| outer.and_then(|o| o.tag.clone())),
+            classes,
+            id: inner.id.clone().or_else(|| outer.and_then(|o| o.id.clone())),
+            ..Default::default()
+        }
+    }
+
+    fn file(&mut self, compound: AncestorCompound, reach: usize) {
+        let key = (compound.tag.clone(), compound.classes.clone(), compound.id.clone());
+        match self.seen.get(&key) {
+            Some(&at) => {
+                let filed = &mut self.compounds[at].reach;
+                *filed = (*filed).max(reach);
+            }
+            None => {
+                self.seen.insert(key, self.compounds.len());
+                self.compounds.push(PointerCompound { compound, reach });
+            }
         }
     }
 }
@@ -39075,6 +39418,8 @@ fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
         && a.identity == b.identity
         && a.link_href == b.link_href
         && a.focused_caret == b.focused_caret
+        && a.focused_selection == b.focused_selection
+        && a.text_sources == b.text_sources
         && rest(a) == rest(b)
 }
 
@@ -39146,6 +39491,7 @@ fn count_tree_differences(kept: &LayoutBox, fresh: &LayoutBox, differences: &mut
                 (&b.box_type, &b.dimensions, &b.position, &b.offsets, &b.float, &b.clear),
                 (b.z_index, &b.stacking_context, &b.viewport, &b.sticky_state, &b.element_id),
                 (&b.identity, &b.link_href, &b.focused_caret, &b.node_id, &b.text_lines),
+                (&b.focused_selection, &b.text_sources),
                 (&b.text_flow_first_offset, &b.root_element_height, b.children.len()),
             )
         )
