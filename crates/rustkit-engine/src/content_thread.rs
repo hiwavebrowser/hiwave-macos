@@ -317,6 +317,13 @@ impl ContentThread {
         let _ = self.cmd.send(PageCmd::Input(input));
     }
 
+    /// CH3.A7: the app owns this view (see [`crate::Engine::set_app_owned`]).
+    /// Queued like any command, so it applies to every document loaded
+    /// after it.
+    pub fn set_app_owned(&self, owned: bool) {
+        let _ = self.cmd.send(PageCmd::SetAppOwned { owned });
+    }
+
     pub fn set_host_reentry(&self, limit: usize) {
         let _ = self.cmd.send(PageCmd::SetHostReentry { limit });
     }
@@ -1256,12 +1263,39 @@ mod tests {
         seen
     }
 
+    /// CH3.A7: a web page on the content thread has no app bridge
+    /// (Chromium 143: both `undefined`), and nothing it does reaches the
+    /// window as IPC.
+    #[test]
+    fn a_web_page_on_the_content_thread_has_no_app_bridge() {
+        let page = page();
+        let mut loaded = page.load_html("<p>web</p>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut probe = page.eval(
+            "[typeof window.ipc, typeof window.hiwaveChrome, typeof __rk_ipc_post].join(',')",
+        );
+        let got = wait_recv(&mut probe, Duration::from_secs(5)).expect("eval answered");
+        // The answer is the value's Debug form (`String("...")`).
+        assert!(
+            got.as_deref().is_ok_and(|v| v.contains("\"undefined,undefined,undefined\"")),
+            "{got:?}"
+        );
+        let mut posted = page.eval(
+            "try { window.ipc.postMessage('{\"cmd\":\"navigate\"}'); } catch (e) {} 1",
+        );
+        assert!(wait_recv(&mut posted, Duration::from_secs(5)).is_some());
+        assert!(ipc_payloads(&page, Duration::from_millis(300)).is_empty());
+    }
+
     #[test]
     fn the_window_is_sent_what_the_page_posts_on_window_ipc() {
         // CH2.E9: `window.ipc.postMessage` filled a queue only a poll of
         // the engine could read, and nothing polled it: the chrome's
-        // messages from a RustKit view went nowhere.
+        // messages from a RustKit view went nowhere. The chrome is an
+        // app-owned view (CH3.A7): web content has no `window.ipc`.
         let page = page();
+        page.set_app_owned(true);
         let mut loaded = page.load_html("<p>chrome</p>");
         assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
         let _ = page.poll();

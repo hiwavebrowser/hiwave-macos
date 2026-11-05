@@ -511,6 +511,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod app_bridge_tests;
+#[cfg(all(test, feature = "headless"))]
 mod text_control_select_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
@@ -984,6 +986,10 @@ struct ViewState {
     /// plan's per-view frame count; the tests read it to see how many draws
     /// one input cost).
     frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -2799,6 +2805,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -2910,6 +2917,7 @@ impl Engine {
             lay: Rc::default(),
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -3038,6 +3046,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -5758,6 +5767,20 @@ impl Engine {
     /// The clipboard this engine's views edit with.
     pub fn clipboard(&self) -> SharedClipboard {
         self.clipboard.clone()
+    }
+
+    /// CH3.A7: mark view `id` as one the app owns (the chrome, the shelf,
+    /// the Inspector, the settings page). Documents the app loads into it
+    /// from then on get the app bridge; a web view (the default) never does.
+    pub fn set_app_owned(&mut self, id: EngineViewId, owned: bool) {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.app_owned = owned;
+        }
+    }
+
+    /// Whether the app owns view `id` (see [`Self::set_app_owned`]).
+    pub fn is_app_owned(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.app_owned)
     }
 
     /// Let script in view `id` read the clipboard
