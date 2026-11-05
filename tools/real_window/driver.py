@@ -1038,9 +1038,218 @@ class Driver:
             return self.not_run(c, "the window shows the typed page's green", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the typed page's green", frame[GREEN] > 100000, str(frame))
 
+
+    # ── CH3.A3: the RustKit chrome over the page ───────────────────────────
+
+    TITLE_BAR = 32  # the window's own title bar, above the chrome view
+
+    def a3_open(self, c, env=None):
+        """A fresh app, flag on, on a3_page.html, with the chrome booted and stacked."""
+        env = dict({"HIWAVE_RUSTKIT_CHROME": "1"}, **(env or {}))
+        if not self.open_page(c, "a3_page.html", env=env):
+            return False
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        self.expect(c, "the chrome was stacked over the page",
+                    bool(self.app.wait_log(r"RustKit chrome stacked over the page", 5)))
+        self.fixture.wait("beacon?a3-ready-", 10, self.since)
+        time.sleep(1.5)
+        return True
+
+    def capture(self, c, name):
+        """The window as a PIL image and its scale (pixels per point), or None."""
+        if not self.can_capture:
+            return None
+        path = self.out / ("%s.%s.png" % (c, name))
+        code, win = self.hw("window", self.app.proc.pid)
+        subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)],
+                       capture_output=True)
+        if not path.is_file():
+            return None
+        from PIL import Image
+        img = Image.open(path).convert("RGB")
+        return img, img.width / float(win["w"]), win
+
+    @staticmethod
+    def is_green(rgb, tol=48):
+        return all(abs(rgb[i] - GREEN[i]) <= tol for i in range(3))
+
+    def green_at(self, shot, x, y):
+        img, scale, _ = shot
+        return self.is_green(img.getpixel((int(x * scale), int(y * scale))))
+
+    def page_clicks(self, mark):
+        return [p for p in self.fixture.seen("beacon?a3-click-", mark)]
+
+    def a3_passthrough_click(self):
+        """CH3.A3: a click on the page under the chrome's transparent area reaches the page, not the chrome."""
+        c = "a3_passthrough_click"
+        if not self.a3_open(c):
+            return
+        shot = self.capture(c, "page")
+        if shot is None:
+            self.not_run(c, "the page shows through the chrome view", self.why_not("Screen Recording"))
+        else:
+            img, scale, win = shot
+            # The chrome view is the whole window and on top: the page's green
+            # can only be seen where the chrome is absent.
+            self.expect(c, "the page's green shows through the chrome view (window centre)",
+                        self.green_at(shot, win["w"] / 2, win["h"] * 0.6))
+            self.expect(c, "the toolbar is still the chrome's (not green)",
+                        not self.green_at(shot, win["w"] / 2, self.TITLE_BAR + 50))
+        if not self.can_input:
+            return self.not_run(c, "a click on the page reaches it", self.why_not("Accessibility"))
+        code, win = self.hw("window", self.app.proc.pid)
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("click", self.app.proc.pid, int(win["w"] * 0.5), int(win["h"] * 0.6))
+        self.expect(c, "the page's button heard the click (its beacon)",
+                    self.fixture.wait("beacon?a3-click-", 5, mark), str(self.page_clicks(mark)))
+        time.sleep(0.3)
+        text = self.app.log_text()[log_from:]
+        self.expect(c, "the app logged a content click", "content click (view-local)" in text)
+        self.expect(c, "the chrome did not take the click", "chrome click (view-local)" not in text)
+        # And the chrome over its own area still takes the pointer.
+        log_from = len(self.app.log_text())
+        self.hw("click", self.app.proc.pid, int(win["w"] * 0.55), 100)
+        self.expect(c, "a click on the toolbar still reaches the chrome",
+                    bool(self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)))
+
+    A3_MENU_JS = ("function a3menu() { showPageContextMenu({ target: document.getElementById('urlInput'), "
+                  "preventDefault: function () {}, clientX: 600, clientY: 70 }); } "
+                  "setTimeout(a3menu, 6000); setTimeout(a3menu, 14000);")
+    OVERLAY = (r"RustKit chrome overlays count=([1-9]\d*) rects=\[RegionRect \{ x: ([\d.]+), y: ([\d.]+), "
+               r"width: ([\d.]+), height: ([\d.]+)")
+
+    def a3_dropdown_over_page(self):
+        """CH3.A3: a chrome popup (the page context menu, opened at the toolbar) paints over the page, takes clicks there, and a page click outside closes it."""
+        c = "a3_dropdown_over_page"
+        # The downloads and history panels are placed below the viewport by
+        # their own CSS (top: calc(100% + 6px) of the initial containing
+        # block), so the check opens the chrome's context menu, as a right
+        # click in the toolbar would, 6 s after boot and again at 14 s.
+        ran_at = None
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A3_MENU_JS}):
+            return
+        log_from = len(self.app.log_text())
+        before = self.capture(c, "before")
+        m = self.app.wait_log(self.OVERLAY, 12, log_from)
+        self.expect(c, "the chrome reported the open menu's box", bool(m), m.group(0) if m else "no overlay report")
+        if not m:
+            return
+        x, y, w, h = (float(m.group(i)) for i in range(2, 6))
+        self.expect(c, "the menu reaches below the toolbar, over the page", y + h > 140, "box %s" % [x, y, w, h])
+        time.sleep(1.0)
+        after = self.capture(c, "after")
+        if before is None or after is None:
+            self.not_run(c, "the menu paints over the page", self.why_not("Screen Recording"))
+        else:
+            px, py = x + w / 2, self.TITLE_BAR + (y + h + 104) / 2 + 10
+            self.expect(c, "before: the page is where the menu opens", self.green_at(before, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "after: the menu paints over the page there", not self.green_at(after, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "after: the page still shows beside and below the menu",
+                        self.green_at(after, x + w + 40, py) and self.green_at(after, px, self.TITLE_BAR + y + h + 30))
+            g0 = sum(n for (n, p) in before[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
+            g1 = sum(n for (n, p) in after[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
+            scale = after[1]
+            self.expect(c, "the page did not move: it lost about the menu's area only",
+                        0 < g0 - g1 < w * h * scale * scale * 1.2,
+                        "green px before %d after %d, menu %d px" % (g0, g1, w * h * scale * scale))
+        if not self.can_input:
+            return self.not_run(c, "clicks on and beside the menu", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        # A click on the menu's last row, which lies over the page, is the chrome's.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x + w / 2), int(self.TITLE_BAR + y + h - 18))
+        hit = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "a click on the menu over the page reaches the chrome", bool(hit))
+        time.sleep(0.5)
+        text = self.app.log_text()[log_from:]
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in text and not self.fixture.seen("beacon?a3-click-", mark))
+        self.expect(c, "the menu closed after its item was clicked",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        # Reopened at 14 s: a click on the page outside it reaches the page and closes it.
+        log_from = len(self.app.log_text())
+        m2 = self.app.wait_log(self.OVERLAY, 12, log_from)
+        if not m2:
+            return self.expect(c, "the menu opened again", False)
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        code, win = self.hw("window", pid)
+        self.hw("click", pid, int(win["w"] * 0.5), int(win["h"] * 0.75))
+        self.expect(c, "with the menu open, a click on the page beside it reaches the page",
+                    self.fixture.wait("beacon?a3-click-", 5, mark))
+        self.expect(c, "and closes the menu",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+
+    def a3_cmd_l_from_page(self):
+        """CH3.A3: with the keyboard on the page, Cmd+L focuses the chrome's address bar and typing goes there."""
+        c = "a3_cmd_l_from_page"
+        if not self.a3_open(c):
+            return
+        if not self.can_input:
+            return self.not_run(c, "Cmd+L from the page", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        mark = self.fixture.mark()
+        self.hw("click", pid, int(win["w"] * 0.5), int(win["h"] * 0.6))
+        self.expect(c, "the page took the click", self.fixture.wait("beacon?a3-click-", 5, mark))
+        time.sleep(0.3)
+        mark = self.fixture.mark()
+        self.hw("type", pid, "k")
+        self.expect(c, "the page has the keyboard (its keydown heard k)",
+                    self.fixture.wait("beacon?a3-key-k", 5, mark))
+        log_from = len(self.app.log_text())
+        self.hw("key", pid, 37, "cmd")  # Cmd+L
+        time.sleep(0.6)
+        mark = self.fixture.mark()
+        # The bar holds the page's URL and Cmd+L does not select it yet
+        # (CH2.E12), so the typed text is appended: look for it in the URL.
+        self.hw("type", pid, "zzqa3")
+        self.hw("key", pid, 36)
+        ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"navigate","url":"([^"]*)"', 8, log_from)
+        self.expect(c, "Return in the address bar posted navigate with the typed text",
+                    bool(ipc) and "zzqa3" in ipc.group(1), ipc.group(1) if ipc else "no navigate")
+        self.expect(c, "the page did not hear the typed text", not self.fixture.seen("beacon?a3-key-z", mark))
+
+    def a3_resize(self):
+        """CH3.A3: after a window resize the chrome's hole follows the page: page visible to the corner, clicks pass through."""
+        c = "a3_resize"
+        if not self.a3_open(c):
+            return
+        if not self.can_resize:
+            return self.not_run(c, "resize", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        for (w, h) in [(900, 620), (1500, 900)]:
+            mark = self.fixture.mark()
+            code, out = self.hw("resize", pid, w, h)
+            self.expect(c, "the window took the size %dx%d" % (w, h), code == 0, json.dumps(out)[:200])
+            self.expect(c, "the page heard resize at %dx%d" % (w, h),
+                        self.fixture.wait("beacon?a3-resize-", 5, mark),
+                        str(self.fixture.seen("beacon?a3-resize-", mark)[-1:]))
+            time.sleep(1.2)
+            code, win = self.hw("window", pid)
+            shot = self.capture(c, "at-%dx%d" % (w, h))
+            if shot is None:
+                self.not_run(c, "frames at %dx%d" % (w, h), self.why_not("Screen Recording"))
+            else:
+                self.expect(c, "the page shows to the bottom-right corner at %dx%d" % (w, h),
+                            self.green_at(shot, win["w"] - 12, win["h"] - 12))
+                self.expect(c, "the toolbar is the chrome's at %dx%d" % (w, h),
+                            not self.green_at(shot, win["w"] * 0.5, self.TITLE_BAR + 50))
+            if self.can_input:
+                mark, log_from = self.fixture.mark(), len(self.app.log_text())
+                self.hw("click", pid, int(win["w"] - 40), int(win["h"] - 40))
+                self.expect(c, "a click near the new bottom-right corner reaches the page at %dx%d" % (w, h),
+                            self.fixture.wait("beacon?a3-click-", 5, mark))
+                self.hw("click", pid, int(win["w"] * 0.55), 100)
+                self.expect(c, "a toolbar click reaches the chrome at %dx%d" % (w, h),
+                            bool(self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
-              "a2_chrome_navigate", "a2_chrome_typed_url"]
+              "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
+              "a3_cmd_l_from_page", "a3_resize"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
