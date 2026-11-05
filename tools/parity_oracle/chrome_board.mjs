@@ -64,8 +64,12 @@ async function runActions(page, actions, outDir) {
           for (const s of candidates) {
             const el = await page.$(s);
             if (!el) continue;
-            if (a.type === 'click') await el.click({ timeout: a.timeout_ms || 2000 });
-            else await el.hover({ timeout: a.timeout_ms || 2000 });
+            // force: the deterministic context freezes requestAnimationFrame
+            // (parity-freeze.js), and Playwright's actionability wait needs two
+            // frames to call an element stable — it would time out. The pointer
+            // still goes to the element's centre, as parity-capture's does.
+            if (a.type === 'click') await el.click({ timeout: a.timeout_ms || 2000, force: true });
+            else await el.hover({ timeout: a.timeout_ms || 2000, force: true });
             res.selector_used = s;
             done = true;
             break;

@@ -53,6 +53,24 @@ TOP_N = 3
 NODE_ENV = {**os.environ, "PATH": f"/opt/homebrew/bin:{os.environ.get('PATH', '')}"}
 
 
+# The oracle context freezes transitions, animations and the caret for every
+# campaign capture (baselines/common/parity-freeze.js). The board's states are
+# transitions (sidebar collapse, focus mode, the find modal), so the same
+# freeze goes INTO the composed page, where both engines see it: the board
+# scores end states, not the moment a 0.2 s fade happened to be sampled.
+FREEZE_STYLE = (
+    '<style data-chrome-board="freeze">\n'
+    '  *, *::before, *::after {\n'
+    '    transition: none !important;\n'
+    '    animation: none !important;\n'
+    '    animation-play-state: paused !important;\n'
+    '    caret-color: transparent !important;\n'
+    '    scroll-behavior: auto !important;\n'
+    '  }\n'
+    '</style>'
+)
+
+
 class BoardError(Exception):
     """A board that cannot be run honestly: refused before any capture."""
 
@@ -103,7 +121,7 @@ def compose_page(board: Dict[str, Any], page: str, repo_root: Path, work: Path) 
     if not head:
         raise BoardError(f"{page}: no <head> to put the IPC stub in")
     stub_tag = f"<script data-chrome-board=\"stub\">\n{prelude}\n</script>"
-    html = html[: head.end()] + "\n" + stub_tag + html[head.end():]
+    html = html[: head.end()] + "\n" + stub_tag + "\n" + FREEZE_STYLE + html[head.end():]
     fixture_tag = f"<script data-chrome-board=\"fixture\">\n{fixture}\n</script>\n"
     body_end = html.lower().rfind("</body>")
     if body_end < 0:
@@ -461,6 +479,16 @@ def git_sha(repo_root: Path) -> str:
         return "?"
 
 
+def report_only(board: Dict[str, Any], out: Path, census_path: Optional[Path]) -> int:
+    """The last run's rows, re-reported with another census; captures untouched."""
+    with open(out / "board.json", encoding="utf-8") as handle:
+        board_json = json.load(handle)
+    board_json["census"] = census_red_lists(board, REPO_ROOT, census_path)
+    write_board(out, board_json)
+    print(f"board: re-reported with census {board_json['census'].get('source')} → {out / 'BOARD.md'}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parity-capture", required=True, help="path to a built parity-capture binary")
@@ -469,6 +497,8 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     ap.add_argument("--work", default=str(DEFAULT_WORK), help="captures and composed pages (not for committing)")
     ap.add_argument("--only", help="one page")
     ap.add_argument("--census", help="CSS census JSON (default: newest docs/census/CSS_PROPERTY_CENSUS_*.json)")
+    ap.add_argument("--report-only", action="store_true",
+                    help="rewrite BOARD.md from <out>/board.json with the census named by --census; no captures")
     args = ap.parse_args(argv)
 
     binary = Path(args.parity_capture)
@@ -476,6 +506,8 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     work = Path(args.work)
     try:
         board = load_board(Path(args.board))
+        if args.report_only:
+            return report_only(board, out, Path(args.census) if args.census else latest_census())
         rows = plan(board, REPO_ROOT, work, only=args.only)
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)

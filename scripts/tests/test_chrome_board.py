@@ -94,6 +94,7 @@ class TestChromeBoard(unittest.TestCase):
             fixture = html.index("chrome.renderTabs(")
             self.assertLess(stub, page_script, "the IPC stub precedes the page's script")
             self.assertLess(page_script, fixture, "the fixture follows the page's script")
+            self.assertIn('data-chrome-board="freeze"', html, "both engines see the oracle's transition freeze")
             report = [r for r in rows if r.page == "report"][0].html_path.read_text(encoding="utf-8")
             self.assertNotIn("<!-- Chart.js is injected by Rust before page load -->", report)
 

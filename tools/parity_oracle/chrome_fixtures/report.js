@@ -1,13 +1,17 @@
 // report.js — board state for report.html (CH3.A1): the host's answers to the
 // analytics requests. report.html's sendIpc resolves on a `hiwave-response`
-// event dispatched after the request, so the stub answers on the next timer
-// tick, as the host does from its own thread.
+// event dispatched after the request (its listener is attached right after
+// the post), so the stub answers from a microtask: after the page's current
+// script, before anything else, in both engines. Not a timer: parity-capture's
+// --html-file load runs no timer callbacks after the load, so a host that
+// answered on setTimeout would leave RustKit's report at "Loading analytics
+// data..." forever (chrome board, 2026-11-05).
 (function () {
   var board = window.__hiwaveBoard;
   function respond(data) {
-    setTimeout(function () {
+    Promise.resolve().then(function () {
       window.dispatchEvent(new CustomEvent('hiwave-response', { detail: { type: 'success', data: data } }));
-    }, 0);
+    });
   }
   var today = {
     pages_visited: 42, trackers_blocked: 311, ads_blocked: 97, popups_blocked: 3,
