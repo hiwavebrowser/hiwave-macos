@@ -267,6 +267,9 @@ struct CaptureResult {
     diagnostics: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     diagnostics_path: Option<String>,
+    /// `--save-html`: the page file written.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    saved_html: Option<String>,
     /// `--inspector-out`
     #[serde(skip_serializing_if = "Option::is_none", default)]
     inspector: Option<inspector::InspectorOutput>,
@@ -371,6 +374,7 @@ impl CaptureResult {
             event_summary: None,
             diagnostics: None,
             diagnostics_path: None,
+            saved_html: None,
             inspector: None,
             page_report: None,
             capture_ms: None,
@@ -718,6 +722,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         let _ = engine.add_inspector_sink(view_id, Box::new(sink.clone()));
         *inspector = engine.inspector(view_id);
     }
+    if args.save_html.is_some() {
+        if let Err(e) = engine.keep_sheet_texts(view_id) {
+            return result.failed("error", format!("Failed to keep sheet texts: {:?}", e));
+        }
+    }
 
     // Load: either the fixture HTML, or the live URL through the same
     // navigation path the browser uses (document fetch, then stylesheets,
@@ -846,6 +855,13 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
 
     write_diagnostics(&engine, view_id, args, &mut result);
 
+    if let Some(ref dir) = args.save_html {
+        match save_html(&engine, view_id, Path::new(dir)) {
+            Ok(path) => result.saved_html = Some(path),
+            Err(e) => return result.failed("error", e),
+        }
+    }
+
     if args.inspector_out.is_some() {
         let opts = rustkit_engine::DiagnosticsOptions {
             include_url_query: args.diagnostics_keep_query,
@@ -871,6 +887,15 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
     let _ = engine.destroy_view(view_id);
 
     result
+}
+
+/// `--save-html`: the settled page as `DIR/page.html`.
+fn save_html(engine: &rustkit_engine::Engine, view_id: rustkit_engine::EngineViewId, dir: &Path) -> Result<String, String> {
+    let html = engine.settled_html(view_id).map_err(|e| format!("Failed to save the page: {e:?}"))?;
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    let path = dir.join("page.html");
+    fs::write(&path, html).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// `--diagnose`, `--diagnose-at` and `--dump-diagnostics`: records read from
@@ -2487,7 +2512,7 @@ p.textContent = 'a'; document.body.appendChild(p); window.RAN_SCRIPT_MARK = 1; }
                 .as_ref()
                 .expect("diagnostics")
                 .iter()
-                .map(|r| r["layout_box"]["border_box"].clone())
+                .map(|r| r["box"]["border_box"].clone())
                 .collect()
         };
         let selectors = ["--diagnose", "#early", "--diagnose", "#late", "--diagnose", "#added", "--diagnose", "#ns"];
@@ -2501,9 +2526,9 @@ p.textContent = 'a'; document.body.appendChild(p); window.RAN_SCRIPT_MARK = 1; }
         // The capture itself: both sheets applied, the node inserted, the
         // noscript content not rendered.
         let live_boxes = boxes(&captured);
-        assert_eq!(live_boxes[0]["height"], 33.0, "{live_boxes:?}");
-        assert_eq!(live_boxes[1]["height"], 77.0, "{live_boxes:?}");
-        assert_eq!(live_boxes[2]["height"], 55.0, "{live_boxes:?}");
+        assert_eq!(live_boxes[0]["h"], 33.0, "{live_boxes:?}");
+        assert_eq!(live_boxes[1]["h"], 77.0, "{live_boxes:?}");
+        assert_eq!(live_boxes[2]["h"], 55.0, "{live_boxes:?}");
         // Shape: the inserted node and both sheets' text are in the file,
         // the sheets in place of their links, `url()` made absolute.
         assert!(saved.contains("id=\"added\""), "{saved}");

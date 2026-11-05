@@ -288,6 +288,7 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+mod save_html;
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
@@ -1153,6 +1154,11 @@ struct ViewState {
     /// The document-order index of each entry of `external_stylesheets`,
     /// so a late sheet is inserted where the cascade expects it.
     external_sheet_slots: Vec<usize>,
+    /// T16 (`parity-capture --save-html`): the text of each external sheet
+    /// the view fetched, by URL, as it was parsed (`url()`s absolute). `None`
+    /// unless [`Engine::keep_sheet_texts`] asked for it: nothing is kept, and
+    /// nothing is paid, for a view that will not be saved.
+    sheet_texts: Option<save_html::SheetTexts>,
     /// External classic scripts the page inserted whose fetches are still
     /// out, or finished and not yet run. The fetch is not tied to a turn
     /// deadline. A live turn runs one whose fetch has finished (an
@@ -1272,6 +1278,9 @@ impl ViewState {
         self.live_images.clear();
         self.live_sheets.clear();
         self.external_sheet_slots.clear();
+        if let Some(texts) = &self.sheet_texts {
+            texts.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
         // parked on that document must not fire `load` on this one.
@@ -2860,6 +2869,7 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_texts: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -2971,6 +2981,7 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_texts: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -3099,6 +3110,7 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_texts: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -16715,6 +16727,7 @@ impl Engine {
                     referrer.get_for(url.clone(), RequestDestination::Style),
                     url.clone(),
                     deadline,
+                    view.sheet_texts.clone(),
                 ));
                 async move {
                     match tokio::time::timeout_at(deadline, &mut fetch).await {
@@ -16753,6 +16766,7 @@ impl Engine {
         request: Request,
         url: Url,
         deadline: tokio::time::Instant,
+        keep_text: Option<save_html::SheetTexts>,
     ) -> Option<Stylesheet> {
         info!(%url, "Loading external stylesheet");
         // A sheet still loading at the deadline is recorded over budget.
@@ -16773,7 +16787,12 @@ impl Engine {
                     match text {
                         Ok(css_text) => match {
                             let _style = wgate::bucket(wgate::HoldBucket::Style);
-                            Stylesheet::parse(&absolutize_css_urls(&css_text, &url))
+                            let absolute = absolutize_css_urls(&css_text, &url);
+                            let parsed = Stylesheet::parse(&absolute);
+                            if let (Some(texts), Ok(_)) = (&keep_text, &parsed) {
+                                texts.lock().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), absolute);
+                            }
+                            parsed
                         } {
                             Ok(stylesheet) => {
                                 debug!(rules = stylesheet.rules.len(), %url, "Parsed external stylesheet");
