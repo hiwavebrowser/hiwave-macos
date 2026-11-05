@@ -8500,8 +8500,16 @@ impl Engine {
             .map_err(|e| EngineError::JsError(e.to_string()))?;
             self.apply_host_reentry_limit(&mut js_runtime);
 
-            let bindings =
-                DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            // CH3.A7: the app bridge only for a document the app itself
+            // loads into a view it owns (the chrome, a panel). A URL load
+            // (`load_url_for_nav`) never gets it.
+            let app_owned = self.views.get(&id).is_some_and(|view| view.app_owned);
+            let bindings = if app_owned {
+                DomBindings::new_app_owned(js_runtime)
+            } else {
+                DomBindings::new(js_runtime)
+            }
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
@@ -21380,7 +21388,12 @@ impl Engine {
 
         for (&view_id, view_state) in &self.views {
             if let Some(ref bindings) = view_state.bindings {
-                for ipc_msg in bindings.drain_ipc_queue() {
+                let drained = bindings.drain_ipc_queue();
+                if !view_state.app_owned {
+                    log_ignored_ipc(view_id, &drained);
+                    continue;
+                }
+                for ipc_msg in drained {
                     messages.push((view_id, ipc_msg));
                 }
             }
@@ -21392,11 +21405,19 @@ impl Engine {
     /// What `id`'s page posted with `window.ipc.postMessage` since the
     /// last drain.
     pub fn drain_view_ipc(&self, id: EngineViewId) -> Vec<IpcMessage> {
-        self.views
-            .get(&id)
-            .and_then(|view| view.bindings.as_ref())
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let drained = view
+            .bindings
+            .as_ref()
             .map(|bindings| bindings.drain_ipc_queue())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !view.app_owned {
+            log_ignored_ipc(id, &drained);
+            return Vec::new();
+        }
+        drained
     }
 
     /// Check if any view has pending IPC messages.
@@ -21407,6 +21428,39 @@ impl Engine {
                 .map(|b| b.has_pending_ipc())
                 .unwrap_or(false)
         })
+    }
+}
+
+/// CH3.A7: IPC from a view the app does not own is dropped. The log names
+/// each message's `cmd` (when it is a plain identifier) and its size,
+/// never the body: a page's text must not reach the log.
+fn log_ignored_ipc(view: EngineViewId, messages: &[IpcMessage]) {
+    for message in messages {
+        warn!(
+            ?view,
+            cmd = %ipc_cmd_shape(&message.payload),
+            bytes = message.payload.len(),
+            "IPC from a view the app does not own ignored"
+        );
+    }
+}
+
+/// The `cmd` of an IPC body when it is a short `[a-z0-9_]` name, else a
+/// placeholder; nothing else of the body.
+fn ipc_cmd_shape(payload: &str) -> String {
+    let cmd = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned));
+    match cmd {
+        Some(c)
+            if !c.is_empty()
+                && c.len() <= 48
+                && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') =>
+        {
+            c
+        }
+        Some(_) => "<non-identifier>".to_string(),
+        None => "<no cmd>".to_string(),
     }
 }
 

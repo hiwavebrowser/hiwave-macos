@@ -552,13 +552,17 @@ mod tests {
         let mut loaded = page.load_html(&html);
         let load = wait_recv(&mut loaded, Duration::from_secs(20)).expect("load reply");
         assert!(load.is_ok(), "{load:?}");
+        // CH3.A7: the content view is not app-owned, so the page has no
+        // `window.ipc`: its DOMContentLoaded `loadReport` fails at once and
+        // says so (before, it waited forever on an IPC nothing read).
         let mut seen = page.eval(
-            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display",
+            "typeof Chart + ',' + typeof loadReport + ',' + document.getElementById('loading').style.display \
+             + ',' + /Failed to load analytics data/.test(document.getElementById('error-container').textContent)",
         );
         let seen = wait_recv(&mut seen, Duration::from_secs(10))
             .expect("eval reply")
             .expect("eval");
-        assert!(seen.contains("function,function,block"), "Chart.js, the page script, DOMContentLoaded: {seen}");
+        assert!(seen.contains("function,function,none,true"), "Chart.js, the page script, DOMContentLoaded: {seen}");
     }
 
     #[test]

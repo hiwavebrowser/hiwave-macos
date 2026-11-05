@@ -124,3 +124,37 @@ fn views_are_not_app_owned_by_default() {
     let (engine, id) = page_engine();
     assert!(!engine.is_app_owned(id));
 }
+
+/// What the log keeps of an ignored message: the `cmd` when it is a plain
+/// name, never the rest of the body.
+#[test]
+fn an_ignored_message_is_logged_by_its_cmd_shape_only() {
+    assert_eq!(ipc_cmd_shape(r#"{"cmd":"navigate","url":"https://example.com/?q=secret"}"#), "navigate");
+    assert_eq!(ipc_cmd_shape(r#"{"cmd":"my secret text"}"#), "<non-identifier>");
+    assert_eq!(ipc_cmd_shape("secret text"), "<no cmd>");
+}
+
+/// The engine's own globals (`__rustkit_*`, `__rk*`) still exist in a web
+/// page (its event, timer and history plumbing), but are not enumerable:
+/// `Object.keys(window)` lists none of them, as in Chromium.
+#[test]
+fn a_web_page_enumerates_no_engine_globals_on_window() {
+    let (mut engine, id) = page_engine();
+    engine.load_html(id, "<p>web</p>").unwrap();
+    assert_eq!(
+        js(
+            &mut engine,
+            id,
+            "Object.keys(window).filter(function (n) { return n.indexOf('__') === 0; }).join(' ')"
+        ),
+        ""
+    );
+    assert_eq!(
+        js(
+            &mut engine,
+            id,
+            "Object.getOwnPropertyNames(globalThis).filter(function (n) { return n.indexOf('__rk_') === 0; }).join(' ')"
+        ),
+        ""
+    );
+}
