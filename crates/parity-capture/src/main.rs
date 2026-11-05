@@ -1024,21 +1024,72 @@ fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
 /// page swallowed.
 const ACTIVE_VALUE_JS: &str =
     "(function(){ var el = document.activeElement; return String(el && 'value' in el ? el.value : ''); })()";
-/// A one-shot capture listener: did the engine's key reach the page?
-const KEY_SEEN_ARM_JS: &str = "(function(){ window.__parityCaptureKeySeen = false; \
-    document.addEventListener('keydown', function(){ window.__parityCaptureKeySeen = true; }, { once: true, capture: true }); })()";
-const KEY_SEEN_READ_JS: &str =
-    "(window.__parityCaptureKeySeen ? 'seen' : 'unseen')";
+/// A one-shot capture listener: did the engine's key reach the page? The
+/// listener is kept on `window` so a read for a key the page never heard
+/// can remove it; otherwise it would fire on the next key before that key
+/// was pressed.
+const KEY_SEEN_ARM_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); } \
+    window.__parityCaptureKeySeen = false; \
+    window.__parityCaptureKeyListener = function(){ window.__parityCaptureKeySeen = true; window.__parityCaptureKeyListener = null; }; \
+    document.addEventListener('keydown', window.__parityCaptureKeyListener, { once: true, capture: true }); })()";
+/// Two answers that are not substrings of each other: `execute_script`
+/// returns the value's debug form (`String("key-heard")`), so the read is a
+/// `contains`, and 'unseen' contains 'seen' (#898 R1).
+const KEY_SEEN_READ_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeySeen) return 'key-heard'; \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); \
+        window.__parityCaptureKeyListener = null; } \
+    return 'key-silent'; })()";
 
 /// Did the page hear the engine's key? Reads what `KEY_SEEN_READ_JS` returned.
 fn key_was_seen(read: &str) -> bool {
-    read.contains("seen")
+    read.contains("key-heard")
 }
 
 /// A `selector` field may name several selectors to try in order, comma
-/// separated, as `click` has always read it.
+/// separated, as `click` has always read it. Top-level commas only: a comma
+/// inside `:is(a, b)`, `[title="x, y"]` or quotes belongs to the selector.
 fn split_selector_list(selector: &str) -> Vec<String> {
-    selector.split(',').map(|s| s.trim().to_string()).collect()
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in selector.chars() {
+        match quote {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
 }
 
 fn execute_actions(
@@ -1097,9 +1148,9 @@ fn execute_actions(
             }
             "click" => {
                 if let Some(ref sel) = a.selector {
-                    let selectors: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
+                    let selectors = split_selector_list(sel);
                     let mut clicked = false;
-                    for s in selectors {
+                    for s in selectors.iter().map(String::as_str) {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
                         let query_js = format!(
                             r#"(function() {{
@@ -1172,8 +1223,8 @@ fn execute_actions(
                 // A pointer move to the element's centre and nothing else: the
                 // page sees mousemove/mouseover and `:hover` applies, no press.
                 let point = match (a.selector.as_ref(), a.x, a.y) {
-                    (Some(sel), _, _) => {
-                        let sel_json = serde_json::to_string(sel).unwrap_or_default();
+                    (Some(sel), _, _) => split_selector_list(sel).into_iter().find_map(|s| {
+                        let sel_json = serde_json::to_string(&s).unwrap_or_default();
                         let query_js = format!(
                             r#"(function() {{
                                 var el = document.querySelector({0});
@@ -1189,10 +1240,10 @@ fn execute_actions(
                             .ok()
                             .and_then(|res| parse_point(&res));
                         if found.is_some() {
-                            a_res.selector_used = Some(sel.clone());
+                            a_res.selector_used = Some(s);
                         }
                         found
-                    }
+                    }),
                     (None, Some(x), Some(y)) => Some((x, y)),
                     _ => None,
                 };
@@ -1280,7 +1331,9 @@ fn execute_actions(
                     // not route to the page; sending both made every listener
                     // hear the key twice and a toggle undo itself.
                     let _ = engine.execute_script(view_id, KEY_SEEN_ARM_JS);
-                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt);
+                    // The engine's keyboard has no meta flag; Meta is Ctrl's
+                    // equivalent on macOS and the chrome takes either.
+                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl || meta, shift, alt);
                     let seen = engine
                         .execute_script(view_id, KEY_SEEN_READ_JS)
                         .map(|r| key_was_seen(&r))
@@ -2517,7 +2570,8 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
     #[test]
     fn a_key_the_page_did_not_hear_reads_as_not_seen() {
         assert!(!key_was_seen("String(\"unseen\")"), "'unseen' is not seen");
-        assert!(key_was_seen("String(\"seen\")"));
+        assert!(!key_was_seen("String(\"key-silent\")"), "the silent answer is not seen");
+        assert!(key_was_seen("String(\"key-heard\")"), "the heard answer is seen");
     }
 
     // The one-shot listener armed for a key the page never heard must not
