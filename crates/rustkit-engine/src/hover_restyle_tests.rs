@@ -342,15 +342,21 @@ fn a_press_restyles_the_pressed_card() {
     assert_same(&pressed, &painted_by_a_full_relayout(&mut engine, view), "pressed");
 }
 
+/// Before S22 a sibling combinator anywhere in the sheets sent every
+/// pointer restyle down the full path; now the next card is a root of the
+/// two builds, beside the hovered one.
 #[test]
-fn a_hover_rule_with_a_sibling_combinator_takes_the_full_path() {
+fn a_hover_rule_with_a_sibling_combinator_takes_the_short_path() {
     let (mut engine, view) = cards(".card:hover + .card{background:pink}");
     let at_rest = painted(&engine, view);
     hover(&mut engine, view, card(2));
-    assert_eq!(skipped(&engine, view), 0, "the next card is not under the hovered one");
+    assert_eq!(skipped(&engine, view), 1, "a background is paint, on the next card too");
+    assert!(walked() < 60, "the two builds went into {} nodes: two cards", walked());
     let hovered = painted(&engine, view);
     assert_ne!(hovered.0, at_rest.0);
-    assert_eq!(hovered, painted_by_a_full_relayout(&mut engine, view));
+    assert_same(&hovered, &painted_by_a_full_relayout(&mut engine, view), "the third card and the fourth");
+    hover(&mut engine, view, NOWHERE);
+    assert_eq!(painted(&engine, view), at_rest, "off the cards");
 }
 
 /// A field in a 40px row and, under it, a box whose hover rule changes
@@ -662,4 +668,259 @@ fn a_container_query_hover_skips_siblings_the_walk_cannot_read() {
         assert_ne!(short.0, at_rest.0, "{what}");
         assert_same(&short, &painted_by_a_full_relayout(&mut engine, view), what);
     }
+}
+
+// ---------------------------------------------------------------------------
+// S22 (reddit, Pete's hand test on 209f6a64): each pointer move with a
+// `:hover` change cost a full build and layout (`build_ms=93`, 380 on the
+// logged-in feed), because one `:hover` rule with a sibling combinator, or
+// with the pseudo-class inside `:not()` / `:is()`, anywhere in the sheets
+// sent every pointer restyle down the full path. Chrome restyles the
+// elements whose hover state changed and the elements their matched rules
+// reach, and lays out only what moved.
+// ---------------------------------------------------------------------------
+
+/// A feed of `posts` posts, six elements each, whose sheet reads `:hover`
+/// the way a site's does: on the post and under it, on a button, inside
+/// `:not()`, and left of a sibling combinator.
+fn feed(posts: usize, extra_css: &str) -> String {
+    let mut html = String::from(
+        "<style>body{margin:0;font:14px/18px sans-serif}\
+         #feed{width:600px}\
+         .post{padding:8px;border:1px solid #ccc;border-top-width:0;color:black}\
+         .post:first-child{border-top-width:1px}\
+         .post:hover{background:#f6f7f8}\
+         .post:hover .title{color:#0079d3}\
+         .title{font-weight:bold} .meta{color:#777;font-size:12px}\
+         .btn{display:inline-block;padding:2px 6px;margin-right:4px;background:#eee}\
+         .btn:hover{background:#ddd}\
+         .btn:not(:hover){color:#333}\
+         .post:hover + .post{border-top-color:#f6f7f8}",
+    );
+    html.push_str(extra_css);
+    html.push_str("</style><div id=feed>");
+    for i in 0..posts {
+        html.push_str(&format!(
+            "<div class=post id=p{i}><div class=title>Post {i}: a title that says something</div>\
+             <div class=meta>posted by someone</div>\
+             <div class=actions><span class=btn>up</span><span class=btn>comment</span></div></div>"
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// Beside the feed: the body's own background.
+const BESIDE: (f32, f32) = (700.0, 100.0);
+
+/// The feed in a view tall enough that the first forty posts are in it.
+fn feed_page(posts: usize, extra_css: &str) -> (Engine, EngineViewId) {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 3000,
+        })
+        .expect("view");
+    engine.load_html(view, &feed(posts, extra_css)).expect("load_html");
+    (engine, view)
+}
+
+fn js_string(engine: &mut Engine, view: EngineViewId, js: &str) -> String {
+    let value = engine.execute_script(view, js).expect("script");
+    value
+        .strip_prefix("String(\"")
+        .and_then(|v| v.strip_suffix("\")"))
+        .unwrap_or(&value)
+        .to_string()
+}
+
+/// The viewport centre of the element `js` evaluates to.
+fn centre(engine: &mut Engine, view: EngineViewId, js: &str) -> (f32, f32) {
+    let value = js_string(
+        engine,
+        view,
+        &format!("(function(){{var r=({js}).getBoundingClientRect();return Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)}})()"),
+    );
+    let (x, y) = value.split_once(',').expect("x,y");
+    (x.parse().unwrap(), y.parse().unwrap())
+}
+
+fn computed(engine: &mut Engine, view: EngineViewId, js: &str, property: &str) -> String {
+    js_string(engine, view, &format!("String(getComputedStyle({js}).getPropertyValue('{property}'))"))
+}
+
+fn last_build_ms(engine: &Engine, view: EngineViewId) -> f64 {
+    engine.relayout_stats(view).expect("view").last_build_ms
+}
+
+fn median(mut ms: Vec<f64>) -> f64 {
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ms[ms.len() / 2]
+}
+
+fn boxes(b: &LayoutBox) -> usize {
+    1 + b.children.iter().map(boxes).sum::<usize>()
+}
+
+/// (a) A move onto a post of a 200-post feed (1,200 elements) builds the
+/// post and the one after it, not the page: under 5% of the boxes, and a
+/// small fraction of a full build's time (measured 3.9 ms against 39 ms,
+/// a tenth; gated at 15% for a loaded machine).
+#[test]
+fn a_hover_on_a_long_feed_builds_a_few_of_its_boxes() {
+    let (mut engine, view) = feed_page(200, "");
+    let total = boxes(engine.views.get(&view).unwrap().layout.as_ref().unwrap());
+    assert!(total > 1200, "{total} boxes");
+    let at_rest = painted(&engine, view);
+    let mut full = Vec::new();
+    for _ in 0..5 {
+        engine.relayout(view).expect("relayout");
+        full.push(last_build_ms(&engine, view));
+    }
+    let mut short = Vec::new();
+    let mut walked_most = 0;
+    for n in 2..=11 {
+        let at = centre(&mut engine, view, &format!("document.getElementById('p{n}')"));
+        let before = skipped(&engine, view);
+        hover(&mut engine, view, at);
+        assert_eq!(skipped(&engine, view), before + 1, "post {n}: every hover rule is paint");
+        assert!(walked() * 20 < total, "post {n}: the two builds went into {} of {total} boxes", walked());
+        walked_most = walked_most.max(walked());
+        short.push(last_build_ms(&engine, view));
+    }
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 11 hovered");
+    // (d) Leaving puts everything back.
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(painted(&engine, view), at_rest, "off the feed");
+    let (short, full) = (median(short), median(full));
+    println!(
+        "S22 feed: boxes={total} walked_most={walked_most} build_ms per move {short:.2} (short path) vs {full:.2} (full build)"
+    );
+    assert!(short * 100.0 < full * 15.0, "a move's builds took {short:.2} ms against a full build's {full:.2} ms");
+}
+
+/// (b) `.a:hover .b`: the descendant is restyled, by the short path; so is
+/// a subject the rule names inside `:is()`.
+#[test]
+fn a_hover_rule_on_a_descendant_restyles_it_on_the_short_path() {
+    let (mut engine, view) = feed_page(20, "#feed :is(.title:hover, .meta:hover){text-decoration:underline}");
+    let title = "document.getElementById('p3').querySelector('.title')";
+    assert_eq!(computed(&mut engine, view, title, "color"), "rgb(0, 0, 0)");
+    let at = centre(&mut engine, view, "document.getElementById('p3').querySelector('.meta')");
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 1, "colours and an underline are paint");
+    assert_eq!(computed(&mut engine, view, title, "color"), "rgb(0, 121, 211)", "the post is hovered: its title");
+    let meta = "document.getElementById('p3').querySelector('.meta')";
+    assert!(
+        computed(&mut engine, view, meta, "text-decoration-line").contains("underline"),
+        "the :is() member on the hovered meta line"
+    );
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "meta hovered");
+}
+
+/// (c) `.a:hover + .b` (after #878's sibling walk): the next post is
+/// restyled with the hovered one, on the short path; the post after it is
+/// not touched. `:not(:hover)` on the button flips on the button alone.
+#[test]
+fn a_hover_rule_with_a_sibling_combinator_restyles_the_sibling_on_the_short_path() {
+    let (mut engine, view) = feed_page(20, "");
+    let border = |engine: &mut Engine, n: usize| {
+        computed(engine, view, &format!("document.getElementById('p{n}')"), "border-top-color")
+    };
+    assert_eq!(border(&mut engine, 4), "rgb(204, 204, 204)");
+    let at_rest = painted(&engine, view);
+    let at = centre(&mut engine, view, "document.getElementById('p3')");
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 1, "a border colour is paint");
+    assert_eq!(border(&mut engine, 4), "rgb(246, 247, 248)", "the next post, by `+`");
+    assert_eq!(border(&mut engine, 5), "rgb(204, 204, 204)", "the one after is not reached");
+    assert!(walked() < 60, "the two builds went into {} nodes: two posts, twice", walked());
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 3 hovered");
+
+    // The first button of post 3: `:not(:hover)` gives way on it.
+    let btn = "document.getElementById('p3').querySelector('.btn')";
+    assert_eq!(computed(&mut engine, view, btn, "color"), "rgb(51, 51, 51)");
+    let at = centre(&mut engine, view, btn);
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 2, "the button's colours are paint");
+    assert_eq!(computed(&mut engine, view, btn, "color"), "rgb(0, 0, 0)", "the post's colour shows through");
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "button hovered");
+
+    // (d) Leaving reverts the sibling too.
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(skipped(&engine, view), 3);
+    assert_eq!(border(&mut engine, 4), "rgb(204, 204, 204)");
+    assert_eq!(painted(&engine, view), at_rest, "off the feed");
+}
+
+/// (c) `.a:hover ~ .b .c`: every later post's meta line, on the short path.
+#[test]
+fn a_hover_rule_with_a_general_sibling_combinator_restyles_every_later_sibling() {
+    let (mut engine, view) = feed_page(20, ".post:hover ~ .post .meta{color:red}");
+    let meta = |engine: &mut Engine, n: usize| {
+        computed(engine, view, &format!("document.getElementById('p{n}').querySelector('.meta')"), "color")
+    };
+    let at = centre(&mut engine, view, "document.getElementById('p15')");
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 1, "a colour is paint");
+    assert_eq!(meta(&mut engine, 14), "rgb(119, 119, 119)", "an earlier post");
+    assert_eq!(meta(&mut engine, 16), "rgb(255, 0, 0)", "the next post");
+    assert_eq!(meta(&mut engine, 19), "rgb(255, 0, 0)", "the last post");
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 15 hovered");
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(meta(&mut engine, 19), "rgb(119, 119, 119)", "off the feed");
+}
+
+/// (e) A hover that changes layout (padding) still lays the page out: the
+/// hovered post grows and the posts after it move down, as a full relayout
+/// places them.
+#[test]
+fn a_hover_that_changes_padding_moves_the_following_siblings() {
+    let (mut engine, view) = feed_page(20, ".post:hover{padding:12px}");
+    let top = |engine: &mut Engine, n: usize| -> f32 {
+        js_string(
+            engine,
+            view,
+            &format!("String(document.getElementById('p{n}').getBoundingClientRect().top)"),
+        )
+        .parse()
+        .expect("top")
+    };
+    let (p3, p4, p9) = (top(&mut engine, 3), top(&mut engine, 4), top(&mut engine, 9));
+    let at = centre(&mut engine, view, "document.getElementById('p3')");
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 0, "padding is layout");
+    assert_eq!(top(&mut engine, 3), p3, "the hovered post stays where it is");
+    assert_eq!(top(&mut engine, 4), p4 + 8.0, "the next post moves down by the padding");
+    assert_eq!(top(&mut engine, 9), p9 + 8.0, "and so does every later one");
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 3 hovered");
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(top(&mut engine, 9), p9, "off the feed");
+}
+
+/// Timing, not a check: `--features headless -- --ignored --nocapture
+/// zz_cascade_timing_of_a_feed_hover`. Logs the "Cascade timing" line of
+/// every build (the two of a pointer restyle, then a full one) on the
+/// 200-post feed, to see where a move's build time goes.
+#[test]
+#[ignore = "timing"]
+fn zz_cascade_timing_of_a_feed_hover() {
+    std::env::set_var("RUSTKIT_CASCADE_TIMING", "1");
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("rustkit_engine=info")
+        .with_writer(std::io::stderr)
+        .try_init();
+    let (mut engine, view) = feed_page(200, "");
+    for n in 2..=4 {
+        let at = centre(&mut engine, view, &format!("document.getElementById('p{n}')"));
+        eprintln!("--- move onto post {n}");
+        hover(&mut engine, view, at);
+        eprintln!("build_ms={:.2} walked={}", last_build_ms(&engine, view), walked());
+    }
+    eprintln!("--- full relayout");
+    engine.relayout(view).expect("relayout");
+    eprintln!("build_ms={:.2}", last_build_ms(&engine, view));
 }

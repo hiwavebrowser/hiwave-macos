@@ -244,6 +244,10 @@ pub struct RelayoutStats {
     pub total_ms: f64,
     /// The most recent relayout's first cause.
     pub last: Option<RelayoutCause>,
+    /// The most recent relayout's build stage, in milliseconds: the whole
+    /// tree, or on a pointer restyle's short path the two builds of the
+    /// restyled subtrees (`build_ms` of the relayout log line).
+    pub last_build_ms: f64,
 }
 
 impl RelayoutStats {

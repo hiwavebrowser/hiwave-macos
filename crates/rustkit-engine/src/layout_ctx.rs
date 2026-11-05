@@ -113,12 +113,13 @@ impl LayoutCtx {
         }
         // A selector walk that reads an ancestor's earlier siblings from the
         // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
-        let checked = view
+        let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
+        let pointer = view
             .lay
             .as_ref()
-            .map(|lay| lay.checked_states.borrow().clone())
+            .map(|lay| (lay.hover_chain.borrow().clone(), lay.active_chain.borrow().clone()))
             .unwrap_or_default();
-        let _walk_checked = crate::WalkCheckedScope::enter(Some(checked));
+        let _walk_checked = crate::WalkCheckedScope::enter(Some(checked), Some(pointer));
         let lay = view.lay.clone();
         if let Some(lay) = lay.as_ref() {
             let mut anims = lay.animations.borrow_mut();

@@ -315,6 +315,8 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
+#[cfg(all(test, feature = "headless"))]
+mod nested_body_tests;
 mod inspector_page;
 pub use inspector_page::{
     diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,
@@ -3771,26 +3773,35 @@ impl Engine {
         if reads.anywhere {
             return !changed.is_empty();
         }
-        let Some(document) = view.document.as_ref() else {
-            return false;
+        changed.iter().any(|raw| Self::change_reach(view, reads, *raw).is_some())
+    }
+
+    /// How far a rule can restyle from the element `raw` (raw NodeId)
+    /// gaining or losing the pseudo-class `reads` is of: `None` when no
+    /// compound with it matches the element by tag, classes and id, else
+    /// the most later siblings a matching rule reaches (0: the element and
+    /// what is under it only).
+    fn change_reach(view: &ViewState, reads: &PointerReads, raw: usize) -> Option<usize> {
+        if reads.compounds.is_empty() {
+            return None;
+        }
+        let document = view.document.as_ref()?;
+        let Some(node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+            return Some(0);
         };
-        !reads.compounds.is_empty()
-            && changed.iter().any(|raw| {
-                let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
-                    return true;
-                };
-                let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
-                    return false;
-                };
-                let classes: Vec<String> = attributes
-                    .get("class")
-                    .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
-                    .unwrap_or_default();
-                reads
-                    .compounds
-                    .iter()
-                    .any(|compound| compound.matches(tag_name, &classes, attributes.get("id")))
-            })
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return None;
+        };
+        let classes: Vec<String> = attributes
+            .get("class")
+            .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        reads
+            .compounds
+            .iter()
+            .filter(|filed| filed.compound.matches(tag_name, &classes, attributes.get("id")))
+            .map(|filed| filed.reach)
+            .max()
     }
 
     /// Restyle the view when the hovered or the pressed chain changed, a
@@ -8106,6 +8117,7 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
             view.relayout_stats.record(&causes, tree_reused, took_ms);
+            view.relayout_stats.last_build_ms = stages.build;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -8382,11 +8394,13 @@ impl Engine {
     /// repainted without a layout, `false` when it has to be laid out.
     ///
     /// Only the elements that gained or lost `:hover` or `:active` since
-    /// the last layout, and what is under them, can be styled differently
-    /// (a sheet with the pseudo-class before a sibling combinator, or where
-    /// the index cannot place it, takes the full path). Those subtrees are
-    /// built twice, with the chains the layout was built with and with the
-    /// chains as they are now; nothing else of the page is built. When the
+    /// the last layout, what is under them, and the later siblings a rule
+    /// with a sibling combinator right of the pseudo-class reaches
+    /// (`PointerCompound::reach`) can be styled differently (a sheet that
+    /// reads the pseudo-class where the index cannot place it takes the
+    /// full path). Those subtrees are built twice, with the chains the
+    /// layout was built with and with the chains as they are now; nothing
+    /// else of the page is built. When the
     /// two differ only in paint properties (`ComputedStyle::copy_paint_only`)
     /// layout would give every box the size and place it already has: the
     /// properties are copied onto the laid-out boxes, the display list is
@@ -8419,29 +8433,36 @@ impl Engine {
         if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
             return miss("focus moved");
         }
-        let unplaced = view.lay.rule_reads.borrow().as_ref().is_none_or(|index| {
-            [&index.reads.hover, &index.reads.active]
-                .iter()
-                .any(|reads| reads.anywhere || reads.siblings)
-        });
-        if unplaced {
-            return miss("a rule reads the pseudo-class beyond the element's subtree");
+        let index = view.lay.rule_reads.borrow();
+        let Some(reads) = index.as_ref().map(|index| &index.reads) else {
+            return miss("no rule index");
+        };
+        if reads.hover.anywhere || reads.active.anywhere {
+            return miss("a rule reads the pseudo-class where no compound shows it");
         }
         let before = (with.hover.clone(), with.active.clone());
         let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
         // Of the elements in one chain only, the ones a compound with the
-        // pseudo-class can match: no rule sees the others change.
-        let mut changed: Vec<usize> = Self::in_one_chain(&before.0, &now.0)
+        // pseudo-class can match, each with how many later siblings a rule
+        // can style from it: no rule sees the others change.
+        let mut changed: Vec<(usize, usize)> = Self::in_one_chain(&before.0, &now.0)
             .into_iter()
-            .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.hover, &[*raw]))
+            .filter_map(|raw| Self::change_reach(view, &reads.hover, raw).map(|reach| (raw, reach)))
             .collect();
         changed.extend(
             Self::in_one_chain(&before.1, &now.1)
                 .into_iter()
-                .filter(|raw| Self::chain_change_restyles(view, |reads| &reads.active, &[*raw])),
+                .filter_map(|raw| Self::change_reach(view, &reads.active, raw).map(|reach| (raw, reach))),
         );
+        drop(index);
         changed.sort_unstable();
-        changed.dedup();
+        changed.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(later.1);
+            }
+            same
+        });
         if changed.is_empty() {
             // The pointer went and came back between two layouts.
             if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
@@ -8450,11 +8471,36 @@ impl Engine {
             return Ok(true);
         }
 
-        // The topmost changed elements, and the elements above them: the
+        // The elements to build again: each changed element, and the later
+        // siblings a rule with a sibling combinator right of the
+        // pseudo-class can style from it (`.a:hover + .b`, S22).
+        let mut restyled: Vec<usize> = Vec::with_capacity(changed.len());
+        for (raw, reach) in &changed {
+            restyled.push(*raw);
+            if *reach == 0 {
+                continue;
+            }
+            let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+                return miss("a changed element left the document");
+            };
+            let mut left = *reach;
+            let mut next = node.next_sibling();
+            while let Some(sibling) = next.filter(|_| left > 0) {
+                if sibling.is_element() {
+                    restyled.push(sibling.id.raw());
+                    left -= 1;
+                }
+                next = sibling.next_sibling();
+            }
+        }
+        restyled.sort_unstable();
+        restyled.dedup();
+
+        // The topmost restyled elements, and the elements above them: the
         // build walks down those and builds only what is under a root.
         let body = document.body().map(|body| body.id.raw());
         let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
-        for raw in &changed {
+        for raw in &restyled {
             let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
                 return miss("a changed element left the document");
             };
@@ -8466,10 +8512,10 @@ impl Engine {
             }
             above.insert(*raw, chain);
         }
-        let roots: Vec<usize> = changed
+        let roots: Vec<usize> = restyled
             .iter()
             .copied()
-            .filter(|raw| !above[raw].iter().any(|up| changed.contains(up)))
+            .filter(|raw| !above[raw].iter().any(|up| restyled.contains(up)))
             .collect();
         let mut path = std::collections::HashSet::new();
         for root in &roots {
@@ -8532,14 +8578,21 @@ impl Engine {
         let Some(mut laid) = view.layout.take() else {
             return Ok(false);
         };
-        let placed = roots
+        // A root with no box of its own in either build (`display: none`,
+        // a sibling the reach took in) has nothing laid out to patch.
+        let boxed: Vec<usize> = roots
+            .iter()
+            .copied()
+            .filter(|root| is[root].node_id.is_some() || was[root].node_id.is_some())
+            .collect();
+        let placed = boxed
             .iter()
             .all(|root| box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, &is[root])));
         if !placed {
             view.layout = Some(laid);
             return miss("layout moved boxes");
         }
-        for root in &roots {
+        for root in &boxed {
             if let Some(laid) = box_of_node_mut(Rc::make_mut(&mut laid), *root) {
                 copy_changed_paint(laid, &was[root], &is[root]);
             }
@@ -10754,13 +10807,10 @@ impl layout_ctx::LayoutCtx {
                     .count();
                 let mut preceding_siblings: Vec<SiblingKey> =
                     Vec::with_capacity(child_element_count);
-                // Selector segments are computed here, not in the child, because
-                // `:nth-of-type` needs the full same-tag sibling count.
                 let children_are_foreign =
                     in_foreign_content || Engine::enters_foreign_content(&tag_lower);
-                let child_segments =
-                    Engine::child_selector_segments(&child_nodes, children_are_foreign);
-                // Same-tag totals feed the `-of-type` pseudo-classes.
+                // Same-tag totals feed the `-of-type` pseudo-classes and the
+                // selector segments (`:nth-of-type` needs the full count).
                 let mut type_totals: HashMap<Cow<'_, str>, usize> = HashMap::new();
                 for c in child_nodes.iter() {
                     if let NodeType::Element { tag_name, .. } = &c.node_type {
@@ -10802,10 +10852,45 @@ impl layout_ctx::LayoutCtx {
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
-                    let child_path = Engine::child_selector_path(
-                        selector_path,
-                        child_segments.get(child_index).and_then(|s| s.as_deref()),
-                    );
+                    let restyle = restyle_child(node.id.raw(), child.id.raw());
+                    if restyle == RestyleChild::Skip {
+                        // A restyle build skips what no root is under: the
+                        // child is only recorded as its later siblings'
+                        // earlier one (S22: a feed of hundreds of posts
+                        // paid a selector path, a children clone and a
+                        // placeholder style per post, twice per move).
+                        if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
+                            let t = lower_tag(tag_name);
+                            *type_seen.entry(t.clone()).or_insert(0) += 1;
+                            let live = self.live_attributes(child.id.raw(), &t, attributes);
+                            let child_classes = element_classes(&live);
+                            let state = ElementState::of(&t, &live);
+                            preceding_siblings.push((
+                                t.into_owned(),
+                                child_classes,
+                                attributes.get("id").cloned(),
+                                state,
+                            ));
+                        }
+                        continue;
+                    }
+                    // The child's selector segment, spelled as
+                    // `child_selector_segments` does, for the children that
+                    // are built (S22: not for the hundreds a restyle skips).
+                    let child_path = match &child.node_type {
+                        NodeType::Element { tag_name, attributes, .. } if !selector_path.is_empty() => {
+                            let t = lower_tag(tag_name);
+                            let segment = Engine::selector_segment(
+                                &t,
+                                attributes,
+                                type_seen.get(&*t).copied().unwrap_or(0) + 1,
+                                type_totals.get(&*t).copied().unwrap_or(1),
+                                children_are_foreign || Engine::enters_foreign_content(&t),
+                            );
+                            Engine::child_selector_path(selector_path, Some(&segment))
+                        }
+                        _ => String::new(),
+                    };
                     let child_sib = match &child.node_type {
                         NodeType::Element { tag_name, .. } => {
                             let t = lower_tag(tag_name);
@@ -10820,9 +10905,8 @@ impl layout_ctx::LayoutCtx {
                         }
                         _ => SiblingContext::SOLE,
                     };
-                    let restyle = restyle_child(node.id.raw(), child.id.raw());
                     let mut child_box = match restyle {
-                        RestyleChild::Skip => LayoutBox::new(BoxType::Block, ComputedStyle::new()),
+                        RestyleChild::Skip => unreachable!("skipped above"),
                         _ => self.build_layout_from_parent_style_and_path(
                             child,
                             children_sheets,
@@ -16888,7 +16972,7 @@ impl SelectorMatcher {
         QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
         // An ancestor's earlier siblings are read from the DOM, with this
         // checkedness (`dom_sibling_key`).
-        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()));
+        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()), None);
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -30688,13 +30772,30 @@ mod node_identity_tests {
         assert!(cascades(&mut engine, &|e| { e.mouse_down_at_point(id, 12.0, 140.0); }), "press on #c");
         assert!(cascades(&mut engine, &|e| { e.click_at_point(id, 12.0, 140.0); }), "release on #c");
 
-        // `:hover` where the compounds do not show it: every change counts.
+        // `:hover` inside `:not()`: the compound around it is what can
+        // flip (S22: before, every change counted).
         engine
             .load_html(
                 id,
                 concat!(
                     r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
                     r#"#b:not(:hover) { width: 300px }</style></head><body>"#,
+                    r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
+                ),
+            )
+            .expect("load_html");
+        assert!(!cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 60.0)), "onto #t: #b:not(:hover) cannot flip");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 20.0)), "onto #b");
+        assert!(cascades(&mut engine, &|e| e.mouse_move_at_point(id, 12.0, 100.0)), "#b to #c");
+
+        // `:hover` where the compounds cannot show it (`:has()`): every
+        // change counts.
+        engine
+            .load_html(
+                id,
+                concat!(
+                    r#"<html><head><style>body { margin: 0 } div { height: 40px } "#,
+                    r#"#b:has(:hover) { width: 300px }</style></head><body>"#,
                     r#"<div id="b">b</div><div id="t">t</div><div id="c">c</div></body></html>"#,
                 ),
             )
@@ -36495,6 +36596,11 @@ struct WalkState {
     /// script), by raw NodeId (`dom_sibling_key`). The subject's own
     /// siblings come with their live state from the build.
     checked: HashMap<usize, bool>,
+    /// The hovered and the pressed chain (raw NodeIds): an earlier sibling
+    /// read from the DOM carries [`HOVER_MARK`] / [`ACTIVE_MARK`] among its
+    /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
+    hover: Vec<usize>,
+    active: Vec<usize>,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -36508,15 +36614,20 @@ thread_local! {
 }
 
 /// Sets [`WALK`] for its lifetime, with an empty memo, and puts the
-/// previous state back: around a view's build (its `checked_states`) and a
-/// script query. `None` keeps the enclosing scope's checkedness.
+/// previous state back: around a view's build (its `checked_states` and
+/// its pointer chains) and a script query. `None` keeps the enclosing
+/// scope's checkedness (chains).
 pub(crate) struct WalkCheckedScope(WalkState);
 
 impl WalkCheckedScope {
-    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>) -> Self {
+    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>, pointer: Option<(Vec<usize>, Vec<usize>)>) -> Self {
         WalkCheckedScope(WALK.with(|w| {
             let checked = checked.unwrap_or_else(|| w.borrow().checked.clone());
-            w.replace(WalkState { checked, memo: Some(HashMap::new()) })
+            let (hover, active) = pointer.unwrap_or_else(|| {
+                let w = w.borrow();
+                (w.hover.clone(), w.active.clone())
+            });
+            w.replace(WalkState { checked, hover, active, memo: Some(HashMap::new()) })
         }))
     }
 }
@@ -36562,7 +36673,16 @@ fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
         }
         _ => ElementState::of(&tag, attributes),
     };
-    Some((tag, element_classes(attributes), attributes.get("id").cloned(), state))
+    let mut classes = element_classes(attributes);
+    WALK.with(|w| {
+        let w = w.borrow();
+        for (chain, mark) in [(&w.hover, HOVER_MARK), (&w.active, ACTIVE_MARK)] {
+            if chain.contains(&node.id.raw()) {
+                classes.push(mark.to_string());
+            }
+        }
+    });
+    Some((tag, classes, attributes.get("id").cloned(), state))
 }
 
 /// The nearest element sibling before `from` that `test` (a `~` step's
@@ -38232,18 +38352,32 @@ struct SelectorReads {
 /// a rule's match from.
 #[derive(Default)]
 struct PointerReads {
-    /// The compounds that carry it, without it: an element none of them
-    /// matches by tag, classes and id gains or loses the pseudo-class
-    /// without any rule noticing.
-    compounds: Vec<AncestorCompound>,
-    seen: std::collections::HashSet<(Option<String>, Vec<String>, Option<String>)>,
+    /// The compounds that carry it, without it, each with how far a rule
+    /// reaches past a matching element's later siblings: an element none
+    /// of them matches by tag, classes and id gains or loses the
+    /// pseudo-class without any rule noticing.
+    compounds: Vec<PointerCompound>,
+    /// Index into `compounds` by tag, classes and id.
+    seen: HashMap<PointerCompoundKey, usize>,
     /// Some selector names it where `compounds` does not show it (inside
-    /// `:not()`, `:has()`, or an `:is()` member with a combinator): any
-    /// element may count.
+    /// `:has()`, or a `:not()` / `:is()` member the compound parser leaves
+    /// permissive): any element may count.
     anywhere: bool,
-    /// Some selector has a sibling combinator: the pseudo-class on one
-    /// element may style its later siblings and what is under them.
-    siblings: bool,
+}
+
+/// A [`PointerCompound`]'s tag, classes and id.
+type PointerCompoundKey = (Option<String>, Vec<String>, Option<String>);
+
+/// One compound a pointer pseudo-class is read on (S22, reddit: one
+/// `:hover` rule with a sibling combinator anywhere in the sheets made
+/// every pointer move a full build and layout).
+struct PointerCompound {
+    compound: AncestorCompound,
+    /// How many later siblings of a matching element the rule can style
+    /// (and what is under them): one per `+` right of the compound up to
+    /// the first descendant or child combinator, `usize::MAX` past a `~`,
+    /// 0 for the subject or a compound left of ` ` or `>`.
+    reach: usize,
 }
 
 impl PointerReads {
@@ -38259,41 +38393,118 @@ impl PointerReads {
             if named == 0 {
                 continue;
             }
-            self.siblings |= member.contains(['+', '~']);
             // A `::before` / `::after` rule is matched by its base selector.
             let base = [(":before", "::before"), (":after", "::after")]
                 .into_iter()
                 .find(|(suffix, _)| member.ends_with(suffix))
                 .map_or(member, |(suffix, pseudo)| pseudo_base_selector(member, pseudo, suffix));
             let prepared = SelectorMatcher.prepared_selector(base);
-            let PreparedSelector::Complex { compounds, .. } = &*prepared else {
+            if matches!(&*prepared, PreparedSelector::Never) {
                 // Invalid, or some other pseudo-element's: it styles nothing.
                 continue;
-            };
-            let mut found = 0;
-            for compound in compounds {
-                let marks = compound.classes.iter().filter(|c| *c == mark).count();
-                if marks == 0 {
-                    continue;
-                }
-                found += marks;
-                let classes: Vec<String> = compound
-                    .classes
-                    .iter()
-                    .filter(|c| !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK))
-                    .cloned()
-                    .collect();
-                if self.seen.insert((compound.tag.clone(), classes.clone(), compound.id.clone())) {
-                    self.compounds.push(AncestorCompound {
-                        never: compound.never,
-                        tag: compound.tag.clone(),
-                        classes,
-                        id: compound.id.clone(),
-                        ..Default::default()
-                    });
-                }
             }
+            let found = self.note_prepared(&prepared, mark, 0);
             self.anywhere |= found != named;
+        }
+    }
+
+    /// File every compound of `prepared` that carries `mark`, each with its
+    /// sibling reach plus `outer` (the reach of the compound an `:is()`
+    /// member sits in). Returns how many marks were found: fewer than the
+    /// selector names means one sits where the parser left it permissive.
+    fn note_prepared(&mut self, prepared: &PreparedSelector, mark: &str, outer: usize) -> usize {
+        match prepared {
+            PreparedSelector::Never => 0,
+            PreparedSelector::List(members) => members.iter().map(|m| self.note_prepared(m, mark, outer)).sum(),
+            PreparedSelector::Complex { tokens, compounds, .. } => {
+                let mut found = 0;
+                for (i, compound) in compounds.iter().enumerate() {
+                    // The sibling steps right of this compound, up to the
+                    // first descendant or child one: past that, everything
+                    // the selector names is under the element.
+                    let mut reach = 0usize;
+                    for (_, combinator) in &tokens[i..] {
+                        match combinator.as_str() {
+                            "+" => reach = reach.saturating_add(1),
+                            "~" => {
+                                reach = usize::MAX;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    found += self.note_compound(compound, None, mark, reach.saturating_add(outer));
+                }
+                found
+            }
+        }
+    }
+
+    /// File `compound` (merged with `outer`, the compound a `:not()` or
+    /// `:is()` member sits in) if it carries `mark`, then its members.
+    fn note_compound(
+        &mut self,
+        compound: &AncestorCompound,
+        outer: Option<&AncestorCompound>,
+        mark: &str,
+        reach: usize,
+    ) -> usize {
+        let merged = Self::merged(outer, compound);
+        let own = compound.classes.iter().filter(|c| *c == mark).count();
+        let mut found = own;
+        if own > 0 {
+            self.file(Self::merged(None, &merged), reach);
+        }
+        if compound.none_of.is_empty() && compound.any_of.is_empty() {
+            return found;
+        }
+        // `:not(.a:hover)` flips only on an element `.a` matches;
+        // `:is(.a:hover, .b)` likewise: the element is both compounds.
+        for inner in &compound.none_of {
+            found += self.note_compound(inner, Some(&merged), mark, reach);
+        }
+        for alts in &compound.any_of {
+            for inner in &alts.compounds {
+                found += self.note_compound(inner, Some(&merged), mark, reach);
+            }
+            // A complex member is matched with the element as its subject:
+            // its own compounds read the pseudo-class from there.
+            for complex in &alts.complex {
+                found += self.note_prepared(complex, mark, reach);
+            }
+        }
+        found
+    }
+
+    /// The tag, classes (marks left out) and id of `outer` and `inner`
+    /// together: what an element must be for both to match it.
+    fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
+        let mut classes: Vec<String> = Vec::new();
+        for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
+            if !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK) && !classes.contains(c) {
+                classes.push(c.clone());
+            }
+        }
+        AncestorCompound {
+            never: inner.never || outer.is_some_and(|o| o.never),
+            tag: inner.tag.clone().or_else(|| outer.and_then(|o| o.tag.clone())),
+            classes,
+            id: inner.id.clone().or_else(|| outer.and_then(|o| o.id.clone())),
+            ..Default::default()
+        }
+    }
+
+    fn file(&mut self, compound: AncestorCompound, reach: usize) {
+        let key = (compound.tag.clone(), compound.classes.clone(), compound.id.clone());
+        match self.seen.get(&key) {
+            Some(&at) => {
+                let filed = &mut self.compounds[at].reach;
+                *filed = (*filed).max(reach);
+            }
+            None => {
+                self.seen.insert(key, self.compounds.len());
+                self.compounds.push(PointerCompound { compound, reach });
+            }
         }
     }
 }
