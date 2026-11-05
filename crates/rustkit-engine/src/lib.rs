@@ -1635,7 +1635,6 @@ fn log_script_stopped_folding(source: &str, elapsed_ms: u64, late: Option<std::t
 /// in one hand test.
 const STOP_LINE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
-const STOP_LINES_ON: bool = false; // T20 RED
 /// The stops of one (page, source) since its last line.
 #[derive(Debug, Clone, Copy)]
 struct StopLine {
@@ -1657,9 +1656,6 @@ impl StopLines {
     /// A stop of `source` on `page` at `now`: `Some(n)` writes a line for
     /// it and the `n` stops folded since the last line; `None` folds it.
     fn admit(&mut self, page: usize, source: &str, now: std::time::Instant) -> Option<u32> {
-        if !STOP_LINES_ON {
-            return Some(0); // T20 RED: every stop gets a line
-        }
         // A key quiet for a window has said all it had to (its folded stops
         // go out with its next line, or are counted by the Inspector's
         // grouped row), so the map holds only the sources stopping now.
@@ -1717,6 +1713,7 @@ fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::t
     if !config.interrupt_scripts_at_budget {
         return None;
     }
+    inspector_glue::clear_stop_pending();
     let now = std::time::Instant::now();
     let budget = std::time::Duration::from_millis(config.live_turn_budget_ms);
     bindings.set_execution_deadline(Some(now + budget));
@@ -1745,6 +1742,8 @@ fn end_live_turn(
         return None;
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    // The turn's errors are drained after this; its last is the stop.
+    inspector_glue::stop_pending(source);
     Some(record_stopped_script(
         config, bindings, source, elapsed_ms, late,
     ))

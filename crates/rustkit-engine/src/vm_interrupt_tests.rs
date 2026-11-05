@@ -215,7 +215,9 @@ document.getElementById('p').addEventListener('click', function () { console.log
         [
             "console Log spin @inline#1:2:78",
             "console Warn Script stopped: it ran past 300 ms (event:click)",
-            "script_error Error: the script was interrupted script=event:click rejection=false",
+            // T20: the stop's own error is one engine line, whichever of
+            // the watchdog or the deadline ended the turn.
+            "script_error Error: stopped at the script budget script=event:click rejection=false",
         ],
         "{lines:#?}"
     );

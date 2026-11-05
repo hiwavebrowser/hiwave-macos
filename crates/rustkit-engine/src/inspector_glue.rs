@@ -233,6 +233,51 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
     }
 }
 
+thread_local! {
+    /// The source whose turn the script budget just stopped, until that
+    /// turn's errors are drained or the next turn is armed (T20).
+    static STOP_PENDING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The budget stopped `source`'s turn: its last error report is the stop.
+pub(crate) fn stop_pending(source: &str) {
+    STOP_PENDING.with(|slot| *slot.borrow_mut() = Some(source.to_string()));
+}
+
+/// A new turn is armed: a stop not drained by now has no report.
+pub(crate) fn clear_stop_pending() {
+    STOP_PENDING.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn take_stop_pending(source: &str) -> bool {
+    STOP_PENDING.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let hit = slot.as_deref() == Some(source);
+        if hit {
+            *slot = None;
+        }
+        hit
+    })
+}
+
+/// The error a budget stop ends its script with, as one fixed engine line
+/// whichever way the stop came: no page text, so it is kept as text.
+pub(crate) const BUDGET_STOP_MESSAGE: &str = "stopped at the script budget";
+
+fn budget_stop_error(inspector: &Inspector, source: &str) {
+    inspector.emit_with(|inspector| InspectorEvent::ScriptError {
+        name: "Error".to_string(),
+        message: Some(BUDGET_STOP_MESSAGE.to_string()),
+        location: None,
+        stack: None,
+        unhandled_rejection: false,
+        script: inspector.url_text(source),
+        value: "error".to_string(),
+        message_len: None,
+        inserted_by: None,
+    });
+}
+
 /// The page's error reports since the last drain, under `source`.
 pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source: &str) {
     let mirror = crate::console_log::enabled();
@@ -241,14 +286,22 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
     if !listening && !mirror {
         return;
     }
-    for report in bindings.take_error_reports() {
+    let reports = bindings.take_error_reports();
+    // The stop the budget made in this turn reports as the turn's last
+    // error, in one of two texts (the watchdog's interrupt, or the host
+    // call refused past the deadline). Both are the one engine line, so a
+    // listener stopped again and again is one row with a count (T20).
+    let stop = take_stop_pending(source).then(|| reports.len().checked_sub(1)).flatten();
+    for (i, report) in reports.into_iter().enumerate() {
         if mirror {
             let window = report.frames.first().and_then(|frame| {
                 bindings.script_source(&frame.path).and_then(|text| crate::console_log::excerpt(&text, frame.line, frame.column))
             });
             crate::console_log::page_error(&report, source, window);
         }
-        if listening {
+        if listening && Some(i) == stop {
+            budget_stop_error(inspector, source);
+        } else if listening {
             script_error(inspector, &report, source);
         }
     }

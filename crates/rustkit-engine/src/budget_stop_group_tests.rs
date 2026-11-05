@@ -43,9 +43,11 @@ document.addEventListener('pointermove', function () { for (;;) { document.body.
     runtime().block_on(engine.load_url(view, server.url("/"))).expect("load_url");
     engine.devtools_attach(view, true).unwrap();
     let since = engine.devtools_console(view, 0).unwrap().next_seq;
+    let started = std::time::Instant::now();
     for i in 0..100 {
         engine.mouse_move_at_point(view, 10.0 + (i % 2) as f32, 20.0);
     }
+    let elapsed = started.elapsed();
     let stops = engine
         .script_log(view)
         .unwrap()
@@ -57,11 +59,23 @@ document.addEventListener('pointermove', function () { for (;;) { document.body.
     let console = engine.devtools_console(view, since).unwrap();
     let rows: Vec<(&str, &str, u32)> = console.entries.iter().map(|e| (e.kind, e.level, e.repeat)).collect();
     let errors: Vec<_> = console.entries.iter().filter(|e| e.kind == "script_error").collect();
-    assert_eq!(errors.len(), 1, "one row for the stops: {rows:?}");
-    assert_eq!(errors[0].repeat, 100, "{rows:?}");
-    assert!(errors[0].message.ends_with("[event:pointermove]"), "{}", errors[0].message);
-    assert!(errors[0].first_ms <= errors[0].last_ms);
     let notes = console.entries.iter().filter(|e| e.kind == "console").count();
-    assert_eq!(notes, 1, "one stop note for the burst: {rows:?}");
-    assert_eq!(console.entries.len(), 2, "{rows:?}");
+    // A quiet machine runs the 100 stops well inside one 5 s window: one
+    // note, then one row x100. A loaded one may take longer, and then each
+    // new window's note starts a new row; the stops still add up to 100.
+    let windows = (elapsed.as_secs() / STOP_LINE_EVERY.as_secs()) as usize + 1;
+    assert!((1..=windows).contains(&notes), "one stop note per 5 s window: {rows:?} in {elapsed:?}");
+    assert_eq!(errors.len(), notes, "one row per window: {rows:?}");
+    assert_eq!(errors.iter().map(|e| e.repeat).sum::<u32>(), 100, "{rows:?}");
+    assert_eq!(console.entries.len(), 2 * notes, "{rows:?}");
+    for e in &errors {
+        // One engine line whichever way each stop came (the watchdog's
+        // interrupt or the host call refused past the deadline): before
+        // T20 the two texts split the run into rows.
+        assert_eq!(e.message, "Uncaught Error: stopped at the script budget [event:pointermove]");
+        assert!(e.first_ms <= e.last_ms);
+    }
+    if elapsed < STOP_LINE_EVERY {
+        assert_eq!(rows, [("console", "warn", 1), ("script_error", "error", 100)]);
+    }
 }

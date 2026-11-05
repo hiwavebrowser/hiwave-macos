@@ -178,12 +178,8 @@ impl DevtoolsConsoleEntry {
     }
 }
 
-const COLLAPSE_ON: bool = false; // T20 RED
 /// Folds each run of identical consecutive lines into its first, counted.
 fn collapse_repeats(entries: impl IntoIterator<Item = DevtoolsConsoleEntry>) -> Vec<DevtoolsConsoleEntry> {
-    if !COLLAPSE_ON {
-        return entries.into_iter().collect(); // T20 RED: nothing folded
-    }
     let mut out: Vec<DevtoolsConsoleEntry> = Vec::new();
     for entry in entries {
         match out.last_mut() {
