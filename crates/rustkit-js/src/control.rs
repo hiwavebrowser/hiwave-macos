@@ -190,6 +190,14 @@ impl ViewControl {
         word != 0 && (word == ALL || word == turn)
     }
 
+    /// Whether the word is [`ALL`]: the view runs no script until a new
+    /// document commits (the window asked to leave this one, or stopped
+    /// it). A turn opened now is stopped at its first opcode, so an
+    /// embedder that can tell beforehand does not open one.
+    pub fn stops_all(&self) -> bool {
+        self.interrupt.load(Ordering::Relaxed) == ALL
+    }
+
     /// Navigation `nav_id` has started and its load is in progress. Called
     /// by the page thread only, before the load's first await; ids grow.
     pub fn begin_nav(&self, nav_id: u64) {
