@@ -321,9 +321,247 @@ enum UserEvent {
     InspectorConsoleEval { code: String },
 }
 
+/// The browser chrome's view: the WebKit view today; a RustKit view behind
+/// `HIWAVE_RUSTKIT_CHROME` (CH3.A2). The app only runs script in it and
+/// places it.
+trait ChromeUi {
+    /// Run `js` in the chrome's document, without waiting for its value.
+    fn eval(&self, js: &str) -> Result<(), String>;
+    /// Move and size the chrome view.
+    fn place(&self, rect: Rect);
+    /// Route the keyboard to the chrome (the window's first responder),
+    /// after a shortcut's script focused one of its fields: the address
+    /// bar, find, the command palette. The WebKit view: nothing, as before.
+    fn take_keyboard(&self) {}
+    /// The page column (x, y, width, height, in points) the chrome must
+    /// leave to the page below it, in a `width` x `height` window (CH3.A3).
+    /// The WebKit view: nothing, as before.
+    fn compose(&self, _width: f64, _height: f64, _hole: (f64, f64, f64, f64)) {}
+}
+
+impl ChromeUi for WebView {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        wry::WebView::evaluate_script(self, js).map_err(|e| e.to_string())
+    }
+
+    fn place(&self, rect: Rect) {
+        let _ = wry::WebView::set_bounds(self, rect);
+    }
+}
+
+/// The chrome's view as built: WebKit, or RustKit with
+/// `HIWAVE_RUSTKIT_CHROME=1` (macOS, content thread on; CH3.A2).
+enum ChromeView {
+    WebKit(WebView),
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    RustKit(webview_rustkit::RustKitView),
+}
+
+impl ChromeUi for ChromeView {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        match self {
+            ChromeView::WebKit(view) => view.eval(js),
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
+            ChromeView::RustKit(view) => view.wry_evaluate_script(js),
+        }
+    }
+
+    fn place(&self, rect: Rect) {
+        match self {
+            ChromeView::WebKit(view) => view.place(rect),
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
+            ChromeView::RustKit(view) => {
+                let _ = view.wry_set_bounds(rect);
+            }
+        }
+    }
+
+    fn take_keyboard(&self) {
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if let ChromeView::RustKit(view) = self {
+            view.grab_keyboard();
+        }
+    }
+
+    fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if let ChromeView::RustKit(view) = self {
+            CHROME_COMPOSITION.with(|c| {
+                let mut c = c.borrow_mut();
+                c.size = (width, height);
+                c.hole = Some(rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
+                c.apply(view);
+            });
+        }
+        #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
+        let _ = (width, height, hole);
+    }
+}
+
+/// The RustKit chrome's composition over the page (CH3.A3, see
+/// `trench/chrome/A3-composition.md`): the window's size, the page column
+/// it leaves open, and the boxes of its popups that are showing, as the
+/// chrome document last reported them (`chrome_overlays`).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+#[derive(Default)]
+struct ChromeComposition {
+    size: (f64, f64),
+    hole: Option<rustkit_viewhost::RegionRect>,
+    overlays: Vec<rustkit_viewhost::RegionRect>,
+}
+
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+impl ChromeComposition {
+    fn apply(&self, view: &webview_rustkit::RustKitView) {
+        let region = rustkit_viewhost::compose_region(self.size.0, self.size.1, self.hole, &self.overlays);
+        tracing::debug!(size = ?self.size, hole = ?self.hole, ?region, "RustKit chrome region");
+        rustkit_viewhost::set_raw_view_region(view.host_view_raw(), Some(region));
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+thread_local! {
+    static CHROME_COMPOSITION: std::cell::RefCell<ChromeComposition> =
+        std::cell::RefCell::new(ChromeComposition::default());
+}
+
+/// `{"cmd":"chrome_overlays","rects":[[x,y,w,h],...]}` from the RustKit
+/// chrome: the boxes of its open popups (CH3.A3). Taken before
+/// `handle_chrome_ipc`, which never sees it. True when `body` was one.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn take_chrome_overlays(body: &str, view: &webview_rustkit::RustKitView) -> bool {
+    if !body.contains("\"chrome_overlays\"") {
+        return false;
+    }
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    if msg.get("cmd").and_then(|c| c.as_str()) != Some("chrome_overlays") {
+        return false;
+    }
+    let rects: Vec<rustkit_viewhost::RegionRect> = msg
+        .get("rects")
+        .and_then(|r| r.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|r| {
+                    let n: Vec<f64> = r.as_array()?.iter().filter_map(|v| v.as_f64()).collect();
+                    (n.len() == 4).then(|| rustkit_viewhost::RegionRect::new(n[0], n[1], n[2], n[3]))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    info!(count = rects.len(), ?rects, "RustKit chrome overlays");
+    CHROME_COMPOSITION.with(|c| {
+        let mut c = c.borrow_mut();
+        c.overlays = rects;
+        // Before the first layout there is no size to compose in.
+        if c.hole.is_some() {
+            c.apply(view);
+        }
+    });
+    true
+}
+
+/// Whether the RustKit chrome has a popup open over the page (CH3.A3).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn chrome_has_overlays() -> bool {
+    CHROME_COMPOSITION.with(|c| !c.borrow().overlays.is_empty())
+}
+
+/// Appended to the RustKit chrome's bridge (CH3.A3): reports the boxes of
+/// the chrome's popups that are showing, so the app can let them over the
+/// page and leave the rest of the page column to the page.
+const CHROME_OVERLAY_REPORTER: &str = r#"
+(function () {
+    var SELECTORS = '.downloads-panel, .history-panel, .toolbar-action-panel, .help-panel, '
+        + '.context-menu, .blocklist-dropdown, .find-modal, .command-palette';
+    var last = null;
+    function shown(el) {
+        var cs = window.getComputedStyle ? getComputedStyle(el) : null;
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')) return false;
+        return true;
+    }
+    function report() {
+        var out = [];
+        var list = document.querySelectorAll(SELECTORS);
+        for (var i = 0; i < list.length; i++) {
+            var el = list[i];
+            if (!shown(el)) continue;
+            var r = el.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) continue;
+            out.push([Math.floor(r.left), Math.floor(r.top), Math.ceil(r.width) + 1, Math.ceil(r.height) + 1]);
+        }
+        var s = JSON.stringify(out);
+        if (s === last) return;
+        last = s;
+        window.ipc.postMessage(JSON.stringify({ cmd: 'chrome_overlays', rects: out }));
+    }
+    function soon() { setTimeout(report, 0); setTimeout(report, 250); }
+    window.__hiwaveReportOverlays = report;
+    window.__hiwaveOutsideClick = function () {
+        var target = document.body;
+        var ev;
+        try { ev = new MouseEvent('click', { bubbles: true }); } catch (e) { ev = new Event('click', { bubbles: true }); }
+        target.dispatchEvent(ev);
+        soon();
+    };
+    ['click', 'mouseup', 'keyup'].forEach(function (t) { document.addEventListener(t, soon, true); });
+    setInterval(report, 1000);
+    soon();
+})();
+"#;
+
+/// `HIWAVE_RUSTKIT_CHROME=1`: the chrome is a RustKit view (CH3.A2). Needs
+/// the content thread, which is where a RustKit view's IPC arrives from.
+fn rustkit_chrome_enabled() -> bool {
+    cfg!(all(target_os = "macos", feature = "rustkit"))
+        && std::env::var("HIWAVE_RUSTKIT_CHROME").map(|v| v == "1").unwrap_or(false)
+        && rustkit_engine::content_thread_enabled()
+}
+
+/// The chrome document for a RustKit view: `JS_BRIDGE` (the WebKit view
+/// runs it as an initialization script) as the head's first script, and
+/// the overlay reporter (CH3.A3) as the body's last.
+fn chrome_html_with_bridge() -> String {
+    let script = format!("<script>{}</script>", JS_BRIDGE);
+    // The overlay reporter needs the body, so it runs at the document's end.
+    let reporter = format!("<script>{}</script>", CHROME_OVERLAY_REPORTER);
+    let html = match CHROME_HTML.rfind("</body>") {
+        Some(at) => format!("{}{}{}", &CHROME_HTML[..at], reporter, &CHROME_HTML[at..]),
+        None => format!("{}{}", CHROME_HTML, reporter),
+    };
+    let html = html.as_str();
+    match html.find("<head>") {
+        Some(at) => {
+            let at = at + "<head>".len();
+            format!("{}{}{}", &html[..at], script, &html[at..])
+        }
+        None => format!("{}{}", script, html),
+    }
+}
+
+impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        (**self).eval(js)
+    }
+
+    fn place(&self, rect: Rect) {
+        (**self).place(rect)
+    }
+
+    fn take_keyboard(&self) {
+        (**self).take_keyboard()
+    }
+
+    fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
+        (**self).compose(width, height, hole)
+    }
+}
+
 fn apply_layout(
     window: &tao::window::Window,
-    chrome: &WebView,
+    chrome: &impl ChromeUi,
     #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
     #[cfg(not(target_os = "macos"))] content: &WebView,
     shelf: &WebView,
@@ -371,13 +609,450 @@ fn apply_layout(
         size: LogicalSize::new(content_width, shelf_height).into(),
     };
 
-    let _ = wry::WebView::set_bounds(chrome, chrome_rect);
+    let _ = chrome.place(chrome_rect);
+    // The RustKit chrome is over the page (CH3.A3): it leaves the page
+    // column (page, Inspector, shelf) to the views below it.
+    chrome.compose(width, height, (sidebar_width, chrome_height, content_width, (height - chrome_height).max(0.0)));
     let _ = content.set_bounds(content_rect);
     let _ = inspector.set_bounds(inspector_rect);
     let _ = shelf.set_bounds(shelf_rect);
 }
 
-fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+/// The chrome's `window.ipc` messages, as the WebKit chrome view hands
+/// them over. A function, not the handler closure, so the RustKit chrome
+/// view (CH3.A2) can feed it the same messages.
+fn handle_chrome_ipc(
+    body: &str,
+    chrome_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    chrome_state: &Arc<Mutex<AppState>>,
+) {
+    info!("Chrome IPC: {}", body);
+
+    match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg) => match &msg {
+            IpcMessage::Navigate { url } => {
+                let _ = chrome_proxy.send_event(UserEvent::Navigate(url.clone()));
+            }
+            IpcMessage::GoBack => {
+                let _ = chrome_proxy.send_event(UserEvent::GoBack);
+            }
+            IpcMessage::GoForward => {
+                let _ = chrome_proxy.send_event(UserEvent::GoForward);
+            }
+            IpcMessage::Reload => {
+                let _ = chrome_proxy.send_event(UserEvent::Reload);
+            }
+            IpcMessage::Stop => {
+                let _ = chrome_proxy.send_event(UserEvent::Stop);
+            }
+            IpcMessage::FindInPage {
+                ref query,
+                case_sensitive,
+                ref direction,
+            } => {
+                let _ = chrome_proxy.send_event(UserEvent::FindInPage {
+                    query: query.clone(),
+                    case_sensitive: *case_sensitive,
+                    direction: direction.clone(),
+                });
+            }
+            IpcMessage::CreateTab { ref url } => {
+                let nav_url = url.clone();
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("IPC response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                if let Some(u) = nav_url {
+                    let _ = chrome_proxy.send_event(UserEvent::Navigate(u));
+                } else {
+                    let _ = chrome_proxy.send_event(UserEvent::NewTab);
+                }
+            }
+            IpcMessage::CloseTab { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Close tab response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                // Navigate to the new active tab after closing
+                if let Ok(s) = chrome_state.lock() {
+                    if let Some(active_tab) = s.shell.get_active_tab() {
+                        let url = active_tab.url.to_string();
+                        info!("Navigating to new active tab after close: {}", url);
+                        let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
+                    }
+                }
+            }
+            IpcMessage::ActivateTab { ref id } => {
+                let _tab_id = id.clone();
+                let already_active = chrome_state
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| tab.id.0))
+                    .map(|active_id| id.parse::<u64>().ok() == Some(active_id))
+                    .unwrap_or(false);
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Tab activation response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                if !already_active {
+                    if let ipc::IpcResponse::Success { data } = response {
+                        if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                            info!("Navigating to tab URL: {}", url);
+                            let _ = chrome_proxy
+                                .send_event(UserEvent::Navigate(url.to_string()));
+                        }
+                    }
+                    // Sync zoom level for the newly activated tab
+                    let _ = chrome_proxy.send_event(UserEvent::SyncZoomLevel);
+                }
+            }
+            IpcMessage::ExecuteCommand { ref id } => {
+                let _cmd_id = id.clone();
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Command execution response: {:?}", response);
+
+                if let ipc::IpcResponse::Success { data } = response {
+                    if let Some(result) = data.get("result") {
+                        if let Some(action) = result.get("action").and_then(|a| a.as_str())
+                        {
+                            match action {
+                                "navigate" => {
+                                    if let Some(url) =
+                                        result.get("url").and_then(|u| u.as_str())
+                                    {
+                                        let _ = chrome_proxy.send_event(
+                                            UserEvent::Navigate(url.to_string()),
+                                        );
+                                    } else {
+                                        let _ = chrome_proxy.send_event(UserEvent::NewTab);
+                                    }
+                                }
+                                "reload" => {
+                                    let _ = chrome_proxy.send_event(UserEvent::Reload);
+                                }
+                                "go_back" => {
+                                    let _ = chrome_proxy.send_event(UserEvent::GoBack);
+                                }
+                                "go_forward" => {
+                                    let _ = chrome_proxy.send_event(UserEvent::GoForward);
+                                }
+                                "open_vault" => {
+                                    // Vault is now accessed via Settings
+                                    let _ = chrome_proxy.send_event(UserEvent::OpenSettings);
+                                }
+                                _ => {
+                                    info!("Unhandled action: {}", action);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            IpcMessage::SearchCommands { ref query } => {
+                let _q = query.clone();
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                if let ipc::IpcResponse::Success { data } = response {
+                    let json =
+                        serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
+                    let _ = chrome_proxy.send_event(UserEvent::ShowCommands(json));
+                }
+            }
+            IpcMessage::GetWorkspaces => {
+                let _response = ipc::commands::handle_message(&chrome_state, msg);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+            }
+            IpcMessage::CreateWorkspace { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Create workspace response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+            }
+            IpcMessage::ActivateWorkspace { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Activate workspace response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let active_url = chrome_state
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.shell.get_active_tab().map(|tab| tab.url.to_string()));
+                if let Some(url) = active_url {
+                    let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
+                }
+            }
+            IpcMessage::DeleteWorkspace { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Delete workspace response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+            }
+            IpcMessage::RenameWorkspace { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Rename workspace response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+            }
+            IpcMessage::SetMode { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Set mode response: {:?}", response);
+            }
+            IpcMessage::OpenSettings => {
+                let _ = chrome_proxy.send_event(UserEvent::OpenSettings);
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Open settings response: {:?}", response);
+            }
+            IpcMessage::CloseSettings => {
+                let _ = chrome_proxy.send_event(UserEvent::CloseSettings);
+                info!("Close settings requested");
+            }
+            IpcMessage::GetShelf { scope } => {
+                let scope = ShelfScope::from_option(scope.as_deref());
+                let _response = ipc::commands::handle_message(&chrome_state, msg);
+                let _ = chrome_proxy.send_event(UserEvent::SyncShelf(scope));
+            }
+            IpcMessage::AddToShelf { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Add to shelf response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+            }
+            IpcMessage::RestoreFromShelf { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Restore from shelf response: {:?}", response);
+                let _ =
+                    chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                if let ipc::IpcResponse::Success { data } = response {
+                    if let Some(restored) = data.get("restored") {
+                        if let Some(url) = restored.get("url").and_then(|v| v.as_str()) {
+                            let _ = chrome_proxy
+                                .send_event(UserEvent::Navigate(url.to_string()));
+                        }
+                    }
+                }
+            }
+            IpcMessage::MoveTabToWorkspace { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Move tab response: {:?}", response);
+                let _ =
+                    chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+            }
+            IpcMessage::LockPage { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Lock page response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+            }
+            IpcMessage::UnlockPage { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Unlock page response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
+            }
+            IpcMessage::GetStaleLocks { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get stale locks response: {:?}", response);
+            }
+            IpcMessage::DeleteFromShelf { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Delete from shelf response: {:?}", response);
+            }
+            IpcMessage::UpdateActiveTabUrl { ref url } => {
+                let _ = chrome_proxy.send_event(UserEvent::UpdateActiveTabUrl(url.clone()));
+            }
+            IpcMessage::SetSidebarOpen { open } => {
+                let _ = chrome_proxy.send_event(UserEvent::SetSidebarOpen(*open));
+            }
+            IpcMessage::SetSidebarWidth { width } => {
+                let _ = chrome_proxy.send_event(UserEvent::SetSidebarWidth(*width));
+            }
+            IpcMessage::SetRightPanelOpen { open } => {
+                let _ = chrome_proxy.send_event(UserEvent::SetRightPanelOpen(*open));
+            }
+            IpcMessage::ExpandChrome => {
+                info!("Expanding chrome (large)");
+                let _ = chrome_proxy.send_event(UserEvent::ExpandChrome);
+            }
+            IpcMessage::ExpandChromeSmall => {
+                info!("Expanding chrome (small)");
+                let _ = chrome_proxy.send_event(UserEvent::ExpandChromeSmall);
+            }
+            IpcMessage::CollapseChrome => {
+                info!("Collapsing chrome");
+                let _ = chrome_proxy.send_event(UserEvent::CollapseChrome);
+            }
+            IpcMessage::ExpandShelf => {
+                info!("Expanding shelf for command palette");
+                let _ = chrome_proxy.send_event(UserEvent::ExpandShelf);
+            }
+            IpcMessage::CollapseShelf => {
+                info!("Collapsing shelf");
+                let _ = chrome_proxy.send_event(UserEvent::CollapseShelf);
+            }
+            // Focus mode IPC handlers
+            IpcMessage::EnterFocusMode => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Enter focus mode response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::EnterFocusMode);
+            }
+            IpcMessage::ExitFocusMode => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Exit focus mode response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::ExitFocusMode);
+            }
+            IpcMessage::ToggleFocusMode => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Toggle focus mode response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
+            }
+            IpcMessage::ToggleInspector => {
+                let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
+            }
+            IpcMessage::GetFocusModeStatus => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get focus mode status response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncFocusModeStatus);
+            }
+            IpcMessage::GetFocusModeConfig => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get focus mode config response: {:?}", response);
+            }
+            IpcMessage::SaveFocusModeConfig { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Save focus mode config response: {:?}", response);
+            }
+            IpcMessage::FocusScrollProgress { .. } => {
+                let _ = ipc::commands::handle_message(&chrome_state, msg);
+                // No response needed, just update state
+            }
+            IpcMessage::FocusMediaPlaying { .. } => {
+                let _ = ipc::commands::handle_message(&chrome_state, msg);
+                // No response needed, just update state
+            }
+            IpcMessage::FocusPageLoaded { .. } => {
+                let _ = ipc::commands::handle_message(&chrome_state, msg);
+                // No response needed, just update state
+            }
+            IpcMessage::ShowFocusPeek => {
+                let _ = ipc::commands::handle_message(&chrome_state, msg);
+                let _ = chrome_proxy.send_event(UserEvent::ShowFocusPeek);
+            }
+            IpcMessage::HideFocusPeek => {
+                let _ = ipc::commands::handle_message(&chrome_state, msg);
+                let _ = chrome_proxy.send_event(UserEvent::HideFocusPeek);
+            }
+            IpcMessage::AddToFocusBlocklist { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Add to focus blocklist response: {:?}", response);
+            }
+            IpcMessage::RemoveFromFocusBlocklist { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Remove from focus blocklist response: {:?}", response);
+            }
+            IpcMessage::BlockAndClose { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Block and close response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
+            }
+            IpcMessage::GetBlocklist => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get blocklist response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
+            }
+            IpcMessage::UnblockDomain { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Unblock domain response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
+            }
+            IpcMessage::GetDownloads => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get downloads response: {:?}", response);
+            }
+            IpcMessage::ClearDownloads => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Clear downloads response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncDownloads);
+            }
+            IpcMessage::GetVisitHistory => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Get visit history response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
+            }
+            IpcMessage::ClearVisitHistory => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Clear visit history response: {:?}", response);
+                let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
+            }
+            IpcMessage::OpenDownload { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Open download response: {:?}", response);
+            }
+            IpcMessage::ShowDownloadInFolder { .. } => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("Show download response: {:?}", response);
+            }
+            IpcMessage::GetSidebarWidth => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                if let ipc::IpcResponse::Success { data } = response {
+                    if let Some(width) = data.get("width").and_then(|w| w.as_u64()) {
+                        let open = data
+                            .get("default_open")
+                            .and_then(|o| o.as_bool())
+                            .unwrap_or(false);
+                        // Prefer the state-aware entry point; fall back
+                        // to the width-only one so an older chrome.html
+                        // keeps its previous (closed) behavior instead
+                        // of erroring.
+                        let script = format!(
+                            "if(window.hiwaveChrome && window.hiwaveChrome.setSidebarState) {{ window.hiwaveChrome.setSidebarState({w}, {o}); }} else if(window.hiwaveChrome && window.hiwaveChrome.setSidebarWidth) {{ window.hiwaveChrome.setSidebarWidth({w}); }}",
+                            w = width, o = open
+                        );
+                        let _ = chrome_proxy.send_event(UserEvent::EvaluateScript(script));
+                    }
+                }
+            }
+            IpcMessage::PrintPage => {
+                info!("Print page requested");
+                let _ = chrome_proxy.send_event(UserEvent::PrintPage);
+            }
+            IpcMessage::ZoomIn => {
+                info!("Zoom in requested");
+                let _ = chrome_proxy.send_event(UserEvent::ZoomIn);
+            }
+            IpcMessage::ZoomOut => {
+                info!("Zoom out requested");
+                let _ = chrome_proxy.send_event(UserEvent::ZoomOut);
+            }
+            IpcMessage::ResetZoom => {
+                info!("Reset zoom requested");
+                let _ = chrome_proxy.send_event(UserEvent::ResetZoom);
+            }
+            IpcMessage::TabAudioStateChanged { playing } => {
+                info!("Tab audio state changed: playing={}", playing);
+                let _ = chrome_proxy.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
+            }
+            IpcMessage::ToggleTabMute { ref id } => {
+                info!("Toggle tab mute: {}", id);
+                let _ = chrome_proxy.send_event(UserEvent::ToggleTabMute { id: id.clone() });
+            }
+            IpcMessage::TriggerAutofill => {
+                info!("Trigger autofill requested");
+                let _ = chrome_proxy.send_event(UserEvent::TriggerAutofill);
+            }
+            _ => {
+                let response = ipc::commands::handle_message(&chrome_state, msg);
+                info!("IPC response: {:?}", response);
+            }
+        },
+        Err(e) => {
+            error!("Failed to parse IPC: {}", e);
+        }
+    }
+}
+
+fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
         let workspace_id = s.shell.get_active_workspace().map(|w| w.id);
@@ -408,11 +1083,11 @@ fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderTabs({}); }}",
             tabs_json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_ws_id = s.shell.get_active_workspace().map(|w| w.id);
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -453,11 +1128,11 @@ fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderWorkspaces({}); }}",
             ws_json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let stats = s.shield.get_stats();
         let payload = serde_json::json!({
@@ -470,11 +1145,11 @@ fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateShieldStats({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView, scope: ShelfScope) {
+fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi, scope: ShelfScope) {
     if let Ok(s) = state.lock() {
         let (items, workspace_name) = match scope {
             ShelfScope::All => (s.shelf_items_all(), None),
@@ -495,11 +1170,11 @@ fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView, scope: S
             "if(window.hiwaveChrome) {{ hiwaveChrome.renderShelf({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let domains: Vec<&String> = s.user_blocklist.domains.iter().collect();
         let json = serde_json::to_string(&domains).unwrap_or_else(|_| "[]".to_string());
@@ -507,11 +1182,11 @@ fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateBlocklist({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let payload = serde_json::json!({
             "downloads": s.downloads_snapshot(),
@@ -522,11 +1197,11 @@ fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateDownloads({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
-fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
+fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let history = s.visit_history_snapshot();
         let json = serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string());
@@ -534,7 +1209,7 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &WebView) {
             "if(window.hiwaveChrome) {{ hiwaveChrome.updateHistory({}); }}",
             json
         );
-        let _ = wry::WebView::evaluate_script(chrome, &script);
+        let _ = chrome.eval(&script);
     }
 }
 
@@ -574,6 +1249,198 @@ fn wheel_burst_started() -> bool {
         t.replace(Some(now))
             .is_none_or(|last| now.duration_since(last) > std::time::Duration::from_millis(500))
     })
+}
+
+/// Which RustKit view an input event is for: the page, or the browser's
+/// own chrome (`HIWAVE_RUSTKIT_CHROME=1`, CH3.A2).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputTarget {
+    Page,
+    Chrome,
+}
+
+/// One input event for a RustKit view, as drained from the viewhost queue:
+/// the pointer, the wheel and keys. Lifted from the event loop's drain
+/// (CH3.A2 step 3b) so the RustKit chrome's input takes the same path.
+/// The chrome is not the page: the Inspector's element picker, a link's or
+/// a form's navigation and the keys that scroll are the page's only.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn dispatch_view_input(
+    view: &webview_rustkit::RustKitView,
+    target: InputTarget,
+    kind: rustkit_viewhost::InputKind,
+    devtools: &mut devtools_panel::Devtools,
+    inspector_for_events: &WebView,
+    click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+) {
+    match kind {
+        rustkit_viewhost::InputKind::Pointer(click) => {
+            // The page hears the click before the browser
+            // acts on it: mousedown on press; mouseup and click
+            // on release, and only then focus and the link,
+            // which a listener's preventDefault() cancels. Until
+            // 2026-10-03 no event reached the page at all, so
+            // every script-driven control was dead (Z lane I0).
+            // Where the pointer is, and when it goes: what a
+            // hover menu or a drag listens for.
+            // The Inspector's select-element mode takes the
+            // pointer instead: hover outlines, release picks.
+            if target == InputTarget::Page && devtools.picking() {
+                let at = (click.x as f32, click.y as f32);
+                match click.input {
+                    rustkit_viewhost::PointerInput::Move => {
+                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                    }
+                    rustkit_viewhost::PointerInput::Leave => {
+                        devtools.pick_hover(view, &inspector_for_events, None)
+                    }
+                    rustkit_viewhost::PointerInput::Button if !click.down => {
+                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                    }
+                    rustkit_viewhost::PointerInput::Button => {}
+                }
+                return;
+            }
+            match click.input {
+                rustkit_viewhost::PointerInput::Move => {
+                    view.mouse_move_at_point(click.x as f32, click.y as f32);
+                    return;
+                }
+                rustkit_viewhost::PointerInput::Leave => {
+                    view.mouse_leave();
+                    return;
+                }
+                rustkit_viewhost::PointerInput::Button => {}
+            }
+            if click.down {
+                view.mouse_down_at_point(click.x as f32, click.y as f32);
+                return;
+            }
+            match target {
+                InputTarget::Page => info!(x = click.x, y = click.y, "content click (view-local)"),
+                InputTarget::Chrome => info!(x = click.x, y = click.y, "chrome click (view-local)"),
+            }
+            let outcome = view.click_at_point(click.x as f32, click.y as f32);
+            // ENGINE focus is not APPKIT focus: without making
+            // the content view the window's first responder,
+            // macOS keeps delivering keys to the chrome WebView
+            // — observed live as "text entry goes back up to
+            // the URL bar". Any click on the page takes the
+            // keyboard, focused element or not: the page's own
+            // shortcuts are keys with nothing focused.
+            view.grab_keyboard();
+            if let Some(tag) = outcome.focused {
+                info!(%tag, "Focused content element");
+                view.relayout();
+            }
+            if let Some(url) = outcome.navigate.filter(|_| target == InputTarget::Page) {
+                info!(%url, "Link clicked");
+                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+            }
+        }
+        // The wheel, from the content view's own `scrollWheel:`.
+        // The window-loop MouseWheel arm above stays as it was;
+        // the view consumes the wheel, so only one of the two
+        // fires for an event. Until 2026-10-06 the wheel reached
+        // neither in the built app (hand-test item H6). A burst
+        // arrives summed by the queue, pointer drift between
+        // its steps included, so a drain costs one scroll per
+        // burst and one present (#692), not one per step.
+        rustkit_viewhost::InputKind::Wheel(scroll) => {
+            if wheel_burst_started() {
+                info!(
+                    dx = scroll.dx,
+                    dy = scroll.dy,
+                    "wheel burst started (content view)"
+                );
+            }
+            if view.scroll_at(
+                scroll.x as f32,
+                scroll.y as f32,
+                scroll.dx as f32,
+                scroll.dy as f32,
+            ) {
+                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
+            }
+        }
+        rustkit_viewhost::InputKind::Key(key) => {
+            // Cmd chords are menu shortcuts, except the editing
+            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
+            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
+            // focused link, button or <select> is not one: its
+            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
+            // The engine reads Cmd as its command modifier (`ctrl`).
+            let edit_chord = key.cmd
+                && view.has_focused_text_control()
+                && (matches!(
+                    key.text.to_ascii_lowercase().as_str(),
+                    "a" | "c" | "v" | "x" | "z"
+                ) || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
+            if key.cmd && !edit_chord {
+                return; // menu shortcuts are not text
+            }
+            // Esc leaves select-element mode; the page does not hear it.
+            if target == InputTarget::Page && devtools.picking() && key.mac_keycode == 53 {
+                if !key.up {
+                    devtools.stop_picker(view, &inspector_for_events);
+                }
+                return;
+            }
+            // macOS keyCodes -> the Win32 VK numbering the edit
+            // model speaks. Text keys carry their characters.
+            let (vk, text): (u32, &str) = match key.mac_keycode {
+                51 => (0x08, ""),      // delete (backspace)
+                117 => (0x2E, ""),     // forward delete
+                123 => (0x25, ""),     // left
+                124 => (0x27, ""),     // right
+                115 => (0x24, ""),     // home
+                119 => (0x23, ""),     // end
+                36 | 76 => (0x0D, ""), // return / keypad enter
+                48 => (0x09, ""),      // tab
+                53 => (0x1B, ""),      // escape
+                116 => (0x21, ""),     // page up
+                121 => (0x22, ""),     // page down
+                126 => (0x26, ""),     // up
+                125 => (0x28, ""),     // down
+                _ => (0, key.text.as_str()),
+            };
+            if vk == 0 && text.is_empty() {
+                return;
+            }
+            if key.up {
+                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                return;
+            }
+            if vk == 0x0D && target == InputTarget::Page {
+                if let Some(url) = view.form_submit_url() {
+                    info!(%url, "Form submitted");
+                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                    return;
+                }
+            }
+            let focused = view.has_focused_element();
+            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
+                view.relayout();
+            } else if !focused && target == InputTarget::Page {
+                // Nothing focused and the page did not take
+                // the key: the keys that scroll, as in the
+                // window-level arm (wheel sign convention).
+                let dy: Option<f32> = match (vk, text) {
+                    (0x28, _) => Some(-40.0),
+                    (0x26, _) => Some(40.0),
+                    (0x22, _) | (0, " ") => Some(-600.0),
+                    (0x21, _) => Some(600.0),
+                    (0x23, _) => Some(-f32::MAX),
+                    (0x24, _) => Some(f32::MAX),
+                    _ => None,
+                };
+                if let Some(dy) = dy {
+                    view.scroll_by(0.0, dy);
+                }
+            }
+        }
+    }
 }
 
 // The real-window driver's h6 check reads "wheel burst started" from the app
@@ -836,441 +1703,39 @@ fn main() {
     let chrome_proxy = proxy.clone();
     let settings_proxy_for_handler = proxy.clone();
 
-    let chrome_webview = WebViewBuilder::new()
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let rustkit_chrome = if rustkit_chrome_enabled() {
+        info!("HIWAVE_RUSTKIT_CHROME=1: the chrome is a RustKit view");
+        let bounds = rustkit_viewhost::Bounds::new(
+            chrome_bounds.position.to_logical::<f64>(1.0).x as i32,
+            chrome_bounds.position.to_logical::<f64>(1.0).y as i32,
+            chrome_bounds.size.to_logical::<f64>(1.0).width as u32,
+            chrome_bounds.size.to_logical::<f64>(1.0).height as u32,
+        );
+        let view = webview_rustkit::RustKitView::new(&window, bounds)
+            .expect("Failed to create the RustKit chrome view");
+        view.load_html_internal(&chrome_html_with_bridge())
+            .expect("Failed to load the chrome into RustKit");
+        Some(ChromeView::RustKit(view))
+    } else {
+        None
+    };
+    #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
+    let rustkit_chrome: Option<ChromeView> = None;
+    let chrome_ipc_proxy = proxy.clone();
+    let chrome_ipc_state = Arc::clone(&state);
+
+    let chrome_webview = if let Some(view) = rustkit_chrome { view } else { ChromeView::WebKit(WebViewBuilder::new()
         .with_html(CHROME_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(chrome_bounds)
         .with_ipc_handler(move |message| {
-            let body = message.body();
-            info!("Chrome IPC: {}", body);
-
-            match serde_json::from_str::<IpcMessage>(body) {
-                Ok(msg) => match &msg {
-                    IpcMessage::Navigate { url } => {
-                        let _ = chrome_proxy.send_event(UserEvent::Navigate(url.clone()));
-                    }
-                    IpcMessage::GoBack => {
-                        let _ = chrome_proxy.send_event(UserEvent::GoBack);
-                    }
-                    IpcMessage::GoForward => {
-                        let _ = chrome_proxy.send_event(UserEvent::GoForward);
-                    }
-                    IpcMessage::Reload => {
-                        let _ = chrome_proxy.send_event(UserEvent::Reload);
-                    }
-                    IpcMessage::Stop => {
-                        let _ = chrome_proxy.send_event(UserEvent::Stop);
-                    }
-                    IpcMessage::FindInPage {
-                        ref query,
-                        case_sensitive,
-                        ref direction,
-                    } => {
-                        let _ = chrome_proxy.send_event(UserEvent::FindInPage {
-                            query: query.clone(),
-                            case_sensitive: *case_sensitive,
-                            direction: direction.clone(),
-                        });
-                    }
-                    IpcMessage::CreateTab { ref url } => {
-                        let nav_url = url.clone();
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("IPC response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        if let Some(u) = nav_url {
-                            let _ = chrome_proxy.send_event(UserEvent::Navigate(u));
-                        } else {
-                            let _ = chrome_proxy.send_event(UserEvent::NewTab);
-                        }
-                    }
-                    IpcMessage::CloseTab { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Close tab response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        // Navigate to the new active tab after closing
-                        if let Ok(s) = chrome_state.lock() {
-                            if let Some(active_tab) = s.shell.get_active_tab() {
-                                let url = active_tab.url.to_string();
-                                info!("Navigating to new active tab after close: {}", url);
-                                let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
-                            }
-                        }
-                    }
-                    IpcMessage::ActivateTab { ref id } => {
-                        let _tab_id = id.clone();
-                        let already_active = chrome_state
-                            .lock()
-                            .ok()
-                            .and_then(|s| s.shell.get_active_tab().map(|tab| tab.id.0))
-                            .map(|active_id| id.parse::<u64>().ok() == Some(active_id))
-                            .unwrap_or(false);
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Tab activation response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        if !already_active {
-                            if let ipc::IpcResponse::Success { data } = response {
-                                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                                    info!("Navigating to tab URL: {}", url);
-                                    let _ = chrome_proxy
-                                        .send_event(UserEvent::Navigate(url.to_string()));
-                                }
-                            }
-                            // Sync zoom level for the newly activated tab
-                            let _ = chrome_proxy.send_event(UserEvent::SyncZoomLevel);
-                        }
-                    }
-                    IpcMessage::ExecuteCommand { ref id } => {
-                        let _cmd_id = id.clone();
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Command execution response: {:?}", response);
-
-                        if let ipc::IpcResponse::Success { data } = response {
-                            if let Some(result) = data.get("result") {
-                                if let Some(action) = result.get("action").and_then(|a| a.as_str())
-                                {
-                                    match action {
-                                        "navigate" => {
-                                            if let Some(url) =
-                                                result.get("url").and_then(|u| u.as_str())
-                                            {
-                                                let _ = chrome_proxy.send_event(
-                                                    UserEvent::Navigate(url.to_string()),
-                                                );
-                                            } else {
-                                                let _ = chrome_proxy.send_event(UserEvent::NewTab);
-                                            }
-                                        }
-                                        "reload" => {
-                                            let _ = chrome_proxy.send_event(UserEvent::Reload);
-                                        }
-                                        "go_back" => {
-                                            let _ = chrome_proxy.send_event(UserEvent::GoBack);
-                                        }
-                                        "go_forward" => {
-                                            let _ = chrome_proxy.send_event(UserEvent::GoForward);
-                                        }
-                                        "open_vault" => {
-                                            // Vault is now accessed via Settings
-                                            let _ = chrome_proxy.send_event(UserEvent::OpenSettings);
-                                        }
-                                        _ => {
-                                            info!("Unhandled action: {}", action);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    IpcMessage::SearchCommands { ref query } => {
-                        let _q = query.clone();
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        if let ipc::IpcResponse::Success { data } = response {
-                            let json =
-                                serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
-                            let _ = chrome_proxy.send_event(UserEvent::ShowCommands(json));
-                        }
-                    }
-                    IpcMessage::GetWorkspaces => {
-                        let _response = ipc::commands::handle_message(&chrome_state, msg);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                    }
-                    IpcMessage::CreateWorkspace { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Create workspace response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                    }
-                    IpcMessage::ActivateWorkspace { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Activate workspace response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let active_url = chrome_state
-                            .lock()
-                            .ok()
-                            .and_then(|s| s.shell.get_active_tab().map(|tab| tab.url.to_string()));
-                        if let Some(url) = active_url {
-                            let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
-                        }
-                    }
-                    IpcMessage::DeleteWorkspace { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Delete workspace response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                    }
-                    IpcMessage::RenameWorkspace { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Rename workspace response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                    }
-                    IpcMessage::SetMode { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Set mode response: {:?}", response);
-                    }
-                    IpcMessage::OpenSettings => {
-                        let _ = chrome_proxy.send_event(UserEvent::OpenSettings);
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Open settings response: {:?}", response);
-                    }
-                    IpcMessage::CloseSettings => {
-                        let _ = chrome_proxy.send_event(UserEvent::CloseSettings);
-                        info!("Close settings requested");
-                    }
-                    IpcMessage::GetShelf { scope } => {
-                        let scope = ShelfScope::from_option(scope.as_deref());
-                        let _response = ipc::commands::handle_message(&chrome_state, msg);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncShelf(scope));
-                    }
-                    IpcMessage::AddToShelf { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Add to shelf response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                    }
-                    IpcMessage::RestoreFromShelf { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Restore from shelf response: {:?}", response);
-                        let _ =
-                            chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        if let ipc::IpcResponse::Success { data } = response {
-                            if let Some(restored) = data.get("restored") {
-                                if let Some(url) = restored.get("url").and_then(|v| v.as_str()) {
-                                    let _ = chrome_proxy
-                                        .send_event(UserEvent::Navigate(url.to_string()));
-                                }
-                            }
-                        }
-                    }
-                    IpcMessage::MoveTabToWorkspace { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Move tab response: {:?}", response);
-                        let _ =
-                            chrome_proxy.send_event(UserEvent::SyncShelf(ShelfScope::Workspace));
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                    }
-                    IpcMessage::LockPage { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Lock page response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                    }
-                    IpcMessage::UnlockPage { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Unlock page response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                    }
-                    IpcMessage::GetStaleLocks { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get stale locks response: {:?}", response);
-                    }
-                    IpcMessage::DeleteFromShelf { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Delete from shelf response: {:?}", response);
-                    }
-                    IpcMessage::UpdateActiveTabUrl { ref url } => {
-                        let _ = chrome_proxy.send_event(UserEvent::UpdateActiveTabUrl(url.clone()));
-                    }
-                    IpcMessage::SetSidebarOpen { open } => {
-                        let _ = chrome_proxy.send_event(UserEvent::SetSidebarOpen(*open));
-                    }
-                    IpcMessage::SetSidebarWidth { width } => {
-                        let _ = chrome_proxy.send_event(UserEvent::SetSidebarWidth(*width));
-                    }
-                    IpcMessage::SetRightPanelOpen { open } => {
-                        let _ = chrome_proxy.send_event(UserEvent::SetRightPanelOpen(*open));
-                    }
-                    IpcMessage::ExpandChrome => {
-                        info!("Expanding chrome (large)");
-                        let _ = chrome_proxy.send_event(UserEvent::ExpandChrome);
-                    }
-                    IpcMessage::ExpandChromeSmall => {
-                        info!("Expanding chrome (small)");
-                        let _ = chrome_proxy.send_event(UserEvent::ExpandChromeSmall);
-                    }
-                    IpcMessage::CollapseChrome => {
-                        info!("Collapsing chrome");
-                        let _ = chrome_proxy.send_event(UserEvent::CollapseChrome);
-                    }
-                    IpcMessage::ExpandShelf => {
-                        info!("Expanding shelf for command palette");
-                        let _ = chrome_proxy.send_event(UserEvent::ExpandShelf);
-                    }
-                    IpcMessage::CollapseShelf => {
-                        info!("Collapsing shelf");
-                        let _ = chrome_proxy.send_event(UserEvent::CollapseShelf);
-                    }
-                    // Focus mode IPC handlers
-                    IpcMessage::EnterFocusMode => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Enter focus mode response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::EnterFocusMode);
-                    }
-                    IpcMessage::ExitFocusMode => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Exit focus mode response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::ExitFocusMode);
-                    }
-                    IpcMessage::ToggleFocusMode => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Toggle focus mode response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::ToggleFocusMode);
-                    }
-                    IpcMessage::ToggleInspector => {
-                        let _ = chrome_proxy.send_event(UserEvent::ToggleInspector);
-                    }
-                    IpcMessage::GetFocusModeStatus => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get focus mode status response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncFocusModeStatus);
-                    }
-                    IpcMessage::GetFocusModeConfig => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get focus mode config response: {:?}", response);
-                    }
-                    IpcMessage::SaveFocusModeConfig { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Save focus mode config response: {:?}", response);
-                    }
-                    IpcMessage::FocusScrollProgress { .. } => {
-                        let _ = ipc::commands::handle_message(&chrome_state, msg);
-                        // No response needed, just update state
-                    }
-                    IpcMessage::FocusMediaPlaying { .. } => {
-                        let _ = ipc::commands::handle_message(&chrome_state, msg);
-                        // No response needed, just update state
-                    }
-                    IpcMessage::FocusPageLoaded { .. } => {
-                        let _ = ipc::commands::handle_message(&chrome_state, msg);
-                        // No response needed, just update state
-                    }
-                    IpcMessage::ShowFocusPeek => {
-                        let _ = ipc::commands::handle_message(&chrome_state, msg);
-                        let _ = chrome_proxy.send_event(UserEvent::ShowFocusPeek);
-                    }
-                    IpcMessage::HideFocusPeek => {
-                        let _ = ipc::commands::handle_message(&chrome_state, msg);
-                        let _ = chrome_proxy.send_event(UserEvent::HideFocusPeek);
-                    }
-                    IpcMessage::AddToFocusBlocklist { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Add to focus blocklist response: {:?}", response);
-                    }
-                    IpcMessage::RemoveFromFocusBlocklist { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Remove from focus blocklist response: {:?}", response);
-                    }
-                    IpcMessage::BlockAndClose { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Block and close response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
-                    }
-                    IpcMessage::GetBlocklist => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get blocklist response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
-                    }
-                    IpcMessage::UnblockDomain { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Unblock domain response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncBlocklist);
-                    }
-                    IpcMessage::GetDownloads => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get downloads response: {:?}", response);
-                    }
-                    IpcMessage::ClearDownloads => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Clear downloads response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncDownloads);
-                    }
-                    IpcMessage::GetVisitHistory => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Get visit history response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
-                    }
-                    IpcMessage::ClearVisitHistory => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Clear visit history response: {:?}", response);
-                        let _ = chrome_proxy.send_event(UserEvent::SyncHistory);
-                    }
-                    IpcMessage::OpenDownload { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Open download response: {:?}", response);
-                    }
-                    IpcMessage::ShowDownloadInFolder { .. } => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("Show download response: {:?}", response);
-                    }
-                    IpcMessage::GetSidebarWidth => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        if let ipc::IpcResponse::Success { data } = response {
-                            if let Some(width) = data.get("width").and_then(|w| w.as_u64()) {
-                                let open = data
-                                    .get("default_open")
-                                    .and_then(|o| o.as_bool())
-                                    .unwrap_or(false);
-                                // Prefer the state-aware entry point; fall back
-                                // to the width-only one so an older chrome.html
-                                // keeps its previous (closed) behavior instead
-                                // of erroring.
-                                let script = format!(
-                                    "if(window.hiwaveChrome && window.hiwaveChrome.setSidebarState) {{ window.hiwaveChrome.setSidebarState({w}, {o}); }} else if(window.hiwaveChrome && window.hiwaveChrome.setSidebarWidth) {{ window.hiwaveChrome.setSidebarWidth({w}); }}",
-                                    w = width, o = open
-                                );
-                                let _ = chrome_proxy.send_event(UserEvent::EvaluateScript(script));
-                            }
-                        }
-                    }
-                    IpcMessage::PrintPage => {
-                        info!("Print page requested");
-                        let _ = chrome_proxy.send_event(UserEvent::PrintPage);
-                    }
-                    IpcMessage::ZoomIn => {
-                        info!("Zoom in requested");
-                        let _ = chrome_proxy.send_event(UserEvent::ZoomIn);
-                    }
-                    IpcMessage::ZoomOut => {
-                        info!("Zoom out requested");
-                        let _ = chrome_proxy.send_event(UserEvent::ZoomOut);
-                    }
-                    IpcMessage::ResetZoom => {
-                        info!("Reset zoom requested");
-                        let _ = chrome_proxy.send_event(UserEvent::ResetZoom);
-                    }
-                    IpcMessage::TabAudioStateChanged { playing } => {
-                        info!("Tab audio state changed: playing={}", playing);
-                        let _ = chrome_proxy.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
-                    }
-                    IpcMessage::ToggleTabMute { ref id } => {
-                        info!("Toggle tab mute: {}", id);
-                        let _ = chrome_proxy.send_event(UserEvent::ToggleTabMute { id: id.clone() });
-                    }
-                    IpcMessage::TriggerAutofill => {
-                        info!("Trigger autofill requested");
-                        let _ = chrome_proxy.send_event(UserEvent::TriggerAutofill);
-                    }
-                    _ => {
-                        let response = ipc::commands::handle_message(&chrome_state, msg);
-                        info!("IPC response: {:?}", response);
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to parse IPC: {}", e);
-                }
-            }
+            handle_chrome_ipc(message.body(), &chrome_proxy, &chrome_state)
         })
         .build_as_child(&window)
-        .expect("Failed to create HiWave WebView");
+        .expect("Failed to create HiWave WebView")) };
 
     info!(
         "HiWave WebView created (full window, top bar height {}px)",
@@ -2020,7 +2485,7 @@ fn main() {
     // Check for debug mode via environment variable
     if std::env::var("HIWAVE_DEBUG").map(|v| v == "1").unwrap_or(false) {
         info!("Debug mode enabled via HIWAVE_DEBUG=1");
-        let _ = wry::WebView::evaluate_script(&chrome_webview, "window.enableDebugMode && window.enableDebugMode();");
+        let _ = chrome_webview.eval("window.enableDebugMode && window.enableDebugMode();");
     }
 
     // Store WebViews in Arcs for event loop access
@@ -2034,6 +2499,22 @@ fn main() {
 
     let chrome_for_events = Arc::clone(&chrome_webview);
     let content_for_events = Arc::clone(&content_webview);
+    // CH3.A3: the RustKit chrome goes over the page, so its popups can
+    // overlap it; it leaves the page column to the page (its region) until
+    // the first layout sets it again.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    if let (ChromeView::RustKit(ref chrome), UnifiedContentWebView::RustKit(ref page)) =
+        (&*chrome_webview, &*content_webview)
+    {
+        rustkit_viewhost::raise_raw_view_above(chrome.host_view_raw(), page.host_view_raw());
+        let scale = window.scale_factor();
+        let size = window.inner_size();
+        let (width, height) = (size.width as f64 / scale, size.height as f64 / scale);
+        let at = content_bounds.position.to_logical::<f64>(1.0);
+        let page_size = content_bounds.size.to_logical::<f64>(1.0);
+        chrome_webview.compose(width, height, (at.x, at.y, page_size.width, (height - at.y).max(0.0)));
+        info!("RustKit chrome stacked over the page");
+    }
     let shelf_for_events = Arc::clone(&shelf_webview);
     let inspector_for_events = Arc::clone(&inspector_webview);
     let state_for_events = Arc::clone(&state);
@@ -2103,6 +2584,12 @@ fn main() {
     // selection and the console's place.
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
     let mut devtools = devtools_panel::Devtools::default();
+    // A script for the RustKit chrome once it has booted (real-window checks).
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let mut chrome_boot_eval = rustkit_chrome_enabled()
+        .then(|| std::env::var("HIWAVE_RUSTKIT_CHROME_EVAL").ok())
+        .flatten()
+        .filter(|js| !js.is_empty());
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2403,6 +2890,55 @@ fn main() {
             }
             #[cfg(all(target_os = "macos", feature = "rustkit"))]
             Event::MainEventsCleared => {
+                // The RustKit chrome (CH3.A2): its page's messages go to the
+                // chrome's command handler, as the WebKit view's do.
+                let chrome_input = if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
+                    chrome.process_events();
+                    // Its input (step 3b), through the page's dispatch. Taken
+                    // whatever the page is doing: the address bar answers
+                    // while a page loads, as the WebKit chrome did. The
+                    // page's own input stays queued for it.
+                    if let Some(id) = chrome.input_view() {
+                        for event in rustkit_viewhost::drain_input_view(id) {
+                            chrome.note_input(event.at, event.seq);
+                            dispatch_view_input(
+                                chrome,
+                                InputTarget::Chrome,
+                                event.kind,
+                                &mut devtools,
+                                &inspector_for_events,
+                                &click_proxy,
+                            );
+                        }
+                    }
+                    let mut booted = false;
+                    for body in chrome.take_ipc_messages() {
+                        if take_chrome_overlays(&body, chrome) {
+                            continue;
+                        }
+                        info!(%body, "RustKit chrome IPC");
+                        handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
+                        booted = true;
+                    }
+                    // `HIWAVE_RUSTKIT_CHROME_EVAL`: a script for the chrome
+                    // once its own script has posted, for the real-window
+                    // checks that cannot type (a2_chrome_navigate).
+                    if booted {
+                        if let Some(js) = chrome_boot_eval.take() {
+                            info!(%js, "RustKit chrome: running HIWAVE_RUSTKIT_CHROME_EVAL");
+                            let _ = chrome.wry_evaluate_script(&js);
+                        }
+                    }
+                    // A link or `location` in the chrome would replace the
+                    // chrome's own document; nothing follows it.
+                    if let Some((url, _)) = chrome.take_script_navigation() {
+                        warn!(%url, "RustKit chrome navigation not followed");
+                    }
+                    chrome.render();
+                    chrome.input_view()
+                } else {
+                    None
+                };
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     // A load in progress gets one slice, then the loop goes back to
@@ -2431,162 +2967,38 @@ fn main() {
                         // it. An event for a view that is gone was dropped by the
                         // viewhost when the view was destroyed.
                         for event in rustkit_viewhost::drain_input() {
+                            // Input on the RustKit chrome's view is not the
+                            // page's: the chrome's arm above takes it, and
+                            // one that came since goes to the chrome too.
+                            if chrome_input == Some(event.view) {
+                                if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
+                                    chrome.note_input(event.at, event.seq);
+                                    dispatch_view_input(
+                                        chrome,
+                                        InputTarget::Chrome,
+                                        event.kind,
+                                        &mut devtools,
+                                        &inspector_for_events,
+                                        &click_proxy,
+                                    );
+                                }
+                                continue;
+                            }
                             // When it arrived, for the W-gate's input-to-present
                             // figure (logged by the presenter with the frame).
                             view.note_input(event.at, event.seq);
-                            match event.kind {
-                            rustkit_viewhost::InputKind::Pointer(click) => {
-                            // The page hears the click before the browser
-                            // acts on it: mousedown on press; mouseup and click
-                            // on release, and only then focus and the link,
-                            // which a listener's preventDefault() cancels. Until
-                            // 2026-10-03 no event reached the page at all, so
-                            // every script-driven control was dead (Z lane I0).
-                            // Where the pointer is, and when it goes: what a
-                            // hover menu or a drag listens for.
-                            // The Inspector's select-element mode takes the
-                            // pointer instead: hover outlines, release picks.
-                            if devtools.picking() {
-                                let at = (click.x as f32, click.y as f32);
-                                match click.input {
-                                    rustkit_viewhost::PointerInput::Move => {
-                                        devtools.pick_hover(view, &inspector_for_events, Some(at))
-                                    }
-                                    rustkit_viewhost::PointerInput::Leave => {
-                                        devtools.pick_hover(view, &inspector_for_events, None)
-                                    }
-                                    rustkit_viewhost::PointerInput::Button if !click.down => {
-                                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
-                                    }
-                                    rustkit_viewhost::PointerInput::Button => {}
-                                }
-                                continue;
-                            }
-                            match click.input {
-                                rustkit_viewhost::PointerInput::Move => {
-                                    view.mouse_move_at_point(click.x as f32, click.y as f32);
-                                    continue;
-                                }
-                                rustkit_viewhost::PointerInput::Leave => {
-                                    view.mouse_leave();
-                                    continue;
-                                }
-                                rustkit_viewhost::PointerInput::Button => {}
-                            }
-                            if click.down {
-                                view.mouse_down_at_point(click.x as f32, click.y as f32);
-                                continue;
-                            }
-                            info!(x = click.x, y = click.y, "content click (view-local)");
-                            let outcome = view.click_at_point(click.x as f32, click.y as f32);
-                            // ENGINE focus is not APPKIT focus: without making
-                            // the content view the window's first responder,
-                            // macOS keeps delivering keys to the chrome WebView
-                            // — observed live as "text entry goes back up to
-                            // the URL bar". Any click on the page takes the
-                            // keyboard, focused element or not: the page's own
-                            // shortcuts are keys with nothing focused.
-                            view.grab_keyboard();
-                            if let Some(tag) = outcome.focused {
-                                info!(%tag, "Focused content element");
-                                view.relayout();
-                            }
-                            if let Some(url) = outcome.navigate {
-                                info!(%url, "Link clicked");
-                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                            }
-                            }
-                            // The wheel, from the content view's own `scrollWheel:`.
-                            // The window-loop MouseWheel arm above stays as it was;
-                            // the view consumes the wheel, so only one of the two
-                            // fires for an event. Until 2026-10-06 the wheel reached
-                            // neither in the built app (hand-test item H6). A burst
-                            // arrives summed by the queue, pointer drift between
-                            // its steps included, so a drain costs one scroll per
-                            // burst and one present (#692), not one per step.
-                            rustkit_viewhost::InputKind::Wheel(scroll) => {
-                            if wheel_burst_started() {
-                                info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
-                            }
-                            if view.scroll_at(scroll.x as f32, scroll.y as f32, scroll.dx as f32, scroll.dy as f32) {
-                                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                            }
-                            }
-                            rustkit_viewhost::InputKind::Key(key) => {
-                            // Cmd chords are menu shortcuts, except the editing
-                            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
-                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
-                            // focused link, button or <select> is not one: its
-                            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
-                            // The engine reads Cmd as its command modifier (`ctrl`).
-                            let edit_chord = key.cmd
-                                && view.has_focused_text_control()
-                                && (matches!(key.text.to_ascii_lowercase().as_str(), "a" | "c" | "v" | "x" | "z")
-                                    || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
-                            if key.cmd && !edit_chord {
-                                continue; // menu shortcuts are not text
-                            }
-                            // Esc leaves select-element mode; the page does not hear it.
-                            if devtools.picking() && key.mac_keycode == 53 {
-                                if !key.up {
-                                    devtools.stop_picker(view, &inspector_for_events);
-                                }
-                                continue;
-                            }
-                            // macOS keyCodes -> the Win32 VK numbering the edit
-                            // model speaks. Text keys carry their characters.
-                            let (vk, text): (u32, &str) = match key.mac_keycode {
-                                51 => (0x08, ""),   // delete (backspace)
-                                117 => (0x2E, ""),  // forward delete
-                                123 => (0x25, ""),  // left
-                                124 => (0x27, ""),  // right
-                                115 => (0x24, ""),  // home
-                                119 => (0x23, ""),  // end
-                                36 | 76 => (0x0D, ""), // return / keypad enter
-                                48 => (0x09, ""),   // tab
-                                53 => (0x1B, ""),   // escape
-                                116 => (0x21, ""),  // page up
-                                121 => (0x22, ""),  // page down
-                                126 => (0x26, ""),  // up
-                                125 => (0x28, ""),  // down
-                                _ => (0, key.text.as_str()),
-                            };
-                            if vk == 0 && text.is_empty() {
-                                continue;
-                            }
-                            if key.up {
-                                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
-                                continue;
-                            }
-                            if vk == 0x0D {
-                                if let Some(url) = view.form_submit_url() {
-                                    info!(%url, "Form submitted");
-                                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                                    continue;
+                            // CH3.A3: a press on the page while a chrome
+                            // popup is open is a click outside it, which
+                            // the chrome's own handler closes it on.
+                            if let rustkit_viewhost::InputKind::Pointer(click) = &event.kind {
+                                if click.down
+                                    && click.input == rustkit_viewhost::PointerInput::Button
+                                    && chrome_has_overlays()
+                                {
+                                    let _ = chrome_for_events.eval("window.__hiwaveOutsideClick && __hiwaveOutsideClick();");
                                 }
                             }
-                            let focused = view.has_focused_element();
-                            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
-                                view.relayout();
-                            } else if !focused {
-                                // Nothing focused and the page did not take
-                                // the key: the keys that scroll, as in the
-                                // window-level arm (wheel sign convention).
-                                let dy: Option<f32> = match (vk, text) {
-                                    (0x28, _) => Some(-40.0),
-                                    (0x26, _) => Some(40.0),
-                                    (0x22, _) | (0, " ") => Some(-600.0),
-                                    (0x21, _) => Some(600.0),
-                                    (0x23, _) => Some(-f32::MAX),
-                                    (0x24, _) => Some(f32::MAX),
-                                    _ => None,
-                                };
-                                if let Some(dy) = dy {
-                                    view.scroll_by(0.0, dy);
-                                }
-                            }
-                            }
-                            }
+                            dispatch_view_input(view, InputTarget::Page, event.kind, &mut devtools, &inspector_for_events, &click_proxy);
                         }
                         // Timers that came due, late fetches, and what the
                         // input above started; then sleep until the next timer.
@@ -2652,8 +3064,7 @@ fn main() {
                             load_new_tab(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_new_tab(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                             );
                             sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                         } else if is_about_url(&url) {
@@ -2670,8 +3081,7 @@ fn main() {
                             load_about_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_about_page(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
                             );
                         } else if is_report_url(&url) {
                             // Update tab URL BEFORE loading the report page
@@ -2686,8 +3096,7 @@ fn main() {
                             load_report_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_report_page(&*content_for_events);
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                                "if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
+                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
                             );
                         } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
                             // Skip about: URLs (about:blank, about:srcdoc, etc.)
@@ -2729,7 +3138,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
                                 full_url.replace("'", "\\'")
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
                     }
                     UserEvent::GoBack => {
@@ -2826,8 +3235,7 @@ fn main() {
                         load_new_tab(&*content_for_events);
                         #[cfg(not(target_os = "macos"))]
                         load_new_tab(&*content_for_events);
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                            "if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
+                        let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
                         );
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
@@ -2851,7 +3259,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
                                 title.replace("'", "\\'")
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
                             sync_workspaces_to_chrome(&state_for_events, &chrome_for_events);
@@ -2862,7 +3270,7 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
                             url.replace("'", "\\'")
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
                     UserEvent::UpdateActiveTabUrl(url) => {
@@ -2891,14 +3299,14 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.updateNavState({}, {}); }}",
                             can_go_back, can_go_forward
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::SetLoading(loading) => {
                         let script = format!(
                             "if(window.hiwaveChrome) {{ hiwaveChrome.setLoading({}); }}",
                             loading
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                         // Inject context menu handler and audio detector when page finishes loading.
                         // Not on macOS: the content view is RustKit, which never
                         // ran these WebKit helpers (no SetLoading was sent there
@@ -2959,7 +3367,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateFindState({}); }}",
                                 json
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &update_script);
+                            let _ = chrome_for_events.eval(&update_script);
                         }
                     }
                     UserEvent::FindInPage { query, case_sensitive, direction } => {
@@ -3005,6 +3413,11 @@ fn main() {
                             json
                         );
                         let _ = shelf_for_events.evaluate_script(&script);
+                    }
+                    UserEvent::ExpandChrome if rustkit_chrome_enabled() => {
+                        // CH3.A3: the RustKit chrome is over the page; its
+                        // panel is drawn over it and reports its box.
+                        let _ = chrome_for_events.eval("window.__hiwaveReportOverlays && __hiwaveReportOverlays();");
                     }
                     UserEvent::ExpandChrome => {
                         // Update chrome height
@@ -3222,7 +3635,7 @@ fn main() {
                             "if(window.hiwaveChrome) {{ hiwaveChrome.setFocusMode(true, {}); }}",
                             config
                         );
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::ExitFocusMode => {
                         info!("Exiting focus mode - restoring chrome UI");
@@ -3245,8 +3658,7 @@ fn main() {
                             right_sidebar_open,
                         );
                         // Notify chrome of focus mode state - call setFocusMode immediately
-                        match wry::WebView::evaluate_script(&chrome_for_events, 
-                            "if(window.hiwaveChrome) { \
+                        match chrome_for_events.eval("if(window.hiwaveChrome) { \
                                 console.log('[Focus] ExitFocusMode event - calling setFocusMode(false)'); \
                                 hiwaveChrome.setFocusMode(false); \
                             } else { \
@@ -3283,7 +3695,7 @@ fn main() {
                                 "if(window.hiwaveChrome) {{ hiwaveChrome.updateFocusModeStatus({}); }}",
                                 status
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
                     }
                     UserEvent::ShowFocusPeek => {
@@ -4386,7 +4798,7 @@ fn main() {
                                 "if(window.hiwave && window.hiwave.updateDecay) {{ window.hiwave.updateDecay({}); }}",
                                 update_json
                             );
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                            let _ = chrome_for_events.eval(&script);
                         }
 
                         // Auto-shelf expired tabs in Zen mode
@@ -4424,7 +4836,7 @@ fn main() {
                         }
                     }
                     UserEvent::EvaluateScript(script) => {
-                        let _ = wry::WebView::evaluate_script(&chrome_for_events, &script);
+                        let _ = chrome_for_events.eval(&script);
                     }
                     UserEvent::EvaluateContentScript(script) => {
                         let _ = content_for_events.evaluate_script(&script);
@@ -4453,7 +4865,7 @@ fn main() {
                                 zoom_pct
                             ));
                             // Notify chrome of zoom level change
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4470,7 +4882,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4487,7 +4899,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4503,7 +4915,7 @@ fn main() {
                                 "document.body.style.zoom = '{}%';",
                                 zoom_pct
                             ));
-                            let _ = wry::WebView::evaluate_script(&chrome_for_events, &format!(
+                            let _ = chrome_for_events.eval(&format!(
                                 "if(window.updateZoomIndicator) {{ updateZoomIndicator({}); }}",
                                 level
                             ));
@@ -4833,31 +5245,33 @@ fn main() {
             match id {
                 id if id == menu_ids::NEW_TAB => {
                     // Send create_tab IPC to properly create tab in shell and sync
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "sendIpc('create_tab');");
+                    let _ = chrome_for_events.eval("sendIpc('create_tab');");
                 }
                 id if id == menu_ids::CLOSE_TAB => {
                     // Send close_tab command to Chrome
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, 
-                        "const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }"
+                    let _ = chrome_for_events.eval("const activeTab = document.querySelector('.tab.active'); if(activeTab) { sendIpc('close_tab', { id: activeTab.dataset.id }); }"
                     );
                 }
                 id if id == menu_ids::RELOAD => {
                     let _ = proxy.send_event(UserEvent::Reload);
                 }
                 id if id == menu_ids::FIND => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "openFindModal(); performFind('reset');");
+                    let _ = chrome_for_events.eval("openFindModal(); performFind('reset');");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::COMMAND_PALETTE => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "openCommandPalette();");
+                    let _ = chrome_for_events.eval("openCommandPalette();");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::HISTORY => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "toggleHistoryPanel();");
+                    let _ = chrome_for_events.eval("toggleHistoryPanel();");
                 }
                 id if id == menu_ids::TOGGLE_SIDEBAR => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "toggleSidebar();");
+                    let _ = chrome_for_events.eval("toggleSidebar();");
                 }
                 id if id == menu_ids::FOCUS_URL => {
-                    let _ = wry::WebView::evaluate_script(&chrome_for_events, "document.getElementById('urlInput').focus(); document.getElementById('urlInput').select();");
+                    let _ = chrome_for_events.eval("document.getElementById('urlInput').focus(); document.getElementById('urlInput').select();");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::GO_BACK => {
                     let _ = proxy.send_event(UserEvent::GoBack);

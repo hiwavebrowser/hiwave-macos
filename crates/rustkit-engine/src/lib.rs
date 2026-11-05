@@ -290,6 +290,10 @@ mod relayout_cause;
 mod selection;
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod button_background_tests;
+#[cfg(test)]
+mod text_transform_layout_tests;
 mod drag_drop;
 mod select_popup;
 mod select_popup_engine;
@@ -416,6 +420,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod load_geometry_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -434,6 +440,8 @@ mod computed_read;
 mod computed_read_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
+#[cfg(test)]
+mod flex_hidden_gap_tests;
 #[cfg(test)]
 mod flex_column_definite_height_tests;
 #[cfg(test)]
@@ -553,6 +561,8 @@ mod grid_auto_repeat_percent_tests;
 mod nested_layout_matrix_tests;
 #[cfg(test)]
 mod zero_font_size_tests;
+#[cfg(test)]
+mod zero_size_overflow_clip_tests;
 #[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -9249,7 +9259,7 @@ impl Engine {
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
         // Elements only: an anonymous block around collapsed white space is
         // no box at all (and no flex item) in Chrome.
-        if !matches!(child.box_type, BoxType::Block) {
+        if !matches!(child.box_type, BoxType::Block) || child.style.display == rustkit_css::Display::None {
             return false;
         }
         let s = &child.style;
@@ -10795,7 +10805,13 @@ impl layout_ctx::LayoutCtx {
                     let mut styled = LayoutBox::new(BoxType::Block, style);
                     styled.node_id = Some(node.id.raw());
                     self.note_boxless_style(&styled, parent_style);
-                    return LayoutBox::new(BoxType::Block, ComputedStyle::new());
+                    // The empty box handed back says `none`, so the parent
+                    // drops it even where an empty block is kept (a flex or
+                    // grid item): CH2.B10, chrome.html's hidden panels were
+                    // flex items and took a `gap` each.
+                    let mut none = ComputedStyle::new();
+                    none.display = rustkit_css::Display::None;
+                    return LayoutBox::new(BoxType::Block, none);
                 }
 
                 // CSS Display 3 §2.7 / CSS 2.1 §9.7: flex and grid items,
@@ -11109,6 +11125,19 @@ impl layout_ctx::LayoutCtx {
 
                     if !has_element_children {
                         let text = node.text_content();
+                        // CSS Text §4.1.1: under a collapsing white-space
+                        // (a button's UA `normal`), runs collapse to one
+                        // space and the line's leading/trailing spaces go.
+                        // The raw text kept template indentation: chrome.html's
+                        // expander measured ~113px for "▾" (Chromium 15.7).
+                        let text = match style.white_space {
+                            rustkit_css::WhiteSpace::Normal
+                            | rustkit_css::WhiteSpace::Nowrap
+                            | rustkit_css::WhiteSpace::PreLine => {
+                                text.split_whitespace().collect::<Vec<_>>().join(" ")
+                            }
+                            _ => text,
+                        };
                         let label = if text.trim().is_empty() {
                             // No text, no children: an empty button renders
                             // empty, not a placeholder word.
@@ -11943,6 +11972,23 @@ impl layout_ctx::LayoutCtx {
                         s
                     };
                     let len = content.chars().count();
+                    // CH2.B6: text-transform changes the text that is laid
+                    // out, not only the text that is painted. Paint applied
+                    // it alone, so an uppercase title measured its lowercase
+                    // width (chrome.html section titles ~15px narrow at 12px;
+                    // the next sibling started inside the painted glyphs).
+                    // Kept raw when the transform changes the character count
+                    // (ß → SS): `text_sources` maps run characters 1:1 to the
+                    // DOM text, and paint still transforms such a run.
+                    let content = {
+                        let transformed =
+                            rustkit_layout::apply_text_transform(&content, style.text_transform);
+                        if transformed.chars().count() == len {
+                            transformed
+                        } else {
+                            content
+                        }
+                    };
                     let mut run = LayoutBox::new(BoxType::Text(content), style);
                     // Where the run's characters came from: mouse
                     // selection and selection paint map through it.
@@ -12673,12 +12719,23 @@ impl layout_ctx::LayoutCtx {
                 // unreachable from the day it landed. The compiler said so on
                 // every build ("unreachable pattern"); nobody read it until
                 // Pete asked what the warnings meant.
-                if tag_name != "button" {
-                    // input/select/textarea get Chrome's white field; buttons
-                    // are ButtonFace-themed, not white — leave them to the
-                    // themed paint path.
-                    style.background_color = rustkit_css::Color::WHITE;
-                }
+                // Buttons (and input type=button/submit/reset, which lay out
+                // as buttons) get ButtonFace, Chrome's rgb(239, 239, 239);
+                // input/select/textarea get the white field. Both live here
+                // so an author `background: transparent` overrides them
+                // (CH2.B3: the painter used to put ButtonFace back under
+                // every alpha-0 button, so chrome.html's transparent
+                // expanders and lock buttons painted as white blocks).
+                let button_like = tag_name == "button"
+                    || (tag_name == "input"
+                        && attributes.get("type").is_some_and(|t| {
+                            matches!(t.to_ascii_lowercase().as_str(), "button" | "submit" | "reset")
+                        }));
+                style.background_color = if button_like {
+                    rustkit_css::Color::new(239, 239, 239, 1.0)
+                } else {
+                    rustkit_css::Color::WHITE
+                };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }

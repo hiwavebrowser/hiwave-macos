@@ -857,6 +857,11 @@ impl WindowSurface {
         self.presenter.raw_view(self.viewhost_id)
     }
 
+    /// The host view's id, which tags the input its NSView records.
+    pub fn viewhost_id(&self) -> ViewId {
+        self.viewhost_id
+    }
+
     /// The NSView and the GPU surface take `bounds` now. The page lays out
     /// when it receives the same bounds as a message. The surface is new,
     /// so the caller draws the commit already published again: anchored at

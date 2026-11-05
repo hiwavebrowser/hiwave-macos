@@ -170,6 +170,16 @@ impl InputQueue {
         taken
     }
 
+    /// Take the recorded events of one view, in arrival order, leaving the
+    /// other views' events queued: the RustKit chrome's input is handled
+    /// while the page's waits for its load (CH3.A2 step 3b).
+    pub fn drain_view(&mut self, view: ViewId) -> Vec<InputEvent> {
+        let (taken, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.events).into_iter().partition(|e| e.view == view);
+        self.events = kept;
+        taken
+    }
+
     /// Drop what is queued for `view`: the view is gone, and an input
     /// recorded for it must not reach whatever view comes next.
     pub fn retire(&mut self, view: ViewId) {
@@ -200,6 +210,11 @@ pub fn drain_input() -> Vec<InputEvent> {
 /// The recorded events of one kind, leaving the others queued.
 pub fn drain_input_kind(keep: impl Fn(&InputKind) -> bool) -> Vec<InputEvent> {
     INPUT.lock().map(|mut q| q.drain_kind(keep)).unwrap_or_default()
+}
+
+/// The recorded events of one view, leaving the other views' queued.
+pub fn drain_input_view(view: ViewId) -> Vec<InputEvent> {
+    INPUT.lock().map(|mut q| q.drain_view(view)).unwrap_or_default()
 }
 
 /// Drop what is queued for a view that no longer exists.
@@ -275,6 +290,24 @@ mod tests {
         q.push(view, click(false));
         q.push(view, key("b"));
         assert_eq!(kinds(&q.drain()), ["key", "pointer", "pointer", "key"]);
+    }
+
+    #[test]
+    fn draining_one_view_leaves_the_other_views_input_queued() {
+        let chrome = ViewId::new();
+        let page = ViewId::new();
+        let mut q = InputQueue::default();
+        q.push(page, click(true));
+        q.push(chrome, key("a"));
+        q.push(page, click(false));
+        q.push(chrome, key("b"));
+        let taken = q.drain_view(chrome);
+        assert_eq!(kinds(&taken), ["key", "key"], "the chrome's two keys");
+        assert!(taken.iter().all(|e| e.view == chrome));
+        assert!(taken[0].seq < taken[1].seq, "in arrival order");
+        let rest = q.drain();
+        assert_eq!(kinds(&rest), ["pointer", "pointer"], "the page's click is still queued");
+        assert!(rest.iter().all(|e| e.view == page));
     }
 
     #[test]
