@@ -18042,6 +18042,39 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
+        // The end of the identifier starting at `i` (CSS Syntax §4.3.11),
+        // escapes included: Tailwind's `.dark\:bg-black:is(.dark *)` is one
+        // class then `:is()`, (0,2,0) in Chrome, not a class, a `:bg-black`
+        // pseudo-class and `:is()`. An escape is `\` and either 1-6 hex
+        // digits plus one optional whitespace, or any other character.
+        fn skip_css_ident(chars: &[char], mut i: usize) -> usize {
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' {
+                    i += 1;
+                    if i >= chars.len() {
+                        break;
+                    }
+                    if chars[i].is_ascii_hexdigit() {
+                        let start = i;
+                        while i < chars.len() && i - start < 6 && chars[i].is_ascii_hexdigit() {
+                            i += 1;
+                        }
+                        if i < chars.len() && chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else if c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            i
+        }
+
         // A selector list takes the specificity of its most specific member.
         // Split on top-level commas only: `:is( a, b)` is one member, and a
         // plain `split(',')` cut it into `:is( a` and `b)`. Then the
@@ -18076,24 +18109,12 @@ impl SelectorMatcher {
                     '#' => {
                         // ID selector
                         ids += 1;
-                        i += 1;
-                        // Skip the ID name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '.' => {
                         // Class selector
                         classes += 1;
-                        i += 1;
-                        // Skip the class name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '[' => {
                         // Attribute selector
@@ -18206,13 +18227,7 @@ impl SelectorMatcher {
                     _ if chars[i].is_alphabetic() || chars[i] == '_' => {
                         // Type selector (element name)
                         tags += 1;
-                        i += 1;
-                        // Skip the element name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     _ => {
                         i += 1;
