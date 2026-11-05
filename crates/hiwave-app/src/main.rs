@@ -357,6 +357,12 @@ enum ChromeView {
     RustKit(webview_rustkit::RustKitView),
 }
 
+/// A panel's view: the shelf, the Inspector and the settings window (CH3.A4).
+/// The same two backends as the chrome, and the app does the same two
+/// things with them: run script in them and place them. Only the chrome
+/// has a composition region (`compose`); a panel has none.
+type PanelView = ChromeView;
+
 impl ChromeUi for ChromeView {
     fn eval(&self, js: &str) -> Result<(), String> {
         match self {
@@ -564,8 +570,8 @@ fn apply_layout(
     chrome: &impl ChromeUi,
     #[cfg(target_os = "macos")] content: &UnifiedContentWebView,
     #[cfg(not(target_os = "macos"))] content: &WebView,
-    shelf: &WebView,
-    inspector: &WebView,
+    shelf: &impl ChromeUi,
+    inspector: &impl ChromeUi,
     chrome_height: f64,
     shelf_height: f64,
     inspector_height: f64,
@@ -614,8 +620,8 @@ fn apply_layout(
     // column (page, Inspector, shelf) to the views below it.
     chrome.compose(width, height, (sidebar_width, chrome_height, content_width, (height - chrome_height).max(0.0)));
     let _ = content.set_bounds(content_rect);
-    let _ = inspector.set_bounds(inspector_rect);
-    let _ = shelf.set_bounds(shelf_rect);
+    inspector.place(inspector_rect);
+    shelf.place(shelf_rect);
 }
 
 /// The chrome's `window.ipc` messages, as the WebKit chrome view hands
@@ -1514,7 +1520,7 @@ fn dispatch_view_input(
     target: InputTarget,
     kind: rustkit_viewhost::InputKind,
     devtools: &mut devtools_panel::Devtools,
-    inspector_for_events: &WebView,
+    inspector_for_events: &dyn ChromeUi,
     click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
 ) {
     match kind {
@@ -1533,13 +1539,13 @@ fn dispatch_view_input(
                 let at = (click.x as f32, click.y as f32);
                 match click.input {
                     rustkit_viewhost::PointerInput::Move => {
-                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                        devtools.pick_hover(view, inspector_for_events, Some(at))
                     }
                     rustkit_viewhost::PointerInput::Leave => {
-                        devtools.pick_hover(view, &inspector_for_events, None)
+                        devtools.pick_hover(view, inspector_for_events, None)
                     }
                     rustkit_viewhost::PointerInput::Button if !click.down => {
-                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                        devtools.pick_at(view, inspector_for_events, at.0, at.1)
                     }
                     rustkit_viewhost::PointerInput::Button => {}
                 }
@@ -1626,7 +1632,7 @@ fn dispatch_view_input(
             // Esc leaves select-element mode; the page does not hear it.
             if target == InputTarget::Page && devtools.picking() && key.mac_keycode == 53 {
                 if !key.up {
-                    devtools.stop_picker(view, &inspector_for_events);
+                    devtools.stop_picker(view, inspector_for_events);
                 }
                 return;
             }
@@ -2475,7 +2481,7 @@ fn main() {
     // === SHELF WEBVIEW (created third, at bottom) ===
     let shelf_proxy = proxy.clone();
     let shelf_state = Arc::clone(&state);
-    let shelf_webview = WebViewBuilder::new()
+    let shelf_webview = PanelView::WebKit(WebViewBuilder::new()
         .with_html(SHELF_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -2488,14 +2494,14 @@ fn main() {
             handle_shelf_find_ipc(message.body(), &content_proxy5)
         })
         .build_as_child(&window)
-        .expect("Failed to create Shelf WebView");
+        .expect("Failed to create Shelf WebView"));
 
     info!("Shelf WebView created (bottom, starts hidden)");
 
     // === INSPECTOR WEBVIEW (created fourth, between content and shelf) ===
     let inspector_proxy = proxy.clone();
     let _inspector_state = Arc::clone(&state);
-    let inspector_webview = WebViewBuilder::new()
+    let inspector_webview = PanelView::WebKit(WebViewBuilder::new()
         .with_html(INSPECTOR_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -2505,7 +2511,7 @@ fn main() {
             handle_inspector_ipc(message.body(), &inspector_proxy)
         })
         .build_as_child(&window)
-        .expect("Failed to create Inspector WebView");
+        .expect("Failed to create Inspector WebView"));
 
     info!("Inspector WebView created (between content and shelf, starts hidden)");
     info!("Four-WebView architecture initialized");
@@ -2657,7 +2663,7 @@ fn main() {
     });
 
     // Track settings window (created on demand)
-    let settings_window: Arc<Mutex<Option<(tao::window::Window, wry::WebView)>>> =
+    let settings_window: Arc<Mutex<Option<(tao::window::Window, PanelView)>>> =
         Arc::new(Mutex::new(None));
     let settings_window_for_events = Arc::clone(&settings_window);
 
@@ -3532,7 +3538,7 @@ fn main() {
                             "if(window.hiwaveShelf) {{ hiwaveShelf.showCommands({}); }}",
                             json
                         );
-                        let _ = shelf_for_events.evaluate_script(&script);
+                        let _ = shelf_for_events.eval(&script);
                     }
                     UserEvent::ExpandChrome if rustkit_chrome_enabled() => {
                         // CH3.A3: the RustKit chrome is over the page; its
@@ -3625,7 +3631,7 @@ fn main() {
                         );
 
                         // Focus the command palette input and trigger initial search
-                        let _ = shelf_for_events.evaluate_script(r#"
+                        let _ = shelf_for_events.eval(r#"
                             if(window.hiwaveShelf) {
                                 hiwaveShelf.clear();
                                 hiwaveShelf.focus();
@@ -3911,7 +3917,7 @@ fn main() {
                                 .expect("Failed to create settings window");
 
                             let settings_proxy = settings_proxy_for_handler.clone();
-                            let settings_webview = WebViewBuilder::new()
+                            let settings_webview = PanelView::WebKit(WebViewBuilder::new()
                                 .with_html(SETTINGS_HTML)
                                 .with_devtools(cfg!(debug_assertions))
                                 .with_clipboard(true)
@@ -3920,7 +3926,7 @@ fn main() {
                                     handle_settings_ipc(msg.body(), &settings_proxy)
                                 })
                                 .build(&settings_win)
-                                .expect("Failed to create settings WebView");
+                                .expect("Failed to create settings WebView"));
 
                             *settings_guard = Some((settings_win, settings_webview));
                         }
@@ -3945,7 +3951,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -3967,13 +3973,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportBrowserProfilesResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportBookmarks { browser, profile_path } => {
@@ -3989,7 +3995,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -4011,7 +4017,7 @@ fn main() {
                                 }).to_string();
                                 if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                     let script = format!("window.postMessage({}, '*');", error_json);
-                                    let _ = settings_wv.evaluate_script(&script);
+                                    let _ = settings_wv.eval(&script);
                                 }
                                 return;
                             }
@@ -4028,7 +4034,7 @@ fn main() {
                             }).to_string();
                             if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                                 let script = format!("window.postMessage({}, '*');", result_json);
-                                let _ = settings_wv.evaluate_script(&script);
+                                let _ = settings_wv.eval(&script);
                             }
                             return;
                         }
@@ -4088,7 +4094,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
 
                         info!("Import complete: {} workspaces, {} tabs", workspaces_created, tabs_created);
@@ -4096,7 +4102,7 @@ fn main() {
                     UserEvent::ImportBookmarksResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetSettings => {
@@ -4110,13 +4116,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SettingsResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveSettings(settings_value) => {
@@ -4134,14 +4140,14 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SettingsSaved => {
                         let result_json = serde_json::json!({ "type": "settings_saved" }).to_string();
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportData { include_settings, include_workspaces } => {
@@ -4162,13 +4168,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveExportToFile { data, suggested_name } => {
@@ -4210,7 +4216,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::PickImportFile => {
@@ -4251,7 +4257,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportStateData { data, replace } => {
@@ -4280,13 +4286,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ImportStateDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearBrowsingData { history, downloads, shelf } => {
@@ -4317,13 +4323,13 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearBrowsingDataResult(json) => {
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetCellar => {
@@ -4351,7 +4357,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::RestoreFromCellar { id } => {
@@ -4382,7 +4388,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearCellar => {
@@ -4397,7 +4403,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetFocusModeConfigForSettings => {
@@ -4411,7 +4417,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveFocusModeConfigFromSettings(config_value) => {
@@ -4434,7 +4440,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::AddToFocusBlocklistFromSettings(domain) => {
@@ -4457,7 +4463,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::RemoveFromFocusBlocklistFromSettings(domain) => {
@@ -4480,7 +4486,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     // Vault settings events
@@ -4496,7 +4502,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::UnlockVault(password) => {
@@ -4524,7 +4530,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::LockVault => {
@@ -4540,7 +4546,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::GetAllCredentials => {
@@ -4573,7 +4579,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::SaveCredential { url, username, password } => {
@@ -4607,7 +4613,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::DeleteCredential(id) => {
@@ -4635,7 +4641,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     // Analytics settings events
@@ -4656,7 +4662,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::UpdateAnalyticsSettings { enabled, retention_days, weekly_report, report_day } => {
@@ -4692,7 +4698,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ClearAnalyticsData => {
@@ -4719,7 +4725,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::ExportAnalyticsData { format } => {
@@ -4779,7 +4785,7 @@ fn main() {
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
                             let script = format!("window.postMessage({}, '*');", result_json);
-                            let _ = settings_wv.evaluate_script(&script);
+                            let _ = settings_wv.eval(&script);
                         }
                     }
                     UserEvent::WindowThreadPing => {
@@ -5084,7 +5090,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.setDomTree({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorSendElementStyles(json) => {
                         // Send element styles to inspector panel
@@ -5092,7 +5098,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.setElementStyles({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorElementPicked { path, styles } => {
                         // Element was picked in content webview, update inspector
@@ -5102,10 +5108,10 @@ fn main() {
                             path.replace("'", "\\'"),
                             styles_json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorPickerStopped => {
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
                         );
                     }
@@ -5134,7 +5140,7 @@ fn main() {
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.startPicker(); }"
                         );
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(true); }"
                         );
                     }
@@ -5145,7 +5151,7 @@ fn main() {
                         let _ = content_for_events.evaluate_script(
                             "if (window.__hiwaveInspector) { window.__hiwaveInspector.stopPicker(); }"
                         );
-                        let _ = inspector_for_events.evaluate_script(
+                        let _ = inspector_for_events.eval(
                             "if (window.hiwaveInspector) { window.hiwaveInspector.setPickerActive(false); }"
                         );
                     }
@@ -5220,7 +5226,7 @@ fn main() {
                             "if (window.hiwaveInspector) {{ window.hiwaveInspector.addConsoleEntry({}); }}",
                             json
                         );
-                        let _ = inspector_for_events.evaluate_script(&script);
+                        let _ = inspector_for_events.eval(&script);
                     }
                     UserEvent::InspectorConsoleClear => {
                         // Clear console in inspector panel
