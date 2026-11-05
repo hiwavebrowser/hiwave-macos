@@ -45590,7 +45590,8 @@ mod individual_transform_tests {
         assert_eq!(
             s.effective_transform().ops,
             vec![
-                TransformOp::Translate(Length::Px(10.0), Length::Zero),
+                // An authored `0` is `0px` (CH2.B14).
+                TransformOp::Translate(Length::Px(10.0), Length::Px(0.0)),
                 TransformOp::Rotate(90.0),
                 TransformOp::Scale(2.0, 2.0),
                 TransformOp::TranslateX(Length::Px(1.0)),
