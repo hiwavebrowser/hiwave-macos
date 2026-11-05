@@ -459,6 +459,8 @@ mod scroll_paints_first_tests;
 mod scroll_after_yielded_load_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_reveal_trigger_tests;
+#[cfg(all(test, feature = "headless"))]
+mod web_animations_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
