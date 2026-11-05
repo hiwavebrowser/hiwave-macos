@@ -329,6 +329,10 @@ trait ChromeUi {
     fn eval(&self, js: &str) -> Result<(), String>;
     /// Move and size the chrome view.
     fn place(&self, rect: Rect);
+    /// Route the keyboard to the chrome (the window's first responder),
+    /// after a shortcut's script focused one of its fields: the address
+    /// bar, find, the command palette. The WebKit view: nothing, as before.
+    fn take_keyboard(&self) {}
 }
 
 impl ChromeUi for WebView {
@@ -367,6 +371,13 @@ impl ChromeUi for ChromeView {
             }
         }
     }
+
+    fn take_keyboard(&self) {
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if let ChromeView::RustKit(view) = self {
+            view.grab_keyboard();
+        }
+    }
 }
 
 /// `HIWAVE_RUSTKIT_CHROME=1`: the chrome is a RustKit view (CH3.A2). Needs
@@ -397,6 +408,10 @@ impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
 
     fn place(&self, rect: Rect) {
         (**self).place(rect)
+    }
+
+    fn take_keyboard(&self) {
+        (**self).take_keyboard()
     }
 }
 
@@ -1089,12 +1104,24 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+/// Which RustKit view an input event is for: the page, or the browser's
+/// own chrome (`HIWAVE_RUSTKIT_CHROME=1`, CH3.A2).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputTarget {
+    Page,
+    Chrome,
+}
+
 /// One input event for a RustKit view, as drained from the viewhost queue:
 /// the pointer, the wheel and keys. Lifted from the event loop's drain
-/// (CH3.A2 step 3b) so the RustKit chrome's input can take the same path.
+/// (CH3.A2 step 3b) so the RustKit chrome's input takes the same path.
+/// The chrome is not the page: the Inspector's element picker, a link's or
+/// a form's navigation and the keys that scroll are the page's only.
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 fn dispatch_view_input(
     view: &webview_rustkit::RustKitView,
+    target: InputTarget,
     kind: rustkit_viewhost::InputKind,
     devtools: &mut devtools_panel::Devtools,
     inspector_for_events: &WebView,
@@ -1112,7 +1139,7 @@ fn dispatch_view_input(
             // hover menu or a drag listens for.
             // The Inspector's select-element mode takes the
             // pointer instead: hover outlines, release picks.
-            if devtools.picking() {
+            if target == InputTarget::Page && devtools.picking() {
                 let at = (click.x as f32, click.y as f32);
                 match click.input {
                     rustkit_viewhost::PointerInput::Move => {
@@ -1143,7 +1170,10 @@ fn dispatch_view_input(
                 view.mouse_down_at_point(click.x as f32, click.y as f32);
                 return;
             }
-            info!(x = click.x, y = click.y, "content click (view-local)");
+            match target {
+                InputTarget::Page => info!(x = click.x, y = click.y, "content click (view-local)"),
+                InputTarget::Chrome => info!(x = click.x, y = click.y, "chrome click (view-local)"),
+            }
             let outcome = view.click_at_point(click.x as f32, click.y as f32);
             // ENGINE focus is not APPKIT focus: without making
             // the content view the window's first responder,
@@ -1157,7 +1187,7 @@ fn dispatch_view_input(
                 info!(%tag, "Focused content element");
                 view.relayout();
             }
-            if let Some(url) = outcome.navigate {
+            if let Some(url) = outcome.navigate.filter(|_| target == InputTarget::Page) {
                 info!(%url, "Link clicked");
                 let _ = click_proxy.send_event(UserEvent::Navigate(url));
             }
@@ -1204,7 +1234,7 @@ fn dispatch_view_input(
                 return; // menu shortcuts are not text
             }
             // Esc leaves select-element mode; the page does not hear it.
-            if devtools.picking() && key.mac_keycode == 53 {
+            if target == InputTarget::Page && devtools.picking() && key.mac_keycode == 53 {
                 if !key.up {
                     devtools.stop_picker(view, &inspector_for_events);
                 }
@@ -1235,7 +1265,7 @@ fn dispatch_view_input(
                 view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
                 return;
             }
-            if vk == 0x0D {
+            if vk == 0x0D && target == InputTarget::Page {
                 if let Some(url) = view.form_submit_url() {
                     info!(%url, "Form submitted");
                     let _ = click_proxy.send_event(UserEvent::Navigate(url));
@@ -1245,7 +1275,7 @@ fn dispatch_view_input(
             let focused = view.has_focused_element();
             if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
                 view.relayout();
-            } else if !focused {
+            } else if !focused && target == InputTarget::Page {
                 // Nothing focused and the page did not take
                 // the key: the keys that scroll, as in the
                 // window-level arm (wheel sign convention).
@@ -2391,6 +2421,12 @@ fn main() {
     // selection and the console's place.
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
     let mut devtools = devtools_panel::Devtools::default();
+    // A script for the RustKit chrome once it has booted (real-window checks).
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    let mut chrome_boot_eval = rustkit_chrome_enabled()
+        .then(|| std::env::var("HIWAVE_RUSTKIT_CHROME_EVAL").ok())
+        .flatten()
+        .filter(|js| !js.is_empty());
 
     // Run the event loop
     event_loop.run(move |event, event_loop_target, control_flow| {
@@ -2695,9 +2731,42 @@ fn main() {
                 // chrome's command handler, as the WebKit view's do.
                 let chrome_input = if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
                     chrome.process_events();
+                    // Its input (step 3b), through the page's dispatch. Taken
+                    // whatever the page is doing: the address bar answers
+                    // while a page loads, as the WebKit chrome did. The
+                    // page's own input stays queued for it.
+                    if let Some(id) = chrome.input_view() {
+                        for event in rustkit_viewhost::drain_input_view(id) {
+                            chrome.note_input(event.at, event.seq);
+                            dispatch_view_input(
+                                chrome,
+                                InputTarget::Chrome,
+                                event.kind,
+                                &mut devtools,
+                                &inspector_for_events,
+                                &click_proxy,
+                            );
+                        }
+                    }
+                    let mut booted = false;
                     for body in chrome.take_ipc_messages() {
                         info!(%body, "RustKit chrome IPC");
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
+                        booted = true;
+                    }
+                    // `HIWAVE_RUSTKIT_CHROME_EVAL`: a script for the chrome
+                    // once its own script has posted, for the real-window
+                    // checks that cannot type (a2_chrome_navigate).
+                    if booted {
+                        if let Some(js) = chrome_boot_eval.take() {
+                            info!(%js, "RustKit chrome: running HIWAVE_RUSTKIT_CHROME_EVAL");
+                            let _ = chrome.wry_evaluate_script(&js);
+                        }
+                    }
+                    // A link or `location` in the chrome would replace the
+                    // chrome's own document; nothing follows it.
+                    if let Some((url, _)) = chrome.take_script_navigation() {
+                        warn!(%url, "RustKit chrome navigation not followed");
                     }
                     chrome.render();
                     chrome.input_view()
@@ -2733,15 +2802,26 @@ fn main() {
                         // viewhost when the view was destroyed.
                         for event in rustkit_viewhost::drain_input() {
                             // Input on the RustKit chrome's view is not the
-                            // page's. Not routed to the chrome yet (CH3.A2
-                            // step 3b): dropped, never sent to the page.
+                            // page's: the chrome's arm above takes it, and
+                            // one that came since goes to the chrome too.
                             if chrome_input == Some(event.view) {
+                                if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
+                                    chrome.note_input(event.at, event.seq);
+                                    dispatch_view_input(
+                                        chrome,
+                                        InputTarget::Chrome,
+                                        event.kind,
+                                        &mut devtools,
+                                        &inspector_for_events,
+                                        &click_proxy,
+                                    );
+                                }
                                 continue;
                             }
                             // When it arrived, for the W-gate's input-to-present
                             // figure (logged by the presenter with the frame).
                             view.note_input(event.at, event.seq);
-                            dispatch_view_input(view, event.kind, &mut devtools, &inspector_for_events, &click_proxy);
+                            dispatch_view_input(view, InputTarget::Page, event.kind, &mut devtools, &inspector_for_events, &click_proxy);
                         }
                         // Timers that came due, late fetches, and what the
                         // input above started; then sleep until the next timer.
@@ -4995,9 +5075,11 @@ fn main() {
                 }
                 id if id == menu_ids::FIND => {
                     let _ = chrome_for_events.eval("openFindModal(); performFind('reset');");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::COMMAND_PALETTE => {
                     let _ = chrome_for_events.eval("openCommandPalette();");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::HISTORY => {
                     let _ = chrome_for_events.eval("toggleHistoryPanel();");
@@ -5007,6 +5089,7 @@ fn main() {
                 }
                 id if id == menu_ids::FOCUS_URL => {
                     let _ = chrome_for_events.eval("document.getElementById('urlInput').focus(); document.getElementById('urlInput').select();");
+                    chrome_for_events.take_keyboard();
                 }
                 id if id == menu_ids::GO_BACK => {
                     let _ = proxy.send_event(UserEvent::GoBack);
