@@ -1377,8 +1377,12 @@ class Driver:
         log_from = 0
         if not self.a4_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": js}):
             return
-        self.expect(c, "the shelf was built as a RustKit view",
-                    bool(self.app.wait_log(r"the shelf is a RustKit view", 1)))
+        # CH3.A4b: the shelf is built when it opens, not at launch.
+        built = self.app.wait_log(r"the shelf is a RustKit view", 15)
+        asked = re.search(r'RustKit chrome IPC body=\{"cmd":"expand_shelf"', self.app.log_text())
+        self.expect(c, "the shelf was built as a RustKit view when it opened (expand_shelf), not at launch",
+                    bool(built and asked and built.start() > asked.start()),
+                    "built %s, expand_shelf %s" % (built and built.start(), asked and asked.start()))
         q = self.panel_ipc("shelf", "search_commands", 15)
         self.expect(c, "the open shelf's script posted search_commands and the app took it", bool(q),
                     q.group(0)[:160] if q else "")
@@ -1446,8 +1450,6 @@ class Driver:
         c = "a4_inspector"
         if not self.a4_open(c):
             return
-        self.expect(c, "the Inspector was built as a RustKit view",
-                    bool(self.app.wait_log(r"the Inspector is a RustKit view", 1)))
         if not self.can_input:
             return self.not_run(c, "Cmd+Opt+I", self.why_not("Accessibility"))
         pid = self.app.proc.pid
@@ -1455,6 +1457,10 @@ class Driver:
         self.hw("key", pid, 34, "cmd", "alt")  # Cmd+Opt+I
         self.expect(c, "Cmd+Opt+I opened the Inspector",
                     bool(self.app.wait_log(r"Opening inspector panel", 5, log_from)))
+        # CH3.A4b: the Inspector is built when it opens, not at launch.
+        early = re.search(r"the Inspector is a RustKit view", self.app.log_text()[:log_from])
+        self.expect(c, "the Inspector was built as a RustKit view when it opened, not at launch",
+                    not early and bool(self.app.wait_log(r"the Inspector is a RustKit view", 5, log_from)))
         # The keyboard is the Inspector's on open (#910 R1 nit 6): a key
         # does not reach the page.
         mark = self.fixture.mark()
