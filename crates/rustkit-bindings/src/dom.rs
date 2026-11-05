@@ -1513,7 +1513,6 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
             JsValue::String(out)
         }
         "content" => node_id(templates.get(&node.id.raw()).cloned()),
-        "innerText" if node.is_element() => JsValue::String(inner_text::inner_text(node)),
         _ => JsValue::Undefined,
     }
 }
@@ -1705,7 +1704,11 @@ pub(crate) fn install(
         "__rustkit_dom_info",
         3,
         Box::new(move |args| {
-            if matches!(string_arg(args, 2), Some("laidout" | "computed" | "geom" | "scroll" | "scrollChain")) {
+            // innerText reads computed display/visibility (CH2.E13).
+            if matches!(
+                string_arg(args, 2),
+                Some("laidout" | "computed" | "geom" | "scroll" | "scrollChain" | "innerText")
+            ) {
                 DomHost::ensure_fresh_geometry(&h, &d);
             }
             let host = h.borrow();
@@ -1782,6 +1785,12 @@ pub(crate) fn install(
                     }
                     None => JsValue::String(String::new()),
                 },
+                (Some(node), Some("innerText")) if node.is_element() => {
+                    let style = |n: &rustkit_dom::Node| {
+                        host.computed.get(&n.id.raw()).and_then(|l| inner_text::Computed::from_lines(l))
+                    };
+                    JsValue::String(inner_text::inner_text(&node, &style))
+                }
                 (Some(node), Some(field)) => node_info(&node, field, &host.templates.borrow()),
                 _ => JsValue::Null,
             }
