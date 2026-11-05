@@ -206,6 +206,22 @@ pub(crate) struct ViewLayout {
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     pub(crate) checked_states: RefCell<HashMap<usize, bool>>,
+    /// The `<select>` drop-down open in this view, if one is
+    /// (`select_popup`). Its commands follow the page's in the display list.
+    pub(crate) select_popup: RefCell<Option<crate::select_popup::SelectPopup>>,
+    /// The press that closed a drop-down: its release is the popup's too,
+    /// and goes nowhere on the page.
+    pub(crate) select_popup_release: Cell<bool>,
+    /// The press that opened the drop-down is still down: its release on
+    /// an option picks it (press, drag, release), anywhere else it is the
+    /// page's and the popup stays open.
+    pub(crate) select_popup_opening_press: Cell<bool>,
+    /// How many commands at the end of the view's display list are the
+    /// popup's (0 when none).
+    pub(crate) select_popup_painted: Cell<usize>,
+    /// Type-to-select on a focused, closed drop-down: the select (raw
+    /// NodeId) and what has been typed at it.
+    pub(crate) select_typeahead: RefCell<(usize, crate::select_popup::TypeAhead)>,
     /// Where script scrolled this view's elements (shared with the bindings).
     pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.
