@@ -4787,9 +4787,12 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     let padding_top = px(&child.style.padding_top, border_box_height);
     let padding_bottom = px(&child.style.padding_bottom, border_box_height);
     let border_left = px(&child.style.border_left_width, border_box_width);
-    let border_right = px(&child.style.border_right_width, border_box_width);
+    // CH2.E7: a styled scrollbar's space rides in the right and bottom
+    // borders, out of the content box.
+    let (bar_v, bar_h) = child.scrollbar_reserve();
+    let border_right = px(&child.style.border_right_width, border_box_width) + bar_v;
     let border_top = px(&child.style.border_top_width, border_box_height);
-    let border_bottom = px(&child.style.border_bottom_width, border_box_height);
+    let border_bottom = px(&child.style.border_bottom_width, border_box_height) + bar_h;
 
     // Set padding and border dimensions
     child.dimensions.padding.left = padding_left;

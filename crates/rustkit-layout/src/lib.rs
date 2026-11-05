@@ -1701,6 +1701,13 @@ pub struct LayoutBox {
     pub sticky_shift: std::cell::Cell<(f32, f32)>,
     /// On the root box: the path to each sticky box, outermost first.
     pub sticky_paths: std::cell::RefCell<Vec<Vec<usize>>>,
+    /// CH2.E7: whether the overflow pass found this `overflow: auto`
+    /// scroller overflowing (vertically, horizontally), so its styled
+    /// scrollbar takes space (`scroll::LayoutBox::scrollbar_reserve`).
+    pub scrollbar_overflows: std::cell::Cell<(bool, bool)>,
+    /// Whether the pointer is over this scroller's thumb
+    /// (`::-webkit-scrollbar-thumb:hover`). Set by the engine.
+    pub scrollbar_thumb_hovered: std::cell::Cell<bool>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -1752,6 +1759,8 @@ impl LayoutBox {
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
             sticky_paths: std::cell::RefCell::new(Vec::new()),
+            scrollbar_overflows: std::cell::Cell::new((false, false)),
+            scrollbar_thumb_hovered: std::cell::Cell::new(false),
         }
     }
 
@@ -4441,7 +4450,8 @@ impl LayoutBox {
         self.dimensions.border.top =
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width)
+                + self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -5175,6 +5185,14 @@ impl LayoutBox {
             (margin_left, margin_right)
         };
 
+        // CH2.E7: a classic scrollbar sits between the padding and the
+        // border, and comes out of the content box (Chrome): the border
+        // box keeps its width. It rides in `border.right`, so the padding
+        // box (clientWidth) and everything that sums the box agree.
+        let (scrollbar, _) = self.scrollbar_reserve();
+        let content_width = (content_width - scrollbar).max(0.0);
+        let border_right = border_right + scrollbar;
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -5195,7 +5213,8 @@ impl LayoutBox {
         self.dimensions.border.top =
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width)
+                + self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -7364,6 +7383,13 @@ impl LayoutBox {
         // rows, laid out by table.rs before this runs, are never cut.
         if let Some(rows) = table_rows_height {
             self.dimensions.content.height = self.dimensions.content.height.max(rows);
+        }
+        // CH2.E7: a horizontal scrollbar comes out of a specified height
+        // (it rides in `border.bottom`, which border-box sizing already
+        // took out); an auto height grows by it instead.
+        let (_, bar) = self.scrollbar_reserve();
+        if bar > 0.0 && !is_border_box && !matches!(self.style.height, Length::Auto) {
+            self.dimensions.content.height = (self.dimensions.content.height - bar).max(0.0);
         }
     }
 
@@ -9931,6 +9957,9 @@ impl DisplayList {
                 self.escapable_clips.pop();
             }
         }
+        // CH2.E7: a scroller's styled scrollbars, over its content, in the
+        // border box but outside the padding-box clip.
+        self.commands.extend(scroll::scrollbar_commands(layout_box));
         if let Some(outer) = outer_ellipsis {
             self.ellipsis = outer;
         }
@@ -11298,6 +11327,20 @@ impl DisplayList {
         // ring command has no dash pattern, so a rounded dashed/dotted border
         // keeps the per-side path below (square corners, correct dashes).
         let radius = self.border_radius_px(layout_box);
+        // The scrollbars' space rides in the right and bottom borders.
+        let (bar_v, bar_h) = layout_box.scrollbar_reserve();
+        let scrollbarless;
+        let d = if (bar_v, bar_h) == (0.0, 0.0) {
+            d
+        } else {
+            let mut plain = d.clone();
+            plain.border.right -= bar_v;
+            plain.border.bottom -= bar_h;
+            plain.content.width += bar_v;
+            plain.content.height += bar_h;
+            scrollbarless = plain;
+            &scrollbarless
+        };
         let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
         let all_solid = [
             s.border_top_style,

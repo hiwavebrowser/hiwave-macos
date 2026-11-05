@@ -1,0 +1,235 @@
+//! Hub row CH2.E7: styled scrollbars. A scroll container with
+//! `::-webkit-scrollbar { width: 6px }` (or `scrollbar-width` /
+//! `scrollbar-color`) paints a classic, space-taking scrollbar inside its
+//! border, with Chrome's thumb geometry, and the thumb drags and the track
+//! pages. Expected numbers are Chrome for Testing 153.0.8010.12 (Linux,
+//! classic scrollbars) on the same pages:
+//! `tools/parity_oracle/scrollbar_geometry_log.mjs`.
+
+use super::*;
+use rustkit_css::Color;
+use rustkit_layout::{DisplayCommand, Rect};
+
+const THUMB: Color = Color { r: 0x88, g: 0x88, b: 0x88, a: 1.0 };
+const THUMB_HOVER: Color = Color { r: 0x55, g: 0x55, b: 0x55, a: 1.0 };
+const TRACK: Color = Color { r: 0, g: 0, b: 255, a: 1.0 };
+
+/// A 300×200 `overflow: auto` box at (10, 20) holding 600px of content.
+fn page(extra: &str) -> String {
+    format!(
+        "<!doctype html><style>body{{margin:0}}\
+         #s{{position:absolute;left:10px;top:20px;width:300px;height:200px;overflow:auto}}\
+         #s::-webkit-scrollbar{{width:6px}}\
+         #s::-webkit-scrollbar-track{{background:rgb(0,0,255)}}\
+         #s::-webkit-scrollbar-thumb{{background:#888;border-radius:3px}}\
+         #s::-webkit-scrollbar-thumb:hover{{background:#555}}\
+         #c{{height:600px}}{extra}</style><div id=s><div id=c></div></div>"
+    )
+}
+
+fn loaded(html: &str) -> (Engine, EngineViewId) {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, html).expect("load");
+    (engine, view)
+}
+
+fn read(engine: &mut Engine, view: EngineViewId, expr: &str) -> String {
+    let got = engine.execute_script(view, &format!("String({expr})")).expect("script");
+    got.trim_start_matches("String(\"").trim_end_matches("\")").to_string()
+}
+
+/// The rect of every fill of `color` in the view's display list.
+fn fills(engine: &Engine, view: EngineViewId, color: Color) -> Vec<Rect> {
+    let list = engine.views[&view].display_list.as_ref().expect("display list");
+    list.commands
+        .iter()
+        .filter_map(|c| match c {
+            DisplayCommand::SolidColor(c, rect) if *c == color => Some(*rect),
+            DisplayCommand::RoundedRect { color: c, rect, .. } if *c == color => Some(*rect),
+            _ => None,
+        })
+        .collect()
+}
+
+fn one(engine: &Engine, view: EngineViewId, color: Color) -> Rect {
+    let got = fills(engine, view, color);
+    assert_eq!(got.len(), 1, "one fill of {color:?}, got {got:?}");
+    got[0]
+}
+
+#[track_caller]
+fn assert_rect(got: Rect, want: (f32, f32, f32, f32)) {
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(
+        near(got.x, want.0) && near(got.y, want.1) && near(got.width, want.2) && near(got.height, want.3),
+        "got {got:?}, want {want:?}"
+    );
+}
+
+#[test]
+fn a_six_pixel_track_paints_at_the_right_edge() {
+    let (engine, view) = loaded(&page(""));
+    assert_rect(one(&engine, view, TRACK), (304.0, 20.0, 6.0, 200.0));
+}
+
+#[test]
+fn the_thumb_is_viewport_over_content_of_the_track_at_the_top() {
+    // Chrome: 200 * 200 / 600 = 66.7, rounded to 67, at the top.
+    let (engine, view) = loaded(&page(""));
+    let thumb = one(&engine, view, THUMB);
+    assert_rect(thumb, (304.0, 20.0, 6.0, 67.0));
+    let rounded = engine.views[&view].display_list.as_ref().unwrap().commands.iter().any(|c| {
+        matches!(c, DisplayCommand::RoundedRect { color, radius, .. }
+            if *color == THUMB && (radius.top_left.h - 3.0).abs() < 0.01)
+    });
+    assert!(rounded, "the thumb takes its 3px border-radius");
+}
+
+#[test]
+fn after_scrolling_a_third_the_thumb_moves_a_third() {
+    // Chrome: scrollTop 200 of 400 puts the thumb at (200 - 67) / 2 = 66.
+    let (mut engine, view) = loaded(&page(""));
+    read(&mut engine, view, "document.getElementById('s').scrollTop = 200");
+    assert_rect(one(&engine, view, THUMB), (304.0, 86.0, 6.0, 67.0));
+}
+
+#[test]
+fn the_scrollbar_takes_its_width_from_the_content_box() {
+    // Chrome: clientWidth 294, offsetWidth 300, the child 294 wide.
+    let (mut engine, view) = loaded(&page(""));
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), $s.clientWidth, $s.offsetWidth, \
+         document.getElementById('c').getBoundingClientRect().width, $s.scrollHeight].slice(1).join(' ')",
+    );
+    assert_eq!(got, "294 300 294 600");
+}
+
+#[test]
+fn scrollbar_width_none_paints_nothing_and_takes_no_space() {
+    let (mut engine, view) = loaded(&page("#s{scrollbar-width:none}"));
+    assert!(fills(&engine, view, TRACK).is_empty());
+    assert!(fills(&engine, view, THUMB).is_empty());
+    assert_eq!(read(&mut engine, view, "document.getElementById('c').getBoundingClientRect().width"), "300");
+}
+
+#[test]
+fn display_none_on_the_scrollbar_paints_nothing_and_takes_no_space() {
+    let (mut engine, view) = loaded(&page("#s::-webkit-scrollbar{display:none}"));
+    assert!(fills(&engine, view, TRACK).is_empty());
+    assert!(fills(&engine, view, THUMB).is_empty());
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').clientWidth"), "300");
+}
+
+#[test]
+fn auto_without_overflow_takes_no_space_and_scroll_always_does() {
+    let (mut engine, view) = loaded(&page("#c{height:50px}"));
+    assert!(fills(&engine, view, TRACK).is_empty());
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').clientWidth"), "300");
+    // `overflow: scroll` shows both bars (6px wide, 15px tall: no
+    // `height`), and no thumb when there is nothing to scroll.
+    let (mut engine, view) = loaded(&page("#c{height:50px}#s{overflow:scroll}"));
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').clientWidth"), "294");
+    assert!(fills(&engine, view, THUMB).is_empty());
+    assert_eq!(fills(&engine, view, TRACK).len(), 2, "a vertical and a horizontal track");
+}
+
+#[test]
+fn the_page_does_not_see_the_pseudo_elements_declarations() {
+    // `width: 6px` and the thumb's background are the scrollbar's, not
+    // the element's.
+    let (mut engine, view) = loaded(&page(""));
+    let got = read(
+        &mut engine,
+        view,
+        "[getComputedStyle(document.getElementById('s')).backgroundColor, \
+         getComputedStyle(document.getElementById('s')).borderTopLeftRadius].join(' ')",
+    );
+    assert_eq!(got, "rgba(0, 0, 0, 0) 0px");
+}
+
+#[test]
+fn the_standard_properties_win_over_the_pseudo_elements() {
+    // Chrome 121+: `scrollbar-color` turns the `::-webkit-scrollbar` rules
+    // off; `thin` lays out 10px.
+    let (mut engine, view) = loaded(&page("#s{scrollbar-width:thin;scrollbar-color:rgb(255,0,0) rgb(0,255,0)}"));
+    assert!(fills(&engine, view, THUMB).is_empty());
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').clientWidth"), "290");
+    let track = one(&engine, view, Color { r: 0, g: 255, b: 0, a: 1.0 });
+    assert_rect(track, (300.0, 20.0, 10.0, 200.0));
+    assert_eq!(fills(&engine, view, Color { r: 255, g: 0, b: 0, a: 1.0 }).len(), 1);
+}
+
+#[test]
+fn dragging_the_thumb_fifty_pixels_scrolls_in_proportion() {
+    // Chrome: 50 * (600 - 200) / (200 - 67) = 150.
+    let (mut engine, view) = loaded(&page(""));
+    assert!(engine.mouse_down_at_point(view, 307.0, 30.0) || true);
+    engine.mouse_move_at_point(view, 307.0, 55.0);
+    engine.mouse_move_at_point(view, 307.0, 80.0);
+    engine.click_at_point(view, 307.0, 80.0);
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').scrollTop"), "150");
+    // The release ends the drag.
+    engine.mouse_move_at_point(view, 307.0, 150.0);
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').scrollTop"), "150");
+}
+
+#[test]
+fn a_press_on_the_track_pages_by_seven_eighths() {
+    // Chrome: a press below the thumb scrolls 0.875 * 200 = 175.
+    let (mut engine, view) = loaded(&page(""));
+    engine.mouse_down_at_point(view, 307.0, 170.0);
+    engine.click_at_point(view, 307.0, 170.0);
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').scrollTop"), "175");
+    // And above it, back.
+    engine.mouse_down_at_point(view, 307.0, 25.0);
+    engine.click_at_point(view, 307.0, 25.0);
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').scrollTop"), "0");
+}
+
+#[test]
+fn the_thumb_takes_its_hover_background_under_the_pointer() {
+    let (mut engine, view) = loaded(&page(""));
+    engine.mouse_move_at_point(view, 307.0, 40.0);
+    assert_rect(one(&engine, view, THUMB_HOVER), (304.0, 20.0, 6.0, 67.0));
+    assert!(fills(&engine, view, THUMB).is_empty());
+    engine.mouse_move_at_point(view, 100.0, 100.0);
+    assert_eq!(fills(&engine, view, THUMB).len(), 1);
+}
+
+#[test]
+fn the_root_scrollbar_paints_at_the_viewport_edge() {
+    // Chrome: the viewport's bar is 6px at x 794; its thumb 600 * 600 /
+    // 2400 = 150 tall, and at 150 once the window scrolls 600.
+    let html = "<!doctype html><style>body{margin:0}::-webkit-scrollbar{width:6px}\
+                ::-webkit-scrollbar-thumb{background:#888}#c{height:2400px}</style><div id=c></div>";
+    let (mut engine, view) = loaded(html);
+    assert_eq!(read(&mut engine, view, "document.getElementById('c').getBoundingClientRect().width"), "794");
+    engine.render(view).expect("render");
+    let thumb_in = |engine: &Engine| -> Vec<Rect> {
+        let commit = engine.latest_commit(view).expect("commit");
+        let list = commit.list.as_ref().expect("list");
+        let mut fixed = false;
+        let mut found = Vec::new();
+        for command in &list.commands {
+            match command {
+                DisplayCommand::PushViewportFixed => fixed = true,
+                DisplayCommand::PopViewportFixed => fixed = false,
+                DisplayCommand::SolidColor(c, rect) if fixed && *c == THUMB => found.push(*rect),
+                _ => {}
+            }
+        }
+        found
+    };
+    let got = thumb_in(&engine);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_rect(got[0], (794.0, 0.0, 6.0, 150.0));
+    engine.scroll_view(view, 0.0, -600.0).expect("scroll");
+    let got = thumb_in(&engine);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_rect(got[0], (794.0, 150.0, 6.0, 150.0));
+}
