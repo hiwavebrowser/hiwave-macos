@@ -912,8 +912,9 @@ pub struct DomBindings {
     event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
-    /// Queue of IPC messages from JavaScript
-    _ipc_queue: RefCell<Vec<IpcMessage>>,
+    /// What the page posted with `window.ipc.postMessage`, held on the
+    /// Rust side (`__rk_ipc_post`), so a drain runs no script.
+    ipc_queue: Rc<RefCell<Vec<IpcMessage>>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<DirtyMark>,
@@ -993,13 +994,26 @@ impl DomBindings {
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
         runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        // `window.ipc.postMessage` lands here (CH2.E9).
+        let ipc_queue = Rc::new(RefCell::new(Vec::new()));
+        let queue = Rc::clone(&ipc_queue);
+        runtime.register_host_function(
+            "__rk_ipc_post",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(payload)) = args.first() {
+                    queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
+                }
+                JsValue::Undefined
+            }),
+        )?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
-            _ipc_queue: RefCell::new(Vec::new()),
+            ipc_queue,
             dirty,
             mutations,
             mutation_log,
@@ -1233,22 +1247,13 @@ impl DomBindings {
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
-            // IPC queue for postMessage calls
-            window.__ipcQueue = [];
-
-            // IPC object for browser-to-Rust communication
+            // IPC object for browser-to-Rust communication. The message
+            // goes to a queue on the Rust side (`__rk_ipc_post`, installed
+            // after the globals); a non-string is sent as its JSON.
             window.ipc = {
                 postMessage: function(message) {
-                    // Store message in queue for Rust to poll
-                    window.__ipcQueue.push(message);
+                    __rk_ipc_post(typeof message === 'string' ? message : JSON.stringify(message));
                 }
-            };
-
-            // Helper to drain the IPC queue (called from Rust)
-            window.__drainIpcQueue = function() {
-                var queue = window.__ipcQueue;
-                window.__ipcQueue = [];
-                return JSON.stringify(queue);
             };
 
             // HiWave Chrome API (for Chrome UI compatibility)
@@ -2244,45 +2249,12 @@ impl DomBindings {
     ///
     /// Returns a Vec of IpcMessage structs.
     pub fn drain_ipc_queue(&self) -> Vec<IpcMessage> {
-        // Call JS to drain the queue and get JSON
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__drainIpcQueue()");
-
-        match result {
-            Ok(JsValue::String(json)) => {
-                // Parse the JSON array
-                match serde_json::from_str::<Vec<String>>(&json) {
-                    Ok(messages) => {
-                        messages
-                            .into_iter()
-                            .map(|payload| IpcMessage { payload })
-                            .collect()
-                    }
-                    Err(e) => {
-                        trace!(error = %e, "Failed to parse IPC queue JSON");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(_) => {
-                trace!("IPC queue returned non-string value");
-                Vec::new()
-            }
-            Err(e) => {
-                trace!(error = %e, "Failed to drain IPC queue");
-                Vec::new()
-            }
-        }
+        std::mem::take(&mut *self.ipc_queue.borrow_mut())
     }
 
     /// Check if there are pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__ipcQueue.length > 0");
-
-        matches!(result, Ok(JsValue::Boolean(true)))
+        !self.ipc_queue.borrow().is_empty()
     }
 
     /// Add an event listener.

@@ -879,6 +879,24 @@ impl PageEndpoint {
         self.publish_commit();
         self.report_focus();
         self.report_script_navigation();
+        self.report_ipc();
+    }
+
+    /// Send the window what the page posted on `window.ipc` (CH2.E9).
+    /// Only the content thread reports it; the queue is Rust-side, so an
+    /// empty one costs no script.
+    fn report_ipc(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let messages = self.engine.drain_view_ipc(self.view);
+        if messages.is_empty() {
+            return;
+        }
+        let nav_id = self.engine.nav_id(self.view).unwrap_or(0);
+        for message in messages {
+            self.emit(PageEvent::Ipc { payload: message.payload, nav_id });
+        }
     }
 
     /// Tell the content thread's window when the page's focus changed on

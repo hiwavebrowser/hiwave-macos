@@ -94,6 +94,8 @@ pub struct RustKitView {
     current_title: RefCell<Option<String>>,
     /// What the chrome has not been told yet (CH2.E9).
     chrome_updates: RefCell<ChromeUpdates>,
+    /// What the page posted on `window.ipc`, in order (CH2.E9).
+    ipc_inbox: RefCell<Vec<String>>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -366,6 +368,7 @@ impl RustKitView {
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
             chrome_updates: RefCell::new(ChromeUpdates::default()),
+            ipc_inbox: RefCell::new(Vec::new()),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
@@ -662,6 +665,17 @@ impl RustKitView {
             self.harvest();
         }
         std::mem::take(&mut *self.chrome_updates.borrow_mut())
+    }
+
+    /// The messages the page posted with `window.ipc.postMessage` since
+    /// the last call, oldest first (CH2.E9). Content thread only. The app
+    /// must hand these to its command handler only for a view showing the
+    /// app's own documents (chrome, shelf): a web page can post here too.
+    pub fn take_ipc_messages(&self) -> Vec<String> {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.ipc_inbox.borrow_mut())
     }
 
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
@@ -1256,7 +1270,8 @@ impl RustKitView {
                     *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
-                PageEvent::Ipc { .. } | PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
+                PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
     }
@@ -1875,6 +1890,32 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert_eq!(updates.loading, Some(false), "{updates:?}");
         assert_eq!(updates.finished.as_deref(), Some(committed.as_str()), "{updates:?}");
         assert_eq!(view.take_chrome_updates(), ChromeUpdates::default(), "reported twice");
+    }
+
+    /// CH2.E9: the chrome's `window.ipc.postMessage` reaches the window.
+    #[test]
+    fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
+        let view = content_view();
+        view.load_html_internal(
+            "<p>chrome</p><script>window.ipc.postMessage(JSON.stringify({cmd: 'navigate', url: 'https://example.com/'}));\
+             window.ipc.postMessage({cmd: 'get_version'});</script>",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < 2 {
+            assert!(Instant::now() < deadline, "the window got {got:?}");
+            wake(&view);
+            got.extend(view.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            got,
+            vec![
+                r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string(),
+                r#"{"cmd":"get_version"}"#.to_string(),
+            ]
+        );
     }
 
     /// A document the app loads itself keeps the address the app gave it.

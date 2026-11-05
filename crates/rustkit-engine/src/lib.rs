@@ -20004,6 +20004,16 @@ impl Engine {
         messages
     }
 
+    /// What `id`'s page posted with `window.ipc.postMessage` since the
+    /// last drain.
+    pub fn drain_view_ipc(&self, id: EngineViewId) -> Vec<IpcMessage> {
+        self.views
+            .get(&id)
+            .and_then(|view| view.bindings.as_ref())
+            .map(|bindings| bindings.drain_ipc_queue())
+            .unwrap_or_default()
+    }
+
     /// Check if any view has pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
         self.views.values().any(|v| {
