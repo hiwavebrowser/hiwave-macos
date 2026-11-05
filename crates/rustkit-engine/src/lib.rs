@@ -295,6 +295,8 @@ mod select_popup;
 mod select_popup_engine;
 #[cfg(test)]
 mod select_popup_engine_tests;
+#[cfg(test)]
+mod select_script_value_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
