@@ -363,6 +363,134 @@ enum ChromeView {
 /// has a composition region (`compose`); a panel has none.
 type PanelView = ChromeView;
 
+/// How many scripts a panel that is not built yet keeps for when it is
+/// (CH3.A4b). Past it the oldest go: a panel shows what it was last told.
+const LAZY_PANEL_HELD_MAX: usize = 256;
+
+/// A panel's view, built when the panel first opens (CH3.A4b): with
+/// `HIWAVE_RUSTKIT_CHROME=1` the shelf and the Inspector were RustKit views
+/// from launch, two engine threads and ~40 MB for panels most sessions never
+/// open. Once built it stays, hidden when the panel closes. Flag off the
+/// WebKit view is built at launch, as before (`built`).
+struct LazyPanel<V = PanelView> {
+    view: std::cell::OnceCell<V>,
+    /// Scripts run on it before it was built, oldest first.
+    held: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// Its document and its name in the log.
+    html: &'static str,
+    name: &'static str,
+}
+
+impl<V: ChromeUi> LazyPanel<V> {
+    /// A panel whose view is built now (the WebKit panels).
+    fn built(view: V, html: &'static str, name: &'static str) -> Self {
+        let panel = Self::deferred(html, name);
+        let _ = panel.view.set(view);
+        panel
+    }
+
+    /// A panel built when it first opens.
+    fn deferred(html: &'static str, name: &'static str) -> Self {
+        LazyPanel {
+            view: std::cell::OnceCell::new(),
+            held: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            html,
+            name,
+        }
+    }
+
+    /// Its view, if built.
+    fn get(&self) -> Option<&V> {
+        self.view.get()
+    }
+
+    /// The layout gives the panel `rect`: a panel with a height is open,
+    /// and one not built yet is built there by `build` (its document and
+    /// name), then hears the scripts it was sent meanwhile. A closed one is
+    /// only placed.
+    fn lay_out(&self, rect: Rect, build: impl FnOnce(Rect, &'static str, &'static str) -> Option<V>) {
+        // RED STUB: built whatever the height, as at launch before CH3.A4b.
+        let _ = rect;
+        if self.view.get().is_none() {
+            if let Some(view) = build(rect, self.html, self.name) {
+                let _ = self.view.set(view);
+            }
+        }
+        if let Some(view) = self.view.get() {
+            view.place(rect);
+        }
+    }
+}
+
+impl<V: ChromeUi> ChromeUi for LazyPanel<V> {
+    fn eval(&self, js: &str) -> Result<(), String> {
+        match self.view.get() {
+            Some(view) => view.eval(js),
+            None => {
+                let mut held = self.held.borrow_mut();
+                if held.len() == LAZY_PANEL_HELD_MAX {
+                    held.pop_front();
+                }
+                held.push_back(js.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    fn place(&self, rect: Rect) {
+        if let Some(view) = self.view.get() {
+            view.place(rect);
+        }
+    }
+
+    fn take_keyboard(&self) {
+        if let Some(view) = self.view.get() {
+            view.take_keyboard();
+        }
+    }
+}
+
+/// The `cmd` of an IPC message, for the log (#907 R1 nit 1): `?` when it
+/// has none.
+fn ipc_cmd(body: &str) -> String {
+    // RED STUB: the whole body.
+    body.to_string()
+}
+
+/// Whether IPC messages are logged whole: only with `HIWAVE_DEBUG=1` (the
+/// app's verbose switch) or `HIWAVE_TEST_HOOKS=1` (the real-window checks,
+/// which read them). By default a line says the message's `cmd` and size:
+/// a body carries URLs with their queries and find-in-page text.
+fn ipc_bodies_logged() -> bool {
+    static LOGGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOGGED.get_or_init(|| {
+        ["HIWAVE_DEBUG", "HIWAVE_TEST_HOOKS"]
+            .iter()
+            .any(|name| std::env::var(name).map(|v| v == "1").unwrap_or(false))
+    })
+}
+
+/// One IPC message in the log, as `ipc_bodies_logged` allows; `panel` names
+/// a RustKit panel.
+fn log_ipc(what: &str, panel: Option<&str>, body: &str) {
+    match (ipc_bodies_logged(), panel) {
+        (true, Some(panel)) => info!(panel, %body, "{}", what),
+        (true, None) => info!(%body, "{}", what),
+        (false, Some(panel)) => info!(panel, cmd = %ipc_cmd(body), len = body.len(), "{}", what),
+        (false, None) => info!(cmd = %ipc_cmd(body), len = body.len(), "{}", what),
+    }
+}
+
+/// `HIWAVE_RUSTKIT_CHROME_EVAL`, the script the real-window checks run in
+/// the RustKit chrome once it boots: only with the flag on and
+/// `HIWAVE_TEST_HOOKS=1` as well (#907 R1 nit 2), so a release build does
+/// not run a script from the environment in the privileged chrome.
+fn chrome_boot_eval(flag_on: bool, test_hooks: Option<&str>, eval: Option<String>) -> Option<String> {
+    // RED STUB: the test hooks switch is not read.
+    let _ = test_hooks;
+    flag_on.then_some(eval).flatten().filter(|js| !js.is_empty())
+}
+
 impl ChromeUi for ChromeView {
     fn eval(&self, js: &str) -> Result<(), String> {
         match self {
@@ -1656,6 +1784,16 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+/// `wheel_burst_started` for a wheel on `target`: the page's only. The
+/// h6 check reads the burst line after its first wheel over the page; a
+/// wheel over the RustKit chrome or a panel must not take it (#907 R1 nit 4).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn wheel_starts_burst(target: InputTarget) -> bool {
+    // RED STUB: every view's wheel shares the burst.
+    let _ = target;
+    wheel_burst_started()
+}
+
 /// Which RustKit view an input event is for: the page, or the browser's
 /// own chrome (`HIWAVE_RUSTKIT_CHROME=1`, CH3.A2).
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
@@ -1903,6 +2041,20 @@ mod wheel_burst_tests {
         assert!(wheel_burst_started(), "the first wheel event after launch starts a burst");
         assert!(!wheel_burst_started(), "an event right behind it belongs to the same burst");
     }
+
+    #[test]
+    fn a_wheel_over_the_chrome_or_a_panel_leaves_the_page_its_burst() {
+        use super::{wheel_starts_burst, InputTarget};
+        // A fresh thread: a fresh launch's clock.
+        std::thread::spawn(|| {
+            assert!(!wheel_starts_burst(InputTarget::Chrome), "the chrome's wheel is not the page's burst");
+            assert!(!wheel_starts_burst(InputTarget::Panel), "nor a panel's");
+            assert!(wheel_starts_burst(InputTarget::Page), "the page's first wheel still starts one");
+            assert!(!wheel_starts_burst(InputTarget::Page));
+        })
+        .join()
+        .unwrap();
+    }
 }
 
 fn is_new_tab_url(url: &str) -> bool {
@@ -1934,6 +2086,110 @@ fn should_record_history_url(url: &str) -> bool {
 
 // Popup filtering is now handled by platform::is_definitely_popup()
 // which provides comprehensive cross-platform URL blocking
+
+// CH3.A4b and the #907 R1 nits: lazy panels, IPC log lines, the eval hook.
+#[cfg(test)]
+mod lazy_panel_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A panel view that records what the app did with it.
+    struct Fake(Rc<RefCell<Vec<String>>>);
+
+    impl ChromeUi for Fake {
+        fn eval(&self, js: &str) -> Result<(), String> {
+            self.0.borrow_mut().push(format!("eval {js}"));
+            Ok(())
+        }
+        fn place(&self, rect: Rect) {
+            let h = rect.size.to_logical::<f64>(1.0).height;
+            self.0.borrow_mut().push(format!("place {h}"));
+        }
+    }
+
+    fn rect(height: u32) -> Rect {
+        Rect {
+            position: LogicalPosition::new(0, 600).into(),
+            size: LogicalSize::new(800, height).into(),
+        }
+    }
+
+    #[test]
+    fn a_deferred_panel_is_built_when_it_first_opens_and_kept_after_it_closes() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let builds = Rc::new(RefCell::new(0));
+        let shelf: LazyPanel<Fake> = LazyPanel::deferred("<p>shelf</p>", "shelf");
+        let build = |log: &Rc<RefCell<Vec<String>>>, builds: &Rc<RefCell<i32>>| {
+            let (log, builds) = (Rc::clone(log), Rc::clone(builds));
+            move |_: Rect, html: &'static str, name: &'static str| {
+                assert_eq!((html, name), ("<p>shelf</p>", "shelf"));
+                *builds.borrow_mut() += 1;
+                Some(Fake(log))
+            }
+        };
+        // Launch: the layout places the panels closed (0 pt tall), and the
+        // app sends a hidden panel scripts.
+        shelf.lay_out(rect(SHELF_HEIGHT_DEFAULT), build(&log, &builds));
+        let _ = shelf.eval("showCommands([])");
+        shelf.take_keyboard();
+        assert!(shelf.get().is_none(), "no panel view after launch");
+        assert_eq!(*builds.borrow(), 0);
+        // expand_shelf: the layout gives it its height.
+        shelf.lay_out(rect(SHELF_HEIGHT_EXPANDED), build(&log, &builds));
+        assert!(shelf.get().is_some(), "the open command built the panel view");
+        assert_eq!(*builds.borrow(), 1);
+        assert_eq!(
+            *log.borrow(),
+            vec!["eval showCommands([])".to_string(), format!("place {}", SHELF_HEIGHT_EXPANDED)],
+            "it hears what it was sent while not built, then takes its place"
+        );
+        // Closed and opened again: the same view, not a second one.
+        shelf.lay_out(rect(SHELF_HEIGHT_DEFAULT), build(&log, &builds));
+        shelf.lay_out(rect(SHELF_HEIGHT_EXPANDED), build(&log, &builds));
+        assert_eq!(*builds.borrow(), 1, "kept after close");
+        assert_eq!(log.borrow().last().map(String::as_str), Some("place 280"));
+    }
+
+    #[test]
+    fn a_panel_built_at_launch_is_placed_as_before() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let panel = LazyPanel::built(Fake(Rc::clone(&log)), "", "Inspector");
+        panel.lay_out(rect(0), |_, _, _| panic!("a built panel is not built again"));
+        let _ = panel.eval("x()");
+        assert_eq!(*log.borrow(), vec!["place 0".to_string(), "eval x()".to_string()]);
+    }
+
+    #[test]
+    fn a_panel_not_built_keeps_only_its_last_scripts() {
+        let panel: LazyPanel<Fake> = LazyPanel::deferred("", "Inspector");
+        for i in 0..LAZY_PANEL_HELD_MAX + 10 {
+            let _ = panel.eval(&format!("line({i})"));
+        }
+        let held = panel.held.borrow();
+        assert_eq!(held.len(), LAZY_PANEL_HELD_MAX);
+        assert_eq!(held.front().map(String::as_str), Some("line(10)"));
+    }
+
+    #[test]
+    fn an_ipc_log_line_names_the_cmd_not_the_body() {
+        let body = r#"{"cmd":"navigate","url":"https://example.test/a?q=secret"}"#;
+        assert_eq!(ipc_cmd(body), "navigate");
+        assert_eq!(ipc_cmd(r#"{"cmd":"find_in_page","query":"secret"}"#), "find_in_page");
+        assert_eq!(ipc_cmd("not json, secret"), "?");
+        assert_eq!(ipc_cmd(r#"{"url":"secret"}"#), "?");
+    }
+
+    #[test]
+    fn the_chrome_eval_hook_needs_the_test_hooks_switch() {
+        let js = || Some("sendIpc('x')".to_string());
+        assert_eq!(chrome_boot_eval(true, None, js()), None, "flag on, no test hooks: not run");
+        assert_eq!(chrome_boot_eval(true, Some("0"), js()), None);
+        assert_eq!(chrome_boot_eval(false, Some("1"), js()), None, "flag off: not run");
+        assert_eq!(chrome_boot_eval(true, Some("1"), Some(String::new())), None);
+        assert_eq!(chrome_boot_eval(true, Some("1"), js()), js());
+    }
+}
 
 #[cfg(test)]
 mod rust_log_tests {
