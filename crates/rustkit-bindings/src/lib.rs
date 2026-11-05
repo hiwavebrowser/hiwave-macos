@@ -1277,6 +1277,13 @@ impl DomBindings {
         })
     }
 
+    /// How many times script has set a text control's selection
+    /// (`select()`, `setSelectionRange`). The engine compares it across a
+    /// press's focus change (CH2.E12).
+    pub fn script_selections(&self) -> u64 {
+        self.edit.script_selections.get()
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {

@@ -33,6 +33,11 @@ pub struct EditContext {
     /// [`ACTIVATION_DURATION`]. `navigator.clipboard.writeText` needs it,
     /// so a page cannot overwrite the clipboard on its own.
     pub(crate) activation_until: Cell<Option<std::time::Instant>>,
+    /// Bumped each time script sets a text control's selection
+    /// (`select()`, `setSelectionRange`, the `selectionStart`/`End`
+    /// setters). The engine reads it around a press's focus change: a
+    /// focus handler that selected keeps its selection (CH2.E12).
+    pub(crate) script_selections: Cell<u64>,
 }
 
 /// How long a user activation lasts (Chrome's transient activation
@@ -59,6 +64,7 @@ impl Default for EditContext {
             states: RefCell::new(Rc::default()),
             script_read: Cell::new(false),
             activation_until: Cell::new(None),
+            script_selections: Cell::new(0),
         }
     }
 }
@@ -230,6 +236,86 @@ pub(crate) fn install(
                 super::note_mutation(&m, DomDirty::Layout, MutationKind::FormValue, || {
                     format!("{}#edit", node.tag_name().unwrap_or(""))
                 });
+                d.mark(DomDirty::Layout);
+            }
+            JsValue::String(report.to_string())
+        }),
+    )?;
+    // text_sel(gen, id, start?, end?, dir?): a text control's selection in
+    // the edit state the engine edits and paints from (CH2.E12), as JSON
+    // {start, end, dir} in UTF-16 units. With `start` and `end` it is set
+    // first (the state is made when the control has none yet); without,
+    // null when the control has no state (script keeps its own copy).
+    // Null when `id` is not a text control.
+    let h = host.clone();
+    let d = dirty.clone();
+    let c = ctx.clone();
+    runtime.register_host_function(
+        "__rustkit_text_sel",
+        5,
+        Box::new(move |args| {
+            let Some(node) = h.borrow().node(args) else {
+                return JsValue::Null;
+            };
+            let Some(kind) = text_control_kind(&node) else {
+                return JsValue::Null;
+            };
+            let raw = node.id.raw();
+            let set = match (number_arg(args, 2), number_arg(args, 3)) {
+                (Some(start), Some(end)) => Some((start, end)),
+                _ => None,
+            };
+            let current = h.borrow().values.get(&raw).cloned().unwrap_or_else(|| {
+                if kind == TextControlKind::MultiLine {
+                    node.text_content()
+                } else {
+                    node.get_attribute("value").unwrap_or("").to_string()
+                }
+            });
+            let states = c.states.borrow().clone();
+            let mut states = states.borrow_mut();
+            if set.is_none() && !states.contains_key(&raw) {
+                return JsValue::Null;
+            }
+            let state = states.entry(raw).or_insert_with(|| {
+                let s = TextEditState::with_value(current.clone());
+                s.move_to_end(false);
+                s
+            });
+            if state.value() != current {
+                // Script set the value since: the caret goes to its end.
+                state.set_value(current);
+            }
+            let mut moved = false;
+            if let Some((start, end)) = set {
+                let value = state.value();
+                let (start, end) = (byte_offset(&value, start), byte_offset(&value, end));
+                let dir = match string_arg(args, 4) {
+                    Some("forward") => rustkit_dom::SelectionDirection::Forward,
+                    Some("backward") => rustkit_dom::SelectionDirection::Backward,
+                    _ => rustkit_dom::SelectionDirection::None,
+                };
+                let before = (state.selection().normalize(), state.selection_direction());
+                state.set_selection_with_direction(start.min(end), end, dir);
+                moved = before != (state.selection().normalize(), state.selection_direction());
+                c.script_selections.set(c.script_selections.get() + 1);
+            }
+            let value = state.value();
+            let sel = state.selection().normalize();
+            let dir = match state.selection_direction() {
+                rustkit_dom::SelectionDirection::Forward => "forward",
+                rustkit_dom::SelectionDirection::Backward => "backward",
+                rustkit_dom::SelectionDirection::None => "none",
+            };
+            let report = serde_json::json!({
+                "start": utf16_offset(&value, sel.start),
+                "end": utf16_offset(&value, sel.end),
+                "dir": dir,
+            });
+            drop(states);
+            if moved {
+                // The engine paints a focused control's selection from the
+                // state: lay it out again.
                 d.mark(DomDirty::Layout);
             }
             JsValue::String(report.to_string())

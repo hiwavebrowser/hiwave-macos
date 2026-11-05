@@ -2851,20 +2851,29 @@ const WRAPPERS_JS: &str = r#"
     }, function (v) {
         v = v === null ? '' : String(v);
         if (inputMode(this) !== 'value') return this.setAttribute('value', v);
-        var n = controlValue(this, v).length;
-        selectionOf(this).start = selectionOf(this).end = n;
+        setValueMovingCaret(this, v);
     });
     accessor(HTMLTextAreaElement.prototype, 'value', function () { return controlValue(this); },
-        function (v) {
-            var n = controlValue(this, v === null ? '' : String(v)).length;
-            selectionOf(this).start = selectionOf(this).end = n;
-        });
-    // Script's view of the selection (HTML §4.10.5.2.10). The engine's caret
-    // is not synced to it yet; setting a value moves both ends to its end.
+        function (v) { setValueMovingCaret(this, v === null ? '' : String(v)); });
+    // Setting a different value moves both ends of the selection to its
+    // end; the same value leaves the selection alone (HTML §4.10.5.4).
+    function setValueMovingCaret(el, v) {
+        if (controlValue(el) === v) return;
+        var n = controlValue(el, v).length;
+        selectionOf(el).start = selectionOf(el).end = n;
+    }
+    // Script's view of the selection (HTML §4.10.5.2.10).
+    // Once a control has an edit state (it was focused, typed in, or
+    // script set its selection), the engine's state is the selection
+    // (`engineSelection`, from dom/editing.js; CH2.E12); this copy stands
+    // in before that.
     var selections = new WeakMap();
+    var engineSelection = null;
     function selectionOf(el) {
         var s = selections.get(el);
         if (!s) { s = { start: 0, end: 0, dir: 'none' }; selections.set(el, s); }
+        var e = engineSelection ? engineSelection(el) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; return s; }
         var n = controlValue(el).length;
         s.start = Math.min(s.start, n); s.end = Math.min(s.end, n);
         return s;
@@ -2874,6 +2883,8 @@ const WRAPPERS_JS: &str = r#"
         s.end = Math.min(end >>> 0, n);
         s.start = Math.min(start >>> 0, s.end);
         s.dir = dir === 'forward' || dir === 'backward' ? dir : 'none';
+        var e = engineSelection ? engineSelection(el, s.start, s.end, s.dir) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; }
     }
     // Validity (HTML §4.10.20.3) for the constraints this rung models.
     var customValidity = new WeakMap();
@@ -5166,6 +5177,7 @@ const WRAPPERS_JS: &str = r#"
     g.__rkEditInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
         selectionOf: function (el) { return selectionOf(el); },
+        setEngineSelection: function (f) { engineSelection = f; },
         setSelection: function (el, start, end, dir) {
             var s = selectionOf(el);
             s.start = start; s.end = end; s.dir = dir;
