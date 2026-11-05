@@ -55,11 +55,14 @@ fn page() -> (Engine, EngineViewId) {
     (engine, view)
 }
 
-fn hover(engine: &mut Engine, view: EngineViewId, at: (f32, f32)) {
+/// Moves the pointer to `at` (viewport points): a `:hover` change takes
+/// the short path or misses to a full relayout.
+pub(crate) fn hover(engine: &mut Engine, view: EngineViewId, at: (f32, f32)) {
     engine.mouse_move_at_point(view, at.0, at.1);
 }
 
-fn skipped(engine: &Engine, view: EngineViewId) -> u32 {
+/// Layouts the view skipped so far: one more after each short-path hit.
+pub(crate) fn skipped(engine: &Engine, view: EngineViewId) -> u32 {
     engine.relayout_stats(view).expect("view").layouts_skipped
 }
 
@@ -388,7 +391,8 @@ fn caret_drawn(painted: &(String, String)) -> bool {
     painted.1.contains("focused_caret: Some(")
 }
 
-fn last_miss() -> String {
+/// Why the last pointer restyle on this thread missed (empty on a hit).
+pub(crate) fn last_miss() -> String {
     LAST_RESTYLE_MISS.with(|why| why.borrow().clone())
 }
 
