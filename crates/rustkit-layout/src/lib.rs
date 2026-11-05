@@ -16,6 +16,7 @@
 
 pub mod flex;
 pub mod forms;
+pub mod selection;
 pub mod fragment;
 pub mod grid;
 pub mod images;
@@ -107,6 +108,7 @@ pub use text::{
 pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
+use std::collections::HashMap;
 use std::cmp::Ordering;
 
 /// The `word-break` the line breaker should run with.
@@ -1434,6 +1436,63 @@ pub struct StackingContext {
     pub positioned_children: Vec<usize>,
 }
 
+/// Where some characters of a text run came from: the DOM text node
+/// `node`, whose white-space-collapsed text (see [`collapse_map`]) supplies
+/// `len` characters from its character `skip` on, at the run's character
+/// `at`. Runs join adjacent text nodes and strip collapsed spaces at their
+/// edges, so a run can have several sources and a source can start part
+/// way into its node's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSource {
+    pub node: usize,
+    pub at: usize,
+    pub skip: usize,
+    pub len: usize,
+    /// Whether the node's white space collapses (it does not under the pre
+    /// family): the same rule the run was built with.
+    pub collapsible: bool,
+}
+
+/// For each character of a DOM text node, the index of the character it
+/// becomes in the white-space-collapsed text (css-text §4.1, as the
+/// engine's box builder collapses it: document white space runs become one
+/// space, at the index of that space), plus one final entry for the end of
+/// the text. Under `collapsible == false` the map is the identity.
+pub fn collapse_map(text: &str, collapsible: bool) -> Vec<usize> {
+    let mut map = Vec::with_capacity(text.len() + 1);
+    if !collapsible {
+        let n = text.chars().count();
+        map.extend(0..=n);
+        return map;
+    }
+    let mut out = 0usize;
+    let mut in_ws = false;
+    for c in text.chars() {
+        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}') {
+            if !in_ws {
+                in_ws = true;
+            }
+            map.push(out);
+        } else {
+            if in_ws {
+                out += 1;
+                in_ws = false;
+            }
+            map.push(out);
+            out += 1;
+        }
+    }
+    if in_ws {
+        out += 1;
+    }
+    map.push(out);
+    map
+}
+
+/// The selection colour Chrome paints behind selected text and behind the
+/// selected part of a text control's value (macOS light appearance).
+pub const SELECTION_COLOR: Color = Color { r: 180, g: 215, b: 255, a: 1.0 };
+
 /// One line of a wrapped text box.
 ///
 /// Populated by `layout_text` when a `BoxType::Text` box wraps onto multiple
@@ -1640,6 +1699,15 @@ pub struct LayoutBox {
     /// previously impossible ("focus tracking requires DOM node ID in
     /// LayoutBox") and is unblocked by `node_id` below.
     pub focused_caret: Option<usize>,
+    /// The selected characters `[start, end)` of the FOCUSED text control's
+    /// value, when its selection is not collapsed. Set with `focused_caret`;
+    /// the painter fills them with the selection colour behind the text.
+    pub focused_selection: Option<(usize, usize)>,
+    /// For a text run: which DOM text nodes its characters came from (see
+    /// [`TextSource`]). Empty for every other box. Mouse selection maps a
+    /// point in the run back to a node and offset through it, and painting
+    /// maps a document selection forward onto the run's characters.
+    pub text_sources: Vec<TextSource>,
     /// Raw `NodeId` of the originating DOM node, when there is one.
     ///
     /// Carried as a plain `usize` so `rustkit-layout` keeps no dependency on
@@ -1740,6 +1808,8 @@ impl LayoutBox {
             identity: None,
             link_href: None,
             focused_caret: None,
+            focused_selection: None,
+            text_sources: Vec::new(),
             node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
@@ -8531,6 +8601,10 @@ pub enum DisplayCommand {
         padding: [f32; 4],
         /// Which control this is; see `TextControlKind`.
         kind: TextControlKind,
+        /// The selected characters `[start, end)` of `value` when the
+        /// control is focused with a non-collapsed selection: painted in
+        /// [`SELECTION_COLOR`] behind the text (`forms::calculate_selection_rects`).
+        selection: Option<(usize, usize)>,
     },
     /// Draw a list box (`<select>` with `size > 1` or `multiple`): one row
     /// per option inside the frame, the selected rows highlighted, rows past
@@ -9448,6 +9522,14 @@ pub struct DisplayList {
     /// text runs paint inside it; a nested block container replaces it with
     /// its own (or none) for the duration of its subtree.
     ellipsis: Option<EllipsisScope>,
+    /// The document selection to paint, by DOM text node: the selected
+    /// characters `[start, end)` of each node's white-space-collapsed text
+    /// (see [`TextSource`]). Empty when nothing is selected.
+    text_selection: HashMap<usize, (usize, usize)>,
+    /// The caret of a focused contenteditable host: a DOM text node and a
+    /// collapsed character offset in it, painted as a `Caret` in the run
+    /// that has that character.
+    text_caret: Option<(usize, usize)>,
 }
 
 /// One block container's `text-overflow: ellipsis` state while its subtree
@@ -9553,6 +9635,8 @@ impl DisplayList {
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
+            text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9577,6 +9661,8 @@ impl DisplayList {
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
+            text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9585,6 +9671,41 @@ impl DisplayList {
         let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
+    }
+
+    /// [`Self::build`], with the document selection painted behind the
+    /// selected characters of each text run, in [`SELECTION_COLOR`]: one
+    /// rect per line of each run, the height of the line box. `selection`
+    /// is by DOM text node, in collapsed characters (see `text_selection`).
+    /// `caret` is an editing caret to paint (see `text_caret`).
+    pub fn build_with_selection(
+        root: &LayoutBox,
+        selection: HashMap<usize, (usize, usize)>,
+        caret: Option<(usize, usize)>,
+    ) -> Self {
+        let mut list = DisplayList::for_root(root);
+        list.text_selection = selection;
+        list.text_caret = caret;
+        list.render_stacking_context(root, 0, &mut 0);
+        list
+    }
+
+    /// The selected characters `[start, end)` of a text run, from the
+    /// document selection and the run's sources. Sorted, not merged.
+    fn run_selection(&self, layout_box: &LayoutBox) -> Vec<(usize, usize)> {
+        if self.text_selection.is_empty() {
+            return Vec::new();
+        }
+        layout_box
+            .text_sources
+            .iter()
+            .filter_map(|src| {
+                let &(start, end) = self.text_selection.get(&src.node)?;
+                let from = start.max(src.skip);
+                let to = end.min(src.skip + src.len);
+                (from < to).then(|| (src.at + from - src.skip, src.at + to - src.skip))
+            })
+            .collect()
     }
 
     /// Build display list from a layout box with scroll state applied.
@@ -11436,6 +11557,32 @@ impl DisplayList {
             // regardless of their own font's leading. `justify_space` is the
             // per-word-separator expansion of a justified line (0 otherwise);
             // the line's width already includes it.
+            // The selected characters of this run, and where each line
+            // starts in the run's characters (lines drop the collapsed
+            // space they broke at, so each is found after the last).
+            let selected = self.run_selection(layout_box);
+            // The editing caret, as a character of this run.
+            let caret_at = self.text_caret.and_then(|(node, offset)| {
+                layout_box
+                    .text_sources
+                    .iter()
+                    .find(|s| s.node == node && offset >= s.skip && offset <= s.skip + s.len)
+                    .map(|s| s.at + offset - s.skip)
+            });
+            let mut caret_painted = false;
+            let mut line_starts: Vec<usize> = Vec::new();
+            if !selected.is_empty() || caret_at.is_some() {
+                if let Some(lines) = &layout_box.text_lines {
+                    let mut cursor = 0usize;
+                    for l in lines.iter().filter(|l| !l.text.is_empty()) {
+                        let rest: String = raw_text.chars().skip(cursor).collect();
+                        let found = rest.find(l.text.as_str()).map(|b| rest[..b].chars().count()).unwrap_or(0);
+                        line_starts.push(cursor + found);
+                        cursor += found + l.text.chars().count();
+                    }
+                }
+            }
+            let mut line_index = 0usize;
             let render_lines: Vec<(String, f32, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
@@ -11487,6 +11634,8 @@ impl DisplayList {
             }
 
             for (text, x, y, text_width, line_top, justify_space) in render_lines {
+                let line_start = line_starts.get(line_index).copied().unwrap_or(0);
+                line_index += 1;
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
@@ -11513,6 +11662,53 @@ impl DisplayList {
                             }
                         }
                     }
+                }
+
+                // The document selection, behind this line's glyphs: from
+                // the advance of the characters before it to the advance
+                // of the selected ones, the height of the line box.
+                let line_len = text.chars().count();
+                for &(from, to) in &selected {
+                    let a = from.max(line_start).min(line_start + line_len) - line_start;
+                    let b = to.max(line_start).min(line_start + line_len) - line_start;
+                    if a >= b {
+                        continue;
+                    }
+                    let width_of = |range: std::ops::Range<usize>| -> f32 {
+                        match &advances {
+                            Some(adv) => adv.get(range).map(|r| r.iter().sum()).unwrap_or(0.0),
+                            None => {
+                                let piece: String = text.chars().skip(range.start).take(range.len()).collect();
+                                measure_text_advanced(&piece, &style.font_family, font_size, style.font_weight, style.font_style).width
+                            }
+                        }
+                    };
+                    let left = x + width_of(0..a);
+                    let width = width_of(a..b);
+                    if width > 0.0 {
+                        self.commands.push(DisplayCommand::SolidColor(
+                            SELECTION_COLOR,
+                            Rect::new(left, line_top, width, line_height),
+                        ));
+                    }
+                }
+                if let Some(at) = caret_at.filter(|at| !caret_painted && *at >= line_start && *at <= line_start + line_len) {
+                    let before = at - line_start;
+                    let offset: f32 = match &advances {
+                        Some(adv) => adv.iter().take(before).sum(),
+                        None => {
+                            let piece: String = text.chars().take(before).collect();
+                            measure_text_advanced(&piece, &style.font_family, font_size, style.font_weight, style.font_style)
+                                .width
+                        }
+                    };
+                    self.commands.push(DisplayCommand::Caret {
+                        x: x + offset,
+                        y: line_top,
+                        height: line_height,
+                        color: style.color,
+                    });
+                    caret_painted = true;
                 }
 
                 // `text-overflow: ellipsis` on the enclosing block container
@@ -11889,6 +12085,7 @@ impl DisplayList {
                     // LayoutBox::node_id).
                     focused: layout_box.focused_caret.is_some(),
                     caret_position: layout_box.focused_caret,
+                    selection: layout_box.focused_selection.filter(|_| layout_box.focused_caret.is_some()),
                 });
             }
             FormControlType::TextArea {
@@ -11917,6 +12114,7 @@ impl DisplayList {
                     border_width,
                     focused: layout_box.focused_caret.is_some(),
                     caret_position: layout_box.focused_caret,
+                    selection: layout_box.focused_selection.filter(|_| layout_box.focused_caret.is_some()),
                 });
             }
             FormControlType::Button { label, .. } => {
@@ -12070,6 +12268,7 @@ impl DisplayList {
                     border_width,
                     focused: false,
                     caret_position: None,
+                    selection: None,
                 });
             }
         }
