@@ -45048,6 +45048,144 @@ mod grid_item_child_abspos_tests {
     }
 }
 
+// ── C15: an absolute box whose ancestors are all static is placed from the
+//    initial containing block, not from its static parent. ──
+#[cfg(test)]
+mod abspos_initial_containing_block_tests {
+    use super::*;
+    use rustkit_layout::{DisplayCommand, DisplayList, Dimensions, Rect};
+
+    const VIEWPORT: (f32, f32) = (1280.0, 800.0);
+
+    /// Laid out as `lay_out_document` lays out the root: viewport set, a
+    /// containing block with the flow cursor (0) as its height, through the
+    /// margin-collapse path.
+    fn laid_out(body: &str) -> LayoutBox {
+        let e = Engine::new(EngineConfig::default()).expect("engine");
+        let html = format!(r#"<html><body style="margin:0">{body}</body></html>"#);
+        let d = Document::parse_html(&html).expect("parse");
+        let mut root = e.build_layout_from_document(&d, &[]);
+        root.set_viewport(VIEWPORT.0, VIEWPORT.1);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, VIEWPORT.0, 0.0),
+            ..Default::default()
+        };
+        let mut margins = rustkit_layout::MarginCollapseContext::new();
+        margins.children_are_formatting_roots = true;
+        let mut floats = rustkit_layout::FloatContext::new();
+        root.layout_with_collapse(&cb, &mut margins, &mut floats);
+        root
+    }
+
+    fn by_id<'a>(b: &'a LayoutBox, id: &str) -> &'a LayoutBox {
+        fn find<'a>(b: &'a LayoutBox, id: &str) -> Option<&'a LayoutBox> {
+            if b.identity.as_ref().is_some_and(|i| i.selector == format!("#{id}")) {
+                return Some(b);
+            }
+            b.children.iter().find_map(|c| find(c, id))
+        }
+        find(b, id).unwrap_or_else(|| panic!("no #{id}"))
+    }
+
+    /// The border-box origin, which is what `getBoundingClientRect()` reads.
+    fn origin(root: &LayoutBox, id: &str) -> (f32, f32) {
+        let r = by_id(root, id).dimensions.border_box();
+        (r.x, r.y)
+    }
+
+    const SPACER: &str = r#"<div style="height:1000px"></div>"#;
+    const ABS: &str = r#"<div id="abs" style="position:absolute;top:1800px;left:10px;width:40px;height:20px;background:red"></div>"#;
+
+    fn under(parent_style: &str) -> LayoutBox {
+        laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;height:50px;{parent_style}">{ABS}</div>"#
+        ))
+    }
+
+    #[track_caller]
+    fn assert_at(root: &LayoutBox, expected: (f32, f32)) {
+        let parent = origin(root, "parent");
+        assert_eq!(parent, (200.0, 1000.0), "precondition: the static parent sits at (200, 1000)");
+        assert_eq!(origin(root, "abs"), expected, "Chrome places #abs at {expected:?}");
+    }
+
+    #[test]
+    fn a_static_parent_does_not_offset_an_absolute_child_on_either_axis() {
+        assert_at(&under(""), (10.0, 1800.0));
+    }
+
+    #[test]
+    fn an_overflow_auto_static_parent_is_no_containing_block() {
+        assert_at(&under("overflow:auto"), (10.0, 1800.0));
+    }
+
+    #[test]
+    fn an_overflow_hidden_static_parent_is_no_containing_block() {
+        assert_at(&under("overflow:hidden"), (10.0, 1800.0));
+    }
+
+    #[test]
+    fn a_padded_bordered_static_parent_still_leaves_the_initial_containing_block() {
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;padding:30px;border:5px solid black">{ABS}</div>"#
+        ));
+        assert_at(&root, (10.0, 1800.0));
+    }
+
+    #[test]
+    fn a_static_grandparent_chain_still_reaches_the_initial_containing_block() {
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px"><section style="padding:7px">{ABS}</section></div>"#
+        ));
+        assert_at(&root, (10.0, 1800.0));
+    }
+
+    #[test]
+    fn a_relative_ancestor_stays_the_containing_block() {
+        // Control: unchanged by the fix.
+        assert_at(&under("position:relative"), (210.0, 2800.0));
+    }
+
+    #[test]
+    fn a_relative_ancestor_above_a_static_parent_is_the_containing_block() {
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;position:relative"><section style="margin-left:20px;padding-top:9px">{ABS}</section></div>"#
+        ));
+        assert_at(&root, (210.0, 2800.0));
+    }
+
+    #[test]
+    fn a_transformed_ancestor_stays_the_containing_block() {
+        // Control: a transform establishes a containing block for absolutes.
+        assert_at(&under("transform:translate(0px,0px)"), (210.0, 2800.0));
+    }
+
+    #[test]
+    fn right_and_bottom_resolve_against_the_initial_containing_block() {
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;width:300px;height:50px"><div id="abs" style="position:absolute;right:0;bottom:0;width:100px;height:50px"></div></div>"#
+        ));
+        assert_at(&root, (VIEWPORT.0 - 100.0, VIEWPORT.1 - 50.0));
+    }
+
+    #[test]
+    fn the_absolute_box_paints_where_it_is_placed() {
+        let root = under("");
+        let list = DisplayList::build(&root);
+        let red = list
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DisplayCommand::SolidColor(color, rect) if color.r == 255 && color.g == 0 && color.b == 0 => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("#abs paints a red rect");
+        assert_eq!((red.x, red.y, red.width, red.height), (10.0, 1800.0, 40.0, 20.0));
+    }
+}
+
 // Needs a headless view: `cargo test -p rustkit-engine --features headless`.
 #[cfg(all(test, target_os = "macos", feature = "headless"))]
 mod error_response_tests {
