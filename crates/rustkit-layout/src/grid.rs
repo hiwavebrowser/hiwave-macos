@@ -10056,7 +10056,13 @@ mod tests {
         for h in [20.0, 30.0] {
             let mut rs = ComputedStyle::new();
             rs.height = Length::Px(h);
-            card.children.push(LayoutBox::new(BoxType::Block, rs));
+            let mut row = LayoutBox::new(BoxType::Block, rs);
+            // The width the block pre-pass leaves on the row: the engine
+            // flows a grid's children in the GRID's width (1040, less the
+            // card's 32 of padding) before the grid places them, and the
+            // flex pass read that back as the row's content width.
+            row.dimensions.content.width = 1008.0;
+            card.children.push(row);
         }
         item.children.push(card);
         grid.children.push(item);
