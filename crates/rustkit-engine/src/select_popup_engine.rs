@@ -1,9 +1,14 @@
 //! The engine side of the `<select>` drop-down (CH2.E6; the model and its
 //! paint are `select_popup`).
 //!
-//! - A click on a focusable drop-down select (no `size` above 1, no
-//!   `multiple`, not disabled), or Space, Alt+Down/Alt+Up or F4 while one
-//!   is focused, opens its popup at the control.
+//! - A press on a focusable drop-down select (no `size` above 1, no
+//!   `multiple`, not disabled) whose `mousedown` went uncancelled, or
+//!   Space, Alt+Down/Alt+Up or F4 while one is focused, opens its popup at
+//!   the control, as Chrome does. Releasing that press on an option picks
+//!   it (press, drag, release); released anywhere else, the popup stays.
+//! - The popup closes when its select leaves the document, loses the focus
+//!   or is disabled (checked after each relayout), and when the view is
+//!   resized.
 //! - While it is open the popup owns the pointer, the wheel and the keys:
 //!   the page hears none of them. A move over it highlights the option under
 //!   the pointer; a click on an enabled option picks it; a press anywhere
@@ -183,7 +188,10 @@ impl Engine {
         let closed = self
             .views
             .get(&id)
-            .and_then(|v| v.lay.select_popup.borrow_mut().take())
+            .and_then(|v| {
+                v.lay.select_popup_opening_press.set(false);
+                v.lay.select_popup.borrow_mut().take()
+            })
             .is_some();
         if closed {
             self.repaint_select_popup(id);
@@ -193,7 +201,10 @@ impl Engine {
 
     /// Close the drop-down and pick the highlighted option.
     fn commit_select_popup(&mut self, id: EngineViewId) {
-        let popup = self.views.get(&id).and_then(|v| v.lay.select_popup.borrow_mut().take());
+        let popup = self.views.get(&id).and_then(|v| {
+            v.lay.select_popup_opening_press.set(false);
+            v.lay.select_popup.borrow_mut().take()
+        });
         let Some(popup) = popup else {
             return;
         };
@@ -326,6 +337,25 @@ impl Engine {
                 None
             }
         };
+        // The release of the press that opened the popup: on an enabled
+        // option it picks it (a drag from the select); anywhere else it is
+        // the page's (`mouseup`, `click` at the select) and the popup stays.
+        if view.lay.select_popup_opening_press.replace(false) {
+            let Some(Some(index)) = hit else {
+                return None;
+            };
+            view.primary_button_down = false;
+            view.press_target = None;
+            view.compat_mouse_suppressed = false;
+            let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
+            view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
+            if let Some(popup) = view.lay.select_popup.borrow_mut().as_mut() {
+                popup.highlighted = Some(index);
+            }
+            self.commit_select_popup(id);
+            self.settle_pointer_restyle(id);
+            return Some(());
+        }
         view.primary_button_down = false;
         view.press_target = None;
         match hit {
@@ -491,9 +521,10 @@ impl Engine {
         })
     }
 
-    /// After a click's default actions: a click on a drop-down select that
-    /// now has the focus opens it.
-    pub(crate) fn open_select_popup_on_click(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+    /// After a press's default action (the focus moved): a press on a
+    /// drop-down select that now has the focus opens it. Its release is
+    /// then the popup's to read (`select_popup_release`).
+    pub(crate) fn open_select_popup_at_press(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw()) else {
             return;
         };
@@ -505,10 +536,53 @@ impl Engine {
         else {
             return;
         };
-        // The click was on the select itself (or on something inside it).
+        // The press was on the select itself (or on something inside it).
         let on_select = self.element_chain(id, hit).contains(&focused);
-        if on_select && self.drop_down_select(id, focused).is_some() {
-            self.open_select_popup(id, focused);
+        if on_select && self.drop_down_select(id, focused).is_some() && self.open_select_popup(id, focused) {
+            if let Some(view) = self.views.get(&id) {
+                view.lay.select_popup_opening_press.set(true);
+            }
+        }
+    }
+
+    /// Close the drop-down when its select is no longer one that can show
+    /// it: out of the document, no longer focused, disabled, or no longer a
+    /// drop-down (`multiple`, `size` above 1). Chrome closes it then.
+    pub(crate) fn close_stale_select_popup(&mut self, id: EngineViewId) {
+        let Some(select) = self.views.get(&id).and_then(|v| v.lay.select_popup.borrow().as_ref().map(|p| p.select))
+        else {
+            return;
+        };
+        let focused = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
+        let connected = self.node(id, select).is_some_and(|node| {
+            let mut at = node;
+            loop {
+                if matches!(at.node_type, NodeType::Document) {
+                    break true;
+                }
+                match at.parent() {
+                    Some(parent) => at = parent,
+                    None => break false,
+                }
+            }
+        });
+        if !connected || focused != Some(select) || self.drop_down_select(id, select).is_none() {
+            debug!(?id, select, connected, ?focused, "Closing a select popup whose select changed");
+            self.close_select_popup(id);
+        }
+    }
+
+    /// The view takes a new size: an open drop-down closes (Chrome), unless
+    /// the size is the one it has.
+    pub(crate) fn close_select_popup_on_resize(&mut self, id: EngineViewId, bounds: Bounds) {
+        if !self.select_popup_open(id) {
+            return;
+        }
+        let same = self
+            .stored_viewport_bounds(id)
+            .is_some_and(|b| b.width == bounds.width && b.height == bounds.height);
+        if !same {
+            self.close_select_popup(id);
         }
     }
 }

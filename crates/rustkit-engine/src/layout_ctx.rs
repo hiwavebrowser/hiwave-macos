@@ -203,6 +203,10 @@ pub(crate) struct ViewLayout {
     /// The press that closed a drop-down: its release is the popup's too,
     /// and goes nowhere on the page.
     pub(crate) select_popup_release: Cell<bool>,
+    /// The press that opened the drop-down is still down: its release on
+    /// an option picks it (press, drag, release), anywhere else it is the
+    /// page's and the popup stays open.
+    pub(crate) select_popup_opening_press: Cell<bool>,
     /// How many commands at the end of the view's display list are the
     /// popup's (0 when none).
     pub(crate) select_popup_painted: Cell<usize>,

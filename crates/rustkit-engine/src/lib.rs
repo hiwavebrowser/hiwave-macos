@@ -1149,6 +1149,7 @@ impl ViewState {
         self.lay.checked_states.borrow_mut().clear();
         self.lay.select_popup.borrow_mut().take();
         self.lay.select_popup_release.set(false);
+        self.lay.select_popup_opening_press.set(false);
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.focused_node.set(None);
         self.wheel_gesture = None;
@@ -2985,6 +2986,7 @@ impl Engine {
     /// all now. The app's live loop uses [`Engine::set_view_bounds`] and
     /// lays out once per turn instead.
     pub fn resize_view(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.close_select_popup_on_resize(id, bounds);
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = None;
@@ -3016,6 +3018,7 @@ impl Engine {
     }
 
     pub fn set_view_bounds(&mut self, id: EngineViewId, bounds: Bounds) -> Result<(), EngineError> {
+        self.close_select_popup_on_resize(id, bounds);
         self.apply_view_bounds(id, bounds)?;
         if let Some(view) = self.views.get_mut(&id) {
             view.pending_resize = Some(bounds);
@@ -3613,6 +3616,9 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         if !suppressed && not_cancelled {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+            // A press on a drop-down `<select>` opens it, as Chrome's
+            // does (a cancelled `mousedown` keeps it shut).
+            self.open_select_popup_at_press(id, viewport_x, viewport_y);
         }
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
@@ -4030,11 +4036,6 @@ impl Engine {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
                 bindings.take_navigation_requests();
             }
-        }
-        // A click on a drop-down `<select>` opens it (after the page's
-        // listeners, which may cancel the click).
-        if not_cancelled && elsewhere.is_none() && navigate.is_none() {
-            self.open_select_popup_on_click(id, viewport_x, viewport_y);
         }
         self.settle_pointer_restyle(id);
         ClickOutcome { focused, navigate }
@@ -8048,6 +8049,9 @@ impl Engine {
         relayout_cause::take_stage_ms();
 
         let layout_skipped = self.relayout_uncounted(id)?;
+        // A drop-down whose select left the document, lost the focus or
+        // was disabled closes (Chrome).
+        self.close_stale_select_popup(id);
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
         let stages = relayout_cause::take_stage_ms();

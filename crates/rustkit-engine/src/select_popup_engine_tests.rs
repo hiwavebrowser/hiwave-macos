@@ -297,3 +297,120 @@ fn a_closed_select_types_a_prefix() {
     engine.handle_text_key(id, 0, "l", false, false, false);
     assert_eq!(js(&mut engine, id, "s.value"), "Blueberry");
 }
+
+// CH2.E6 fix round (R1 nits 1, 3 and 4).
+
+// Nit 1, the brief's shape: a select in an `overflow: auto` panel
+// scrolled 100px, the panel itself in a scrolled panel, on a scrolled
+// page. Every scroller above the select moves the popup with it.
+const NESTED_SCROLL_PAGE: &str = r#"<!DOCTYPE html><html><body style="margin:0;height:2000px">
+<div style="height:300px"></div>
+<div id="outer" style="margin-left:100px;width:400px;height:200px;overflow:auto">
+  <div style="height:50px"></div>
+  <div id="panel" style="width:300px;height:150px;overflow:auto">
+    <div style="height:200px"></div>
+    <select id="inner" style="display:block;width:150px;height:24px">
+      <option>i0</option><option>i1</option><option>i2</option>
+    </select>
+    <div style="height:300px"></div>
+  </div>
+  <div style="height:400px"></div>
+</div>
+<script>
+  window.log = [];
+  document.addEventListener('change', function (e) { log.push(e.target.id + ':' + e.target.selectedIndex); });
+</script>
+</body></html>"#;
+
+#[test]
+fn a_select_in_a_panel_scrolled_100px_opens_its_popup_where_it_is_shown() {
+    let Some((mut engine, id)) = page() else { return };
+    engine.load_html(id, NESTED_SCROLL_PAGE).expect("load_html");
+    js(&mut engine, id, "document.getElementById('panel').scrollTop = 100; document.getElementById('outer').scrollTop = 30; ''");
+    engine.set_scroll_offset(id, 0.0, 200.0).expect("scroll");
+    // Document y: 300 (spacer) + 50 + 200 = 550; shown at
+    // 550 - 100 (panel) - 30 (outer) - 200 (page) = 220 in the viewport.
+    click(&mut engine, id, 175.0, 232.0);
+    assert!(engine.select_popup_open(id), "a press where the select is shown opens it");
+    let popup = engine.views[&id].lay.select_popup.borrow().clone().unwrap();
+    assert_eq!(popup.rect.x, 100.0);
+    assert_eq!(popup.rect.y, 200.0 + 244.0, "under the select as shown, in document coordinates");
+    let (x, y) = row_point(&engine, id, 2);
+    click(&mut engine, id, x, y - 200.0);
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "inner:2");
+}
+
+// Nit 3: the popup opens at the press, as Chrome's does.
+#[test]
+fn a_press_on_the_select_opens_the_popup_before_the_release() {
+    let Some((mut engine, id)) = page() else { return };
+    engine.mouse_down_at_point(id, 85.0, 22.0);
+    assert!(engine.select_popup_open(id), "the press opens it");
+    engine.click_at_point(id, 85.0, 22.0);
+    assert!(engine.select_popup_open(id), "the release on the select leaves it open");
+    assert_eq!(log(&mut engine, id), "", "nothing picked");
+}
+
+#[test]
+fn press_drag_release_onto_an_option_picks_it() {
+    let Some((mut engine, id)) = page() else { return };
+    engine.mouse_down_at_point(id, 85.0, 22.0);
+    assert!(engine.select_popup_open(id), "the press opens it");
+    let (x, y) = row_point(&engine, id, 3);
+    engine.mouse_move_at_point(id, x, y);
+    engine.click_at_point(id, x, y);
+    assert!(!engine.select_popup_open(id), "the release on an option picks it and closes");
+    assert_eq!(js(&mut engine, id, "String(s.selectedIndex)"), "3");
+    assert_eq!(log(&mut engine, id), "input:s:3 change:s:3");
+}
+
+#[test]
+fn a_cancelled_mousedown_does_not_open_the_popup() {
+    let Some((mut engine, id)) = page() else { return };
+    js(&mut engine, id, "s.addEventListener('mousedown', function (e) { e.preventDefault(); }); ''");
+    click(&mut engine, id, 85.0, 22.0);
+    assert!(!engine.select_popup_open(id), "preventDefault on mousedown keeps it shut");
+}
+
+// Nit 4: changes from outside close the popup.
+#[test]
+fn a_blur_closes_the_popup() {
+    let Some((mut engine, id)) = page() else { return };
+    open(&mut engine, id);
+    js(&mut engine, id, "s.blur(); ''");
+    assert!(!engine.select_popup_open(id), "losing the focus closes it");
+    assert_eq!(texts(&engine, id).iter().filter(|t| *t == "Four").count(), 0, "its rows are gone");
+}
+
+#[test]
+fn removing_the_select_closes_the_popup() {
+    let Some((mut engine, id)) = page() else { return };
+    open(&mut engine, id);
+    js(&mut engine, id, "s.remove(); ''");
+    assert!(!engine.select_popup_open(id), "a select taken out of the document closes it");
+}
+
+#[test]
+fn disabling_the_select_closes_the_popup() {
+    let Some((mut engine, id)) = page() else { return };
+    open(&mut engine, id);
+    js(&mut engine, id, "s.disabled = true; ''");
+    assert!(!engine.select_popup_open(id), "a disabled select closes it");
+}
+
+#[test]
+fn a_viewport_resize_closes_the_popup() {
+    let Some((mut engine, id)) = page() else { return };
+    open(&mut engine, id);
+    engine.resize_view(id, Bounds::new(0, 0, 700, 500)).expect("resize");
+    assert!(!engine.select_popup_open(id), "a resize closes it");
+}
+
+#[test]
+fn an_unrelated_relayout_keeps_the_popup_open() {
+    let Some((mut engine, id)) = page() else { return };
+    open(&mut engine, id);
+    js(&mut engine, id, "document.getElementById('other').style.background = 'red'; ''");
+    assert!(engine.select_popup_open(id), "a style change elsewhere leaves it open");
+    assert!(texts(&engine, id).iter().any(|t| t == "Four"), "and painted");
+}
