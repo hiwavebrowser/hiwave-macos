@@ -515,11 +515,14 @@ impl Animations {
     /// The full build is over: elements it did not visit have no computed
     /// style (css-transitions-1 §3: a transition on an element that no
     /// longer has one is cancelled). A build that took the kept box tree
-    /// (`reused_tree`) visited no element at all, but they are all still
-    /// there with their styles: nothing is cancelled and the before-change
-    /// values stay for the next change.
-    pub(crate) fn end_build(&mut self, reused_tree: bool) {
-        if reused_tree {
+    /// (`reused_tree`) visited no element at all, and a pointer restyle's
+    /// partial build (`partial_build`) visited only what is under the
+    /// changed elements; the rest are all still there with their styles:
+    /// nothing is cancelled and the before-change values stay for the
+    /// next change. (The restyle itself misses to a full build when a
+    /// changed element left the document.)
+    pub(crate) fn end_build(&mut self, reused_tree: bool, partial_build: bool) {
+        if reused_tree || partial_build {
             return;
         }
         let serial = self.build_serial;

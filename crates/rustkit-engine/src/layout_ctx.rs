@@ -99,8 +99,11 @@ impl LayoutCtx {
     ///
     /// `build` must be a complete build of the view: the transitions of
     /// every element it did not reach are cancelled when it returns, so a
-    /// build cut short would cancel what it never got to (a build that
-    /// took the kept box tree is the one known exception).
+    /// build cut short would cancel what it never got to. Two builds are
+    /// known not to be complete and are not swept: one that took the kept
+    /// box tree, and a pointer restyle's partial build
+    /// (`crate::restyle_build_active`), which skips everything that is not
+    /// under a changed element.
     pub(crate) fn with_building<R>(&self, view: BuildView, build: impl FnOnce() -> R) -> R {
         struct Restore<'a> {
             ctx: &'a LayoutCtx,
@@ -126,15 +129,20 @@ impl LayoutCtx {
             anims.last_build_clock = Some(anims.clock_ms);
             anims.begin_build();
         }
+        // A pointer restyle sets this before its builds and takes it
+        // after them: read before `build`, while it is certainly set.
+        let partial_build = crate::restyle_build_active();
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         let built = build();
         // What the build did not visit has no computed style: its
         // transitions end here. Not after a build that took the kept box
-        // tree: it visited nothing, and every element is still there.
+        // tree (it visited nothing) or a partial restyle build (it skipped
+        // what is not under a changed element): every element is still
+        // there with its style.
         if let Some(lay) = lay.as_ref() {
             let reused_tree = crate::relayout_cause::last_build_reused_tree();
-            lay.animations.borrow_mut().end_build(reused_tree);
+            lay.animations.borrow_mut().end_build(reused_tree, partial_build);
         }
         built
     }
