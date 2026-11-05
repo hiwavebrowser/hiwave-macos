@@ -14927,7 +14927,17 @@ impl layout_ctx::LayoutCtx {
                     set_stacks(style, rustkit_css::STACKS_WILL_CHANGE, will_change_stacks(value));
                 }
             }
-            "isolation" | "mix-blend-mode" | "perspective" | "transform-style" | "backdrop-filter"
+            "backdrop-filter" => {
+                // A list the paint reads, or nothing: an invalid value
+                // leaves the earlier declaration (Filter Effects 2 §3).
+                let value = value.trim().to_ascii_lowercase();
+                if rustkit_layout::filter_steps(&value, 16.0, 16.0).is_some() {
+                    let none = value == "none";
+                    style.backdrop_filter = if none { String::new() } else { value };
+                    set_stacks(style, rustkit_css::STACKS_BACKDROP, !none);
+                }
+            }
+            "isolation" | "mix-blend-mode" | "perspective" | "transform-style"
             | "content-visibility" | "view-transition-name" => {
                 if let Some((bit, on)) = stacks_declaration(property, value) {
                     set_stacks(style, bit, on);
@@ -15633,7 +15643,10 @@ impl layout_ctx::LayoutCtx {
             "mix-blend-mode" => style.stacks &= !rustkit_css::STACKS_BLEND,
             "perspective" => style.stacks &= !rustkit_css::STACKS_PERSPECTIVE,
             "transform-style" => style.stacks &= !rustkit_css::STACKS_PRESERVE_3D,
-            "backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
+            "backdrop-filter" => {
+                style.backdrop_filter.clear();
+                style.stacks &= !rustkit_css::STACKS_BACKDROP;
+            }
             "content-visibility" => style.stacks &= !rustkit_css::STACKS_CONTENT_VISIBILITY,
             "view-transition-name" => style.stacks &= !rustkit_css::STACKS_VIEW_TRANSITION,
             "contain" => style.contain_holds_fixed = false,
@@ -23155,15 +23168,6 @@ fn stacks_declaration(property: &str, value: &str) -> Option<(u8, bool)> {
             "flat" => Some((rustkit_css::STACKS_PRESERVE_3D, false)),
             _ => None,
         },
-        "backdrop-filter" => {
-            if value == "none" {
-                Some((rustkit_css::STACKS_BACKDROP, false))
-            } else if value.ends_with(')') {
-                Some((rustkit_css::STACKS_BACKDROP, true))
-            } else {
-                None
-            }
-        }
         "content-visibility" => match value.as_str() {
             "auto" | "hidden" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, true)),
             "visible" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, false)),
@@ -24695,6 +24699,7 @@ fn geometry_snapshot(
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
         let holds_fixed = transformed
             || !b.style.filter.is_empty()
+            || !b.style.backdrop_filter.is_empty()
             || b.style.will_change_holds_fixed
             || b.style.contain_holds_fixed;
         let under = Scrollers {

@@ -3272,7 +3272,7 @@ const WRAPPERS_JS: &str = r#"
         'animation-direction': 'normal', 'animation-duration': '0s', 'animation-fill-mode': 'none',
         'animation-iteration-count': '1', 'animation-name': 'none',
         'animation-play-state': 'running', 'animation-timing-function': 'ease',
-        'aspect-ratio': 'auto',
+        'aspect-ratio': 'auto', 'backdrop-filter': 'none',
         'background': 'rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box',
         'background-clip': 'border-box', 'background-image': 'none',
         'background-origin': 'padding-box', 'background-position': '0% 0%',

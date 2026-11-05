@@ -929,13 +929,14 @@ fn culling_never_changes_coverage_or_order_of_decorations_negative_sizes_or_wide
         return;
     };
     let hazards = cull_hazards();
-    // The same list through the blur path, whose only flushes besides the
-    // blur are the size cap's.
+    // The same list with a backdrop blur, drawn into a frame texture that
+    // the blur reads.
     let mut blurred = hazards.clone();
     blurred.push(DisplayCommand::BackdropFilter {
         rect: Rect::new(900.0, 700.0, 100.0, 60.0),
         border_radius: rustkit_layout::BorderRadius::default(),
-        filter: rustkit_css::BackdropFilter::Blur(4.0),
+        steps: vec![rustkit_layout::FilterStep::Blur(4.0)],
+        own_groups: 0,
     });
     let cases: [(&str, &[DisplayCommand], u64); 4] = [
         ("fast", &hazards, MAX_BATCH_BYTES),
@@ -1291,7 +1292,8 @@ fn fuzz_case(seed: u64) -> FuzzCase {
             15 if blur => list.push(DisplayCommand::BackdropFilter {
                 rect: Rect::new(x, y, rng.pos(50.0, 500.0), rng.pos(50.0, 300.0)),
                 border_radius: rustkit_layout::BorderRadius::uniform(rng.f(0.0, 20.0)),
-                filter: rustkit_css::BackdropFilter::Blur(rng.f(1.0, 12.0)),
+                steps: vec![rustkit_layout::FilterStep::Blur(rng.f(1.0, 12.0))],
+                own_groups: 0,
             }),
             15 if gpu_gradients => {
                 let stops = (0..2 + rng.u(3))

@@ -411,8 +411,6 @@ pub struct Renderer {
     filter_matrix_pipeline: pipeline::FilterMatrixPipeline,
     // Image pipeline: the blit shader composited source-over (straight alpha)
     image_pipeline: wgpu::RenderPipeline,
-    // Blit pipeline for Rgba8Unorm targets (for blitting to filter textures)
-    blit_pipeline_rgba: wgpu::RenderPipeline,
 
     // Backdrop filter pipelines (compute shaders for blur + color filters)
     backdrop_filter_pipelines: pipeline::BackdropFilterPipelines,
@@ -508,6 +506,9 @@ pub struct Renderer {
     intermediate_texture: Option<wgpu::Texture>,
     intermediate_view: Option<wgpu::TextureView>,
     intermediate_size: (u32, u32),
+    /// `paint_backdrop`'s two scratch textures and their size.
+    backdrop_scratch: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    backdrop_scratch_size: (u32, u32),
 
     // Sampler for drawing filtered textures back to screen
     filter_sampler: wgpu::Sampler,
@@ -686,14 +687,6 @@ impl Renderer {
             &texture_bind_group_layout,
         );
 
-        // Create blit pipeline for Rgba8Unorm targets (blitting to filter textures)
-        let blit_pipeline_rgba = pipeline::create_blit_pipeline(
-            &device,
-            wgpu::TextureFormat::Rgba8Unorm,
-            &uniform_bind_group_layout,
-            &texture_bind_group_layout,
-        );
-
         // Create backdrop filter pipelines (compute shaders for blur + color filters)
         let backdrop_filter_pipelines = pipeline::create_backdrop_filter_pipelines(&device);
 
@@ -752,7 +745,6 @@ impl Renderer {
             color_glyph_pipeline,
             filter_matrix_pipeline,
             image_pipeline,
-            blit_pipeline_rgba,
             backdrop_filter_pipelines,
             gradient_pipeline,
             gpu_gradients_enabled,
@@ -797,6 +789,8 @@ impl Renderer {
             intermediate_texture: None,
             intermediate_view: None,
             intermediate_size: (0, 0),
+            backdrop_scratch: Vec::new(),
+            backdrop_scratch_size: (0, 0),
             filter_sampler,
             surface_format,
             clear_color: wgpu::Color::WHITE,
@@ -1160,236 +1154,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw a textured quad from a filtered texture to the render target immediately.
-    /// This renders with a custom bind group, bypassing the batch system.
-    fn draw_filtered_texture_to(
-        &self,
-        texture_view: &wgpu::TextureView,
-        target: &wgpu::TextureView,
-        rect: Rect,
-    ) {
-        // Create bind group for this texture
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Filtered Texture Bind Group"),
-            layout: &self.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
-                },
-            ],
-        });
-
-        // Create vertices for the quad - normalized tex coords to sample region
-        let x = rect.x;
-        let y = rect.y;
-        let w = rect.width;
-        let h = rect.height;
-
-        // Calculate tex coords based on position in viewport
-        let (vw, vh) = self.viewport_size;
-        let u0 = rect.x / vw as f32;
-        let v0 = rect.y / vh as f32;
-        let u1 = (rect.x + rect.width) / vw as f32;
-        let v1 = (rect.y + rect.height) / vh as f32;
-
-        let white = [1.0, 1.0, 1.0, 1.0];
-
-        let vertices = [
-            TextureVertex { position: [x, y], tex_coords: [u0, v0], color: white },
-            TextureVertex { position: [x + w, y], tex_coords: [u1, v0], color: white },
-            TextureVertex { position: [x + w, y + h], tex_coords: [u1, v1], color: white },
-            TextureVertex { position: [x, y + h], tex_coords: [u0, v1], color: white },
-        ];
-        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
-
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Filtered Quad Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Filtered Quad Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Filtered Texture Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Filtered Texture Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            // Use blit_pipeline to properly sample RGBA texture
-            // (texture_pipeline treats red channel as alpha for glyph rendering)
-            render_pass.set_pipeline(&self.blit_pipeline);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &bind_group, &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..6, 0, 0..1);
-        }
-
-        self.submit(encoder);
-    }
-
-    /// Create a bind group for backdrop filter compute shader operations.
-    fn create_filter_bind_group(
-        &self,
-        input_view: &wgpu::TextureView,
-        output_view: &wgpu::TextureView,
-    ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Filter Bind Group"),
-            layout: &self.backdrop_filter_pipelines.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.backdrop_filter_pipelines.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(input_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(output_view),
-                },
-            ],
-        })
-    }
-
-    /// Run Gaussian blur on a texture using compute shaders.
-    /// Performs two passes: horizontal then vertical blur.
-    fn run_blur_compute(
-        &self,
-        source_view: &wgpu::TextureView,
-        intermediate_view: &wgpu::TextureView,
-        dest_view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-        blur_radius: f32,
-    ) {
-        // Update filter params uniform
-        let params = FilterParams {
-            blur_radius,
-            filter_type: 0, // Not used for blur
-            filter_amount: 1.0,
-            texture_width: width as f32,
-            texture_height: height as f32,
-            _padding0: 0.0,
-            _padding1: 0.0,
-            _padding2: 0.0,
-        };
-        self.queue.write_buffer(
-            &self.backdrop_filter_pipelines.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[params]),
-        );
-
-        // Calculate workgroup counts (16x16 workgroups)
-        let workgroups_x = (width + 15) / 16;
-        let workgroups_y = (height + 15) / 16;
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Blur Compute Encoder"),
-        });
-
-        // Pass 1: Horizontal blur (source -> intermediate)
-        {
-            let bind_group = self.create_filter_bind_group(source_view, intermediate_view);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Horizontal Blur Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.backdrop_filter_pipelines.blur_h_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-        }
-
-        // Pass 2: Vertical blur (intermediate -> dest)
-        {
-            let bind_group = self.create_filter_bind_group(intermediate_view, dest_view);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Vertical Blur Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.backdrop_filter_pipelines.blur_v_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-        }
-
-        self.submit(encoder);
-    }
-
-    /// Run a color filter (grayscale, sepia, brightness) on a texture.
-    fn run_color_filter_compute(
-        &self,
-        source_view: &wgpu::TextureView,
-        dest_view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-        filter_type: u32,
-        amount: f32,
-    ) {
-        // Update filter params uniform
-        let params = FilterParams {
-            blur_radius: 0.0,
-            filter_type,
-            filter_amount: amount,
-            texture_width: width as f32,
-            texture_height: height as f32,
-            _padding0: 0.0,
-            _padding1: 0.0,
-            _padding2: 0.0,
-        };
-        self.queue.write_buffer(
-            &self.backdrop_filter_pipelines.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[params]),
-        );
-
-        // Calculate workgroup counts
-        let workgroups_x = (width + 15) / 16;
-        let workgroups_y = (height + 15) / 16;
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Color Filter Compute Encoder"),
-        });
-
-        {
-            let bind_group = self.create_filter_bind_group(source_view, dest_view);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Color Filter Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.backdrop_filter_pipelines.color_filter_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-        }
-
-        self.submit(encoder);
-    }
-
     /// Draw the lists that follow scrolled by `offset`: the list stays in
     /// document coordinates and the whole of it is drawn inside one
     /// translate by `-offset`, except a `position: fixed` run
@@ -1582,12 +1346,12 @@ impl Renderer {
             self.scroll_translate(-1.0);
         }
 
-        // Check if there are any blur backdrop filters that need GPU processing
-        let has_blur_filters = commands.iter().any(|cmd| {
-            matches!(cmd, DisplayCommand::BackdropFilter {
-                filter: rustkit_css::BackdropFilter::Blur(r), ..
-            } if *r > 0.0)
-        });
+        // A `backdrop-filter` reads what is drawn under it, so the frame
+        // is drawn into a texture the renderer can sample (the target may
+        // only be a render attachment) and copied to the target at the end.
+        let has_backdrop = commands
+            .iter()
+            .any(|cmd| matches!(cmd, DisplayCommand::BackdropFilter { .. }));
 
         // Check if there are any GPU gradients that need z-order aware rendering
         let has_gpu_gradients = self.gpu_gradients_enabled && commands.iter().any(|cmd| {
@@ -1598,10 +1362,7 @@ impl Renderer {
             )
         });
 
-        if has_blur_filters {
-            // Use GPU blur path - render to intermediate texture with GPU blur processing
-            self.execute_with_gpu_blur(commands, target)?;
-        } else if has_gpu_gradients {
+        if has_gpu_gradients && !has_backdrop {
             // Use GPU gradient path - flush batches before each gradient for correct z-order
             self.execute_with_gpu_gradients(commands, target)?;
         } else {
@@ -1621,8 +1382,14 @@ impl Renderer {
             // colour matrix. Opacity and filter scopes share the budget:
             // past `MAX_OPACITY_LAYERS` of them in one list, all of them fall
             // back to `process_command`, which applies each scope to the
-            // vertices batched inside it (see `OpacityScopes`). So does the
-            // backdrop-blur path, which never layers.
+            // vertices batched inside it (see `OpacityScopes`).
+            let final_target = target;
+            let base = if has_backdrop {
+                self.ensure_intermediate_texture().clone()
+            } else {
+                target.clone()
+            };
+            let target = &base;
             let layered = commands
                 .iter()
                 .filter(|cmd| {
@@ -1652,6 +1419,11 @@ impl Renderer {
                         _ => {}
                     }
                 }
+                if let DisplayCommand::BackdropFilter { rect, border_radius, steps, own_groups } = cmd {
+                    let own = if layered { *own_groups as usize } else { layers.len() };
+                    self.paint_backdrop(target, &layers, &mut cleared, *rect, *border_radius, steps, own)?;
+                    continue;
+                }
                 let culled = self.culled(cmd);
                 if self.order_flush_needed(commands, i, culled) {
                     self.stats.overlap_flushes += 1;
@@ -1672,6 +1444,9 @@ impl Renderer {
                 self.flush_batches_to(target, false)?;
             } else {
                 self.flush_to(target)?;
+            }
+            if has_backdrop {
+                self.copy_frame(&base, final_target);
             }
         }
 
@@ -1759,71 +1534,6 @@ impl Renderer {
             self.image_indices.len() * size_of::<u32>(),
         ];
         bytes.iter().any(|&b| b as u64 >= self.max_batch_bytes)
-    }
-
-    /// Execute commands with GPU blur support for backdrop filters.
-    fn execute_with_gpu_blur(
-        &mut self,
-        commands: &[DisplayCommand],
-        target: &wgpu::TextureView,
-    ) -> Result<(), RendererError> {
-        // Ensure intermediate texture exists
-        let _ = self.ensure_intermediate_texture();
-        let intermediate_view = self.intermediate_view.as_ref().unwrap().clone();
-
-        let mut is_first_flush = true;
-
-        for (i, cmd) in commands.iter().enumerate() {
-            // Check if this is a blur backdrop filter
-            if let DisplayCommand::BackdropFilter {
-                rect,
-                border_radius: _,
-                filter: rustkit_css::BackdropFilter::Blur(radius),
-            } = cmd
-            {
-                if *radius > 0.0 {
-                    // Flush current batches to intermediate texture
-                    self.flush_batches_to(&intermediate_view, is_first_flush)?;
-                    is_first_flush = false;
-
-                    // Apply GPU blur
-                    self.apply_gpu_blur(&intermediate_view, *rect, *radius);
-
-                    continue;
-                }
-            }
-
-            // Process command normally (including non-blur backdrop filters).
-            // The order check as in the fast path: a flush for the size cap
-            // falls wherever culling leaves the batch full, so paint order
-            // must not depend on where flushes fall.
-            let culled = self.culled(cmd);
-            if self.order_flush_needed(commands, i, culled) {
-                self.stats.overlap_flushes += 1;
-                self.flush_batches_to(&intermediate_view, is_first_flush)?;
-                is_first_flush = false;
-            } else if !culled && self.batches_full() && !is_decoration(cmd) {
-                self.flush_batches_to(&intermediate_view, is_first_flush)?;
-                is_first_flush = false;
-            }
-            if !culled {
-                self.process_command(cmd);
-            }
-        }
-        self.end_scroll_translate();
-
-        // Flush remaining batches to intermediate
-        if !self.color_vertices.is_empty()
-            || !self.texture_vertices.is_empty()
-            || !self.image_vertices.is_empty()
-        {
-            self.flush_batches_to(&intermediate_view, is_first_flush)?;
-        }
-
-        // Copy intermediate to final target
-        self.copy_texture_to_target(&intermediate_view, target);
-
-        Ok(())
     }
 
     /// Execute commands with GPU gradient support for correct z-order.
@@ -2189,114 +1899,6 @@ impl Renderer {
         (rx.max(0.001), ry.max(0.001))
     }
 
-    /// Blit from intermediate texture (surface format) to a filter texture (Rgba8Unorm).
-    /// This performs format conversion during the render pass.
-    fn blit_to_filter_texture(&self, dest_view: &wgpu::TextureView) {
-        let (vw, vh) = self.viewport_size;
-
-        // Create bind group for sampling the intermediate texture
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Blit Texture Bind Group"),
-            layout: &self.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(
-                        self.intermediate_view.as_ref().unwrap(),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
-                },
-            ],
-        });
-
-        // Full-screen quad vertices
-        let vertices = [
-            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
-        ];
-        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
-
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Blit Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Blit Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Blit to Filter Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Blit to Filter Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dest_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            // Use blit_pipeline_rgba for rendering to Rgba8Unorm target
-            // (properly samples all 4 RGBA channels, unlike texture_pipeline which treats R as alpha)
-            render_pass.set_pipeline(&self.blit_pipeline_rgba);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &bind_group, &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..6, 0, 0..1);
-        }
-
-        self.submit(encoder);
-    }
-
-    /// Apply GPU Gaussian blur to a region of the intermediate texture.
-    fn apply_gpu_blur(
-        &self,
-        render_target: &wgpu::TextureView,
-        rect: Rect,
-        blur_radius: f32,
-    ) {
-        let (vw, vh) = self.viewport_size;
-
-        // Create filter textures for the blur passes (full viewport size for simplicity)
-        let (_filter_tex_a, filter_view_a) = self.create_filter_texture(vw, vh);
-        let (_filter_tex_b, filter_view_b) = self.create_filter_texture(vw, vh);
-
-        // Blit from intermediate texture (Bgra8Unorm) to filter texture A (Rgba8Unorm)
-        // This performs format conversion via the blit_pipeline_rgba
-        self.blit_to_filter_texture(&filter_view_a);
-
-        // Run the blur compute passes: A -> B (horizontal), B -> A (vertical)
-        self.run_blur_compute(
-            &filter_view_a,
-            &filter_view_b,
-            &filter_view_a,
-            vw,
-            vh,
-            blur_radius,
-        );
-
-        // Draw the blurred result back to the render target at the specified rect
-        self.draw_filtered_texture_to(&filter_view_a, render_target, rect);
-    }
-
     fn has_batched(&self) -> bool {
         !(self.color_vertices.is_empty()
             && self.texture_vertices.is_empty()
@@ -2393,6 +1995,315 @@ impl Renderer {
             self.opacity_layer_pool.push((texture, view));
         }
         self.opacity_layer_pool[depth].1.clone()
+    }
+
+    /// `backdrop-filter` (Filter Effects 2 §3): filter what is painted
+    /// under the box and draw it back inside the box's border box, before
+    /// the box paints. The backdrop is the group `own` levels below the
+    /// innermost open one (the box's own opacity/filter groups are skipped;
+    /// the group under them is the backdrop root) or, with no group that
+    /// deep, the frame. The result is drawn into the innermost group, so
+    /// the box's opacity fades it with the box, and it is drawn
+    /// premultiplied over what is there, so `opacity()` leaves the frame
+    /// as it was, both as in Chromium 143.
+    ///
+    /// Only the box's region is read and filtered: the steps run on a
+    /// scratch texture the size of the border box (cut to the viewport).
+    /// Blur samples past the region are mirrored back into it, so nothing
+    /// outside the box bleeds in (Chromium's edge mode). A box under a
+    /// rotation or skew is not filtered.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_backdrop(
+        &mut self,
+        base: &wgpu::TextureView,
+        layers: &[(wgpu::TextureView, LayerEffect)],
+        cleared: &mut bool,
+        rect: Rect,
+        radius: rustkit_layout::BorderRadius,
+        steps: &[rustkit_layout::FilterStep],
+        own: usize,
+    ) -> Result<(), RendererError> {
+        use rustkit_layout::FilterStep;
+        // What is batched is behind the box.
+        self.flush_mid_stream(base, layers, cleared)?;
+        let source = match layers.len().checked_sub(own + 1) {
+            Some(depth) => layers[depth].0.clone(),
+            None => {
+                if !*cleared {
+                    self.clear_view(base, self.clear_color);
+                    *cleared = true;
+                }
+                base.clone()
+            }
+        };
+        let m = self.current_transform();
+        if steps.is_empty() || m[1] != 0.0 || m[2] != 0.0 {
+            return Ok(());
+        }
+        let (ax, ay) = self.transform_point(rect.x, rect.y);
+        let (bx, by) = self.transform_point(rect.x + rect.width, rect.y + rect.height);
+        let (x0, x1) = (ax.min(bx), ax.max(bx));
+        let (y0, y1) = (ay.min(by), ay.max(by));
+        let (vw, vh) = self.viewport_size;
+        let rx0 = x0.floor().max(0.0) as i32;
+        let ry0 = y0.floor().max(0.0) as i32;
+        let rx1 = (x1.ceil() as i32).min(vw as i32);
+        let ry1 = (y1.ceil() as i32).min(vh as i32);
+        if rx1 <= rx0 || ry1 <= ry0 {
+            return Ok(());
+        }
+        let (w, h) = ((rx1 - rx0) as u32, (ry1 - ry0) as u32);
+        let (tw, th) = self.ensure_backdrop_scratch(w, h);
+        let scratch = [
+            self.backdrop_scratch[0].1.clone(),
+            self.backdrop_scratch[1].1.clone(),
+        ];
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Backdrop Filter Encoder"),
+        });
+        // Where the current result is: `None` the source at the region's
+        // origin, `Some(i)` scratch `i` at (0, 0).
+        let mut current: Option<usize> = None;
+        for step in steps {
+            let (input, origin) = match current {
+                None => (&source, [rx0, ry0]),
+                Some(i) => (&scratch[i], [0, 0]),
+            };
+            let free = match current {
+                Some(i) => 1 - i,
+                None => 0,
+            };
+            let mut params = BackdropParams {
+                origin,
+                size: [w as i32, h as i32],
+                ..BackdropParams::default()
+            };
+            match *step {
+                FilterStep::Blur(sigma) => {
+                    params.sigma = sigma;
+                    // Out to 3 sigma, as Skia's Gaussian; no further than
+                    // the region reaches (mirroring folds the rest back).
+                    params.radius = ((3.0 * sigma).ceil() as i32).min(w.max(h) as i32 * 2).max(1);
+                    // Horizontal into the free scratch, vertical back.
+                    let pipes = &self.backdrop_filter_pipelines;
+                    self.backdrop_pass(&mut encoder, &pipes.blur_h_pipeline, &params, input, &scratch[free], w, h);
+                    let into = match current {
+                        Some(i) => i,
+                        None => 1,
+                    };
+                    params.origin = [0, 0];
+                    self.backdrop_pass(&mut encoder, &pipes.blur_v_pipeline, &params, &scratch[free], &scratch[into], w, h);
+                    current = Some(into);
+                }
+                FilterStep::ColorMatrix(mx) => {
+                    for row in 0..4 {
+                        params.rows[row].copy_from_slice(&mx[row * 5..row * 5 + 4]);
+                        params.rows[4][row] = mx[row * 5 + 4];
+                    }
+                    let pipes = &self.backdrop_filter_pipelines;
+                    self.backdrop_pass(&mut encoder, &pipes.color_matrix_pipeline, &params, input, &scratch[free], w, h);
+                    current = Some(free);
+                }
+            }
+        }
+        self.submit(encoder);
+        let Some(result) = current else {
+            return Ok(());
+        };
+
+        // Draw it back over the box's border box, cut by the open clips and
+        // the box's own corners.
+        let tex = [
+            (x0 - rx0 as f32) / tw as f32,
+            (y0 - ry0 as f32) / th as f32,
+            (x1 - rx0 as f32) / tw as f32,
+            (y1 - ry0 as f32) / th as f32,
+        ];
+        let rounded = !radius.is_zero();
+        if rounded {
+            self.push_clip_rounded(rect, radius);
+        } else {
+            self.push_clip(rect);
+        }
+        let pieces = self.textured_pieces(rect, tex);
+        self.pop_clip();
+        let mut vertices = Vec::with_capacity(pieces.len() * 4);
+        for (corners, t, coverage) in pieces {
+            let color = [coverage; 4];
+            let uv = [[t[0], t[1]], [t[2], t[1]], [t[2], t[3]], [t[0], t[3]]];
+            for k in 0..4 {
+                vertices.push(TextureVertex { position: corners[k], tex_coords: uv[k], color });
+            }
+        }
+        let dest = match layers.last() {
+            Some((layer, _)) => layer.clone(),
+            None => base.clone(),
+        };
+        self.draw_texture_quads(&self.color_glyph_pipeline, &scratch[result], &dest, &vertices);
+        Ok(())
+    }
+
+    /// One compute pass of `backdrop_filter.wgsl` over a `w` x `h` region.
+    #[allow(clippy::too_many_arguments)]
+    fn backdrop_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        params: &BackdropParams,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+    ) {
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Backdrop Params"),
+            contents: bytemuck::bytes_of(params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Backdrop Filter Bind Group"),
+            layout: &self.backdrop_filter_pipelines.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(output),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Backdrop Filter Pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(w.div_ceil(16), h.div_ceil(16), 1);
+    }
+
+    /// Two scratch textures at least `w` x `h`, kept between frames and
+    /// grown when a larger region comes; returns their size.
+    fn ensure_backdrop_scratch(&mut self, w: u32, h: u32) -> (u32, u32) {
+        let (cw, ch) = self.backdrop_scratch_size;
+        if self.backdrop_scratch.len() < 2 || cw < w || ch < h {
+            let size = (cw.max(w), ch.max(h));
+            self.backdrop_scratch = (0..2).map(|_| self.create_filter_texture(size.0, size.1)).collect();
+            self.backdrop_scratch_size = size;
+        }
+        self.backdrop_scratch_size
+    }
+
+    fn clear_view(&self, target: &wgpu::TextureView, color: wgpu::Color) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Clear Encoder"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        self.submit(encoder);
+    }
+
+    /// The frame drawn into `frame` (a backdrop list's) copied to `target`
+    /// as it is (the blit pipeline replaces).
+    fn copy_frame(&self, frame: &wgpu::TextureView, target: &wgpu::TextureView) {
+        let (vw, vh) = (self.viewport_size.0 as f32, self.viewport_size.1 as f32);
+        let color = [1.0; 4];
+        let vertices = [
+            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color },
+            TextureVertex { position: [vw, 0.0], tex_coords: [1.0, 0.0], color },
+            TextureVertex { position: [vw, vh], tex_coords: [1.0, 1.0], color },
+            TextureVertex { position: [0.0, vh], tex_coords: [0.0, 1.0], color },
+        ];
+        self.draw_texture_quads(&self.blit_pipeline, frame, target, &vertices);
+    }
+
+    /// Quads (four vertices each) sampling `texture`, drawn into `target`
+    /// through `pipeline`, over what `target` holds.
+    fn draw_texture_quads(
+        &self,
+        pipeline: &wgpu::RenderPipeline,
+        texture: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        vertices: &[TextureVertex],
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
+        let indices: Vec<u32> = (0..vertices.len() as u32 / 4)
+            .flat_map(|q| [0, 1, 2, 0, 2, 3].map(|i| q * 4 + i))
+            .collect();
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Quads Bind Group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
+                },
+            ],
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Texture Quads Encoder"),
+        });
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Texture Quads Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Quads Vertex Buffer"),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Texture Quads Index Buffer"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                render_pass.set_pipeline(pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, &bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            }
+        }
+        self.submit(encoder);
     }
 
     fn clear_transparent(&self, target: &wgpu::TextureView) {
@@ -2527,83 +2438,6 @@ impl Renderer {
             render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
-        self.submit(encoder);
-    }
-
-    /// Copy the intermediate texture to the final target.
-    fn copy_texture_to_target(
-        &self,
-        source: &wgpu::TextureView,
-        target: &wgpu::TextureView,
-    ) {
-        let (vw, vh) = self.viewport_size;
-
-        // Draw the entire intermediate texture to the target
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Copy Texture Bind Group"),
-            layout: &self.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(source),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.filter_sampler),
-                },
-            ],
-        });
-
-        let vertices = [
-            TextureVertex { position: [0.0, 0.0], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [vw as f32, 0.0], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [vw as f32, vh as f32], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
-            TextureVertex { position: [0.0, vh as f32], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] },
-        ];
-        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
-
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Copy Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Copy Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Copy to Target Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Copy to Target Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            // Use blit_pipeline instead of texture_pipeline to properly sample RGBA
-            // (texture_pipeline treats red channel as alpha for glyph rendering)
-            render_pass.set_pipeline(&self.blit_pipeline);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &bind_group, &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..6, 0, 0..1);
-        }
-
         self.submit(encoder);
     }
 
@@ -2754,9 +2588,9 @@ impl Renderer {
                 );
             }
 
-            DisplayCommand::BackdropFilter { rect, border_radius, filter } => {
-                self.apply_backdrop_filter(*rect, *border_radius, *filter);
-            }
+            // Drawn by the fast path, which holds the layers it reads
+            // (`paint_backdrop`); the GPU-gradient path does not filter.
+            DisplayCommand::BackdropFilter { .. } => {}
 
             DisplayCommand::LinearGradient { rect, direction, stops, repeating, border_radius } => {
                 self.draw_linear_gradient(*rect, *direction, stops, *repeating, *border_radius);
@@ -3897,139 +3731,6 @@ impl Renderer {
         .into_iter()
         .filter(|r| r.width > 0.0 && r.height > 0.0)
         .collect()
-    }
-
-    /// Apply a backdrop filter (blur, grayscale, etc.) to pixels behind the element.
-    ///
-    /// ## GPU Infrastructure (Available)
-    ///
-    /// The following GPU compute pipeline infrastructure is in place:
-    /// - `backdrop_filter_pipelines`: Compute pipelines for blur (horizontal/vertical) and color filters
-    /// - `create_filter_texture()`: Creates storage textures for compute operations
-    /// - `run_blur_compute()`: Executes Gaussian blur via 2-pass separable filter
-    /// - `run_color_filter_compute()`: Executes grayscale/sepia/brightness filters
-    ///
-    /// ## Current Limitation
-    ///
-    /// Full GPU backdrop filter requires render-to-texture support:
-    /// 1. Rendering commands up to this point to an intermediate texture
-    /// 2. Copying the backdrop region
-    /// 3. Running compute shader passes
-    /// 4. Drawing the filtered result
-    ///
-    /// The current architecture batches all commands and renders once at the end of `execute()`,
-    /// making mid-frame capture non-trivial. For now, we use overlay approximations.
-    ///
-    /// ## Future Integration Path
-    ///
-    /// To enable true GPU filters:
-    /// 1. Modify `execute()` to split rendering at BackdropFilter commands
-    /// 2. Create intermediate render texture with `COPY_SRC` usage
-    /// 3. Flush batched commands before each backdrop filter
-    /// 4. Copy region, run compute, draw result, continue batching
-    fn apply_backdrop_filter(
-        &mut self,
-        rect: Rect,
-        border_radius: rustkit_layout::BorderRadius,
-        filter: rustkit_css::BackdropFilter,
-    ) {
-        use rustkit_css::BackdropFilter;
-
-        // Apply clipping
-        let rect = if let Some(clip) = self.current_clip() {
-            if let Some(clipped) = rect.intersect(&clip) {
-                clipped
-            } else {
-                return; // Fully clipped
-            }
-        } else {
-            rect
-        };
-
-        if rect.width <= 0.0 || rect.height <= 0.0 {
-            return;
-        }
-
-        match filter {
-            BackdropFilter::None => {}
-
-            BackdropFilter::Blur(radius) => {
-                // Proper backdrop blur requires render-to-texture and compute shaders.
-                // For now, we simulate it with a semi-transparent white/gray overlay
-                // which approximates the "frosted glass" effect.
-                if radius > 0.0 {
-                    // The heavier the blur, the more opaque the overlay (0.0-1.0 range)
-                    let opacity = (radius / 20.0).min(0.5) * 0.3;
-                    let overlay_color = Color::new(255, 255, 255, opacity);
-
-                    if border_radius.is_zero() {
-                        self.draw_solid_rect(rect, overlay_color);
-                    } else {
-                        self.draw_rounded_rect(rect, overlay_color, border_radius);
-                    }
-                }
-            }
-
-            BackdropFilter::Grayscale(amount) => {
-                // Approximate grayscale by drawing a gray overlay
-                // This isn't accurate but provides visual feedback
-                if amount > 0.0 {
-                    let gray_value = 128;
-                    // Alpha in 0.0-1.0 range
-                    let overlay_color = Color::new(gray_value, gray_value, gray_value, amount * 0.4);
-
-                    if border_radius.is_zero() {
-                        self.draw_solid_rect(rect, overlay_color);
-                    } else {
-                        self.draw_rounded_rect(rect, overlay_color, border_radius);
-                    }
-                }
-            }
-
-            BackdropFilter::Brightness(amount) => {
-                // Brightness > 1.0 = lighter, < 1.0 = darker
-                if amount != 1.0 {
-                    let color = if amount > 1.0 {
-                        // Lighten with white overlay (alpha in 0.0-1.0 range)
-                        let intensity = ((amount - 1.0) * 0.4).min(0.8);
-                        Color::new(255, 255, 255, intensity)
-                    } else {
-                        // Darken with black overlay (alpha in 0.0-1.0 range)
-                        let intensity = ((1.0 - amount) * 0.8).min(0.8);
-                        Color::new(0, 0, 0, intensity)
-                    };
-
-                    if border_radius.is_zero() {
-                        self.draw_solid_rect(rect, color);
-                    } else {
-                        self.draw_rounded_rect(rect, color, border_radius);
-                    }
-                }
-            }
-
-            BackdropFilter::Contrast(_) => {
-                // Contrast adjustment would require per-pixel operations
-                // No simple overlay approximation exists
-            }
-
-            BackdropFilter::Saturate(_) => {
-                // Saturation adjustment would require per-pixel color manipulation
-                // No simple overlay approximation exists
-            }
-
-            BackdropFilter::Sepia(amount) => {
-                // Approximate sepia with a brownish overlay (alpha in 0.0-1.0 range)
-                if amount > 0.0 {
-                    let sepia_color = Color::new(112, 66, 20, amount * 0.3);
-
-                    if border_radius.is_zero() {
-                        self.draw_solid_rect(rect, sepia_color);
-                    } else {
-                        self.draw_rounded_rect(rect, sepia_color, border_radius);
-                    }
-                }
-            }
-        }
     }
 
     /// Render a linear gradient using the GPU shader.
@@ -6454,10 +6155,6 @@ impl Renderer {
     }
 
     /// Get the current clip rectangle (screen space).
-    fn current_clip(&self) -> Option<Rect> {
-        self.clip_stack.last().map(|entry| entry.rect)
-    }
-
     /// A textured quad (glyph, image) cut to the current clip and taken to
     /// screen space: the four corner positions in emit order (top-left,
     /// top-right, bottom-right, bottom-left) and the texture coordinates of
