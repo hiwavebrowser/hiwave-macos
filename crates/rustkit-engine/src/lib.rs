@@ -465,6 +465,8 @@ mod web_animations_tests;
 mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
+#[cfg(all(test, feature = "headless"))]
+mod waapi_layer_tests;
 mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
