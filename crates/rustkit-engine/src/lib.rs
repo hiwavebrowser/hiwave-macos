@@ -287,6 +287,7 @@ mod relayout_cause;
 mod selection;
 #[cfg(test)]
 mod selection_tests;
+mod drag_drop;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
@@ -508,6 +509,8 @@ mod fixed_under_scroll_tests;
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
+mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1019,6 +1022,9 @@ struct ViewState {
     /// Which press of a multi-click the button went down for (1 single,
     /// 2 double...): the release fires `dblclick` after the second.
     press_clicks: u32,
+    /// HTML drag and drop: the press's drag candidate, or the drag in
+    /// progress (drag_drop.rs).
+    drag: drag_drop::DragState,
     /// The press in progress has had its say on the focus (it moved it, or
     /// a listener cancelled the press): the release leaves the focus alone.
     press_settled_focus: bool,
@@ -1172,6 +1178,7 @@ impl ViewState {
         self.pointer_at = None;
         self.primary_button_down = false;
         self.press_target = None;
+        self.drag = drag_drop::DragState::default();
         self.press_settled_focus = false;
         self.doc_selection = None;
         self.select_drag = None;
@@ -2726,6 +2733,7 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
             doc_selection: None,
@@ -2829,6 +2837,7 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
             doc_selection: None,
@@ -2949,6 +2958,7 @@ impl Engine {
             pointer_at: None,
             primary_button_down: false,
             press_target: None,
+            drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
             doc_selection: None,
@@ -3656,6 +3666,9 @@ impl Engine {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
             self.press_selects(id, viewport_x, viewport_y, clicks, shift);
         }
+        // A press the page let through on a draggable element may become
+        // a drag (drag_drop.rs).
+        self.note_drag_candidate(id, target, !suppressed && not_cancelled, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
         }
@@ -3673,6 +3686,10 @@ impl Engine {
     /// listeners wrote to the DOM is laid out before this returns.
     pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
         let _hold = wgate::hold("move");
+        // A drag's moves are drag events only (drag_drop.rs).
+        if self.drag_move(id, viewport_x, viewport_y) {
+            return;
+        }
         self.pointer_moved(id, viewport_x, viewport_y, true);
         // With the button held, the selection the press started follows.
         self.drag_selects(id, viewport_x, viewport_y);
@@ -3683,6 +3700,7 @@ impl Engine {
     /// was last seen.
     pub fn mouse_leave(&mut self, id: EngineViewId) {
         let _hold = wgate::hold("leave");
+        self.drag_left_view(id);
         let last = self.views.get(&id).and_then(|view| view.pointer_at);
         if let Some((x, y)) = last {
             self.pointer_moved(id, x, y, false);
@@ -3732,6 +3750,12 @@ impl Engine {
             let changed = Self::in_one_chain(&before, &now);
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.hover, &changed);
             *view.lay.hover_chain.borrow_mut() = now.clone();
+        }
+        // During a drag the page hears drag events, not these
+        // (drag_drop.rs); `:hover` above still follows the pointer.
+        if view.drag.dragging() {
+            self.settle_pointer_restyle(id);
+            return;
         }
 
         // (target, type, relatedTarget)
@@ -3987,6 +4011,11 @@ impl Engine {
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         let _hold = wgate::hold("click");
+        // The release of a drag ends it: `drop` and `dragend`, and no
+        // `pointerup`, `mouseup` or `click` (drag_drop.rs).
+        if let Some(outcome) = self.drag_release(id, viewport_x, viewport_y) {
+            return outcome;
+        }
         let mut clicks = 1;
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
@@ -4323,11 +4352,30 @@ impl Engine {
         event_type: &str,
         data: &rustkit_bindings::MouseEventBindingData,
     ) -> bool {
+        let not_cancelled = self.run_listeners(id, target, event_type, true, |bindings| {
+            bindings.fire_mouse_event(target, event_type, data)
+        });
+        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
+        not_cancelled
+    }
+
+    /// Run the listeners of one input event `fire` dispatches, in a live
+    /// turn, and file what they threw. `fallback` is the answer when there
+    /// is no page, a listener threw, or the document is being left.
+    /// `target` (a raw NodeId) is for the log only.
+    fn run_listeners<T>(
+        &mut self,
+        id: EngineViewId,
+        target: usize,
+        event_type: &str,
+        fallback: T,
+        fire: impl FnOnce(&DomBindings) -> Result<T, rustkit_bindings::BindingError>,
+    ) -> T {
         let Some(view) = self.views.get_mut(&id) else {
-            return true;
+            return fallback;
         };
         let Some(bindings) = view.bindings.as_ref() else {
-            return true;
+            return fallback;
         };
         // The window has asked to leave this document (`navigate`,
         // `load_html`, a reload's cancel): its interrupt word is ALL until
@@ -4339,16 +4387,16 @@ impl Engine {
         // navigation that ends without a commit lifts the word, and the
         // document hears input again.
         if view.control.stops_all() {
-            debug!(?id, event_type, target, "Mouse event not dispatched: the document is being left");
-            return true;
+            debug!(?id, event_type, target, "Input event not dispatched: the document is being left");
+            return fallback;
         }
         let source = format!("event:{event_type}");
         let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
-        let fired = bindings.fire_mouse_event(target, event_type, data);
+        let fired = fire(bindings);
         let stopped = end_live_turn(&self.config, armed, bindings, &source);
-        let not_cancelled = match fired {
-            Ok(not_cancelled) => not_cancelled,
+        let answer = match fired {
+            Ok(answer) => answer,
             Err(e) => {
                 // A stopped listener's error is the stop itself, which has
                 // its own record.
@@ -4361,13 +4409,12 @@ impl Engine {
                     };
                     inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
                 }
-                true
+                fallback
             }
         };
         inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source);
         view.script_log.extend(stopped);
-        debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
-        not_cancelled
+        answer
     }
 
     /// One turn of the live loop for a loaded page: run the timers that came
@@ -19837,12 +19884,15 @@ impl Engine {
             ViewEvent::Blurred {
                 view_id: viewhost_id,
             } => {
-                if let Some(view) = self
+                if let Some((id, view)) = self
                     .views
-                    .values_mut()
-                    .find(|v| v.viewhost_id == viewhost_id)
+                    .iter_mut()
+                    .find(|(_, v)| v.viewhost_id == viewhost_id)
                 {
                     view.view_focused = false;
+                    // A drag whose release went to another window ends here.
+                    let id = *id;
+                    self.cancel_drag(id);
                 }
             }
             ViewEvent::Input {
@@ -30385,12 +30435,11 @@ mod node_identity_tests {
             drag(&mut engine, 10.0, 12.0),
             (js_string("mouseup:s1:12 click:s1:12"), Some("https://example.test/one".to_string()))
         );
-        // Two elements of one link: the click is the link's, and the link
-        // is not followed (Chrome starts a drag of the link here and sends
-        // no click at all; the engine has no drag).
-        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string("mouseup:s2:10 click:one:30"), None));
-        // From one link onto another: the click is the body's; neither is followed.
-        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string("mouseup:two:20 click:BODY:60"), None));
+        // Past the drag threshold a link is dragged (drag_drop.rs): as in
+        // Chrome, the release ends the drag, with no `mouseup` and no
+        // `click`, and no link is followed, within one link or onto another.
+        assert_eq!(drag(&mut engine, 10.0, 30.0), (js_string(""), None));
+        assert_eq!(drag(&mut engine, 10.0, 60.0), (js_string(""), None));
         // A release with no press before it is a click where it lands.
         let outcome = engine.click_at_point(id, 12.0, 60.0);
         assert_eq!(outcome.navigate.as_deref(), Some("https://example.test/two"));
