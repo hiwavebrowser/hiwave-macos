@@ -194,6 +194,15 @@ struct Args {
     #[arg(long)]
     run_inline_scripts: bool,
 
+    /// Save the page as it stands at the end of the capture to
+    /// `DIR/page.html`: the DOM after its scripts, each
+    /// `<link rel=stylesheet>` replaced in place by the text the capture
+    /// fetched for it, scripts kept empty and inert. Replay it with
+    /// `--html-file DIR/page.html` (dev-tools T16). No cookies, headers or
+    /// response bodies other than the sheets' are written.
+    #[arg(long, value_name = "DIR")]
+    save_html: Option<String>,
+
     /// Render the HiWave Inspector for this capture's diagnostics dump into
     /// this directory: inspector.html (the page with its input),
     /// inspector.png and inspector.display-list.json.
@@ -2411,6 +2420,110 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         // The layout came with the load, the whole window before the end.
         let before = settled["last_relayout_ms_before"].as_f64().expect("a layout was recorded");
         assert!(before >= 3000.0, "{settled}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T16: `--save-html` writes the settled page, and `--html-file` on it
+    /// lays out as the capture did. The page's script inserts a node after
+    /// the load, and one sheet arrives past the subresource budget (applied
+    /// on a live turn, Z row S6); both must be in the saved file, the
+    /// script must not run again, and nothing of the page URL's query or of
+    /// the script's source is written.
+    #[test]
+    fn a_saved_page_replays_the_settled_dom_and_its_late_sheet() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (kind, body) = if path.starts_with("/a.css") {
+                        ("text/css", "#early { height: 33px; background-image: url(img/x.png) }".to_string())
+                    } else if path.starts_with("/late.css") {
+                        // Past the 8 s subresource budget.
+                        std::thread::sleep(Duration::from_millis(8_600));
+                        ("text/css", "#late { height: 77px } .made { height: 55px }".to_string())
+                    } else if path.starts_with("/page") {
+                        (
+                            "text/html",
+                            "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/late.css\"></head>\
+<body style=\"margin: 0\"><div id=\"early\">e</div><div id=\"late\">l</div><noscript><p id=\"ns\" style=\"height: 400px\">n</p></noscript>\
+<script>setTimeout(function () { var p = document.createElement('p'); p.id = 'added'; p.className = 'made'; \
+p.textContent = 'a'; document.body.appendChild(p); window.RAN_SCRIPT_MARK = 1; }, 50);</script></body></html>"
+                                .to_string(),
+                        )
+                    } else {
+                        ("text/plain", String::new())
+                    };
+                    let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("parity-capture-save-html-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let saved_dir = dir.join("saved");
+        let url = format!("http://127.0.0.1:{port}/page?tok=SECRET#frag");
+        let boxes = |result: &CaptureResult| -> Vec<serde_json::Value> {
+            result
+                .diagnostics
+                .as_ref()
+                .expect("diagnostics")
+                .iter()
+                .map(|r| r["layout_box"]["border_box"].clone())
+                .collect()
+        };
+        let selectors = ["--diagnose", "#early", "--diagnose", "#late", "--diagnose", "#added", "--diagnose", "#ns"];
+        let mut live = vec!["parity-capture", "--url", url.as_str(), "--live-ms", "11000", "--timeout-ms", "60000"];
+        live.extend_from_slice(&["--save-html", saved_dir.to_str().unwrap()]);
+        live.extend_from_slice(&selectors);
+        let captured = run_capture(&Args::try_parse_from(&live).unwrap());
+        assert_eq!(captured.status, "ok", "{:?}", captured.error);
+        let page = saved_dir.join("page.html");
+        let saved = fs::read_to_string(&page).expect("page.html written");
+        // The capture itself: both sheets applied, the node inserted, the
+        // noscript content not rendered.
+        let live_boxes = boxes(&captured);
+        assert_eq!(live_boxes[0]["height"], 33.0, "{live_boxes:?}");
+        assert_eq!(live_boxes[1]["height"], 77.0, "{live_boxes:?}");
+        assert_eq!(live_boxes[2]["height"], 55.0, "{live_boxes:?}");
+        // Shape: the inserted node and both sheets' text are in the file,
+        // the sheets in place of their links, `url()` made absolute.
+        assert!(saved.contains("id=\"added\""), "{saved}");
+        assert!(saved.contains("#late { height: 77px }"), "{saved}");
+        assert!(saved.contains(&format!("127.0.0.1:{port}/img/x.png")), "{saved}");
+        assert!(!saved.contains("<link"), "{saved}");
+        assert!(saved.contains(&format!("<base href=\"http://127.0.0.1:{port}/page\">")), "{saved}");
+        // Privacy and inertness.
+        for leak in ["SECRET", "frag", "createElement", "RAN_SCRIPT_MARK", "id=\"ns\""] {
+            assert!(!saved.contains(leak), "{leak} in {saved}");
+        }
+        // Replay: no server needed for layout, scripts off, same boxes.
+        let replay_args =
+            [&["parity-capture", "--html-file", page.to_str().unwrap(), "--run-inline-scripts"][..], &selectors[..]].concat();
+        let replayed = run_capture(&Args::try_parse_from(&replay_args).unwrap());
+        assert_eq!(replayed.status, "ok", "{:?}", replayed.error);
+        let replay_boxes = boxes(&replayed);
+        assert_eq!(replay_boxes, live_boxes, "replay differs from the capture");
+        // One inserted node: the saved script did not run again.
+        assert_eq!(saved.matches("id=\"added\"").count(), 1, "{saved}");
         let _ = fs::remove_dir_all(&dir);
     }
 
