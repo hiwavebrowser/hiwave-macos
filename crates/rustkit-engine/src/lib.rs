@@ -555,6 +555,8 @@ mod display_inherit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod element_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
+mod styled_scrollbar_tests;
+#[cfg(all(test, feature = "headless"))]
 mod transform_parse_tests;
 #[cfg(all(test, feature = "headless"))]
 mod transform_rect_tests;
@@ -934,6 +936,16 @@ const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_s
 struct ViewState {
     /// What the last wheel moved, while a run of wheels holds to it.
     wheel_gesture: Option<WheelGesture>,
+    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
+    /// the release.
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
+    scrollbar_hover: Option<WheelTarget>,
+    /// CH2.E7: the element a press on a styled scrollbar went to (the
+    /// scroller, or the root element for the viewport's bar). Until the
+    /// release, the press's mouse events target it, and the release fires
+    /// no `click` (Chrome).
+    scrollbar_pressed: Option<usize>,
     id: EngineViewId,
     /// Counts the display lists this view has been given.
     frame_generation: u64,
@@ -1176,8 +1188,13 @@ impl ViewState {
         self.lay.select_popup_release.set(false);
         self.lay.select_popup_opening_press.set(false);
         self.lay.element_scrolls.borrow_mut().clear();
+        self.lay.scrollbar_marks.borrow_mut().clear();
+        self.lay.root_scrollbar.set(false);
         self.lay.focused_node.set(None);
         self.wheel_gesture = None;
+        self.scrollbar_drag = None;
+        self.scrollbar_hover = None;
+        self.scrollbar_pressed = None;
         self.hovered_node = None;
         self.lay.hover_chain.borrow_mut().clear();
         self.lay.active_chain.borrow_mut().clear();
@@ -2743,6 +2760,9 @@ impl Engine {
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
             wheel_gesture: None,
+            scrollbar_drag: None,
+            scrollbar_hover: None,
+            scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -2847,6 +2867,9 @@ impl Engine {
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
             wheel_gesture: None,
+            scrollbar_drag: None,
+            scrollbar_hover: None,
+            scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -2968,6 +2991,9 @@ impl Engine {
             nav_event_rx: nav_rx,
             compat_mouse_suppressed: false,
             wheel_gesture: None,
+            scrollbar_drag: None,
+            scrollbar_hover: None,
+            scrollbar_pressed: None,
             hovered_node: None,
             pending_dirty: None,
             last_dirty: None,
@@ -3384,12 +3410,19 @@ impl Engine {
         if new == old {
             return Ok((false, rest));
         }
+        self.store_element_scroll(id, node, new)?;
+        Ok((true, rest))
+    }
+
+    /// Store a scroller's new offset (already clamped and whole) and paint
+    /// it; then the page hears it. As `scroll_view`: the frame first.
+    fn store_element_scroll(&mut self, id: EngineViewId, node: usize, new: (f32, f32)) -> Result<(), EngineError> {
         {
+            let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
             let mut scrolls = view.lay.element_scrolls.borrow_mut();
             scrolls.offsets.insert(node, new);
             scrolls.generation += 1;
         }
-        // As `scroll_view`: the frame first, then the page hears it.
         self.relist_after_element_scroll(id);
         if let Err(e) = self.render(id) {
             debug!(?id, ?e, "Render at the new element scroll failed; the next wake draws it");
@@ -3398,7 +3431,172 @@ impl Engine {
             bindings.notify_element_scrolled(node);
         }
         self.flush_script_dom_writes(id, Some(RelayoutCause::Scroll))?;
-        Ok((true, rest))
+        Ok(())
+    }
+
+    /// CH2.E7: where the window or a scroller is scrolled to now.
+    fn scroll_of(view: &ViewState, target: WheelTarget) -> Option<(f32, f32)> {
+        match target {
+            WheelTarget::Window => Some(view.scroll_offset),
+            WheelTarget::Element(node) => {
+                Some(box_of_node(view.layout.as_deref()?, node)?.element_scroll.get())
+            }
+        }
+    }
+
+    /// CH2.E7: scroll the window or a scroller to `to` (clamped, whole
+    /// pixels), as a scrollbar does. True when it moved.
+    fn scroll_target_to(&mut self, id: EngineViewId, target: WheelTarget, to: (f32, f32)) -> Result<bool, EngineError> {
+        let view = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?;
+        match target {
+            WheelTarget::Window => {
+                let at = view.scroll_offset;
+                // `scroll_view` takes y the other way round.
+                self.scroll_view(id, to.0 - at.0, at.1 - to.1)
+            }
+            WheelTarget::Element(node) => {
+                let Some(b) = view.layout.as_deref().and_then(|layout| box_of_node(layout, node)) else {
+                    return Ok(false);
+                };
+                let (max_x, max_y) = b.element_scroll_max();
+                let new = (to.0.clamp(0.0, max_x).round(), to.1.clamp(0.0, max_y).round());
+                if new == b.element_scroll.get() {
+                    return Ok(false);
+                }
+                self.store_element_scroll(id, node, new)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// CH2.E7: the styled scrollbar part under a VIEWPORT point, and what
+    /// it scrolls: the viewport's bar first, then the scrollers under the
+    /// point, innermost first. Each scroller's bars are in its own layout
+    /// coordinates, which the scrollers around it have moved.
+    fn scrollbar_spot_at(view: &ViewState, x: f32, y: f32) -> Option<(WheelTarget, ScrollbarSpot)> {
+        let layout = view.layout.as_deref()?;
+        let laid = view.laid_with.as_ref().map_or((0, 0), |w| w.size);
+        for bar in root_scrollbar_bars(layout, laid, view.scroll_offset, view.max_scroll_offset) {
+            if let Some(spot) = spot_on_bar(bar, x, y) {
+                return Some((WheelTarget::Window, spot));
+            }
+        }
+        let hit = Self::hit_at(view, x, y)?;
+        let page = Self::layout_point(view, Some(&hit), x, y);
+        for (i, &node) in hit.scrollers.iter().enumerate() {
+            let Some(b) = box_of_node(layout, node) else {
+                continue;
+            };
+            let around = hit.scrollers[i + 1..]
+                .iter()
+                .filter_map(|&n| box_of_node(layout, n))
+                .fold((0.0, 0.0), |at, s| {
+                    let o = s.element_scroll.get();
+                    (at.0 + o.0, at.1 + o.1)
+                });
+            let local = (page.0 + around.0, page.1 + around.1);
+            for bar in b.scrollbar_bars() {
+                if let Some(spot) = spot_on_bar(bar, local.0, local.1) {
+                    return Some((WheelTarget::Element(node), spot));
+                }
+            }
+        }
+        None
+    }
+
+    /// CH2.E7: a primary press on a styled scrollbar. On the thumb it
+    /// starts a drag; on the track it pages toward the point, 7/8 of what
+    /// is visible (Chrome; the press does not repeat while held here).
+    fn press_scrollbar(&mut self, id: EngineViewId, x: f32, y: f32) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        view.scrollbar_pressed = None;
+        let Some((target, spot)) = Self::scrollbar_spot_at(view, x, y) else {
+            return;
+        };
+        let Some(at) = Self::scroll_of(view, target) else {
+            return;
+        };
+        view.scrollbar_pressed = match target {
+            WheelTarget::Element(node) => Some(node),
+            WheelTarget::Window => view.document.as_ref().and_then(|d| d.document_element()).map(|e| e.id.raw()),
+        };
+        match spot {
+            ScrollbarSpot::Thumb(bar) => {
+                let vertical = bar.orientation == rustkit_layout::ScrollbarOrientation::Vertical;
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.scrollbar_drag = Some(ScrollbarDrag {
+                        target,
+                        vertical,
+                        start_pointer: if vertical { y } else { x },
+                        start_scroll: at,
+                        scroll_per_px: bar.scroll_per_px,
+                    });
+                }
+            }
+            ScrollbarSpot::Track(bar, direction) => {
+                let step = rustkit_layout::scroll::page_step(bar.visible) * direction;
+                let to = match bar.orientation {
+                    rustkit_layout::ScrollbarOrientation::Vertical => (at.0, at.1 + step),
+                    rustkit_layout::ScrollbarOrientation::Horizontal => (at.0 + step, at.1),
+                };
+                if let Err(e) = self.scroll_target_to(id, target, to) {
+                    debug!(?id, ?e, "Scrollbar track press failed");
+                }
+            }
+        }
+    }
+
+    /// CH2.E7: the pointer moved: a drag in progress follows it, and the
+    /// thumb under it takes its `:hover` part.
+    fn scrollbar_pointer_moved(&mut self, id: EngineViewId, x: f32, y: f32) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        if let (Some(drag), true) = (view.scrollbar_drag, view.primary_button_down) {
+            let travel = (if drag.vertical { y } else { x }) - drag.start_pointer;
+            let by = travel * drag.scroll_per_px;
+            let to = if drag.vertical {
+                (drag.start_scroll.0, drag.start_scroll.1 + by)
+            } else {
+                (drag.start_scroll.0 + by, drag.start_scroll.1)
+            };
+            if let Err(e) = self.scroll_target_to(id, drag.target, to) {
+                debug!(?id, ?e, "Scrollbar drag failed");
+            }
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let over = match Self::scrollbar_spot_at(view, x, y) {
+            Some((target, ScrollbarSpot::Thumb(_))) => Some(target),
+            _ => None,
+        };
+        let over = view.scrollbar_drag.map(|d| d.target).or(over);
+        if over == view.scrollbar_hover {
+            return;
+        }
+        let cell_of = |target: WheelTarget| -> Option<&Cell<bool>> {
+            let layout = view.layout.as_deref()?;
+            match target {
+                WheelTarget::Window => Some(&layout.scrollbar_thumb_hovered),
+                WheelTarget::Element(node) => Some(&box_of_node(layout, node)?.scrollbar_thumb_hovered),
+            }
+        };
+        if let Some(cell) = view.scrollbar_hover.and_then(cell_of) {
+            cell.set(false);
+        }
+        if let Some(cell) = over.and_then(cell_of) {
+            cell.set(true);
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.scrollbar_hover = over;
+        }
+        self.relist_after_element_scroll(id);
+        if let Err(e) = self.render(id) {
+            debug!(?id, ?e, "Render of the thumb's hover failed; the next wake draws it");
+        }
     }
 
     /// Hit-test a click in VIEWPORT coordinates and return the link URL it
@@ -3679,7 +3877,9 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.press_clicks = clicks;
         }
-        let target = self.element_at_point(id, viewport_x, viewport_y);
+        self.press_scrollbar(id, viewport_x, viewport_y);
+        let on_scrollbar = self.views.get(&id).and_then(|v| v.scrollbar_pressed);
+        let target = on_scrollbar.or_else(|| self.element_at_point(id, viewport_x, viewport_y));
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
             view.press_target = target;
@@ -3700,7 +3900,8 @@ impl Engine {
         let not_cancelled = suppressed
             || self.disabled_control_at_point(id, viewport_x, viewport_y)
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
-        if !suppressed && not_cancelled {
+        // A press on a scrollbar moves no focus.
+        if !suppressed && not_cancelled && on_scrollbar.is_none() {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
             self.press_selects(id, viewport_x, viewport_y, clicks, shift);
             // A press on a drop-down `<select>` opens it, as Chrome's
@@ -3735,6 +3936,7 @@ impl Engine {
         if self.select_popup_move(id, viewport_x, viewport_y) {
             return;
         }
+        self.scrollbar_pointer_moved(id, viewport_x, viewport_y);
         self.pointer_moved(id, viewport_x, viewport_y, true);
         // With the button held, the selection the press started follows.
         self.drag_selects(id, viewport_x, viewport_y);
@@ -4068,6 +4270,7 @@ impl Engine {
         }
         let mut clicks = 1;
         if let Some(view) = self.views.get_mut(&id) {
+            view.scrollbar_drag = None;
             view.primary_button_down = false;
             view.select_drag = None;
             clicks = std::mem::replace(&mut view.press_clicks, 1);
@@ -4075,6 +4278,24 @@ impl Engine {
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
         self.dispatch_mouse_at_point(id, "pointerup", viewport_x, viewport_y);
+        // CH2.E7: the release of a press on a scrollbar is a `mouseup` at
+        // the scroller and nothing more: no `click`, no focus (Chrome).
+        if self.views.get(&id).is_some_and(|v| v.scrollbar_pressed.is_some()) {
+            let suppressed = self
+                .views
+                .get_mut(&id)
+                .is_some_and(|view| std::mem::take(&mut view.compat_mouse_suppressed));
+            if !suppressed {
+                self.dispatch_mouse_at_point(id, "mouseup", viewport_x, viewport_y);
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                view.scrollbar_pressed = None;
+                view.press_target = None;
+                view.press_settled_focus = false;
+            }
+            self.settle_pointer_restyle(id);
+            return ClickOutcome { focused: self.focused_tag(id), navigate: None };
+        }
         let suppressed = self
             .views
             .get_mut(&id)
@@ -4371,7 +4592,8 @@ impl Engine {
             }
             Some(node.id.raw())
         });
-        let Some(target) = target else {
+        // A press on a scrollbar keeps its events on the scroller.
+        let Some(target) = view.scrollbar_pressed.or(target) else {
             return true;
         };
         let data = rustkit_bindings::MouseEventBindingData {
@@ -9411,13 +9633,7 @@ impl layout_ctx::LayoutCtx {
         javascript_enabled: bool,
         bounds: (u32, u32),
     ) -> LayoutBox {
-        // Note: height is 0 because layout_block_children uses content.height as the cursor position
-        // Children should start at y=0, not y=viewport_height
-        let containing_block = Dimensions {
-            content: Rect::new(0.0, 0.0, bounds.0 as f32, 0.0),
-            ..Default::default()
-        };
-
+        let lay = building.lay.clone();
         // Build layout tree from DOM with tracing
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
@@ -9429,6 +9645,38 @@ impl layout_ctx::LayoutCtx {
 
         // Layout computation
         let mut root_box = root_box;
+        // CH2.E7: an `overflow: auto` box with a styled (classic) scrollbar
+        // takes the bar's width only once it overflows, and the root's bar
+        // narrows the initial containing block. Both are known after a
+        // layout: lay out again from the unlaid tree, with the marks, until
+        // nothing new overflows. Only trees with such a bar pay for it.
+        let root_bar = root_scrollbar_width(&root_box);
+        // The bars the last layout of this view showed are shown from the
+        // start (`ViewLayout::scrollbar_marks`).
+        let remembered = lay.as_ref().map(|l| l.scrollbar_marks.borrow().clone()).unwrap_or_default();
+        root_box.apply_scrollbar_marks(&remembered);
+        let root_remembered = lay.as_ref().is_some_and(|l| l.root_scrollbar.get());
+        let unlaid = (root_box.may_mark_scrollbars() || root_bar > 0.0).then(|| root_box.clone());
+        let root_bar_always = root_bar > 0.0
+            && (root_remembered || root_box.style.overflow_y == rustkit_css::Overflow::Scroll);
+        let mut cb_width = bounds.0 as f32 - if root_bar_always { root_bar } else { 0.0 };
+        let mut passes = 0;
+        for pass in 0..4 {
+            if pass > 0 {
+                let Some(unlaid) = unlaid.as_ref() else { break };
+                let mut marks = HashMap::new();
+                root_box.collect_scrollbar_marks(&mut marks);
+                let mut fresh = unlaid.clone();
+                fresh.apply_scrollbar_marks(&marks);
+                root_box = fresh;
+            }
+            passes += 1;
+        // Height 0: layout_block_children uses content.height as the
+        // cursor, so children start at y=0, not y=viewport_height.
+        let containing_block = Dimensions {
+            content: Rect::new(0.0, 0.0, cb_width.max(0.0), 0.0),
+            ..Default::default()
+        };
         {
             let _layout_span = tracing::info_span!("layout_compute").entered();
             let _layout_time = time_stage(Stage::Layout);
@@ -9449,6 +9697,42 @@ impl layout_ctx::LayoutCtx {
                 &mut margin_context,
                 &mut float_context,
             );
+        }
+            if unlaid.is_none() {
+                break;
+            }
+            let mut again = root_box.mark_overflowing_scrollbars(pass == 0 && !remembered.is_empty());
+            let root_overflows = root_box.dimensions.margin_box().height > bounds.1 as f32 + 0.5;
+            if root_bar > 0.0
+                && cb_width >= bounds.0 as f32
+                && root_overflows
+                && !matches!(root_box.style.overflow_y, rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip)
+            {
+                cb_width = bounds.0 as f32 - root_bar;
+                again = true;
+            } else if pass == 0
+                && root_remembered
+                && !root_overflows
+                && root_box.style.overflow_y != rustkit_css::Overflow::Scroll
+                && cb_width < bounds.0 as f32
+            {
+                // The document no longer overflows: the remembered bar goes.
+                cb_width = bounds.0 as f32;
+                again = true;
+            }
+            if !again {
+                break;
+            }
+        }
+        if let Some(lay) = lay.as_ref() {
+            lay.layout_passes.set(lay.layout_passes.get() + passes);
+            lay.layout_builds.set(lay.layout_builds.get() + 1);
+        }
+        if let (Some(lay), true) = (lay.as_ref(), unlaid.is_some()) {
+            let mut marks = HashMap::new();
+            root_box.collect_scrollbar_marks(&mut marks);
+            *lay.scrollbar_marks.borrow_mut() = marks;
+            lay.root_scrollbar.set(cb_width < bounds.0 as f32);
         }
 
         // Ensure body element fills viewport (common browser behavior)
@@ -9703,6 +9987,34 @@ impl layout_ctx::LayoutCtx {
             let mut root = LayoutBox::new(BoxType::Block, style.clone());
             root.node_id = Some(html.id.raw());
             self.note_boxless_style(&root, None);
+        }
+
+        // CH2.E7: the viewport's scrollbar is styled by the root element's
+        // `scrollbar-*` properties and `::-webkit-scrollbar*` parts; the
+        // root box carries them. `overflow: hidden | clip` on `<html>`
+        // shows no bar.
+        if let (Some(html), Some(style)) = (document.document_element(), html_style.as_ref()) {
+            if let NodeType::Element { attributes, .. } = &html.node_type {
+                let hides = matches!(
+                    style.overflow_y,
+                    rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip
+                );
+                root_box.style.scrollbar_width = if hides {
+                    rustkit_css::ScrollbarWidth::None
+                } else {
+                    style.scrollbar_width
+                };
+                root_box.style.scrollbar_color = style.scrollbar_color;
+                root_box.style.webkit_scrollbar = self.webkit_scrollbar_style(
+                    "html",
+                    attributes,
+                    &stylesheets,
+                    &[],
+                    &[],
+                    SiblingContext::SOLE.with_children(true),
+                    style,
+                );
+            }
         }
 
         // `<html>` has no box here, but its width and `container-type` count.
@@ -10951,6 +11263,20 @@ impl layout_ctx::LayoutCtx {
                     container_query::note_first_letter_float();
                 }
 
+                // CH2.E7: a scroll container's (and the root's)
+                // `::-webkit-scrollbar*` parts.
+                if Self::may_show_scrollbars(&layout_box.style) {
+                    layout_box.style.webkit_scrollbar = self.webkit_scrollbar_style(
+                        &tag_lower,
+                        attributes,
+                        stylesheets,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        &layout_box.style,
+                    );
+                }
+
                 // Check for ::before pseudo-element
                 let before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
@@ -11591,6 +11917,142 @@ impl layout_ctx::LayoutCtx {
             })
     }
 
+    /// Whether an element can show a scrollbar, so its
+    /// `::-webkit-scrollbar*` parts are worth matching: a scroll container
+    /// (`overflow: auto | scroll` on an axis). The root's parts, which
+    /// style the viewport's bar, are matched where its box is made.
+    fn may_show_scrollbars(style: &ComputedStyle) -> bool {
+        use rustkit_css::Overflow;
+        let shows = |o: Overflow| matches!(o, Overflow::Auto | Overflow::Scroll);
+        shows(style.overflow_x) || shows(style.overflow_y)
+    }
+
+    /// The `::-webkit-scrollbar*` parts that match an element (CH2.E7), or
+    /// None when no `::-webkit-scrollbar` rule does: Chrome then draws its
+    /// own scrollbar and ignores the other parts. Each part cascades as a
+    /// pseudo-element does (layers, specificity, `!important`); only what a
+    /// scrollbar paints is kept. Never touches the element's own style.
+    #[allow(clippy::too_many_arguments)]
+    fn webkit_scrollbar_style(
+        &self,
+        tag_name: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        stylesheets: &[Stylesheet],
+        ancestors: &[Ancestor],
+        siblings_before: &[SiblingKey],
+        sib: SiblingContext,
+        element: &ComputedStyle,
+    ) -> Option<Box<rustkit_css::WebkitScrollbar>> {
+        let candidates: Vec<&Rule> = stylesheets
+            .iter()
+            .flat_map(|s| s.rules.iter())
+            .filter(|r| r.selector.contains("-webkit-scrollbar"))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let part = |pseudo: &str| -> Option<ComputedStyle> {
+            let single_colon = pseudo.replace("::", ":");
+            let mut matched: Vec<((usize, usize, usize), &Rule)> = Vec::new();
+            for rule in &candidates {
+                let Some((base, bare, members)) =
+                    pseudo_list_base(&rule.selector, pseudo, single_colon.as_str())
+                else {
+                    continue;
+                };
+                if !(bare || self.rule_may_match(&base, tag_name, attributes)) {
+                    continue;
+                }
+                if let Some(specificity) = SelectorMatcher.matched_specificity(
+                    &SelectorMatcher.prepared_selector(&base),
+                    &members,
+                    members[0].1,
+                    tag_name,
+                    attributes,
+                    ancestors,
+                    siblings_before,
+                    sib,
+                ) {
+                    matched.push((specificity, *rule));
+                }
+            }
+            matched.retain(|(_, rule)| container_query::applies(&rule.container));
+            if matched.is_empty() {
+                return None;
+            }
+            let mut style = ComputedStyle::new();
+            style.font_size = element.font_size.clone();
+            style.color = element.color;
+            matched.sort_by_key(|(spec, rule)| (rule.layer_order, *spec));
+            let mut important = matched.clone();
+            important.sort_by_key(|(spec, rule)| (std::cmp::Reverse(rule.layer_order), *spec));
+            for important_pass in [false, true] {
+                let rules = if important_pass { &important } else { &matched };
+                let reverted = reverted_layer_properties(rules.iter().map(|r| r.1), important_pass);
+                for (_, rule) in rules {
+                    for declaration in &rule.declarations {
+                        if declaration.important != important_pass
+                            || (!reverted.is_empty()
+                                && reverted.contains(&(rule.layer_order, declaration.property.as_str())))
+                        {
+                            continue;
+                        }
+                        if let rustkit_css::PropertyValue::Specified(value) = &declaration.value {
+                            self.apply_cascaded(&mut style, Some(element), &declaration.property, value);
+                        }
+                    }
+                }
+            }
+            Some(style)
+        };
+        let bar = part("::-webkit-scrollbar")?;
+        let font_px = match element.font_size {
+            rustkit_css::Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let px = |l: &rustkit_css::Length| match l {
+            rustkit_css::Length::Auto => None,
+            other => Some(other.to_px(font_px, 16.0, 0.0)),
+        };
+        let to_part = |s: &ComputedStyle| {
+            let radius = [
+                s.border_top_left_radius.clone(),
+                s.border_top_right_radius.clone(),
+                s.border_bottom_right_radius.clone(),
+                s.border_bottom_left_radius.clone(),
+            ];
+            let has_radius = radius.iter().any(|c| *c != rustkit_css::CornerRadius::default());
+            rustkit_css::ScrollbarPart {
+                background: (s.background_color.a > 0.0).then_some(s.background_color),
+                radius,
+                has_radius,
+                hidden: s.display == rustkit_css::Display::None,
+            }
+        };
+        let thumb = part("::-webkit-scrollbar-thumb").map(|s| to_part(&s)).unwrap_or_default();
+        let thumb_hover = part("::-webkit-scrollbar-thumb:hover").map(|s| {
+            let mut hover = to_part(&s);
+            if !hover.has_radius {
+                hover.radius = thumb.radius.clone();
+                hover.has_radius = thumb.has_radius;
+            }
+            if hover.background.is_none() {
+                hover.background = thumb.background;
+            }
+            hover
+        });
+        Some(Box::new(rustkit_css::WebkitScrollbar {
+            width: px(&bar.width),
+            height: px(&bar.height),
+            hidden: bar.display == rustkit_css::Display::None,
+            bar: to_part(&bar),
+            track: part("::-webkit-scrollbar-track").map(|s| to_part(&s)).unwrap_or_default(),
+            thumb,
+            thumb_hover,
+            corner: part("::-webkit-scrollbar-corner").map(|s| to_part(&s)).unwrap_or_default(),
+        }))
+    }
+
     /// The cascade half of `create_pseudo_element`: the pseudo-element's
     /// style, or None when it generates no box (no rule matched, or none set
     /// `content`).
@@ -11943,6 +12405,8 @@ impl layout_ctx::LayoutCtx {
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
             style.pointer_events = parent.pointer_events;
+            // css-scrollbars-1 §3: `scrollbar-color` inherits.
+            style.scrollbar_color = parent.scrollbar_color;
             // css-tables: both inherit.
             style.border_spacing = parent.border_spacing;
             style.border_collapse = parent.border_collapse;
@@ -13017,6 +13481,8 @@ impl Engine {
             "box-sizing" => style.box_sizing = parent.box_sizing,
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
+            "scrollbar-color" => style.scrollbar_color = parent.scrollbar_color,
+            "scrollbar-width" => style.scrollbar_width = parent.scrollbar_width,
             "border-spacing" => style.border_spacing = parent.border_spacing,
             "border-collapse" => style.border_collapse = parent.border_collapse,
             "vertical-align" => style.vertical_align = parent.vertical_align,
@@ -14152,6 +14618,17 @@ impl layout_ctx::LayoutCtx {
             }
             "overflow-y" => {
                 style.overflow_y = parse_overflow(value);
+            }
+            // css-scrollbars-1 (CH2.E7). An invalid value is dropped.
+            "scrollbar-width" => {
+                if let Some(width) = rustkit_css::parse_scrollbar_width(value) {
+                    style.scrollbar_width = width;
+                }
+            }
+            "scrollbar-color" => {
+                if let Some(colors) = rustkit_css::parse_scrollbar_color(value) {
+                    style.scrollbar_color = colors;
+                }
             }
             // css-overflow-3 §5.1. Not inherited (a block owns its line
             // boxes). The two-value form and `<string>` fallback are
@@ -19537,10 +20014,16 @@ impl Engine {
             let commit = FrameCommit {
                 generation: view.frame_generation,
                 nav_generation: view.nav_id,
-                list: devtools::with_highlight(
-                    view.display_list.clone(),
+                list: with_root_scrollbar(
+                    devtools::with_highlight(
+                        view.display_list.clone(),
+                        view.layout.as_deref(),
+                        view.devtools_highlight,
+                    ),
                     view.layout.as_deref(),
-                    view.devtools_highlight,
+                    view.laid_with.as_ref().map_or((0, 0), |w| w.size),
+                    view.scroll_offset,
+                    view.max_scroll_offset,
                 ),
                 scroll_offset: view.scroll_offset,
                 max_scroll_offset: view.max_scroll_offset,
@@ -23512,6 +23995,25 @@ fn publish_geometry(
 /// flick's events, inertia included, come much closer together than this.
 const WHEEL_GESTURE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// CH2.E7: a thumb drag in progress. The scroll follows the pointer's
+/// travel along the bar from where the press was.
+#[derive(Clone, Copy, Debug)]
+struct ScrollbarDrag {
+    target: WheelTarget,
+    vertical: bool,
+    start_pointer: f32,
+    start_scroll: (f32, f32),
+    scroll_per_px: f32,
+}
+
+/// What a point on a styled scrollbar is over.
+#[derive(Clone, Copy, Debug)]
+enum ScrollbarSpot {
+    Thumb(rustkit_layout::scroll::BarGeometry),
+    /// The track before (-1) or after (+1) the thumb.
+    Track(rustkit_layout::scroll::BarGeometry, f32),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum WheelTarget {
     Window,
@@ -24037,6 +24539,9 @@ fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
 fn computed_style_lines(b: &LayoutBox) -> String {
     let s = &*b.style;
     let d = &b.dimensions;
+    // The border widths as CSS reports them. A styled scrollbar's space
+    // is its own gutter (`Dimensions::scrollbar`), not border (CH2.E7).
+    let css_border = d.border;
     let font_px = match s.font_size {
         rustkit_css::Length::Px(p) => p,
         _ => 16.0,
@@ -24092,10 +24597,10 @@ fn computed_style_lines(b: &LayoutBox) -> String {
         ("padding-right", css_px(d.padding.right)),
         ("padding-bottom", css_px(d.padding.bottom)),
         ("padding-left", css_px(d.padding.left)),
-        ("border-top-width", css_px(d.border.top)),
-        ("border-right-width", css_px(d.border.right)),
-        ("border-bottom-width", css_px(d.border.bottom)),
-        ("border-left-width", css_px(d.border.left)),
+        ("border-top-width", css_px(css_border.top)),
+        ("border-right-width", css_px(css_border.right)),
+        ("border-bottom-width", css_px(css_border.bottom)),
+        ("border-left-width", css_px(css_border.left)),
         ("border-top-left-radius", corner_longhand(&radii[0].0, &radii[0].1)),
         ("border-top-right-radius", corner_longhand(&radii[1].0, &radii[1].1)),
         ("border-bottom-right-radius", corner_longhand(&radii[2].0, &radii[2].1)),
@@ -39622,6 +40127,80 @@ fn restyle_child(parent: usize, child: usize) -> RestyleChild {
 }
 
 /// The first box of `tree`, in tree order, that is the box of the node.
+/// CH2.E7: what a point (in the bar's coordinates) is over on one bar.
+fn spot_on_bar(bar: rustkit_layout::scroll::BarGeometry, x: f32, y: f32) -> Option<ScrollbarSpot> {
+    let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+    if !inside(bar.track) {
+        return None;
+    }
+    let thumb = bar.thumb?;
+    if inside(thumb) {
+        return Some(ScrollbarSpot::Thumb(bar));
+    }
+    let before = match bar.orientation {
+        rustkit_layout::ScrollbarOrientation::Vertical => y < thumb.y,
+        rustkit_layout::ScrollbarOrientation::Horizontal => x < thumb.x,
+    };
+    Some(ScrollbarSpot::Track(bar, if before { -1.0 } else { 1.0 }))
+}
+
+/// CH2.E7: the width of the root's (the viewport's) styled scrollbar when
+/// it shows, 0 when the root has none (the platform's overlay bar).
+fn root_scrollbar_width(root: &LayoutBox) -> f32 {
+    if matches!(root.style.overflow_y, rustkit_css::Overflow::Hidden | rustkit_css::Overflow::Clip) {
+        return 0.0;
+    }
+    rustkit_layout::scroll::ScrollbarLook::of(&root.style).map_or(0.0, |look| look.thickness().0)
+}
+
+/// CH2.E7: the viewport's bar, in viewport coordinates (`viewport` is the
+/// laid-out size), for the window as scrolled now.
+fn root_scrollbar_bars(
+    root: &LayoutBox,
+    viewport: (u32, u32),
+    scroll: (f32, f32),
+    max: (f32, f32),
+) -> Vec<rustkit_layout::scroll::BarGeometry> {
+    let width = root_scrollbar_width(root);
+    let shows = max.1 > 0.0 || root.style.overflow_y == rustkit_css::Overflow::Scroll;
+    if width <= 0.0 || !shows || viewport.0 == 0 {
+        return Vec::new();
+    }
+    let port = Rect::new(0.0, 0.0, viewport.0 as f32 - width, viewport.1 as f32);
+    rustkit_layout::scroll::bar_geometry(port, (width, 0.0), (0.0, max.1), scroll)
+}
+
+/// The frame's list with the viewport's styled scrollbar over it, held
+/// against the window's scroll. A frame without one is the list as is.
+fn with_root_scrollbar(
+    list: Option<Arc<DisplayList>>,
+    layout: Option<&LayoutBox>,
+    viewport: (u32, u32),
+    scroll: (f32, f32),
+    max: (f32, f32),
+) -> Option<Arc<DisplayList>> {
+    let (Some(base), Some(root)) = (list.as_ref(), layout) else {
+        return list;
+    };
+    let Some(look) = rustkit_layout::scroll::ScrollbarLook::of(&root.style) else {
+        return list;
+    };
+    let bars = root_scrollbar_bars(root, viewport, scroll, max);
+    if bars.is_empty() {
+        return list;
+    }
+    let mut combined = DisplayList::clone(base);
+    combined.commands.push(rustkit_layout::DisplayCommand::PushViewportFixed);
+    combined.commands.extend(rustkit_layout::scroll::paint_bars(
+        look,
+        &bars,
+        root.scrollbar_thumb_hovered.get(),
+        16.0,
+    ));
+    combined.commands.push(rustkit_layout::DisplayCommand::PopViewportFixed);
+    Some(Arc::new(combined))
+}
+
 fn box_of_node(tree: &LayoutBox, raw: usize) -> Option<&LayoutBox> {
     if tree.node_id == Some(raw) {
         return Some(tree);
