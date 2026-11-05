@@ -102,6 +102,42 @@ fn unitless_zero_sizes_are_zero() {
     ]);
 }
 
+/// A column whose height is indefinite flexes its items into its
+/// `max-height` (css-flexbox-1 §9.3), not into their stack. Shrinking is
+/// weighted by basis (14/16), and text items stop at their min-content.
+#[test]
+fn column_flex_items_shrink_into_max_height() {
+    const C: &str = "display:flex;flex-direction:column;max-height:20px";
+    check(&[
+        ("col_maxh20", one(C), "c=0+20 kids=0+10,10+10"),
+        ("col_maxh20_minh30", one(&format!("{C};min-height:30px")), "c=0+30 kids=0+14,14+16"),
+        (
+            "col_maxh20_bb_pad",
+            one(&format!("{C};padding:5px;box-sizing:border-box")),
+            "c=0+20 kids=5+5,10+5",
+        ),
+        ("col_maxh20_ovauto", one(&format!("{C};overflow:auto")), "c=0+20 kids=0+10,10+10"),
+        (
+            "col_maxh20_textkids",
+            format!("{B}<div id=c style=\"{C}\"><div>a</div><div>b</div></div>"),
+            "c=0+20 kids=0+18,18+18",
+        ),
+    ]);
+}
+
+/// CSS 2.1 §10.7: min-height wins over a smaller max-height. max won.
+#[test]
+fn min_height_wins_over_max_height() {
+    check(&[
+        ("block_maxh20_minh30", one("max-height:20px;min-height:30px"), "c=0+30 kids=0+40,40+44"),
+        (
+            "block_h50_maxh20_minh30",
+            one("height:50px;max-height:20px;min-height:30px"),
+            "c=0+30 kids=0+40,40+44",
+        ),
+    ]);
+}
+
 /// Controls that were right before the fix.
 #[test]
 fn definite_height_controls() {
