@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E4 mouse surface</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* Top half: a link with a title (pointer cursor, tooltip). Bottom half:
+     a resize handle (ew-resize). Across the middle of the top half, three
+     five-letter words centred, so the window's centre-ish point is on
+     "bravo" whatever the chrome around the content view. */
+  #link { position: fixed; left: 0; right: 0; top: 0; height: 50%; display: block;
+          color: #000; text-decoration: none; background: #e0e0ff; }
+  #words { position: fixed; left: 0; right: 0; top: 0; height: 100%; margin: 0;
+           font: 120px/100vh sans-serif; text-align: center; white-space: nowrap; }
+  #handle { position: fixed; left: 0; right: 0; bottom: 0; height: 50%; cursor: ew-resize; background: #ffe0e0; }
+  body.words #link, body.words #handle { display: none; }
+  body:not(.words) #words { display: none; }
+</style>
+<a id="link" href="#nowhere" title="the E4 tooltip"></a>
+<div id="handle"></div>
+<p id="words">alpha bravo delta</p>
+<script>
+  function beacon(name) { fetch('/beacon?' + encodeURIComponent(name)).catch(function () {}); }
+  var q = location.search;
+  if (q.indexOf('words') >= 0) document.body.className = 'words';
+  document.addEventListener('contextmenu', function (e) {
+    if (q.indexOf('prevent') >= 0) e.preventDefault();
+    beacon('e4-contextmenu-button-' + e.button + '-prevented-' + (e.defaultPrevented ? 1 : 0));
+  });
+  document.addEventListener('auxclick', function (e) { beacon('e4-auxclick-button-' + e.button); });
+  document.addEventListener('dblclick', function (e) {
+    beacon('e4-dblclick-detail-' + e.detail + '-selection-' + String(getSelection()));
+  });
+  document.addEventListener('click', function (e) { beacon('e4-click-detail-' + e.detail); });
+  document.addEventListener('pointermove', function (e) {
+    if (e.buttons) beacon('e4-dragmove-buttons-' + e.buttons);
+  });
+  beacon('e4-ready');
+</script>

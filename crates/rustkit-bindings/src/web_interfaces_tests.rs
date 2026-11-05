@@ -58,17 +58,18 @@ fn elements_are_instances_of_their_tags_interface() {
 /// in effects. Each threw "not a callable function", an error boundary caught
 /// it and mounted the whole page again, on every turn of the live loop.
 ///
-/// Chromium 143: `getContext('nope')` is null; on a `<video>` with no source
+/// Chromium 143: `getContext('webgl')` is null and `getContext('2d')` a
+/// CanvasRenderingContext2D (web_canvas.js); on a `<video>` with no source
 /// `load()` and `pause()` return undefined, `paused` is true, `readyState` 0,
 /// `canPlayType('x/y')` "", `currentTime` 0, `duration` NaN, `ended` false,
 /// and `play()` returns a promise that rejects with a DOMException.
 #[test]
-fn a_canvas_has_no_context_and_a_media_element_plays_nothing_without_throwing() {
+fn a_canvas_has_no_webgl_context_and_a_media_element_plays_nothing_without_throwing() {
     let b = bound();
     b.evaluate("document.body.innerHTML = '<canvas id=\"c\"></canvas><video id=\"v\"></video><audio id=\"au2\"></audio>';").unwrap();
     assert_eq!(
-        ev(&b, "var c = document.getElementById('c'); String([typeof c.getContext, c.getContext('webgl'), c.getContext('2d'), document.createElement('canvas').getContext('experimental-webgl')].join())"),
-        "function,,,"
+        ev(&b, "var c = document.getElementById('c'); String([typeof c.getContext, c.getContext('webgl'), Object.prototype.toString.call(c.getContext('2d')), document.createElement('canvas').getContext('experimental-webgl')].join())"),
+        "function,,[object CanvasRenderingContext2D],"
     );
     // The page's own check, as written.
     assert_eq!(
