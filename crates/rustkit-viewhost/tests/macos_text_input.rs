@@ -179,25 +179,92 @@ fn main() {
         // (Chrome 143 on this seat: no keydown for Cmd+T or Cmd+N, and the
         // tab opens though the page cancels; Cmd+L, Cmd+D, Cmd+K reach it).
         use rustkit_viewhost::is_reserved_chord;
-        for (code, shift, alt, reserved, what) in [
-            (17, false, false, true, "Cmd+T"),
-            (45, false, false, true, "Cmd+N"),
-            (13, false, false, true, "Cmd+W"),
-            (12, false, false, true, "Cmd+Q"),
-            (17, true, false, true, "Cmd+Shift+T"),
-            (33, true, false, true, "Cmd+Shift+["),
-            (124, false, true, true, "Cmd+Option+Right"),
-            (37, false, false, false, "Cmd+L"),
-            (2, false, false, false, "Cmd+D"),
-            (40, false, false, false, "Cmd+K"),
-            (3, false, false, false, "Cmd+F"),
-            (9, false, false, false, "Cmd+V"),
-            (33, false, false, false, "Cmd+[ (Back)"),
-            (124, false, false, false, "Cmd+Right"),
+        // By the character the key types, as menu key equivalents match
+        // (R1 HOLD nit 6): on Dvorak the W key is keycode 43, and keycode
+        // 13 types ","; on AZERTY Q is keycode 0 and keycode 12 types "a".
+        // Arrows go by keycode; a non-Latin character falls back to it.
+        for (code, chars, shift, alt, reserved, what) in [
+            (17, "t", false, false, true, "Cmd+T"),
+            (45, "n", false, false, true, "Cmd+N"),
+            (13, "w", false, false, true, "Cmd+W"),
+            (12, "q", false, false, true, "Cmd+Q"),
+            (17, "T", true, false, true, "Cmd+Shift+T"),
+            (33, "{", true, false, true, "Cmd+Shift+["),
+            (30, "}", true, false, true, "Cmd+Shift+]"),
+            (124, "\u{f703}", false, true, true, "Cmd+Option+Right"),
+            (37, "l", false, false, false, "Cmd+L"),
+            (2, "d", false, false, false, "Cmd+D"),
+            (40, "k", false, false, false, "Cmd+K"),
+            (3, "f", false, false, false, "Cmd+F"),
+            (9, "v", false, false, false, "Cmd+V"),
+            (33, "[", false, false, false, "Cmd+[ (Back)"),
+            (124, "\u{f703}", false, false, false, "Cmd+Right"),
+            (43, "w", false, false, true, "Dvorak Cmd+W (the comma key)"),
+            (13, ",", false, false, false, "Dvorak Cmd+, (the W key)"),
+            (0, "q", false, false, true, "AZERTY Cmd+Q (the A key)"),
+            (12, "a", false, false, false, "AZERTY Cmd+A (the Q key)"),
+            (17, "\u{435}", false, false, true, "Russian Cmd+T (the T key types е): by keycode"),
         ] {
-            assert_eq!(is_reserved_chord(code, true, shift, alt), reserved, "{what}");
+            assert_eq!(is_reserved_chord(chars, code, true, shift, alt), reserved, "{what}");
         }
-        assert!(!is_reserved_chord(17, false, false, false), "T without Cmd");
+        assert!(!is_reserved_chord("t", 17, false, false, false), "T without Cmd");
+
+        // R1 HOLD on #918: with no text field focused the input method is
+        // not consulted (Chromium has no input context when the text input
+        // type is NONE), so a dead key is a key, not a composition: a page
+        // with j/k shortcuts hears every keydown. Option+e then e, by
+        // keyCode, as the window server delivers them.
+        let key_event = |down: bool, keycode: u16, flags: u64, chars: &str, plain: &str| -> id {
+            msg_send![class!(NSEvent),
+                keyEventWithType: if down { 10u64 } else { 11u64 } // NSEventTypeKeyDown / KeyUp
+                location: NSPoint::new(0.0, 0.0)
+                modifierFlags: flags
+                timestamp: 0.0f64
+                windowNumber: 0isize
+                context: nil
+                characters: string(chars)
+                charactersIgnoringModifiers: string(plain)
+                isARepeat: NO
+                keyCode: keycode]
+        };
+        const OPTION: u64 = 1 << 19;
+        let press = |keycode: u16, flags: u64, chars: &str, plain: &str| {
+            let _: () = msg_send![page, keyDown: key_event(true, keycode, flags, chars, plain)];
+            let _: () = msg_send![page, keyUp: key_event(false, keycode, flags, chars, plain)];
+        };
+        set_text_input_state(view_id, None);
+        let context: id = msg_send![page, inputContext];
+        assert!(context == nil, "no input context with nothing editable focused (Chromium: TEXT_INPUT_TYPE_NONE)");
+        // Stale marked text from a field that lost focus does not swallow keys.
+        let _: () = msg_send![page, setMarkedText: string("\u{b4}") selectedRange: NSRange::new(1, 0) replacementRange: none];
+        set_text_input_state(view_id, None);
+        let marked: BOOL = msg_send![page, hasMarkedText];
+        assert_eq!(marked, NO, "focus leaving the field drops its marked text");
+        take();
+        press(14, OPTION, "", "e"); // Option+e: the dead acute on a US layout
+        press(14, 0, "e", "e");
+        let got = take();
+        let keys: Vec<(bool, u16)> = got
+            .iter()
+            .filter_map(|k| match k {
+                InputKind::Key(k) => Some((k.up, k.mac_keycode)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            got.iter().all(|k| matches!(k, InputKind::Key(_))),
+            "no composition with nothing editable focused: {got:?}"
+        );
+        assert_eq!(keys, vec![(false, 14), (true, 14), (false, 14), (true, 14)], "every key reaches the page: {got:?}");
+        let marked: BOOL = msg_send![page, hasMarkedText];
+        assert_eq!(marked, NO, "nothing marked");
+        // A field focused again: the input method is back.
+        set_text_input_state(
+            view_id,
+            Some(TextInputMirror { marked: None, selected: (0, 0), caret: Some((0.0, 0.0, 20.0)) }),
+        );
+        let context: id = msg_send![page, inputContext];
+        assert!(context != nil, "a focused text field has an input context");
 
         println!("ok: the content view is a text input client and answers the Edit menu");
     }

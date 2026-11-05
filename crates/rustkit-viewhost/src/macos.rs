@@ -167,7 +167,7 @@ unsafe fn text_of(obj: id) -> String {
 /// on this seat: a page's `preventDefault()` does not stop Cmd+T or Cmd+N,
 /// and the page hears no keydown for them; it does hear Cmd+L, Cmd+D and
 /// Cmd+K (tools/real_window, `e3_cmd_key_to_page`'s probe).
-pub fn is_reserved_chord(keycode: u16, cmd: bool, shift: bool, alt: bool) -> bool {
+pub fn is_reserved_chord(_chars: &str, keycode: u16, cmd: bool, shift: bool, alt: bool) -> bool {
     const Q: u16 = 12;
     const W: u16 = 13;
     const T: u16 = 17;
@@ -608,7 +608,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     return pass(event);
                 }
                 let key = pending_key(event, false, None);
-                if is_reserved_chord(key.mac_keycode, key.cmd, key.shift, key.alt) {
+                if is_reserved_chord(&key.text, key.mac_keycode, key.cmd, key.shift, key.alt) {
                     return pass(event);
                 }
                 let token = NEXT_KEY_EQUIVALENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

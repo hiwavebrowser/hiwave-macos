@@ -762,6 +762,13 @@ fn panel_ipc_log_line(panel: &str, body: &str) -> String {
     format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
 }
 
+/// Input method text as the log carries it (CH2.E3).
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+#[cfg(target_os = "macos")]
+fn ime_input_log_line(input: &rustkit_viewhost::ImeInput) -> String {
+    format!("{input:?}")
+}
+
 /// A panel probe report as the log carries it (#910 R1 blocker 2), or
 /// `None` for one that is not a report: rebuilt from its shapes only (the
 /// size, and for each of `selectors` the box, the match count, `checked`
@@ -2048,7 +2055,7 @@ fn dispatch_view_input(
         // Marked and committed text from the input method: a dead key, an
         // IME, the accent popover, the emoji picker (CH2.E3).
         rustkit_viewhost::InputKind::Ime(input) => {
-            tracing::debug!(?input, "input method text");
+            tracing::debug!(input = %ime_input_log_line(&input), "input method text");
             view.ime_input(input);
             view.relayout();
         }
@@ -2247,6 +2254,28 @@ mod panel_log_tests {
         assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
         assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
         assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+}
+
+// #918 R1 HOLD must-fix 2: input method text (a dead key's, an IME's, the
+// accent popover's, the emoji picker's; in a password field too) is never
+// logged, at any level: the variant and the size only.
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod ime_log_tests {
+    use super::ime_input_log_line;
+    use rustkit_viewhost::ImeInput;
+
+    const SECRET: &str = "hunter2-e3-secret";
+
+    #[test]
+    fn an_input_method_line_names_the_variant_and_size_never_the_text() {
+        let marked = ime_input_log_line(&ImeInput::SetMarked(SECRET.to_string()));
+        assert!(!marked.contains(SECRET), "{marked}");
+        assert_eq!(marked, format!("ime=SetMarked len={}", SECRET.len()));
+        let insert = ime_input_log_line(&ImeInput::Insert { text: SECRET.to_string(), replace: Some((1, 1)) });
+        assert!(!insert.contains(SECRET), "{insert}");
+        assert_eq!(insert, format!("ime=Insert len={} replace=true", SECRET.len()));
+        assert_eq!(ime_input_log_line(&ImeInput::Unmark), "ime=Unmark");
     }
 }
 

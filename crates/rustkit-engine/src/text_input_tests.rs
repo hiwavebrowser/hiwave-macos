@@ -269,3 +269,69 @@ fn edit_menu_commands_act_on_the_focused_field() {
     js(&mut engine, id, "$('q').blur()");
     assert!(!engine.run_edit_command(id, &EditCommand::Paste), "nothing focused: nothing to paste into");
 }
+
+// #918 R1 HOLD, nit 3: focus leaving a field mid-composition finishes it.
+// Chrome 143 (tools/parity_oracle/ime_gate_log.mjs, CDP half): the marked
+// text stays, compositionend fires before blur, and the next composition
+// starts fresh in the newly focused field.
+#[test]
+fn focus_leaving_a_composing_field_ends_the_composition_first() {
+    let (mut engine, id) = page();
+    js(
+        &mut engine,
+        id,
+        "['i', 'q'].forEach(function (id) { $(id).addEventListener('blur', function () { log.push('blur ' + id); }); }); 0",
+    );
+    focus_end(&mut engine, id, "i");
+    engine.set_marked_text(id, "n");
+    take_log(&mut engine, id);
+    js(&mut engine, id, "$('q').focus(); 0");
+    assert_eq!(
+        take_log(&mut engine, id),
+        ["compositionend \"n\" - - \"abn\" CompositionEvent true", "blur i"]
+    );
+    assert_eq!(value(&mut engine, id, "i"), "abn", "Chrome keeps the marked text");
+    js(&mut engine, id, "$('q').setSelectionRange(5, 5); 0");
+    engine.set_marked_text(id, "ni");
+    let log = take_log(&mut engine, id);
+    assert_eq!(log.first().map(String::as_str), Some("compositionstart \"\" - - \"hello\" CompositionEvent true"), "{log:?}");
+    assert_eq!(value(&mut engine, id, "i"), "abn");
+    assert_eq!(value(&mut engine, id, "q"), "helloni");
+
+    // blur() with nothing taking the focus: the same.
+    let (mut engine, id) = page();
+    focus_end(&mut engine, id, "t");
+    engine.set_marked_text(id, "k");
+    take_log(&mut engine, id);
+    js(&mut engine, id, "$('t').blur(); 0");
+    assert_eq!(take_log(&mut engine, id), ["compositionend \"k\" - - \"abk\" CompositionEvent true"]);
+    assert!(engine.text_input_state(id).is_none(), "nothing editable focused");
+    assert!(!engine.unmark_text(id), "the composition is over");
+}
+
+// #918 R1 HOLD, nit 4, pinned: Chrome 143 does not end a composition when
+// script moves the selection (select(), setSelectionRange()); the next
+// update still replaces the marked text, and the commit lands there.
+#[test]
+fn script_selection_mid_composition_leaves_the_composition_open() {
+    for act in ["$('i').select()", "$('i').setSelectionRange(0, 0)"] {
+        let (mut engine, id) = page();
+        focus_end(&mut engine, id, "i");
+        engine.set_marked_text(id, "n");
+        take_log(&mut engine, id);
+        js(&mut engine, id, &format!("{act}; 0"));
+        assert_eq!(take_log(&mut engine, id), Vec::<String>::new(), "{act}: no events");
+        assert!(engine.set_marked_text(id, "ni"));
+        assert_eq!(
+            take_log(&mut engine, id),
+            [
+                "compositionupdate \"ni\" - - \"abn\" CompositionEvent true",
+                "beforeinput \"ni\" insertCompositionText true \"abn\" InputEvent false",
+                "input \"ni\" insertCompositionText true \"abni\" InputEvent false",
+            ],
+            "{act}"
+        );
+        assert!(engine.insert_text(id, "X"));
+        assert_eq!(value(&mut engine, id, "i"), "abX", "{act}");
+    }
+}
