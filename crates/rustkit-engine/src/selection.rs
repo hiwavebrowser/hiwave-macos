@@ -336,7 +336,7 @@ impl Engine {
             let Some(view) = self.views.get_mut(&id) else {
                 return;
             };
-            let (anchor, start, end) = {
+            let anchor = {
                 let states = view.lay.edit_states.borrow();
                 let Some(state) = states.get(&raw) else {
                     return;
@@ -356,9 +356,8 @@ impl Engine {
                     _ => (at, at, at),
                 };
                 state.set_selection(start, end);
-                (anchor, start, end)
+                anchor
             };
-            let _ = (start, end);
             view.select_drag = Some(SelectDrag::Control { node: raw, anchor });
             view.doc_selection = None;
             if let Some(bindings) = view.bindings.as_ref() {
