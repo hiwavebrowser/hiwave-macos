@@ -3293,7 +3293,7 @@ const WRAPPERS_JS: &str = r#"
         'border-top': '0px none rgb(0, 0, 0)', 'border-top-color': 'rgb(0, 0, 0)',
         'border-top-style': 'none', 'border-width': '0px', 'box-shadow': 'none', 'clear': 'none',
         'clip-path': 'none', 'column-count': 'auto', 'column-gap': 'normal', 'container': 'none',
-        'container-name': 'none', 'container-type': 'normal', 'filter': 'none', 'flex': '0 1 auto',
+        'container-name': 'none', 'container-type': 'normal', 'cursor': 'auto', 'filter': 'none', 'flex': '0 1 auto',
         'flex-basis': 'auto', 'flex-flow': 'row nowrap', 'flex-grow': '0', 'flex-shrink': '1',
         'flex-wrap': 'nowrap', 'font': '16px Times', 'gap': 'normal', 'grid-area': 'auto',
         'grid-auto-columns': 'auto', 'grid-auto-flow': 'row', 'grid-auto-rows': 'auto',
@@ -4579,14 +4579,16 @@ const WRAPPERS_JS: &str = r#"
         value: function (id, type, init) {
             var target = typeof id === 'number' ? wrap(id) : null;
             if (!target) return true;
-            var pointer = type === 'click' || type.indexOf('pointer') === 0;
+            // `auxclick` and `contextmenu` are PointerEvents too (Chromium 143).
+            var pointer = type === 'click' || type === 'auxclick' || type === 'contextmenu' ||
+                type.indexOf('pointer') === 0;
             var edge = /(enter|leave)$/.test(type);
-            var press = type === 'mousedown' || type === 'mouseup' || type === 'click';
+            var press = type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'auxclick';
             init.bubbles = !edge;
             init.cancelable = !edge && type !== 'pointercancel';
             init.composed = !edge;
             init.view = g;
-            init.detail = press ? 1 : 0;
+            init.detail = typeof init.detail === 'number' ? init.detail : (press ? 1 : 0);
             init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
             if (pointer) {
                 init.pointerId = 1;

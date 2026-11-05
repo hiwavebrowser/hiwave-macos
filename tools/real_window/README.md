@@ -87,6 +87,13 @@ of a run (about a minute for all checks).
 | `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
 | `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
 | `i0a_close` | I0(a): closing a busy tab | `i0a_spin.html`, then Cmd+W | yes |
+| `e4_contextmenu` | CH2.E4 right press | `e4_mouse.html?words`: `contextmenu` (button 2) reaches the page and the native menu opens (`hwdrive menus`); Escape closes it | yes |
+| `e4_contextmenu_prevented` | CH2.E4 | `e4_mouse.html?words&prevent`: the page cancels it, no menu, the release is an `auxclick` | yes |
+| `e4_dblclick_selects_word` | CH2.E4 click count | `e4_mouse.html?words`: `hwdrive dblclick`; `dblclick` with detail 2 finds "bravo" selected | yes |
+| `e4_drag` | CH2.E4 | `hwdrive drag`: `pointermove` with `buttons` 1 | yes |
+| `e4_cursor_hand` | CH2.E4 CSS cursor | `e4_mouse.html`: `hwdrive cursor` reads the system cursor: hand over the link, left-right over `ew-resize`, arrow in the title bar | yes |
+| `e4_tooltip` | CH2.E4 `title` | the link's `title` is the view's tooltip (debug log) and a tooltip window shows after a rest | yes |
+| `e4_chrome_tab` | CH2.E4, `HIWAVE_RUSTKIT_CHROME=1` | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
 | `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks

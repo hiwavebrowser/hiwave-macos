@@ -47,6 +47,10 @@ use crate::input_queue::{PendingClick, PendingKey, PendingScroll, PointerInput};
 #[cfg(target_os = "macos")]
 pub(crate) const VIEW_ID_IVAR: &str = "rkViewId";
 
+/// The ivar holding the `NSCursor` the view shows (CH2.E4); 0 for the arrow.
+#[cfg(target_os = "macos")]
+const CURSOR_IVAR: &str = "rkCursor";
+
 #[cfg(target_os = "macos")]
 pub fn drain_pending_clicks() -> Vec<PendingClick> {
     drain_input_kind(|k| matches!(k, InputKind::Pointer(_)))
@@ -114,6 +118,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         // Each view carries the ViewId it was created with, so what it
         // records is tagged with the view it was delivered to.
         decl.add_ivar::<u64>(VIEW_ID_IVAR);
+        decl.add_ivar::<usize>(CURSOR_IVAR);
 
         extern "C" fn record(this: &Object, event: id, down: bool, input: PointerInput) {
             if input == PointerInput::Button {
@@ -126,11 +131,20 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let lpt: cocoa::foundation::NSPoint =
                     msg_send![this, convertPoint: wpt fromView: nil];
                 let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                let (clicks, shift) = if matches!(input, PointerInput::Button | PointerInput::Secondary) {
+                    let count: isize = msg_send![event, clickCount];
+                    let flags: u64 = msg_send![event, modifierFlags];
+                    (count.max(1) as u32, flags & (1 << 17) != 0) // NSEventModifierFlagShift
+                } else {
+                    (1, false)
+                };
                 let click = PendingClick {
                     x: lpt.x,
                     y: frame.size.height - lpt.y,
                     down,
                     input,
+                    clicks,
+                    shift,
                 };
                 // A move right after a move replaces it in the queue: the
                 // page needs where the pointer is, not every point it
@@ -149,6 +163,28 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         extern "C" fn mouse_moved(this: &Object, _sel: Sel, event: id) {
             record(this, event, false, PointerInput::Move);
         }
+        // CH2.E4: the secondary button is the page's `contextmenu`. Its
+        // drag is a move (the page is not told the button is held).
+        extern "C" fn right_mouse_down(this: &Object, _sel: Sel, event: id) {
+            record(this, event, true, PointerInput::Secondary);
+        }
+        extern "C" fn right_mouse_up(this: &Object, _sel: Sel, event: id) {
+            record(this, event, false, PointerInput::Secondary);
+        }
+        // The cursor the page asked for (`set_view_cursor`), when the
+        // pointer comes into the view and whenever AppKit rebuilds the
+        // window's cursor rects.
+        extern "C" fn cursor_update(this: &Object, _sel: Sel, _event: id) {
+            unsafe {
+                let _: () = msg_send![view_cursor(this), set];
+            }
+        }
+        extern "C" fn reset_cursor_rects(this: &Object, _sel: Sel) {
+            unsafe {
+                let visible: cocoa::foundation::NSRect = msg_send![this, visibleRect];
+                let _: () = msg_send![this, addCursorRect: visible cursor: view_cursor(this)];
+            }
+        }
         extern "C" fn mouse_exited(this: &Object, _sel: Sel, event: id) {
             record(this, event, false, PointerInput::Leave);
         }
@@ -158,6 +194,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         extern "C" fn update_tracking_areas(this: &Object, _sel: Sel) {
             const MOUSE_ENTERED_AND_EXITED: u64 = 0x01;
             const MOUSE_MOVED: u64 = 0x02;
+            const CURSOR_UPDATE: u64 = 0x04;
             const ACTIVE_ALWAYS: u64 = 0x80;
             const IN_VISIBLE_RECT: u64 = 0x200;
             unsafe {
@@ -175,7 +212,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 let area: id = msg_send![Class::get("NSTrackingArea").expect("NSTrackingArea class"), alloc];
                 let area: id = msg_send![area,
                     initWithRect: zero
-                    options: MOUSE_ENTERED_AND_EXITED | MOUSE_MOVED | ACTIVE_ALWAYS | IN_VISIBLE_RECT
+                    options: MOUSE_ENTERED_AND_EXITED | MOUSE_MOVED | CURSOR_UPDATE | ACTIVE_ALWAYS | IN_VISIBLE_RECT
                     owner: this as *const Object as id
                     userInfo: nil];
                 let _: () = msg_send![this, addTrackingArea: area];
@@ -328,6 +365,11 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             decl.add_method(sel!(mouseMoved:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseDragged:), mouse_moved as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(mouseExited:), mouse_exited as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(rightMouseDown:), right_mouse_down as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(rightMouseUp:), right_mouse_up as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(rightMouseDragged:), mouse_moved as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(cursorUpdate:), cursor_update as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(resetCursorRects), reset_cursor_rects as extern "C" fn(&Object, Sel));
             decl.add_method(sel!(scrollWheel:), scroll_wheel as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(updateTrackingAreas),
@@ -466,6 +508,86 @@ pub fn raise_raw_view_above(view: isize, below: isize) {
         // NSWindowAbove = 1.
         let _: () = msg_send![superview, addSubview: view positioned: 1i64 relativeTo: below];
     }
+}
+
+/// The cursor a content view shows: the one `set_view_cursor` stored, else
+/// the arrow.
+#[cfg(target_os = "macos")]
+fn view_cursor(this: &objc::runtime::Object) -> id {
+    let stored: usize = unsafe { *this.get_ivar::<usize>(CURSOR_IVAR) };
+    if stored != 0 {
+        return stored as id;
+    }
+    unsafe { msg_send![objc::runtime::Class::get("NSCursor").expect("NSCursor class"), arrowCursor] }
+}
+
+/// `raw` as a RustKit content view, or `None` for any other view.
+#[cfg(target_os = "macos")]
+fn content_view(raw: isize) -> Option<id> {
+    if raw == 0 {
+        return None;
+    }
+    let view = raw as id;
+    let is_ours: bool = unsafe { msg_send![view, isKindOfClass: rustkit_content_view_class()] };
+    is_ours.then_some(view)
+}
+
+/// Show the cursor for the CSS keyword the page reported under the pointer
+/// (`PageEvent::Cursor`, CH2.E4) over the content view `raw`: set at once
+/// when the pointer is over the view, and kept in the view's cursor rect so
+/// AppKit restores it when the pointer comes back.
+#[cfg(target_os = "macos")]
+pub fn set_view_cursor(raw: isize, css: &str) {
+    use objc::runtime::{Class, Sel};
+    let Some(view) = content_view(raw) else {
+        return;
+    };
+    let selector = crate::cursor::ns_cursor_selector(css);
+    unsafe {
+        let class = Class::get("NSCursor").expect("NSCursor class");
+        let sel = Sel::register(selector);
+        let known: bool = msg_send![class, respondsToSelector: sel];
+        let cursor: id = if known { msg_send![class, performSelector: sel] } else { nil };
+        let cursor: id = if cursor == nil { msg_send![class, arrowCursor] } else { cursor };
+        (*view).set_ivar::<usize>(CURSOR_IVAR, cursor as usize);
+        let window: id = msg_send![view, window];
+        if window != nil {
+            let at: cocoa::foundation::NSPoint = msg_send![window, mouseLocationOutsideOfEventStream];
+            let local: cocoa::foundation::NSPoint = msg_send![view, convertPoint: at fromView: nil];
+            let bounds: cocoa::foundation::NSRect = msg_send![view, bounds];
+            let inside = local.x >= bounds.origin.x
+                && local.y >= bounds.origin.y
+                && local.x < bounds.origin.x + bounds.size.width
+                && local.y < bounds.origin.y + bounds.size.height;
+            if inside {
+                let _: () = msg_send![cursor, set];
+            }
+            let _: () = msg_send![window, invalidateCursorRectsForView: view];
+        }
+    }
+    debug!(css, ns = selector, "content view cursor set");
+}
+
+/// The content view's tooltip: the nearest `title` under the pointer
+/// (`PageEvent::Tooltip`, CH2.E4), `None` for none. AppKit shows it when
+/// the pointer rests.
+#[cfg(target_os = "macos")]
+pub fn set_view_tooltip(raw: isize, title: Option<&str>) {
+    let Some(view) = content_view(raw) else {
+        return;
+    };
+    unsafe {
+        let text: id = match title {
+            Some(t) => {
+                let s = cocoa::foundation::NSString::alloc(nil);
+                let s: id = cocoa::foundation::NSString::init_str(s, t);
+                msg_send![s, autorelease]
+            }
+            None => nil,
+        };
+        let _: () = msg_send![view, setToolTip: text];
+    }
+    debug!(tooltip = ?title, "content view tooltip set");
 }
 
 #[cfg(target_os = "macos")]

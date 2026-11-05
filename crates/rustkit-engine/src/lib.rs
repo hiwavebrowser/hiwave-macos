@@ -547,6 +547,8 @@ mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
+mod mouse_surface_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_flexible_row_tests;
 #[cfg(all(test, feature = "headless"))]
 mod place_shorthand_tests;
@@ -1079,6 +1081,12 @@ struct ViewState {
     /// Which press of a multi-click the button went down for (1 single,
     /// 2 double...): the release fires `dblclick` after the second.
     press_clicks: u32,
+    /// The click count the press or release being dispatched reports as
+    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
+    event_clicks: u32,
+    /// What the window was last told about the pointer: the cursor and
+    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
+    hover_reported: Option<HoverFeedback>,
     /// HTML drag and drop: the press's drag candidate, or the drag in
     /// progress (drag_drop.rs).
     drag: drag_drop::DragState,
@@ -1645,6 +1653,15 @@ enum PointFocus {
     /// A click with no press before it: the control under the point or
     /// the one its label names, else nothing is focused.
     Click,
+}
+
+/// What the window shows for the element under the pointer (CH2.E4): the
+/// used `cursor` keyword (`auto` resolved to `text` or `default`) and the
+/// nearest `title`, the tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverFeedback {
+    pub cursor: &'static str,
+    pub title: Option<String>,
 }
 
 /// What a primary-button click did once the page's listeners had run.
@@ -2820,6 +2837,8 @@ impl Engine {
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
+            event_clicks: 1,
+            hover_reported: None,
             doc_selection: None,
             select_drag: None,
             view_focused: false,
@@ -2929,6 +2948,8 @@ impl Engine {
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
+            event_clicks: 1,
+            hover_reported: None,
             doc_selection: None,
             select_drag: None,
             view_focused: false,
@@ -3055,6 +3076,8 @@ impl Engine {
             drag: drag_drop::DragState::default(),
             press_settled_focus: false,
             press_clicks: 1,
+            event_clicks: 1,
+            hover_reported: None,
             doc_selection: None,
             select_drag: None,
             view_focused: false,
@@ -3925,6 +3948,7 @@ impl Engine {
         }
         if let Some(view) = self.views.get_mut(&id) {
             view.press_clicks = clicks;
+            view.event_clicks = clicks;
         }
         self.press_scrollbar(id, viewport_x, viewport_y);
         let on_scrollbar = self.views.get(&id).and_then(|v| v.scrollbar_pressed);
@@ -4018,6 +4042,120 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_at = None;
         }
+    }
+
+    /// A secondary-button press at VIEWPORT coordinates (CH2.E4), as
+    /// Chromium on macOS delivers it: `pointerdown`, `mousedown` (no
+    /// `mousedown` when the `pointerdown` was cancelled), then
+    /// `contextmenu`, all with `button` 2 and `buttons` 2. The press moves
+    /// the focus as a primary one does. When no listener cancelled the
+    /// `contextmenu` its default action runs (macOS: the word under the
+    /// point is selected, unless a selection is already there) and this
+    /// returns true: the browser shows its context menu. The primary
+    /// button's state (drag, `:active`, selection drag) is not touched.
+    pub fn context_menu_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        let _hold = wgate::hold("press");
+        if !self.views.contains_key(&id) {
+            return false;
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            view.event_clicks = 1;
+        }
+        let pointer_ok = self.dispatch_mouse_button(id, "pointerdown", viewport_x, viewport_y, 2, 2);
+        let mouse_ok = pointer_ok
+            && (self.disabled_control_at_point(id, viewport_x, viewport_y)
+                || self.dispatch_mouse_button(id, "mousedown", viewport_x, viewport_y, 2, 2));
+        if pointer_ok && mouse_ok {
+            self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+        }
+        let shown = self.dispatch_mouse_button(id, "contextmenu", viewport_x, viewport_y, 2, 2);
+        if shown && !self.has_ranged_selection(id) {
+            self.press_selects(id, viewport_x, viewport_y, 2, false);
+            if let Some(view) = self.views.get_mut(&id) {
+                view.select_drag = None;
+            }
+        }
+        self.settle_pointer_restyle(id);
+        shown
+    }
+
+    /// The release of a secondary-button press the browser's menu did not
+    /// take (the page cancelled `contextmenu`): `pointerup`, `mouseup`,
+    /// `auxclick`, `button` 2 (Chromium 143).
+    pub fn context_menu_release(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        let _hold = wgate::hold("click");
+        if let Some(view) = self.views.get_mut(&id) {
+            view.event_clicks = 1;
+        }
+        let pointer_ok = self.dispatch_mouse_button(id, "pointerup", viewport_x, viewport_y, 2, 0);
+        if !self.disabled_control_at_point(id, viewport_x, viewport_y) {
+            if pointer_ok {
+                self.dispatch_mouse_button(id, "mouseup", viewport_x, viewport_y, 2, 0);
+            }
+            self.dispatch_mouse_button(id, "auxclick", viewport_x, viewport_y, 2, 0);
+        }
+        self.settle_pointer_restyle(id);
+    }
+
+    /// Whether the document selection, or the focused field's, spans text.
+    fn has_ranged_selection(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let doc = view.doc_selection.as_ref().is_some_and(|sel| sel.anchor != sel.focus);
+        let field = self.focused_text_control(id).is_some_and(|raw| {
+            view.lay.edit_states.borrow().get(&raw).is_some_and(|state| {
+                let sel = state.selection().normalize();
+                sel.start != sel.end
+            })
+        });
+        doc || field
+    }
+
+    /// What the window shows for the pointer (CH2.E4): the used cursor of
+    /// the box under it and the nearest `title`. `None` when the pointer is
+    /// not over the view.
+    pub fn hover_feedback(&self, id: EngineViewId) -> Option<HoverFeedback> {
+        let view = self.views.get(&id)?;
+        let (x, y) = view.pointer_at?;
+        let hit = Self::hit_at(view, x, y)?;
+        let cursor = match hit.cursor {
+            rustkit_css::Cursor::Auto => match &hit.box_type {
+                BoxType::Text(_) => "text",
+                BoxType::FormControl(
+                    rustkit_layout::FormControlType::TextInput { .. }
+                    | rustkit_layout::FormControlType::TextArea { .. },
+                ) => "text",
+                _ => "default",
+            },
+            other => other.as_str(),
+        };
+        // HTML §3.2.6.1: the nearest element with a `title`; an empty one
+        // stops the search and shows nothing.
+        let mut title = None;
+        let mut node = hit.node_id.and_then(|raw| view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(raw)));
+        while let Some(n) = node {
+            if let NodeType::Element { attributes, .. } = &n.node_type {
+                if let Some(t) = attributes.get("title") {
+                    title = (!t.is_empty()).then(|| t.clone());
+                    break;
+                }
+            }
+            node = n.parent();
+        }
+        Some(HoverFeedback { cursor, title })
+    }
+
+    /// [`Self::hover_feedback`] when it differs from what the window was
+    /// last told (and record it as told). `Some(None)`: the pointer left.
+    pub fn take_hover_change(&mut self, id: EngineViewId) -> Option<Option<HoverFeedback>> {
+        let now = self.hover_feedback(id);
+        let view = self.views.get_mut(&id)?;
+        if view.hover_reported == now {
+            return None;
+        }
+        view.hover_reported = now.clone();
+        Some(now)
     }
 
     /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
@@ -4337,6 +4475,7 @@ impl Engine {
             view.primary_button_down = false;
             view.select_drag = None;
             clicks = std::mem::replace(&mut view.press_clicks, 1);
+            view.event_clicks = clicks;
             let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
@@ -4640,6 +4779,22 @@ impl Engine {
         viewport_x: f32,
         viewport_y: f32,
     ) -> bool {
+        let buttons = if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 };
+        self.dispatch_mouse_button(id, event_type, viewport_x, viewport_y, 0, buttons)
+    }
+
+    /// [`Self::dispatch_mouse_at_point`] for any button. `detail` is the
+    /// click count for a press, release, `click` or `auxclick`, 2 for
+    /// `dblclick`, 0 for the rest (Chromium 143, CH2.E4).
+    fn dispatch_mouse_button(
+        &mut self,
+        id: EngineViewId,
+        event_type: &str,
+        viewport_x: f32,
+        viewport_y: f32,
+        button: i16,
+        buttons: u16,
+    ) -> bool {
         let Some(view) = self.views.get_mut(&id) else {
             return true;
         };
@@ -4666,8 +4821,13 @@ impl Engine {
             screen_y: viewport_y as f64,
             offset_x: hit.local_x as f64,
             offset_y: hit.local_y as f64,
-            button: 0,
-            buttons: if matches!(event_type, "mousedown" | "pointerdown") { 1 } else { 0 },
+            button,
+            buttons,
+            detail: Some(match event_type {
+                "mousedown" | "mouseup" | "click" | "auxclick" => view.event_clicks.max(1),
+                "dblclick" => 2,
+                _ => 0,
+            }),
             ..Default::default()
         };
         let not_cancelled = self.fire_mouse(id, target, event_type, &data);
@@ -9478,6 +9638,7 @@ impl Engine {
         style.writing_mode = from.writing_mode;
         style.visibility = from.visibility;
         style.pointer_events = from.pointer_events;
+        style.cursor = from.cursor;
         style.display = rustkit_css::Display::Block;
         style.display_modifier = rustkit_css::DisplayModifier::ListItem;
         let mut summary = LayoutBox::new(BoxType::Block, style.clone());
@@ -12057,6 +12218,7 @@ impl layout_ctx::LayoutCtx {
                         s.font_stretch = parent.font_stretch;
                         s.visibility = parent.visibility;
                         s.pointer_events = parent.pointer_events;
+                        s.cursor = parent.cursor;
                         // NOT CSS inheritance — feature plumbing: gradient
                         // text (background-clip:text + transparent fill) is
                         // detected on the TEXT box at paint time
@@ -12481,6 +12643,7 @@ impl layout_ctx::LayoutCtx {
             pseudo_style.text_transform = parent.text_transform;
             pseudo_style.visibility = parent.visibility;
             pseudo_style.pointer_events = parent.pointer_events;
+            pseudo_style.cursor = parent.cursor;
         }
 
         // Sort by cascade layer, then specificity (a, b, c); the sort is
@@ -12677,6 +12840,7 @@ impl layout_ctx::LayoutCtx {
             style.text_transform = parent.text_transform;
             style.visibility = parent.visibility;
             style.pointer_events = parent.pointer_events;
+            style.cursor = parent.cursor;
             // css-scrollbars-1 §3: `scrollbar-color` inherits.
             style.scrollbar_color = parent.scrollbar_color;
             // css-tables: both inherit.
@@ -12763,6 +12927,10 @@ impl layout_ctx::LayoutCtx {
                 style.display = rustkit_css::Display::Inline;
                 style.color = rustkit_css::Color::new(0, 0, 238, 1.0); // #0000EE
                 style.text_decoration_line = rustkit_css::TextDecorationLine::UNDERLINE;
+                // Chromium's UA sheet: `a:-webkit-any-link { cursor: pointer }`.
+                if attributes.contains_key("href") {
+                    style.cursor = rustkit_css::Cursor::Pointer;
+                }
             }
             // Text formatting
             "strong" | "b" => {
@@ -13764,6 +13932,7 @@ impl Engine {
             "box-sizing" => style.box_sizing = parent.box_sizing,
             "transform" => style.transform = parent.transform.clone(),
             "pointer-events" => style.pointer_events = parent.pointer_events,
+            "cursor" => style.cursor = parent.cursor,
             "scrollbar-color" => style.scrollbar_color = parent.scrollbar_color,
             "scrollbar-width" => style.scrollbar_width = parent.scrollbar_width,
             "border-spacing" => style.border_spacing = parent.border_spacing,
@@ -14822,6 +14991,12 @@ impl layout_ctx::LayoutCtx {
                     _ => {}
                 }
             }
+            // CH2.E4: the keyword after any `url()` images.
+            "cursor" => {
+                if let Some(cursor) = rustkit_css::Cursor::parse(value) {
+                    style.cursor = cursor;
+                }
+            }
             "pointer-events" => {
                 // `none` or not: the other values are SVG's ways of
                 // saying which painted part of a shape is a target.
@@ -15437,6 +15612,7 @@ impl layout_ctx::LayoutCtx {
             "width" => style.width = rustkit_css::Length::Auto,
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
+            "cursor" => style.cursor = rustkit_css::Cursor::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
             "display" => {
                 style.display = rustkit_css::Display::Block;

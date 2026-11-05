@@ -1875,6 +1875,31 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+/// The browser's context menu over the page (CH2.E4), shown where the
+/// page let a right press through: Back, Forward and Reload, the items of
+/// WebKit's default menu on a page (the content view was WebKit before
+/// RustKit). Each item is a main-menu id, so the menu-event arm runs it.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn show_page_context_menu(view: &webview_rustkit::RustKitView, x: f32, y: f32) {
+    use crate::webview::IWebContent as _;
+    use muda::{ContextMenu as _, MenuItem, PredefinedMenuItem};
+    let menu = Menu::new();
+    let items: [&dyn muda::IsMenuItem; 4] = [
+        &MenuItem::with_id(menu_ids::GO_BACK, "Back", view.can_go_back(), None),
+        &MenuItem::with_id(menu_ids::GO_FORWARD, "Forward", view.can_go_forward(), None),
+        &PredefinedMenuItem::separator(),
+        &MenuItem::with_id(menu_ids::RELOAD, "Reload Page", true, None),
+    ];
+    if let Err(e) = menu.append_items(&items) {
+        warn!(error = %e, "context menu not built");
+        return;
+    }
+    info!(x, y, "page context menu shown");
+    let at = muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x as f64, y as f64));
+    // SAFETY: the content view is a live NSView in the window.
+    unsafe { menu.show_context_menu_for_nsview(view.host_view() as *const std::ffi::c_void, Some(at)) };
+}
+
 /// `wheel_burst_started` for a wheel on `target`: the page's only. The
 /// h6 check reads the burst line after its first wheel over the page; a
 /// wheel over the RustKit chrome or a panel must not take it (#907 R1 nit 4).
@@ -1933,7 +1958,7 @@ fn dispatch_view_input(
                     rustkit_viewhost::PointerInput::Button if !click.down => {
                         devtools.pick_at(view, inspector_for_events, at.0, at.1)
                     }
-                    rustkit_viewhost::PointerInput::Button => {}
+                    rustkit_viewhost::PointerInput::Button | rustkit_viewhost::PointerInput::Secondary => {}
                 }
                 return;
             }
@@ -1946,10 +1971,20 @@ fn dispatch_view_input(
                     view.mouse_leave();
                     return;
                 }
+                // CH2.E4: `contextmenu`; the browser's menu, if the page
+                // lets it through, is shown after the drain.
+                rustkit_viewhost::PointerInput::Secondary => {
+                    if click.down {
+                        view.secondary_down(click.x as f32, click.y as f32);
+                    } else {
+                        view.secondary_up(click.x as f32, click.y as f32);
+                    }
+                    return;
+                }
                 rustkit_viewhost::PointerInput::Button => {}
             }
             if click.down {
-                view.mouse_down_at_point(click.x as f32, click.y as f32);
+                view.mouse_down_with(click.x as f32, click.y as f32, click.clicks, click.shift);
                 return;
             }
             match target {
@@ -3799,6 +3834,12 @@ fn main() {
                         warn!(%url, "RustKit chrome navigation not followed");
                     }
                     chrome.render();
+                    // A right press the chrome's script let through (the
+                    // sidebar's) gets no menu: the WebKit chrome's would be
+                    // WebKit's own (CH2.E4).
+                    if chrome.take_context_menu().is_some() {
+                        tracing::debug!("RustKit chrome: contextmenu not cancelled, no menu shown");
+                    }
                     chrome.input_view()
                 } else {
                     None
@@ -3973,6 +4014,10 @@ fn main() {
                         // window when the open panel's view records (T6b).
                         devtools.pump(view, &inspector_for_events);
                         view.render();
+                        // CH2.E4: a right press the page let through.
+                        if let Some((x, y)) = view.take_context_menu() {
+                            show_page_context_menu(view, x, y);
+                        }
                     }
                 }
             }
