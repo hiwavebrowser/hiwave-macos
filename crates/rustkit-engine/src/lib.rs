@@ -45061,10 +45061,11 @@ mod abspos_initial_containing_block_tests {
     /// containing block with the flow cursor (0) as its height, through the
     /// margin-collapse path.
     fn laid_out(body: &str) -> LayoutBox {
-        let e = Engine::new(EngineConfig::default()).expect("engine");
+        // A layout context alone: no GPU device, so this runs on Linux CI.
+        let lctx = layout_ctx::LayoutCtx::default();
         let html = format!(r#"<html><body style="margin:0">{body}</body></html>"#);
         let d = Document::parse_html(&html).expect("parse");
-        let mut root = e.build_layout_from_document(&d, &[]);
+        let mut root = lctx.build_layout_from_document(&d, &[], false);
         root.set_viewport(VIEWPORT.0, VIEWPORT.1);
         let cb = Dimensions {
             content: Rect::new(0.0, 0.0, VIEWPORT.0, 0.0),
