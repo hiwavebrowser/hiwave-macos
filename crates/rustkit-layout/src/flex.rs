@@ -317,6 +317,20 @@ fn min_inner_main_size(container: &LayoutBox) -> f32 {
     }
 }
 
+/// The `max-height` ceiling on a vertical main size, as an inner size, or
+/// infinity when there is none (or it is a percentage, which needs the
+/// containing block). The analogue of [`min_inner_main_size`].
+fn max_inner_main_size(container: &LayoutBox) -> f32 {
+    match container.style.max_height {
+        Length::Px(px) => inner_main_from_spec(container, px),
+        Length::Vh(vh) => inner_main_from_spec(container, vh / 100.0 * container.viewport.1),
+        ref l if crate::grid::is_font_or_viewport_relative(l) => {
+            inner_main_from_spec(container, container.length_to_px(l, 0.0))
+        }
+        _ => f32::INFINITY,
+    }
+}
+
 /// Whether an in-flow child of `b` has a percentage `height`.
 fn has_percent_height_child(b: &LayoutBox) -> bool {
     b.children.iter().any(|c| {
@@ -443,6 +457,7 @@ fn layout_flex_container_at(
     let used_inner_cross_height = used_inner_height
         .or(resolved_percent_inner_height.filter(|_| container.style.flex_direction.is_row()));
     let style_min_inner_main = min_inner_main_size(container);
+    let style_max_inner_main = max_inner_main_size(container);
 
     let style = &container.style;
 
@@ -489,8 +504,19 @@ fn layout_flex_container_at(
         // entry point hands over the pre-pass stack, which can sit below
         // the floor: x's `min-height: 100dvh` column grew its `flex: 1`
         // row to the 450px stack instead of the 1000px floor.
-        Axis::Vertical => style_definite_inner_main
-            .unwrap_or(container_box.content.height.max(style_min_inner_main)),
+        //
+        // Its `max-height` ceiling too (css-flexbox-1 §9.3: the container's
+        // main size is determined first, then the items flex into it): a
+        // `max-height: 20px` column of 40 and 44px items is 20 tall and
+        // Chromium shrinks the items to 10 each; here they kept the stack
+        // and overflowed (CH2.B7). min-height wins over max-height.
+        Axis::Vertical => style_definite_inner_main.unwrap_or(
+            container_box
+                .content
+                .height
+                .min(style_max_inner_main)
+                .max(style_min_inner_main),
+        ),
     };
     // Deliberately NOT given the same treatment: the cross-axis analogue (an
     // inset-stretched ROW container centring items in a stale cursor) is the
@@ -692,7 +718,13 @@ fn layout_flex_container_at(
             .iter()
             .map(|i| i.outer_hypothetical_main_size())
             .sum();
-        (sum + main_gap * n).max(style_min_inner_main)
+        // The content size is clamped by `max-height` before the items
+        // flex into it (CH2.B7: a `max-height: 20px` column kept its items'
+        // 84px stack and overflowed; Chromium shrinks them to 10 each).
+        // min-height wins over max-height.
+        (sum + main_gap * n)
+            .min(style_max_inner_main)
+            .max(style_min_inner_main)
     } else {
         container_main_size
     };
@@ -1290,8 +1322,14 @@ fn layout_flex_container_at(
                     item.min_main_size = auto_min;
                     // A content-sized item's hypothetical size is re-derived
                     // just below, and the change it detects is what triggers
-                    // the rerun; only its floor is raised here.
+                    // the rerun; only its floor is raised here. Unless steps
+                    // 4–10 already shrank it under the floor: its
+                    // hypothetical may not move, so the rerun is asked for
+                    // here (CH2.B7: text rows in a `max-height` column).
                     if item.main_size_from_content {
+                        if item.target_main_size < auto_min - 0.01 {
+                            any_changed = true;
+                        }
                         continue;
                     }
                     if item.hypothetical_main_size < auto_min {
@@ -1358,7 +1396,11 @@ fn layout_flex_container_at(
                     + main_gap * line.items.len().saturating_sub(1) as f32;
                 let redistribute_main = match definite_inner_main {
                     Some(m) => m,
-                    None => content_sum.max(min_inner_main),
+                    // Clamped by max-height as at the entry (CH2.B7); the
+                    // automatic minimum raised above keeps a text item at
+                    // its content height, so it overflows rather than
+                    // shrinking under its text.
+                    None => content_sum.min(style_max_inner_main).max(min_inner_main),
                 };
                 resolve_flexible_lengths(line, redistribute_main, main_gap);
                 distribute_main_axis(

@@ -225,7 +225,14 @@ pub enum PageInput {
         shift: bool,
         alt: bool,
     },
-    MouseDown { x: f32, y: f32 },
+    /// A primary-button press: the `clicks`-th of a multi-click (AppKit's
+    /// `clickCount`), with Shift held or not.
+    MouseDown { x: f32, y: f32, clicks: u32, shift: bool },
+    /// A secondary-button press (CH2.E4): `contextmenu`. When no listener
+    /// cancels it the page reports [`PageEvent::ContextMenu`].
+    SecondaryDown { x: f32, y: f32 },
+    /// Its release, when the browser's menu did not take it.
+    SecondaryUp { x: f32, y: f32 },
     MouseMove { x: f32, y: f32 },
     MouseLeave,
     Click {
@@ -309,9 +316,16 @@ pub enum PageEvent {
         payload: String,
         nav_id: u64,
     },
-    /// Not produced on this PR. The variant is the protocol's.
-    #[allow(dead_code)]
+    /// The used `cursor` keyword under the pointer, when it changed
+    /// (CH2.E4): `auto` resolved to `text` or `default`; `default` once the
+    /// pointer left the view.
     Cursor(String),
+    /// The tooltip under the pointer, when it changed: the nearest
+    /// `title`, `None` for none (CH2.E4).
+    Tooltip(Option<String>),
+    /// A secondary press no listener cancelled: the window shows its
+    /// context menu at view point `x`, `y` (CH2.E4).
+    ContextMenu { x: f32, y: f32 },
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
     Unresponsive,
@@ -620,6 +634,19 @@ impl PageEndpoint {
 
     fn apply_input(&mut self, input: PageInput) {
         let view = self.view;
+        // What the pointer is over may change: the window is told its
+        // cursor and tooltip after these (CH2.E4).
+        let pointer = matches!(
+            input,
+            PageInput::MouseDown { .. }
+                | PageInput::MouseMove { .. }
+                | PageInput::MouseLeave
+                | PageInput::Click { .. }
+                | PageInput::SecondaryDown { .. }
+                | PageInput::SecondaryUp { .. }
+                | PageInput::Scroll { .. }
+                | PageInput::ScrollAt { .. }
+        );
         match input {
             PageInput::TextKey {
                 key_code,
@@ -659,9 +686,15 @@ impl PageEndpoint {
             PageInput::KeyUp { key_code, key, ctrl, shift, alt } => {
                 self.engine.handle_key_up(view, key_code, &key, ctrl, shift, alt);
             }
-            PageInput::MouseDown { x, y } => {
-                self.engine.mouse_down_at_point(view, x, y);
+            PageInput::MouseDown { x, y, clicks, shift } => {
+                self.engine.mouse_down_with(view, x, y, clicks.max(1), shift);
             }
+            PageInput::SecondaryDown { x, y } => {
+                if self.engine.context_menu_at_point(view, x, y) {
+                    self.emit(PageEvent::ContextMenu { x, y });
+                }
+            }
+            PageInput::SecondaryUp { x, y } => self.engine.context_menu_release(view, x, y),
             PageInput::MouseMove { x, y } => self.engine.mouse_move_at_point(view, x, y),
             PageInput::MouseLeave => self.engine.mouse_leave(view),
             PageInput::Click { x, y, reply } => {
@@ -740,6 +773,9 @@ impl PageEndpoint {
         }
         self.publish_commit();
         self.report_focus();
+        if pointer {
+            self.report_hover();
+        }
         // A listener's `location.href =` or `link.click()` is not the
         // click's own default action. The content thread reports it; the
         // same-thread window still pulls with TakeNavigation.
@@ -921,6 +957,21 @@ impl PageEndpoint {
             return;
         }
         self.emit_focus();
+    }
+
+    /// Tell the window the cursor and tooltip under the pointer when they
+    /// changed (CH2.E4). A pointer that left the view gets `default` and
+    /// no tooltip.
+    fn report_hover(&mut self) {
+        let Some(now) = self.engine.take_hover_change(self.view) else {
+            return;
+        };
+        let (cursor, title) = match now {
+            Some(f) => (f.cursor, f.title),
+            None => ("default", None),
+        };
+        self.emit(PageEvent::Cursor(cursor.to_string()));
+        self.emit(PageEvent::Tooltip(title));
     }
 
     /// (anything focused, a text field focused) in the page now.
@@ -1275,7 +1326,12 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
     for (i, cmd) in out.into_iter().enumerate() {
         if i < at {
             match cmd {
-                PageCmd::Input(PageInput::MouseMove { .. } | PageInput::MouseLeave | PageInput::MouseDown { .. }) => {
+                PageCmd::Input(PageInput::MouseMove { .. }
+                    | PageInput::MouseLeave
+                    | PageInput::MouseDown { .. }
+                    | PageInput::SecondaryDown { .. }
+                    | PageInput::SecondaryUp { .. },
+                ) => {
                     dropped += 1;
                     continue;
                 }
@@ -1391,5 +1447,57 @@ mod tests {
         endpoint.drain(None);
         assert_eq!(handle.last_sent_nav_id(), 1);
         let _ = handle.drain_events();
+    }
+
+    /// CH2.E4: what the pointer is over reaches the window as events: the
+    /// cursor and the tooltip when they change, the context menu when the
+    /// page let a right press through, nothing when it cancelled it.
+    #[test]
+    fn hover_and_a_right_press_reach_the_window_as_events() {
+        let (handle, mut endpoint) = pair();
+        let (tx, _rx) = oneshot::channel();
+        handle.send(PageCmd::LoadHtml {
+            html: "<body style='margin:0'><a id=l href='#x' title='go' style='display:block;height:40px'>link</a>\
+                   <div style='height:40px'></div></body>"
+                .into(),
+            nav_id: 0,
+            reply: tx,
+        });
+        endpoint.drain(None);
+        let _ = handle.drain_events();
+        let hover = |handle: &PageHandle, endpoint: &mut PageEndpoint, input: PageInput| {
+            handle.send(PageCmd::Input(input));
+            endpoint.drain(None);
+            handle
+                .drain_events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    PageEvent::Cursor(c) => Some(format!("cursor {c}")),
+                    PageEvent::Tooltip(t) => Some(format!("tooltip {t:?}")),
+                    PageEvent::ContextMenu { x, y } => Some(format!("menu {x},{y}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 10.0 }),
+            vec!["cursor pointer".to_string(), "tooltip Some(\"go\")".to_string()]
+        );
+        assert!(hover(&handle, &mut endpoint, PageInput::MouseMove { x: 310.0, y: 12.0 }).is_empty(), "no change, no event");
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 60.0 }),
+            vec!["cursor default".to_string(), "tooltip None".to_string()]
+        );
+        assert_eq!(hover(&handle, &mut endpoint, PageInput::SecondaryDown { x: 300.0, y: 60.0 }), vec!["menu 300,60".to_string()]);
+        eval(&handle, &mut endpoint, "document.addEventListener('contextmenu', function (e) { e.preventDefault(); })");
+        assert!(hover(&handle, &mut endpoint, PageInput::SecondaryDown { x: 300.0, y: 60.0 }).is_empty(), "cancelled: no menu");
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseMove { x: 300.0, y: 10.0 }),
+            vec!["cursor pointer".to_string(), "tooltip Some(\"go\")".to_string()]
+        );
+        assert_eq!(
+            hover(&handle, &mut endpoint, PageInput::MouseLeave),
+            vec!["cursor default".to_string(), "tooltip None".to_string()]
+        );
     }
 }

@@ -963,6 +963,39 @@ fn fill_contours(
     fill_cluster(&cluster, rule, color, &mut checks, commands);
 }
 
+/// Fill device-space contours with one colour, as convex polygons the
+/// renderer fills exactly (see [`fill_contours`]). For painters other than
+/// SVG that draw paths: a canvas's `fill()`.
+pub fn fill_device_contours(contours: &[Vec<(f32, f32)>], even_odd: bool, color: Color) -> Vec<DisplayCommand> {
+    let mut commands = Vec::new();
+    let rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+    fill_contours(contours, rule, color, &mut commands);
+    commands
+}
+
+/// Fill device-space contours with a linear gradient from `(x1, y1)` to
+/// `(x2, y2)` (device space, padded past the ends), `stops` as
+/// `(offset, colour)` in increasing offset (see [`fill_gradient`]).
+pub fn fill_device_contours_linear(
+    contours: &[Vec<(f32, f32)>],
+    even_odd: bool,
+    from: (f32, f32),
+    to: (f32, f32),
+    stops: Vec<(f32, Color)>,
+) -> Vec<DisplayCommand> {
+    let gradient = Gradient {
+        geometry: GradientGeometry::Linear { x1: from.0, y1: from.1, x2: to.0, y2: to.1 },
+        stops,
+        transform: Transform2D::identity(),
+        user_space: true,
+        spread: SpreadMethod::Pad,
+    };
+    let rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+    let mut commands = Vec::new();
+    fill_gradient(contours, rule, &gradient, (0.0, 0.0, 0.0, 0.0), &Transform2D::identity(), 1.0, &mut commands);
+    commands
+}
+
 /// Fill contours that may overlap, sharing `checks` with the rest of the fill.
 fn fill_cluster(
     contours: &[&[(f32, f32)]],
