@@ -8006,6 +8006,18 @@ impl Engine {
         relayout_cause::set_last_build_reused_tree(false);
         relayout_cause::take_stage_ms();
 
+        // Script's pause/play/cancel/finish of CSS animations, before the
+        // build reads them.
+        if let Some(view) = self.views.get(&id) {
+            let controls = std::mem::take(&mut view.lay.animated.borrow_mut().controls);
+            if !controls.is_empty() {
+                let mut anims = view.lay.animations.borrow_mut();
+                for control in &controls {
+                    anims.control(control);
+                }
+            }
+        }
+
         let layout_skipped = self.relayout_uncounted(id)?;
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -23009,6 +23021,15 @@ fn publish_geometry(
     lay: Rc<layout_ctx::ViewLayout>,
 ) {
     bindings.share_element_scrolls(lay.element_scrolls.clone());
+    // The CSS animations as of this layout, for `getAnimations()`, and the
+    // properties they animate, for computed reads.
+    {
+        let anims = lay.animations.borrow();
+        let mut animated = lay.animated.borrow_mut();
+        animated.css = anims.describe();
+        animated.css_props = anims.animated_props();
+    }
+    bindings.share_animated_styles(lay.animated.clone());
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));

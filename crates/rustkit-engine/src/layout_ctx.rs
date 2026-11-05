@@ -188,6 +188,30 @@ impl LayoutCtx {
                 Some(frames)
             };
         lay.animations.borrow_mut().on_style(node, style, &resolve);
+        // Script's animated values, above the CSS ones: each entry parsed
+        // against the style as it stands and composed on it.
+        let entries = lay.animated.borrow().script.get(&node).cloned();
+        if let Some(entries) = entries {
+            for (property, value, composite) in &entries {
+                let property = property.to_ascii_lowercase();
+                let indices = crate::animations::prop_indices(&property);
+                if indices.is_empty() {
+                    self.apply_style_property(style, &property, value);
+                    continue;
+                }
+                let mut probe = style.clone();
+                self.apply_style_property(&mut probe, &property, value);
+                for i in indices {
+                    let under = crate::animations::prop_value(style, i);
+                    let new = crate::animations::prop_value(&probe, i);
+                    let composed = crate::animations::compose(&under, &new, composite);
+                    crate::animations::set_prop_value(style, i, &composed);
+                }
+            }
+            if !style.animation_name.trim().is_empty() && !style.animation_name.eq_ignore_ascii_case("none") {
+                style.animation_settled_opacity = Some(style.opacity);
+            }
+        }
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`
@@ -315,6 +339,10 @@ pub(crate) struct ViewLayout {
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
+    /// The animated-style layer script's Web Animations write (shared
+    /// with the bindings), overlaid above the CSS animations, and the
+    /// engine's CSS animations as script sees them.
+    pub(crate) animated: rustkit_bindings::SharedAnimatedStyles,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box

@@ -122,8 +122,9 @@ mod web_scroll;
 mod web_url;
 
 pub use dom::{
-    BoxGeometry, ControlWrites, ElementScrolls, ForcedGeometry, ForcedLayout, GeometrySource, HitTester,
-    SelectorMatchFn, SharedElementScrolls,
+    AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, CssAnimationInfo, ElementScrolls,
+    ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    SharedElementScrolls,
 };
 pub mod events;
 
@@ -450,12 +451,11 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
-    ("Element", "animate(composite)"),
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 9] = [
     ("Element", "animate(pseudoElement)"),
-    ("Animation", "playbackRate"),
-    ("Animation", "reverse"),
-    ("Animation", "updatePlaybackRate"),
+    ("CSSAnimation", "currentTime"),
+    ("CSSAnimation", "playbackRate"),
+    ("CSSTransition", "pause"),
     ("XMLHttpRequest", "open(async=false)"),
     ("XMLHttpRequest", "responseXML"),
     ("CustomElementRegistry", "define(extends)"),
@@ -1625,6 +1625,13 @@ impl DomBindings {
     }
 
     /// Keep element scroll offsets in the view's table.
+    /// Share the view's animated-style layer (`AnimatedStyles`): script's
+    /// Web Animations write it, the engine's build reads it and publishes
+    /// its CSS animations into it.
+    pub fn share_animated_styles(&self, animated: SharedAnimatedStyles) {
+        self.dom_host.borrow_mut().animated = animated;
+    }
+
     pub fn share_element_scrolls(&self, scrolls: SharedElementScrolls) {
         self.dom_host.borrow_mut().element_scrolls = scrolls;
     }

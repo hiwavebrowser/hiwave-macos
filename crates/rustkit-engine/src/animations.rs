@@ -31,6 +31,7 @@
 //! `background-position`, `line-height`, `visibility`'s discrete rule,
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
+use rustkit_bindings::{CssAnimationControl, CssAnimationInfo};
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
     AnimationPlayState, Color, ComputedStyle, Display, Length, TimingFunction, TransformList,
@@ -967,6 +968,14 @@ struct CssAnimation {
     iterations_seen: u32,
     /// `animationend` has fired: the active phase is over.
     ended: bool,
+    /// Script cancelled it: no effect and not listed, and not started
+    /// again while the CSS still names it (as in Chrome).
+    cancelled: bool,
+    /// Script's `pause()`/`play()` overrides `animation-play-state` until
+    /// the CSS value changes.
+    script_paused: Option<bool>,
+    /// The `animation-play-state` last cascaded, to see it change.
+    css_play_state: AnimationPlayState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -978,7 +987,7 @@ enum Phase {
 
 impl CssAnimation {
     fn moving(&self) -> bool {
-        !self.ended && self.paused_local.is_none()
+        !self.ended && !self.cancelled && self.paused_local.is_none()
     }
     fn local(&self, now: f64) -> f64 {
         self.paused_local.unwrap_or(now - self.created_ms)
@@ -1193,6 +1202,9 @@ impl Animations {
                         started: false,
                         iterations_seen: 0,
                         ended: false,
+                        cancelled: false,
+                        script_paused: None,
+                        css_play_state: item.play_state,
                     });
                     self.css.len() - 1
                 }
@@ -1208,9 +1220,16 @@ impl Animations {
             a.direction = item.direction;
             a.fill = item.fill_mode;
             a.timing = item.timing.clone();
-            match (item.play_state, a.paused_local) {
-                (AnimationPlayState::Paused, None) => a.paused_local = Some(now - a.created_ms),
-                (AnimationPlayState::Running, Some(local)) => {
+            if item.play_state != a.css_play_state {
+                a.css_play_state = item.play_state;
+                a.script_paused = None;
+            }
+            let paused = a
+                .script_paused
+                .unwrap_or(item.play_state == AnimationPlayState::Paused);
+            match (paused, a.paused_local) {
+                (true, None) => a.paused_local = Some(now - a.created_ms),
+                (false, Some(local)) => {
                     a.created_ms = now - local;
                     a.paused_local = None;
                 }
@@ -1218,7 +1237,11 @@ impl Animations {
             }
         }
         let mut events = Vec::new();
-        for a in self.css.iter_mut().filter(|a| a.node == node) {
+        for a in self
+            .css
+            .iter_mut()
+            .filter(|a| a.node == node && !a.cancelled)
+        {
             let local = a.local(now);
             let phase = a.phase(local);
             if !a.started && phase != Phase::Before {
@@ -1399,6 +1422,236 @@ pub(crate) fn sync_animation_scalars(style: &mut ComputedStyle) {
     style.animation_direction = first.direction;
     style.animation_fill_mode = first.fill_mode;
     style.animation_play_state = first.play_state;
+}
+
+// ------------------------------------------------ script's view and layer
+
+fn easing_text(t: &TimingFunction) -> String {
+    match t {
+        TimingFunction::Ease => "ease".to_string(),
+        TimingFunction::Linear => "linear".to_string(),
+        TimingFunction::EaseIn => "ease-in".to_string(),
+        TimingFunction::EaseOut => "ease-out".to_string(),
+        TimingFunction::EaseInOut => "ease-in-out".to_string(),
+        TimingFunction::StepStart => "step-start".to_string(),
+        TimingFunction::StepEnd => "step-end".to_string(),
+        TimingFunction::Steps(n, true) => format!("steps({n}, start)"),
+        TimingFunction::Steps(n, false) => format!("steps({n})"),
+        TimingFunction::CubicBezier(a, b, c, d) => format!("cubic-bezier({a}, {b}, {c}, {d})"),
+    }
+}
+
+impl Animations {
+    /// The running transitions and animations as script sees them
+    /// (`getAnimations()`'s `CSSTransition`/`CSSAnimation` objects).
+    pub(crate) fn describe(&self) -> Vec<CssAnimationInfo> {
+        let mut out = Vec::new();
+        for t in &self.transitions {
+            out.push(CssAnimationInfo {
+                node: t.node,
+                kind: "transition",
+                index: t.prop,
+                name: PROPS[t.prop].name.to_string(),
+                start_ms: t.created_ms,
+                paused_ms: None,
+                delay_ms: t.delay_ms,
+                duration_ms: t.duration_ms,
+                iterations: 1.0,
+                direction: "normal",
+                fill: "backwards",
+                easing: easing_text(&t.timing),
+                ended: false,
+            });
+        }
+        for a in self.css.iter().filter(|a| !a.cancelled) {
+            out.push(CssAnimationInfo {
+                node: a.node,
+                kind: "animation",
+                index: a.index,
+                name: a.name.clone(),
+                start_ms: a.created_ms,
+                paused_ms: a.paused_local,
+                delay_ms: a.delay_ms,
+                duration_ms: a.duration_ms,
+                iterations: a.iterations,
+                direction: match a.direction {
+                    AnimationDirection::Normal => "normal",
+                    AnimationDirection::Reverse => "reverse",
+                    AnimationDirection::Alternate => "alternate",
+                    AnimationDirection::AlternateReverse => "alternate-reverse",
+                },
+                fill: match a.fill {
+                    AnimationFillMode::None => "none",
+                    AnimationFillMode::Forwards => "forwards",
+                    AnimationFillMode::Backwards => "backwards",
+                    AnimationFillMode::Both => "both",
+                },
+                easing: easing_text(&a.timing),
+                ended: a.ended,
+            });
+        }
+        out
+    }
+
+    /// The properties the running transitions and animations set, per
+    /// element (what a computed read keeps the published row for).
+    pub(crate) fn animated_props(&self) -> HashMap<usize, Vec<String>> {
+        let mut out: HashMap<usize, Vec<String>> = HashMap::new();
+        for t in &self.transitions {
+            out.entry(t.node)
+                .or_default()
+                .push(PROPS[t.prop].name.to_string());
+        }
+        for a in self.css.iter().filter(|a| !a.cancelled) {
+            let props = out.entry(a.node).or_default();
+            for prop in a.props() {
+                props.push(PROPS[prop].name.to_string());
+            }
+        }
+        out
+    }
+
+    /// Script's `pause()`/`play()`/`cancel()`/`finish()` on one of them.
+    pub(crate) fn control(&mut self, c: &CssAnimationControl) {
+        let now = self.clock_ms;
+        if c.kind == "transition" {
+            let Some(at) = self
+                .transitions
+                .iter()
+                .position(|t| t.node == c.node && t.prop == c.index)
+            else {
+                return;
+            };
+            match c.op.as_str() {
+                "cancel" => {
+                    let t = self.transitions.remove(at);
+                    self.push_event(&t, "transitioncancel", t.elapsed_at(now));
+                }
+                "finish" => {
+                    let t = &mut self.transitions[at];
+                    t.created_ms = now - t.delay_ms - t.duration_ms;
+                }
+                _ => {}
+            }
+            return;
+        }
+        let Some(at) = self
+            .css
+            .iter()
+            .position(|a| a.node == c.node && a.index == c.index)
+        else {
+            return;
+        };
+        match c.op.as_str() {
+            "pause" => {
+                let a = &mut self.css[at];
+                a.script_paused = Some(true);
+                if a.paused_local.is_none() {
+                    a.paused_local = Some(now - a.created_ms);
+                }
+            }
+            "play" => {
+                let a = &mut self.css[at];
+                a.script_paused = Some(false);
+                if let Some(local) = a.paused_local.take() {
+                    a.created_ms = now - local;
+                }
+            }
+            "cancel" => {
+                let a = &mut self.css[at];
+                if a.cancelled {
+                    return;
+                }
+                a.cancelled = true;
+                if !a.ended {
+                    let (a, elapsed) = (a.clone(), a.elapsed_at(now));
+                    self.push_animation_event(&a, "animationcancel", elapsed);
+                }
+            }
+            "finish" => {
+                let a = &mut self.css[at];
+                if a.iterations.is_finite() {
+                    a.paused_local = None;
+                    a.script_paused = Some(false);
+                    a.created_ms = now - a.delay_ms - a.active_duration();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Set animatable property `index` of `style` to `value`.
+pub(crate) fn set_prop_value(style: &mut ComputedStyle, index: usize, value: &AnimValue) {
+    (PROPS[index].set)(style, value)
+}
+
+fn add_length(a: &Length, b: &Length) -> Option<Length> {
+    use Length::*;
+    Some(match (a, b) {
+        (Px(x), Px(y)) => Px(x + y),
+        (Zero, Px(y)) | (Px(y), Zero) => Px(*y),
+        (Percent(x), Percent(y)) => Percent(x + y),
+        (Zero, Percent(y)) | (Percent(y), Zero) => Percent(*y),
+        (Em(x), Em(y)) => Em(x + y),
+        (Rem(x), Rem(y)) => Rem(x + y),
+        (Zero, Zero) => Zero,
+        _ => return None,
+    })
+}
+
+/// A script animation's `value` composed on the `underlying` value
+/// (web-animations-1 §4.4.1, css-transforms-2 §13): `add` sums numbers
+/// and lengths and post-multiplies a transform list, `accumulate` sums a
+/// matching transform list function by function (`scale` as s1 + s2 - 1)
+/// and otherwise adds; `replace` is the value.
+pub(crate) fn compose(underlying: &AnimValue, value: &AnimValue, composite: &str) -> AnimValue {
+    if composite != "add" && composite != "accumulate" {
+        return value.clone();
+    }
+    match (underlying, value) {
+        (AnimValue::Number(u), AnimValue::Number(v)) => AnimValue::Number(u + v),
+        (AnimValue::Length(u), AnimValue::Length(v)) => {
+            AnimValue::Length(add_length(u, v).unwrap_or_else(|| v.clone()))
+        }
+        (AnimValue::Transform(u), AnimValue::Transform(v)) => {
+            if u.ops.is_empty() {
+                return value.clone();
+            }
+            if composite == "accumulate" && u.ops.len() == v.ops.len() {
+                use TransformOp::*;
+                let ops: Option<Vec<TransformOp>> = u
+                    .ops
+                    .iter()
+                    .zip(&v.ops)
+                    .map(|(a, b)| {
+                        Some(match (a, b) {
+                            (Translate(ax, ay), Translate(bx, by)) => {
+                                Translate(add_length(ax, bx)?, add_length(ay, by)?)
+                            }
+                            (TranslateX(ax), TranslateX(bx)) => TranslateX(add_length(ax, bx)?),
+                            (TranslateY(ay), TranslateY(by)) => TranslateY(add_length(ay, by)?),
+                            (Scale(ax, ay), Scale(bx, by)) => Scale(ax + bx - 1.0, ay + by - 1.0),
+                            (ScaleX(x), ScaleX(y)) => ScaleX(x + y - 1.0),
+                            (ScaleY(x), ScaleY(y)) => ScaleY(x + y - 1.0),
+                            (Rotate(x), Rotate(y)) => Rotate(x + y),
+                            (SkewX(x), SkewX(y)) => SkewX(x + y),
+                            (SkewY(x), SkewY(y)) => SkewY(x + y),
+                            (Skew(ax, ay), Skew(bx, by)) => Skew(ax + bx, ay + by),
+                            _ => return None,
+                        })
+                    })
+                    .collect();
+                if let Some(ops) = ops {
+                    return AnimValue::Transform(TransformList { ops });
+                }
+            }
+            let mut ops = u.ops.clone();
+            ops.extend(v.ops.iter().cloned());
+            AnimValue::Transform(TransformList { ops })
+        }
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]

@@ -68,7 +68,8 @@ fn computed(engine: &mut Engine, view: EngineViewId, prop: &str) -> String {
 
 fn opacity(engine: &mut Engine, view: EngineViewId) -> f64 {
     let s = computed(engine, view, "opacity");
-    s.parse().unwrap_or_else(|_| panic!("computed opacity {s:?}"))
+    s.parse()
+        .unwrap_or_else(|_| panic!("computed opacity {s:?}"))
 }
 
 fn num(engine: &mut Engine, view: EngineViewId, expr: &str) -> f64 {
@@ -91,17 +92,30 @@ fn an_animation_leaves_the_style_attribute_and_observers_alone() {
     let (mut engine, view, _server) = load(&page(
         "",
         "<div id=h style=\"opacity:0\"></div>",
-        "window.recs=0;new MutationObserver(function(m){recs+=m.length}).observe(h,{attributes:true});\
-         window.a=h.animate([{opacity:0},{opacity:1}],{duration:200,fill:'forwards',easing:'linear'});",
+        "window.recs=0;new MutationObserver(function(m){recs+=m.length}).observe(h,{attributes:true});",
     ));
+    // Started after load: the load phase runs an animation-frame chain to
+    // its timer horizon, so one started by an inline script is over by
+    // the time the page shows (a gap of the load, not of this layer).
+    run(
+        &mut engine,
+        view,
+        "window.a=h.animate([{opacity:0},{opacity:1}],{duration:200,fill:'forwards',easing:'linear'});",
+    );
     pump(&mut engine, view, 96, 16);
     let mid = opacity(&mut engine, view);
     assert!(mid > 0.2 && mid < 0.8, "midway opacity {mid}");
-    assert_eq!(read(&mut engine, view, "h.getAttribute('style')"), "opacity:0");
+    assert_eq!(
+        read(&mut engine, view, "h.getAttribute('style')"),
+        "opacity:0"
+    );
     assert_eq!(read(&mut engine, view, "recs"), "0");
     pump(&mut engine, view, 300, 16);
     assert_eq!(opacity(&mut engine, view), 1.0);
-    assert_eq!(read(&mut engine, view, "h.getAttribute('style')"), "opacity:0");
+    assert_eq!(
+        read(&mut engine, view, "h.getAttribute('style')"),
+        "opacity:0"
+    );
     assert_eq!(read(&mut engine, view, "recs"), "0");
     run(&mut engine, view, "a.commitStyles();");
     pump(&mut engine, view, 16, 16);
@@ -121,7 +135,14 @@ fn get_animations_lists_css_animations_and_transitions() {
         "h.addEventListener('animationcancel',function(e){log.push('cancel:'+e.animationName)});",
     ));
     pump(&mut engine, view, 16, 16);
-    assert_eq!(read(&mut engine, view, "h.getAnimations().length+','+document.getAnimations().length"), "1,1");
+    assert_eq!(
+        read(
+            &mut engine,
+            view,
+            "h.getAnimations().length+','+document.getAnimations().length"
+        ),
+        "1,1"
+    );
     run(&mut engine, view, "window.a=h.getAnimations()[0];");
     assert_eq!(
         read(
@@ -135,8 +156,15 @@ fn get_animations_lists_css_animations_and_transitions() {
     let t1 = num(&mut engine, view, "a.currentTime");
     pump(&mut engine, view, 100, 10);
     let t2 = num(&mut engine, view, "a.currentTime");
-    assert!((t2 - t1 - 100.0).abs() <= 20.0, "currentTime moved {t1} -> {t2}");
-    assert_eq!(read(&mut engine, view, "h.getAnimations()[0]===a"), "true", "the same object again");
+    assert!(
+        (t2 - t1 - 100.0).abs() <= 20.0,
+        "currentTime moved {t1} -> {t2}"
+    );
+    assert_eq!(
+        read(&mut engine, view, "h.getAnimations()[0]===a"),
+        "true",
+        "the same object again"
+    );
     run(&mut engine, view, "h.classList.add('w');");
     pump(&mut engine, view, 16, 16);
     assert_eq!(
@@ -158,10 +186,18 @@ fn get_animations_lists_css_animations_and_transitions() {
     assert!(opacity(&mut engine, view) > held, "running again");
     run(&mut engine, view, "a.cancel();");
     pump(&mut engine, view, 32, 16);
-    assert_eq!(opacity(&mut engine, view), 0.0, "cancelled: the box's own opacity");
+    assert_eq!(
+        opacity(&mut engine, view),
+        0.0,
+        "cancelled: the box's own opacity"
+    );
     assert_eq!(read(&mut engine, view, "log.join()"), "cancel:fade");
     assert_eq!(
-        read(&mut engine, view, "h.getAnimations().filter(function(x){return x instanceof CSSAnimation}).length"),
+        read(
+            &mut engine,
+            view,
+            "h.getAnimations().filter(function(x){return x instanceof CSSAnimation}).length"
+        ),
         "0"
     );
 }
@@ -176,25 +212,40 @@ fn playback_rate_and_reverse_run_the_clock_both_ways() {
         "window.a=h.animate([{opacity:0},{opacity:1}],{duration:200,fill:'both',easing:'linear'});a.playbackRate=2;",
     ));
     pump(&mut engine, view, 128, 16);
-    assert_eq!(read(&mut engine, view, "a.playState+','+a.currentTime"), "finished,200");
+    assert_eq!(
+        read(&mut engine, view, "a.playState+','+a.currentTime"),
+        "finished,200"
+    );
     assert_eq!(opacity(&mut engine, view), 1.0);
     run(&mut engine, view, "a.reverse();");
     pump(&mut engine, view, 16, 16);
-    assert_eq!(read(&mut engine, view, "a.playState+','+a.playbackRate"), "running,-2");
+    assert_eq!(
+        read(&mut engine, view, "a.playState+','+a.playbackRate"),
+        "running,-2"
+    );
     pump(&mut engine, view, 32, 16);
     let back = opacity(&mut engine, view);
     assert!(back < 1.0 && back > 0.0, "running back: {back}");
     pump(&mut engine, view, 100, 16);
     // Chrome reads a currentTime at or past the start here (-99.996 on
     // the oracle: the hold is not clamped at 0 when nothing seeks).
-    assert_eq!(read(&mut engine, view, "a.playState+','+(a.currentTime<=0)"), "finished,true");
+    assert_eq!(
+        read(&mut engine, view, "a.playState+','+(a.currentTime<=0)"),
+        "finished,true"
+    );
     assert_eq!(opacity(&mut engine, view), 0.0);
     run(&mut engine, view, "a.updatePlaybackRate(0.5);a.play();");
     pump(&mut engine, view, 16, 16);
-    assert_eq!(read(&mut engine, view, "a.playbackRate+','+a.playState"), "0.5,running");
+    assert_eq!(
+        read(&mut engine, view, "a.playbackRate+','+a.playState"),
+        "0.5,running"
+    );
     pump(&mut engine, view, 100, 10);
     let slow = opacity(&mut engine, view);
-    assert!((slow - 0.3).abs() <= 0.12, "about 60 ms in at half speed: {slow}");
+    assert!(
+        (slow - 0.3).abs() <= 0.12,
+        "about 60 ms in at half speed: {slow}"
+    );
 }
 
 /// Composite `add` and `accumulate` build on the underlying value: a
@@ -208,7 +259,10 @@ fn composite_add_and_accumulate_build_on_the_underlying_value() {
          {duration:100,composite:'add',fill:'forwards'});",
     ));
     pump(&mut engine, view, 150, 10);
-    assert_eq!(computed(&mut engine, view, "transform"), "matrix(1, 0, 0, 1, 150, 0)");
+    assert_eq!(
+        computed(&mut engine, view, "transform"),
+        "matrix(1, 0, 0, 1, 150, 0)"
+    );
     assert_eq!(opacity(&mut engine, view), 0.75);
     run(
         &mut engine,
@@ -217,7 +271,10 @@ fn composite_add_and_accumulate_build_on_the_underlying_value() {
          window.b=h.animate({transform:['scale(2)','scale(2)']},{duration:100,composite:'accumulate',fill:'forwards'});",
     );
     pump(&mut engine, view, 150, 10);
-    assert_eq!(computed(&mut engine, view, "transform"), "matrix(3, 0, 0, 3, 0, 0)");
+    assert_eq!(
+        computed(&mut engine, view, "transform"),
+        "matrix(3, 0, 0, 3, 0, 0)"
+    );
     assert_eq!(opacity(&mut engine, view), 0.5, "the cancelled add is gone");
 }
 
@@ -243,7 +300,10 @@ fn animation_constructor_and_document_timeline() {
     let mid = opacity(&mut engine, view);
     assert!(mid > 0.15 && mid < 0.6, "midway: {mid}");
     let progress = num(&mut engine, view, "e.getComputedTiming().progress");
-    assert!((progress - mid).abs() <= 0.02, "progress {progress} is the opacity {mid}");
+    assert!(
+        (progress - mid).abs() <= 0.02,
+        "progress {progress} is the opacity {mid}"
+    );
     let t1 = num(&mut engine, view, "document.timeline.currentTime");
     assert!(t1 >= t0 + 40.0, "the timeline moved {t0} -> {t1}");
     pump(&mut engine, view, 100, 10);

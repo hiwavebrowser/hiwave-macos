@@ -109,6 +109,68 @@ impl ElementScrolls {
 /// What `DomBindings::share_element_scrolls` takes.
 pub type SharedElementScrolls = Rc<std::cell::RefCell<ElementScrolls>>;
 
+/// The animated-style layer page script drives through Web Animations,
+/// shared between the bindings (script writes it) and the engine's build
+/// (which overlays it on each element's cascaded style, above its CSS
+/// animations and transitions, and leaves the `style` attribute alone),
+/// plus the engine's own CSS animations as script sees them.
+#[derive(Debug, Default)]
+pub struct AnimatedStyles {
+    /// Per raw NodeId, in animation order: `(property, value, composite)`
+    /// with composite `replace`, `add` or `accumulate`. An entry composes
+    /// on what the entries before it (and the CSS) left.
+    pub script: HashMap<usize, Vec<(String, String, String)>>,
+    /// Bumped by each write.
+    pub generation: u64,
+    /// The engine's CSS animations and transitions as of the last layout,
+    /// what `getAnimations()` lists.
+    pub css: Vec<CssAnimationInfo>,
+    /// The properties those animate, per raw NodeId: a `getComputedStyle`
+    /// read keeps the published row for them rather than the inline text.
+    pub css_props: HashMap<usize, Vec<String>>,
+    /// Script's `pause()`/`play()`/`cancel()`/`finish()` on those, for the
+    /// engine to apply at its next layout.
+    pub controls: Vec<CssAnimationControl>,
+}
+
+/// One of the engine's CSS animations or transitions, for script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssAnimationInfo {
+    pub node: usize,
+    /// `animation` or `transition`.
+    pub kind: &'static str,
+    /// The `animation` list index, or the transition's property index.
+    pub index: usize,
+    /// The `@keyframes` name, or the transitioned property.
+    pub name: String,
+    /// When it started (its delay counts from here), on the page's clock.
+    pub start_ms: f64,
+    /// The local time it is held at, when paused.
+    pub paused_ms: Option<f64>,
+    pub delay_ms: f64,
+    pub duration_ms: f64,
+    /// `f32::INFINITY` for `infinite`.
+    pub iterations: f32,
+    pub direction: &'static str,
+    pub fill: &'static str,
+    pub easing: String,
+    /// Its active phase is over.
+    pub ended: bool,
+}
+
+/// Script's control of one of the engine's CSS animations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssAnimationControl {
+    pub node: usize,
+    pub kind: String,
+    pub index: usize,
+    /// `pause`, `play`, `cancel` or `finish`.
+    pub op: String,
+}
+
+/// What `DomBindings::share_animated_styles` takes.
+pub type SharedAnimatedStyles = Rc<std::cell::RefCell<AnimatedStyles>>;
+
 /// Builds the geometry and computed-style maps of the layout it was made
 /// for (`DomBindings::set_geometry_source`).
 pub type GeometrySource =
@@ -188,6 +250,8 @@ pub(crate) struct DomHost {
     scroll: (f32, f32),
     /// The view's element scroll offsets (web_scroll.js).
     pub(crate) element_scrolls: SharedElementScrolls,
+    /// The view's animated-style layer and CSS animations (web_animations.js).
+    pub(crate) animated: SharedAnimatedStyles,
     /// The scroll state `window.scrollTo` clamps against (web_scroll.rs);
     /// a forced layout moves its maximum.
     pub(crate) scroll_state: crate::web_scroll::SharedScroll,
@@ -1705,6 +1769,132 @@ pub(crate) fn install(
         }),
     )?;
 
+    // animate(gen, id, entries): what Web Animations put on an element's
+    // animated-style layer, as JSON `[[property, value, composite], ...]`
+    // in animation order, or null to take the layer off. A script write
+    // that lays the page out (the layer is read by the build).
+    let (h, d, l) = (host.clone(), dirty.clone(), log.clone());
+    runtime.register_host_function(
+        "__rustkit_dom_animate",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            let entries: Option<Vec<(String, String, String)>> = match args.get(2) {
+                Some(JsValue::String(json)) => serde_json::from_str(json).ok(),
+                _ => None,
+            };
+            let mut layer = host.animated.borrow_mut();
+            let changed = match entries {
+                Some(entries) => layer.script.insert(node.id.raw(), entries.clone()) != Some(entries),
+                None => layer.script.remove(&node.id.raw()).is_some(),
+            };
+            if changed {
+                layer.generation += 1;
+                d.mark(crate::DomDirty::Layout);
+                // The element restyles as if its inline style changed, so
+                // the next build walks it rather than keep its box.
+                l.borrow_mut().push(MutationRecord {
+                    node: node.id.raw(),
+                    kind: MutationKind::Style,
+                    attr: None,
+                    old: None,
+                    child: None,
+                });
+            }
+            JsValue::Undefined
+        }),
+    )?;
+    // cssAnimations(): the engine's CSS animations and transitions as of
+    // the last layout, as JSON, for `getAnimations()`.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_css_animations",
+        0,
+        Box::new(move |_| {
+            let host = h.borrow();
+            let layer = host.animated.borrow();
+            let items: Vec<String> = layer
+                .css
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{{\"node\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
+                         \"duration\":{},\"iterations\":{},\"direction\":{:?},\"fill\":{:?},\"easing\":{},\"ended\":{}}}",
+                        a.node,
+                        a.kind,
+                        a.index,
+                        serde_json::to_string(&a.name).unwrap_or_default(),
+                        a.start_ms,
+                        a.paused_ms.map_or("null".to_string(), |p| p.to_string()),
+                        a.delay_ms,
+                        a.duration_ms,
+                        if a.iterations.is_infinite() { "null".to_string() } else { a.iterations.to_string() },
+                        a.direction,
+                        a.fill,
+                        serde_json::to_string(&a.easing).unwrap_or_default(),
+                        a.ended
+                    )
+                })
+                .collect();
+            JsValue::String(format!("[{}]", items.join(",")))
+        }),
+    )?;
+    // animated(gen, id, property): whether the property is animated on the
+    // element, by script's layer or by a CSS animation or transition, so a
+    // computed read keeps the published (animated) row over the inline
+    // text (#861's at-once read of a plain inline value).
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_animated",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let (Some(node), Some(property)) = (host.node(args), string_arg(args, 2)) else {
+                return JsValue::Boolean(false);
+            };
+            let layer = host.animated.borrow();
+            let raw = node.id.raw();
+            let by_script = layer
+                .script
+                .get(&raw)
+                .is_some_and(|entries| entries.iter().any(|(p, _, _)| p == property));
+            let by_css = layer
+                .css_props
+                .get(&raw)
+                .is_some_and(|props| props.iter().any(|p| p == property));
+            JsValue::Boolean(by_script || by_css)
+        }),
+    )?;
+    // cssControl(gen, id, kind, index, op): script's pause/play/cancel/
+    // finish of one of them; the engine applies it at its next layout.
+    let (h, d) = (host.clone(), dirty.clone());
+    runtime.register_host_function(
+        "__rustkit_dom_css_control",
+        5,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            let (Some(JsValue::String(kind)), Some(index), Some(JsValue::String(op))) =
+                (args.get(2), number_arg(args, 3), args.get(4))
+            else {
+                return JsValue::Undefined;
+            };
+            host.animated.borrow_mut().controls.push(CssAnimationControl {
+                node: node.id.raw(),
+                kind: kind.clone(),
+                index: index.max(0.0) as usize,
+                op: op.clone(),
+            });
+            d.mark(crate::DomDirty::Layout);
+            JsValue::Undefined
+        }),
+    )?;
+
     // hit(x, y): the node under a viewport point, or null before a layout
     // and on a miss. A layout's hit test wins; published boxes are the
     // stand-in when a test wrote them by hand.
@@ -1957,10 +2147,12 @@ const WRAPPERS_JS: &str = r#"
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
         hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
-        scrollElement: __rustkit_dom_scroll_element
+        scrollElement: __rustkit_dom_scroll_element,
+        animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
+        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted', 'scroll_element'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -2915,6 +3107,20 @@ const WRAPPERS_JS: &str = r#"
         },
         byId: function (id) { return wrap(id); }
     };
+    // What web_animations.js drives the engine's animated-style layer
+    // with; it takes this and deletes it. write: the element's entries,
+    // `[[property, value, composite], ...]`, or null for none. css: the
+    // engine's CSS animations and transitions as of the last layout.
+    // control: pause/play/cancel/finish one of them.
+    g.__rustkit_animated_style = {
+        write: function (el, entries) {
+            var s = slotOf(el);
+            N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
+        },
+        css: function () { return JSON.parse(N.cssAnimations()); },
+        control: function (el, kind, index, op) { var s = slotOf(el); N.cssControl(s.gen, s.id, kind, index, op); },
+        byId: function (id) { return wrap(id); }
+    };
     function scrollOffset(axis) {
         var v = axis === 'x' ? (g.scrollX || g.pageXOffset) : (g.scrollY || g.pageYOffset);
         return finite(typeof v === 'number' ? v : 0);
@@ -3203,10 +3409,15 @@ const WRAPPERS_JS: &str = r#"
         var inline = el.style;
         if (inline) {
             var stale = !!info(el, 'stale');
+            var slot = inline.length ? slotOf(el) : null;
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
                 if (!v) continue;
+                // An animated property (Web Animations' layer, a CSS
+                // animation or transition) reads the engine's row: the
+                // animation is above the inline text in the cascade.
+                if (slot && N.animated(slot.gen, slot.id, name)) continue;
                 if (name === 'opacity') {
                     // #861: a plain value is seen at once, as a number in 0..1.
                     // What needs the cascade (`calc()`, `var()`, `inherit`) or
