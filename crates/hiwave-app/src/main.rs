@@ -613,6 +613,24 @@ const PANEL_PROBE: &str = r#"
 })(SELECTORS);
 "#;
 
+/// A RustKit panel's `window.ipc` message as the log carries it (#910 R1
+/// blocker 1).
+fn panel_ipc_log_line(panel: &str, body: &str) -> String {
+    format!("panel={panel:?} body={body}")
+}
+
+/// A panel probe report as the log carries it (#910 R1 blocker 2), or
+/// `None` for one that is not a report.
+fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
+    let _ = selectors;
+    Some(body.to_string())
+}
+
+/// A URL for the log (#910 R1 nit 3).
+fn url_for_log(url: &str) -> &str {
+    url
+}
+
 /// The probe for the RustKit panels' documents, or nothing without
 /// `HIWAVE_RUSTKIT_PANEL_PROBE`.
 fn panel_probe_script() -> String {
@@ -683,12 +701,12 @@ fn pump_rustkit_panel(
             info!(panel = name, %body, "RustKit panel probe");
             continue;
         }
-        info!(panel = name, %body, "RustKit panel IPC");
+        info!("RustKit panel IPC {}", panel_ipc_log_line(name, &body));
         handle(&body);
     }
     // A link or `location` in a panel would replace its own document.
     if let Some((url, _)) = view.take_script_navigation() {
-        warn!(panel = name, %url, "RustKit panel navigation not followed");
+        warn!(panel = name, url = url_for_log(&url), "RustKit panel navigation not followed");
     }
     view.render();
     view.input_view()
@@ -1888,6 +1906,67 @@ mod panel_tests {
         assert_eq!(route_input(settings, None, &panels), InputRoute::Panel(2));
         assert_eq!(route_input(page, Some(chrome), &panels), InputRoute::Page);
         assert_eq!(route_input(page, None, &[None, None, None]), InputRoute::Page);
+    }
+}
+
+// #910 R1: what the log carries of a RustKit panel's messages: shapes only,
+// never a body, page text, a field's value or a URL's query.
+#[cfg(test)]
+mod panel_log_tests {
+    use super::*;
+
+    const SECRET: &str = "hunter2-a4-secret";
+
+    #[test]
+    fn a_panel_ipc_line_names_the_cmd_and_size_never_the_body() {
+        let bodies = [
+            format!(r#"{{"cmd":"unlock_vault","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"save_credential","url":"https://a.test/login?next={SECRET}","username":"{SECRET}","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"inspector_console_eval","code":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"search_commands","query":"{SECRET}"}}"#),
+        ];
+        for body in &bodies {
+            let line = panel_ipc_log_line("settings", body);
+            assert!(!line.contains(SECRET), "{line}");
+            assert!(!line.contains("password") && !line.contains("https"), "{line}");
+            assert!(line.contains(&format!("len={}", body.len())), "{line}");
+        }
+        assert_eq!(
+            panel_ipc_log_line("settings", &bodies[0]),
+            format!("panel=\"settings\" cmd=unlock_vault len={}", bodies[0].len())
+        );
+        // Not JSON, or a cmd that is not a command name: `?`.
+        let line = panel_ipc_log_line("shelf", SECRET);
+        assert_eq!(line, format!("panel=\"shelf\" cmd=? len={}", SECRET.len()));
+        let line = panel_ipc_log_line("shelf", &format!(r#"{{"cmd":"{SECRET} x"}}"#));
+        assert!(line.contains("cmd=?") && !line.contains(SECRET), "{line}");
+    }
+
+    #[test]
+    fn a_probe_report_in_the_log_is_shapes_only() {
+        let body = format!(
+            r##"{{"cmd":"panel_probe","size":[800,280],"text":"{SECRET}","boxes":{{"#vaultPassword":{{"box":[1,2,3,4],"n":1,"checked":null,"len":17,"value":"{SECRET}"}},"#cb":{{"box":[5,6,7,8],"n":1,"checked":true,"len":2}},"#gone":null,"#{SECRET}":{{"box":[0,0,0,0],"n":1}}}}}}"##
+        );
+        let line = panel_probe_log_line(&body, &["#vaultPassword", "#cb", "#gone"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert!(!line.contains("text") && !line.contains("value"), "{line}");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["size"], serde_json::json!([800, 280]));
+        assert_eq!(v["boxes"]["#vaultPassword"], serde_json::json!({"box": [1, 2, 3, 4], "n": 1, "checked": null, "len": 17}));
+        assert_eq!(v["boxes"]["#cb"]["checked"], serde_json::json!(true));
+        assert_eq!(v["boxes"]["#gone"], serde_json::Value::Null);
+        // A text where a shape belongs is dropped, not logged.
+        let body = format!(r##"{{"cmd":"panel_probe","size":["{SECRET}",1],"boxes":{{"#cb":{{"box":["{SECRET}"],"len":"{SECRET}"}}}}}}"##);
+        let line = panel_probe_log_line(&body, &["#cb"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert_eq!(panel_probe_log_line(SECRET, &["#cb"]), None);
+    }
+
+    #[test]
+    fn a_url_in_the_log_has_no_query_or_fragment() {
+        assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
+        assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
+        assert_eq!(url_for_log("about:blank"), "about:blank");
     }
 }
 
