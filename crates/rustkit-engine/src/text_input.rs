@@ -100,6 +100,37 @@ impl Engine {
             .unwrap_or(false)
     }
 
+    /// `insertText:replacementRange:` with nothing marked: `replace`
+    /// (UTF-16 start, length) is the part of the focused field's value the
+    /// text replaces, as the press-and-hold accent popover replaces the
+    /// letter typed before it. `None` is [`Self::insert_text`].
+    pub fn insert_text_replacing(&mut self, id: EngineViewId, text: &str, replace: Option<(usize, usize)>) -> bool {
+        if let (Some((start, len)), Some(node)) = (replace, self.focused_text_input(id)) {
+            let composing = self
+                .compose(id, "state", "")
+                .is_some_and(|r| !r["marked"].is_null());
+            if !composing {
+                if let Some(view) = self.views.get(&id) {
+                    if let Some(state) = view.lay.edit_states.borrow().get(&node) {
+                        let value = state.value();
+                        let byte = |units: usize| -> usize {
+                            let mut used = 0;
+                            for (i, c) in value.char_indices() {
+                                if used >= units {
+                                    return i;
+                                }
+                                used += c.len_utf16();
+                            }
+                            value.len()
+                        };
+                        state.set_selection(byte(start), byte(start + len));
+                    }
+                }
+            }
+        }
+        self.insert_text(id, text)
+    }
+
     /// `unmarkText` — keep what is marked and end the composition.
     /// Whether a composition was open.
     pub fn unmark_text(&mut self, id: EngineViewId) -> bool {
@@ -262,5 +293,73 @@ fn control_caret(
         x: rect.x + border_width + padding[3] + width,
         y: rect.y + border_width + padding[0] + line * height,
         height,
+    }
+}
+
+/// The system clipboard as the engine's [`rustkit_dom::clipboard::Clipboard`]:
+/// macOS `NSPasteboard`'s general pasteboard, plain text (CH2.E3). On
+/// another OS, an in-memory clipboard.
+pub(crate) fn system_clipboard() -> rustkit_dom::clipboard::SharedClipboard {
+    #[cfg(target_os = "macos")]
+    {
+        std::rc::Rc::new(Pasteboard)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        rustkit_dom::clipboard::MemoryClipboard::shared()
+    }
+}
+
+/// The general pasteboard's plain text. `NSPasteboard` may be used from
+/// any thread; the page's engine runs on the content thread.
+#[cfg(target_os = "macos")]
+struct Pasteboard;
+
+#[cfg(target_os = "macos")]
+impl Pasteboard {
+    /// `NSPasteboardTypeString`.
+    fn string_type() -> cocoa::base::id {
+        use cocoa::foundation::NSString;
+        use objc::{msg_send, sel, sel_impl};
+        unsafe {
+            let s = NSString::alloc(cocoa::base::nil).init_str("public.utf8-plain-text");
+            msg_send![s, autorelease]
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl rustkit_dom::clipboard::Clipboard for Pasteboard {
+    fn read_text(&self) -> Option<String> {
+        use cocoa::base::{id, nil};
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let board: id = msg_send![class!(NSPasteboard), generalPasteboard];
+            let string: id = msg_send![board, stringForType: Self::string_type()];
+            let text = if string == nil {
+                None
+            } else {
+                let utf8: *const std::os::raw::c_char = msg_send![string, UTF8String];
+                (!utf8.is_null()).then(|| std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+            };
+            let _: () = msg_send![pool, drain];
+            text
+        }
+    }
+
+    fn write_text(&self, text: &str) {
+        use cocoa::base::id;
+        use cocoa::foundation::NSString;
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe {
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let board: id = msg_send![class!(NSPasteboard), generalPasteboard];
+            let _: isize = msg_send![board, clearContents];
+            let string: id = NSString::alloc(cocoa::base::nil).init_str(text);
+            let string: id = msg_send![string, autorelease];
+            let _: bool = msg_send![board, setString: string forType: Self::string_type()];
+            let _: () = msg_send![pool, drain];
+        }
     }
 }

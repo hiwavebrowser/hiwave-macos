@@ -1217,10 +1217,38 @@ fn dispatch_view_input(
                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
             }
         }
-        // Not routed yet (CH2.E3 red).
-        rustkit_viewhost::InputKind::Ime(_)
-        | rustkit_viewhost::InputKind::Edit(_)
-        | rustkit_viewhost::InputKind::KeyEquivalent { .. } => {}
+        // A Cmd chord the content view took before the menu (CH2.E3): the
+        // page hears its keydown (metaKey) first, as in Chromium; the page
+        // answers whether it claimed it, and one it did not goes on to the
+        // menu (`rustkit_viewhost::finish_key_equivalent`). Chromium's
+        // reserved chords (Cmd+T/N/W/Q, ...) never reach here.
+        rustkit_viewhost::InputKind::KeyEquivalent { key, token } => {
+            let (vk, text) = mac_key_to_vk(&key);
+            info!(keycode = key.mac_keycode, token, "Cmd chord to the page first");
+            view.handle_command_key(vk, text, key.shift, key.alt, token);
+        }
+        // Marked and committed text from the input method: a dead key, an
+        // IME, the accent popover, the emoji picker (CH2.E3).
+        rustkit_viewhost::InputKind::Ime(input) => {
+            tracing::debug!(?input, "input method text");
+            view.ime_input(input);
+            view.relayout();
+        }
+        // An Edit menu item (CH2.E3): the command in the focused text field.
+        rustkit_viewhost::InputKind::Edit(action) => {
+            use rustkit_engine::EditCommand;
+            let command = match action {
+                rustkit_viewhost::EditAction::Copy => EditCommand::Copy,
+                rustkit_viewhost::EditAction::Cut => EditCommand::Cut,
+                rustkit_viewhost::EditAction::Paste => EditCommand::Paste,
+                rustkit_viewhost::EditAction::Undo => EditCommand::Undo,
+                rustkit_viewhost::EditAction::Redo => EditCommand::Redo,
+                rustkit_viewhost::EditAction::SelectAll => EditCommand::SelectAll,
+            };
+            info!(?action, "Edit menu action");
+            view.edit_command(command);
+            view.relayout();
+        }
         rustkit_viewhost::InputKind::Key(key) => {
             // Cmd chords are menu shortcuts, except the editing
             // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
@@ -1244,24 +1272,7 @@ fn dispatch_view_input(
                 }
                 return;
             }
-            // macOS keyCodes -> the Win32 VK numbering the edit
-            // model speaks. Text keys carry their characters.
-            let (vk, text): (u32, &str) = match key.mac_keycode {
-                51 => (0x08, ""),      // delete (backspace)
-                117 => (0x2E, ""),     // forward delete
-                123 => (0x25, ""),     // left
-                124 => (0x27, ""),     // right
-                115 => (0x24, ""),     // home
-                119 => (0x23, ""),     // end
-                36 | 76 => (0x0D, ""), // return / keypad enter
-                48 => (0x09, ""),      // tab
-                53 => (0x1B, ""),      // escape
-                116 => (0x21, ""),     // page up
-                121 => (0x22, ""),     // page down
-                126 => (0x26, ""),     // up
-                125 => (0x28, ""),     // down
-                _ => (0, key.text.as_str()),
-            };
+            let (vk, text) = mac_key_to_vk(&key);
             if vk == 0 && text.is_empty() {
                 return;
             }
@@ -1297,6 +1308,27 @@ fn dispatch_view_input(
                 }
             }
         }
+    }
+}
+
+/// macOS keyCodes -> the Win32 VK numbering the edit model speaks. Text
+/// keys carry their characters.
+fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
+    match key.mac_keycode {
+        51 => (0x08, ""),      // delete (backspace)
+        117 => (0x2E, ""),     // forward delete
+        123 => (0x25, ""),     // left
+        124 => (0x27, ""),     // right
+        115 => (0x24, ""),     // home
+        119 => (0x23, ""),     // end
+        36 | 76 => (0x0D, ""), // return / keypad enter
+        48 => (0x09, ""),      // tab
+        53 => (0x1B, ""),      // escape
+        116 => (0x21, ""),     // page up
+        121 => (0x22, ""),     // page down
+        126 => (0x26, ""),     // up
+        125 => (0x28, ""),     // down
+        _ => (0, key.text.as_str()),
     }
 }
 
@@ -5064,6 +5096,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id().0.as_str();
+            // The real-window driver reads which shortcut the menu took.
+            info!(id, "menu event");
             match id {
                 id if id == menu_ids::NEW_TAB => {
                     // Send create_tab IPC to properly create tab in shell and sync

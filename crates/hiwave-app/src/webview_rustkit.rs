@@ -226,6 +226,8 @@ fn content_engine_builder() -> EngineBuilder {
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
         .follows_script_navigation(true)
+        // Copy, cut and paste use the system clipboard (CH2.E3).
+        .system_clipboard(!cfg!(test))
         // What a page asks of the network after its `load` event (beacons,
         // pixels, metrics fetches that may never stop) is the live loop's:
         // it neither holds the window thread inside the load nor delays
@@ -437,6 +439,12 @@ impl RustKitView {
     fn drop_events(&self) {
         let Some(handle) = self.handle.as_ref() else { return };
         let events = handle.drain_events();
+        // A Cmd chord the page did not claim goes on to the menu (CH2.E3).
+        for event in &events {
+            if let PageEvent::KeyEquivalentDone { token, claimed } = event {
+                rustkit_viewhost::finish_key_equivalent(*token, *claimed);
+            }
+        }
         #[cfg(test)]
         self.seen_events.borrow_mut().extend(events);
         #[cfg(not(test))]
@@ -631,6 +639,30 @@ impl RustKitView {
     }
 
     /// A key was released: the page hears `keyup`.
+    /// A macOS Cmd chord (CH2.E3): the page hears its keydown first. The
+    /// page answers whether it claimed `token`; one it did not goes on to
+    /// the main menu (`rustkit_viewhost::finish_key_equivalent`), when the
+    /// answer arrives.
+    pub fn handle_command_key(&self, key_code: u32, key: &str, shift: bool, alt: bool, token: u64) {
+        self.submit(PageCmd::Input(PageInput::CommandKey {
+            key_code,
+            key: key.to_string(),
+            shift,
+            alt,
+            token,
+        }));
+    }
+
+    /// The input method's marked or committed text (CH2.E3).
+    pub fn ime_input(&self, input: rustkit_viewhost::ImeInput) {
+        self.submit(PageCmd::Input(PageInput::Ime(input)));
+    }
+
+    /// An Edit menu item in the focused text field (CH2.E3).
+    pub fn edit_command(&self, command: rustkit_engine::EditCommand) {
+        self.submit(PageCmd::Input(PageInput::Edit(command)));
+    }
+
     pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
         self.submit(PageCmd::Input(PageInput::KeyUp {
             key_code,
@@ -1300,9 +1332,27 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::KeyEquivalentDone { token, claimed } => {
+                    rustkit_viewhost::finish_key_equivalent(token, claimed);
+                }
+                PageEvent::TextInput(state) => self.mirror_text_input(state),
                 PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
+    }
+
+    /// Keep the page's text-input state where the content view's input
+    /// method can read it synchronously (CH2.E3).
+    fn mirror_text_input(&self, state: Option<rustkit_engine::TextInputState>) {
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        let mirror = state.map(|s| rustkit_viewhost::TextInputMirror {
+            marked: s.marked,
+            selected: s.selected,
+            caret: s.caret.map(|c| (c.x as f64, c.y as f64, c.height as f64)),
+        });
+        rustkit_viewhost::set_text_input_state(surface.borrow().viewhost_id(), mirror);
     }
 
     fn present_latest(&self) {
@@ -1341,6 +1391,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
         | PageEvent::TextFocused(_)
+        | PageEvent::KeyEquivalentDone { .. }
+        | PageEvent::TextInput(_)
         | PageEvent::Cursor(_)
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,

@@ -178,6 +178,26 @@ fn insert_text_with_nothing_marked_is_a_cancelable_insert() {
 }
 
 #[test]
+fn an_accent_picked_from_the_press_and_hold_popover_replaces_the_letter() {
+    let (mut engine, id) = page();
+    focus_end(&mut engine, id, "i");
+    engine.insert_text(id, "e");
+    take_log(&mut engine, id);
+    // The popover's pick: insertText:"è" replacementRange:{2, 1}. Not
+    // logged from Chrome (CDP's insertText takes no replacement range):
+    // the events are the plain insertText ones, over the replaced letter.
+    assert!(engine.insert_text_replacing(id, "\u{e8}", Some((2, 1))));
+    assert_eq!(value(&mut engine, id, "i"), "abè");
+    assert_eq!(
+        take_log(&mut engine, id),
+        [
+            "beforeinput \"è\" insertText false \"abe\" InputEvent true",
+            "input \"è\" insertText false \"abè\" InputEvent false",
+        ]
+    );
+}
+
+#[test]
 fn the_text_input_state_reports_the_marked_range_and_a_caret_rect() {
     let (mut engine, id) = page();
     focus_end(&mut engine, id, "i");

@@ -21,6 +21,7 @@ pub use rustkit_bindings::IpcMessage;
 /// The clipboard edit commands use (CH2.E1); a platform one plugs in with
 /// [`Engine::set_clipboard`].
 pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
+pub use rustkit_dom::forms::EditCommand;
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -1327,6 +1328,10 @@ pub struct EngineConfig {
     /// watchdog is armed once per execution, and script still running when
     /// its allowance is spent is stopped.
     pub live_turn_budget_ms: u64,
+    /// Copy, cut and paste use the system clipboard (macOS `NSPasteboard`,
+    /// CH2.E3) instead of an in-memory one. Off by default: tests and
+    /// captures must not touch the user's clipboard. The app turns it on.
+    pub system_clipboard: bool,
     /// The embedder loads the URL a page's script asks for
     /// ([`Engine::take_script_navigation`]), as the live app does. A load
     /// whose scripts have asked to leave then does not wait for the images
@@ -1372,6 +1377,7 @@ impl Default for EngineConfig {
             follows_script_navigation: false,
             post_load_requests_live: false,
             inspector: InspectorConfig::tab(),
+            system_clipboard: false,
         }
     }
 }
@@ -2684,13 +2690,18 @@ impl Engine {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         console_log::install_console_diag();
+        let system_clipboard = config.system_clipboard;
         Ok(Self {
             config,
             presenter,
             page_commits: HashMap::new(),
             nav_seq,
             host_reentry_override: None,
-            clipboard: MemoryClipboard::shared(),
+            clipboard: if system_clipboard {
+                text_input::system_clipboard()
+            } else {
+                MemoryClipboard::shared()
+            },
             clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
@@ -21159,6 +21170,13 @@ impl EngineBuilder {
     /// (`EngineConfig::live_turn_budget_ms`).
     pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
         self.config.live_turn_budget_ms = ms;
+        self
+    }
+
+    /// Copy, cut and paste use the system clipboard
+    /// (`EngineConfig::system_clipboard`).
+    pub fn system_clipboard(mut self, on: bool) -> Self {
+        self.config.system_clipboard = on;
         self
     }
 
