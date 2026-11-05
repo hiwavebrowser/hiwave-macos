@@ -655,13 +655,6 @@ impl RustKitView {
             .flatten()
     }
 
-    /// Where the page's own script asked to go since the last call
-    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
-    /// from a timer). The caller navigates.
-    /// A reload, `location.replace()` or a meta refresh replaces the
-    /// current history entry when it is loaded, as in Chrome.
-    /// The URL, and whether the user activated the navigation (a click or
-    /// a form submit) rather than the page's script.
     /// What the chrome must be told since the last call (CH2.E9).
     /// Filled from the content thread's events, so only with the page on
     /// its own thread (the default); flag off the events are dropped.
@@ -672,16 +665,16 @@ impl RustKitView {
         std::mem::take(&mut *self.chrome_updates.borrow_mut())
     }
 
-    /// The messages the page posted with `window.ipc.postMessage` since
-    /// the last call, oldest first (CH2.E9). Content thread only. The app
-    /// must hand these to its command handler only for a view showing the
-    /// app's own documents (chrome, shelf): a web page can post here too.
     /// The viewhost id the input of this view's NSView is tagged with.
     /// Content thread only (the flag-off engine owns its host view).
     pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
         self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
     }
 
+    /// The messages the page posted with `window.ipc.postMessage` since
+    /// the last call, oldest first (CH2.E9). Content thread only. The app
+    /// must hand these to its command handler only for a view showing the
+    /// app's own documents (chrome, shelf): a web page can post here too.
     pub fn take_ipc_messages(&self) -> Vec<String> {
         if self.content.is_some() {
             self.harvest();
@@ -689,6 +682,13 @@ impl RustKitView {
         std::mem::take(&mut *self.ipc_inbox.borrow_mut())
     }
 
+    /// Where the page's own script asked to go since the last call
+    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
+    /// from a timer). The caller navigates.
+    /// A reload, `location.replace()` or a meta refresh replaces the
+    /// current history entry when it is loaded, as in Chrome.
+    /// The URL, and whether the user activated the navigation (a click or
+    /// a form submit) rather than the page's script.
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
