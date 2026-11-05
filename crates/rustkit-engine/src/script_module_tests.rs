@@ -494,3 +494,38 @@ fn a_missing_module_in_a_prefetched_graph_fails_only_its_own_module() {
         "{records:#?}"
     );
 }
+
+/// Review B2 on S15: a slow import must not hold the page's classic
+/// scripts. The prefetch walk stops when the page's scripts are in; a fetch
+/// still out is awaited only by the module that imports it.
+#[test]
+fn a_slow_prefetched_import_does_not_hold_the_classic_scripts() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(r#"<script type="module" src="/a.js"></script><script>log.push('classic'); window.classicAt = Date.now();</script>"#),
+        ),
+        ("/a.js", JS, "import './dep.js?delay=3000'; log.push('a');".into()),
+        ("/dep.js?delay=3000", JS, "log.push('dep');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,dep,a");
+    let classic_at = engine.execute_script(view, "String(window.classicAt)").unwrap();
+    let classic_ms: u128 = classic_at
+        .trim_start_matches("String(\"")
+        .trim_end_matches("\")")
+        .parse()
+        .unwrap_or_else(|_| panic!("classicAt: {classic_at}"));
+    let dep = served_once(&server, "/dep.js?delay=3000");
+    let dep_ms = dep
+        .answered_wall
+        .expect("dep answered")
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    assert!(
+        classic_ms < dep_ms,
+        "the classic script ran {} ms after the slow import was answered: it waited for the module graph",
+        classic_ms - dep_ms
+    );
+}

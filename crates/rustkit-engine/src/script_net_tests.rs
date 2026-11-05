@@ -27,6 +27,8 @@ pub(crate) struct ServedRequest {
     pub(crate) path: String,
     pub(crate) arrived: Instant,
     pub(crate) answered: Option<Instant>,
+    /// `answered` on the wall clock, to compare with a page's `Date.now()`.
+    pub(crate) answered_wall: Option<std::time::SystemTime>,
 }
 
 impl Server {
@@ -93,7 +95,7 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let entry = {
                     let mut log = logged.lock().unwrap();
-                    log.push(ServedRequest { path: path.clone(), arrived: Instant::now(), answered: None });
+                    log.push(ServedRequest { path: path.clone(), arrived: Instant::now(), answered: None, answered_wall: None });
                     log.len() - 1
                 };
                 let length = head
@@ -146,7 +148,11 @@ pub(crate) fn serve_byte_routes(routes: Vec<(&'static str, &'static str, Vec<u8>
                 );
                 let _ = stream.write_all(&body);
                 let _ = stream.flush();
-                logged.lock().unwrap()[entry].answered = Some(Instant::now());
+                {
+                    let mut log = logged.lock().unwrap();
+                    log[entry].answered = Some(Instant::now());
+                    log[entry].answered_wall = Some(std::time::SystemTime::now());
+                }
             });
         }
     });
