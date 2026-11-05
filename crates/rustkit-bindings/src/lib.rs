@@ -131,8 +131,9 @@ mod web_scroll;
 mod web_url;
 
 pub use dom::{
-    BoxGeometry, ControlWrites, ElementScrolls, ForcedGeometry, ForcedLayout, GeometrySource, HitTester,
-    SelectorMatchFn, SharedElementScrolls,
+    AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, CssAnimationInfo, ElementScrolls,
+    ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    SharedElementScrolls,
 };
 pub mod events;
 
@@ -459,12 +460,11 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
-    ("Element", "animate(composite)"),
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("Element", "animate(pseudoElement)"),
-    ("Animation", "playbackRate"),
-    ("Animation", "reverse"),
-    ("Animation", "updatePlaybackRate"),
+    ("CSSAnimation", "currentTime"),
+    ("CSSAnimation", "playbackRate"),
+    ("CSSTransition", "pause"),
     ("XMLHttpRequest", "open(async=false)"),
     ("XMLHttpRequest", "responseXML"),
     ("CustomElementRegistry", "define(extends)"),
@@ -701,6 +701,8 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
+    // The virtual clock as it stands: the engine's animation clock.
+    window.__rustkit_now = function () { return now; };
     window.__rustkit_next_timer = function () {
         var due = -1;
         for (var i = 0; i < timers.length; i++) {
@@ -1735,6 +1737,13 @@ impl DomBindings {
     }
 
     /// Keep element scroll offsets in the view's table.
+    /// Share the view's animated-style layer (`AnimatedStyles`): script's
+    /// Web Animations write it, the engine's build reads it and publishes
+    /// its CSS animations into it.
+    pub fn share_animated_styles(&self, animated: SharedAnimatedStyles) {
+        self.dom_host.borrow_mut().animated = animated;
+    }
+
     pub fn share_element_scrolls(&self, scrolls: SharedElementScrolls) {
         self.dom_host.borrow_mut().element_scrolls = scrolls;
     }
@@ -2428,6 +2437,57 @@ impl DomBindings {
             JsValue::Number(n) => (n as u32, false),
             _ => (0, false),
         })
+    }
+
+    /// The page's virtual clock, in ms: what its timers and animation
+    /// frames have run up to. The engine's CSS transitions run on it.
+    pub fn clock_now_ms(&self) -> f64 {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_bookkeeping("window.__rustkit_now()")
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() => n,
+            _ => 0.0,
+        }
+    }
+
+    /// Fire a `TransitionEvent` (`transitionrun`, `transitionstart`,
+    /// `transitionend`, `transitioncancel`) at an element (by node id), as
+    /// the engine's transitions change phase. Bubbles; `transitionend` can
+    /// be cancelled. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_transition_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        property: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
+    }
+
+    /// Fire an `AnimationEvent` (`animationstart`, `animationiteration`,
+    /// `animationend`, `animationcancel`) at an element (by node id), as
+    /// the engine's `@keyframes` animations change phase. Bubbles, not
+    /// cancelable. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_animation_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        name: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
     }
 
     /// Milliseconds until the page's next timer is due on the virtual clock

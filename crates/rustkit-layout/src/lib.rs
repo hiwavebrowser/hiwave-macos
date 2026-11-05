@@ -10907,15 +10907,17 @@ impl DisplayList {
         // border radius shrunk inward by the border it sits inside.
         let d = &layout_box.dimensions;
         let border_rect = d.border_box();
+        // A padding box with no area still clips: it clips everything. The
+        // chrome's collapsed sidebar is `width: 0; overflow: hidden` with its
+        // sections still inside (CH2.B2), and Chromium paints none of them;
+        // returning None here painted them all, unclipped, over the main
+        // area. The renderer takes an empty clip as "nothing passes".
         let padding_rect = Rect::new(
             border_rect.x + d.border.left,
             border_rect.y + d.border.top,
-            border_rect.width - d.border.left - d.border_with_gutter().right,
-            border_rect.height - d.border.top - d.border_with_gutter().bottom,
+            (border_rect.width - d.border.left - d.border_with_gutter().right).max(0.0),
+            (border_rect.height - d.border.top - d.border_with_gutter().bottom).max(0.0),
         );
-        if padding_rect.width <= 0.0 || padding_rect.height <= 0.0 {
-            return None;
-        }
 
         // Each corner's horizontal radius shrinks by the vertical border it
         // meets and its vertical radius by the horizontal one, so unequal
@@ -12180,11 +12182,9 @@ impl DisplayList {
                     } else {
                         Color::BLACK
                     },
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::new(239, 239, 239, 1.0)
-                    },
+                    // ButtonFace comes from the UA style (engine), so an
+                    // authored `transparent` survives here (CH2.B3).
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {

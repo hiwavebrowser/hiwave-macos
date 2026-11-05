@@ -31,14 +31,25 @@ pub struct StylesheetAst {
     pub keyframes: Vec<KeyframesAst>,
 }
 
-/// The `opacity` an `@keyframes` rule sets at its two ends, `None` where that
-/// keyframe does not set it. The engine runs no animations, so this is all it
-/// keeps of the rule (see `ComputedStyle::settle_animation_opacity`).
+/// An `@keyframes` rule: its keyframe blocks, in source order, for the
+/// engine to run, and the `opacity` it sets at its two ends (`None` where
+/// that keyframe does not set it) for the frame a parity capture, which
+/// runs no animations, settles on (`ComputedStyle::settle_animation_opacity`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframesAst {
     pub name: String,
     pub first: Option<f32>,
     pub last: Option<f32>,
+    pub frames: Vec<KeyframeAst>,
+}
+
+/// One keyframe block: the offsets its selector names (fractions, `from`
+/// is 0 and `to` is 1) and its declarations (`!important` ones dropped,
+/// as they are invalid in a keyframe).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyframeAst {
+    pub offsets: Vec<f32>,
+    pub declarations: Vec<DeclarationAst>,
 }
 
 /// A layer name declared at a point in the sheet.
@@ -119,11 +130,40 @@ fn at_block_kind(prelude: &str) -> AtBlock {
 /// a value this cannot read (`var()`): the rule is then as good as absent, and
 /// the box keeps painting at full opacity rather than be hidden on a guess.
 fn keyframes_opacity(name: String, body: &str) -> Option<KeyframesAst> {
-    let mut frames = KeyframesAst { name, first: None, last: None };
+    let mut frames = KeyframesAst {
+        name,
+        first: None,
+        last: None,
+        frames: Vec::new(),
+    };
     if frames.name.is_empty() {
         return None;
     }
     for frame in parse_stylesheet(body).ok()?.rules {
+        let offsets: Vec<f32> = frame
+            .selector
+            .split(',')
+            .filter_map(|at| match at.trim().to_ascii_lowercase().as_str() {
+                "from" => Some(0.0),
+                "to" => Some(1.0),
+                other => other
+                    .strip_suffix('%')
+                    .and_then(|p| p.trim().parse::<f32>().ok())
+                    .map(|p| p / 100.0),
+            })
+            .filter(|o| (0.0..=1.0).contains(o))
+            .collect();
+        if !offsets.is_empty() {
+            frames.frames.push(KeyframeAst {
+                offsets,
+                declarations: frame
+                    .declarations
+                    .iter()
+                    .filter(|d| !d.important)
+                    .cloned()
+                    .collect(),
+            });
+        }
         // Keyframe declarations with `!important` are invalid and ignored.
         let Some(value) = frame
             .declarations
@@ -421,7 +461,7 @@ fn take_block(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
 }
 
 /// A parsed declaration AST.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeclarationAst {
     pub property: String,
     pub value: String,
@@ -1392,32 +1432,27 @@ mod tests {
     /// pin the parser contract here.
     #[test]
     fn keyframes_keep_opacity_at_each_end() {
-        let frames = |css: &str| parse_stylesheet(css).expect("parse").keyframes;
+        let frames = |css: &str| -> Vec<(String, Option<f32>, Option<f32>)> {
+            parse_stylesheet(css)
+                .expect("parse")
+                .keyframes
+                .into_iter()
+                .map(|k| (k.name, k.first, k.last))
+                .collect()
+        };
         assert_eq!(
             frames("@keyframes fade { from { opacity: 0 } to { opacity: 1 } }"),
-            vec![KeyframesAst {
-                name: "fade".into(),
-                first: Some(0.0),
-                last: Some(1.0),
-            }]
+            vec![("fade".to_string(), Some(0.0), Some(1.0))]
         );
         assert_eq!(
             frames("@keyframes p { 0% { opacity: 20% } 100% { opacity: .5 } }"),
-            vec![KeyframesAst {
-                name: "p".into(),
-                first: Some(0.2),
-                last: Some(0.5),
-            }]
+            vec![("p".to_string(), Some(0.2), Some(0.5))]
         );
         // `!important` in a keyframe is invalid and ignored; an end that
         // only had that declaration stays unset.
         assert_eq!(
             frames("@keyframes i { from { opacity: 0 !important } to { opacity: 1 } }"),
-            vec![KeyframesAst {
-                name: "i".into(),
-                first: None,
-                last: Some(1.0),
-            }]
+            vec![("i".to_string(), None, Some(1.0))]
         );
         // `var()` cannot be read: the `?` on the parse drops the whole
         // `@keyframes` (as good as absent), so settle leaves the box at
@@ -1428,11 +1463,46 @@ mod tests {
         );
         assert_eq!(
             frames("@-webkit-keyframes w { to { opacity: .25 } }"),
-            vec![KeyframesAst {
-                name: "w".into(),
-                first: None,
-                last: Some(0.25),
-            }]
+            vec![("w".to_string(), None, Some(0.25))]
+        );
+    }
+
+    /// S13b: the engine runs `@keyframes`, so every block is kept with its
+    /// offsets and declarations (`!important` ones dropped).
+    #[test]
+    fn keyframes_keep_every_block() {
+        let sheet = parse_stylesheet(
+            "@keyframes k { from { opacity: 0; transform: none } 25%, 75% { opacity: .5 !important; \
+             animation-timing-function: linear } to { opacity: 1 } }",
+        )
+        .expect("parse");
+        let k = &sheet.keyframes[0];
+        let blocks: Vec<(Vec<f32>, Vec<(String, String)>)> = k
+            .frames
+            .iter()
+            .map(|f| {
+                (
+                    f.offsets.clone(),
+                    f.declarations
+                        .iter()
+                        .map(|d| (d.property.clone(), d.value.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![
+                (
+                    vec![0.0],
+                    vec![("opacity".to_string(), "0".to_string()), ("transform".to_string(), "none".to_string())]
+                ),
+                (
+                    vec![0.25, 0.75],
+                    vec![("animation-timing-function".to_string(), "linear".to_string())]
+                ),
+                (vec![1.0], vec![("opacity".to_string(), "1".to_string())]),
+            ]
         );
     }
 }
