@@ -70,7 +70,8 @@ fn computed(engine: &mut Engine, view: EngineViewId, prop: &str) -> String {
 
 fn opacity(engine: &mut Engine, view: EngineViewId) -> f64 {
     let s = computed(engine, view, "opacity");
-    s.parse().unwrap_or_else(|_| panic!("computed opacity {s:?}"))
+    s.parse()
+        .unwrap_or_else(|_| panic!("computed opacity {s:?}"))
 }
 
 fn log(engine: &mut Engine, view: EngineViewId) -> String {
@@ -113,8 +114,9 @@ const FADE: &str = "@keyframes fade{from{opacity:0}to{opacity:1}}";
 /// once each.
 #[test]
 fn a_forwards_fade_in_paints_after_the_timers_pass() {
-    let (mut engine, view, _server) =
-        load(&page(&format!("#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}")));
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}"
+    )));
     pump(&mut engine, view, 100, 10);
     let mid = opacity(&mut engine, view);
     assert!(mid > 0.2 && mid < 0.8, "midway opacity {mid}");
@@ -124,14 +126,19 @@ fn a_forwards_fade_in_paints_after_the_timers_pass() {
     assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.2");
     pump(&mut engine, view, 500, 50);
     assert_eq!(opacity(&mut engine, view), 1.0, "forwards holds");
-    assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.2", "end fires once");
+    assert_eq!(
+        log(&mut engine, view),
+        "start:fade@0,end:fade@0.2",
+        "end fires once"
+    );
 }
 
 /// Without a forward fill the box returns to its own value at the end.
 #[test]
 fn without_a_fill_the_box_returns_to_its_own_value() {
-    let (mut engine, view, _server) =
-        load(&page(&format!("#h{{opacity:.5;animation:fade 100ms linear}}{FADE}")));
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:.5;animation:fade 100ms linear}}{FADE}"
+    )));
     pump(&mut engine, view, 50, 10);
     let mid = opacity(&mut engine, view);
     assert!(mid > 0.3 && mid < 0.7, "midway opacity {mid}");
@@ -159,20 +166,31 @@ fn an_infinite_spinner_keeps_turning() {
         .split(',')
         .map(|c| c.trim().parse().unwrap())
         .collect();
-    assert!(q[0].abs() < 0.05 && (q[1] - 1.0).abs() < 0.05, "quarter turn: {quarter}");
+    assert!(
+        q[0].abs() < 0.05 && (q[1] - 1.0).abs() < 0.05,
+        "quarter turn: {quarter}"
+    );
     pump(&mut engine, view, 2000, 100);
-    assert_eq!(log(&mut engine, view), "start:spin@0,iteration:spin@1,iteration:spin@2");
+    assert_eq!(
+        log(&mut engine, view),
+        "start:spin@0,iteration:spin@1,iteration:spin@2"
+    );
     let later = computed(&mut engine, view, "transform");
     pump(&mut engine, view, 300, 100);
-    assert_ne!(later, computed(&mut engine, view, "transform"), "still turning");
+    assert_ne!(
+        later,
+        computed(&mut engine, view, "transform"),
+        "still turning"
+    );
 }
 
 /// `animation-play-state: paused` holds the current value; `running`
 /// resumes from it.
 #[test]
 fn play_state_paused_holds_and_running_resumes() {
-    let (mut engine, view, _server) =
-        load(&page(&format!("#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}")));
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}"
+    )));
     pump(&mut engine, view, 100, 10);
     run(&mut engine, view, "h.style.animationPlayState='paused'");
     pump(&mut engine, view, 16, 16);
@@ -204,7 +222,10 @@ fn iteration_count_and_alternate_direction() {
     assert!(opacity(&mut engine, view) < down, "still coming down");
     pump(&mut engine, view, 200, 16);
     assert_eq!(opacity(&mut engine, view), 0.0);
-    assert_eq!(log(&mut engine, view), "start:fade@0,iteration:fade@0.1,end:fade@0.2");
+    assert_eq!(
+        log(&mut engine, view),
+        "start:fade@0,iteration:fade@0.1,end:fade@0.2"
+    );
 }
 
 /// A delay with `both`: the first keyframe shows during the delay
@@ -216,7 +237,11 @@ fn delay_with_both_fills_backwards_then_holds() {
         "#h{opacity:0;animation:up 100ms linear 100ms both}@keyframes up{from{opacity:.5}to{opacity:1}}",
     ));
     pump(&mut engine, view, 50, 10);
-    assert_eq!(opacity(&mut engine, view), 0.5, "the first keyframe during the delay");
+    assert_eq!(
+        opacity(&mut engine, view),
+        0.5,
+        "the first keyframe during the delay"
+    );
     assert_eq!(log(&mut engine, view), "");
     pump(&mut engine, view, 100, 10);
     let mid = opacity(&mut engine, view);
@@ -231,8 +256,9 @@ fn delay_with_both_fills_backwards_then_holds() {
 /// value is the box's own again and `animationcancel` fires.
 #[test]
 fn removing_the_animation_cancels_it() {
-    let (mut engine, view, _server) =
-        load(&page(&format!("#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}")));
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}"
+    )));
     pump(&mut engine, view, 100, 10);
     assert!(opacity(&mut engine, view) > 0.2);
     run(&mut engine, view, "h.style.animation='none'");
@@ -257,7 +283,10 @@ fn several_animations_run_together() {
     ));
     pump(&mut engine, view, 200, 16);
     assert_eq!(opacity(&mut engine, view), 1.0);
-    assert_eq!(computed(&mut engine, view, "transform"), "matrix(1, 0, 0, 1, 100, 0)");
+    assert_eq!(
+        computed(&mut engine, view, "transform"),
+        "matrix(1, 0, 0, 1, 100, 0)"
+    );
     let mut ended: Vec<String> = log(&mut engine, view)
         .split(',')
         .filter(|e| e.starts_with("end:"))
@@ -270,7 +299,10 @@ fn several_animations_run_together() {
 /// Parity captures run no animations: the settled frame paints at once.
 #[test]
 fn with_animations_disabled_the_settled_frame_paints() {
-    let html = format!("<!doctype html>{}", page(&format!("#h{{opacity:0;animation:fade 1s forwards}}{FADE}")));
+    let html = format!(
+        "<!doctype html>{}",
+        page(&format!("#h{{opacity:0;animation:fade 1s forwards}}{FADE}"))
+    );
     let config = EngineConfig {
         disable_animations: true,
         ..EngineConfig::default()
@@ -285,5 +317,8 @@ fn with_animations_disabled_the_settled_frame_paints() {
         })
         .expect("view");
     engine.load_html(view, &html).expect("load");
-    assert!(hero_painted(&engine, view), "settled on the end frame at load");
+    assert!(
+        hero_painted(&engine, view),
+        "settled on the end frame at load"
+    );
 }

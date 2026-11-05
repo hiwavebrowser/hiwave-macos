@@ -2245,6 +2245,25 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Fire an `AnimationEvent` (`animationstart`, `animationiteration`,
+    /// `animationend`, `animationcancel`) at an element (by node id), as
+    /// the engine's `@keyframes` animations change phase. Bubbles, not
+    /// cancelable. Listener exceptions are queued, see
+    /// [`Self::take_reported_errors`].
+    pub fn fire_animation_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        name: &str,
+        elapsed_s: f32,
+    ) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
+             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+        ))?;
+        Ok(())
+    }
+
     /// Milliseconds until the page's next timer is due on the virtual clock
     /// (0 when one is overdue). `None` when no timer is set.
     pub fn next_timer_delay(&self) -> Option<u64> {

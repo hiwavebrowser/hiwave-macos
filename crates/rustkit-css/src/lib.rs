@@ -2413,6 +2413,35 @@ pub struct TransitionItem {
     pub timing: TimingFunction,
 }
 
+/// One entry of the `animation` list (css-animations-1 §4): a `@keyframes`
+/// name (`none` for no animation) with its timing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationItem {
+    pub name: String,
+    pub duration: f32,
+    pub delay: f32,
+    pub timing: TimingFunction,
+    pub iteration_count: AnimationIterationCount,
+    pub direction: AnimationDirection,
+    pub fill_mode: AnimationFillMode,
+    pub play_state: AnimationPlayState,
+}
+
+impl Default for AnimationItem {
+    fn default() -> Self {
+        Self {
+            name: "none".to_string(),
+            duration: 0.0,
+            delay: 0.0,
+            timing: TimingFunction::Ease,
+            iteration_count: AnimationIterationCount::One,
+            direction: AnimationDirection::Normal,
+            fill_mode: AnimationFillMode::None,
+            play_state: AnimationPlayState::Running,
+        }
+    }
+}
+
 impl TimingFunction {
     /// The output progress for input progress `t` in 0..=1 (css-easing-1):
     /// the cubic Bézier solved for `x = t`, or the step function.
@@ -3032,6 +3061,9 @@ pub struct ComputedStyle {
     pub transition_timing_function: TimingFunction,
     pub transition_delay: f32, // seconds
     pub transitions: Vec<TransitionItem>,
+    /// The whole `animation` list the engine runs; the scalars below are
+    /// the first item's, and `animation_name` joins every name.
+    pub animations: Vec<AnimationItem>,
 
     // Animations (parsed but not executed during parity capture)
     pub animation_name: String,
@@ -5390,6 +5422,7 @@ mod settle_animation_opacity_tests {
                     name: "x".into(),
                     first,
                     last,
+                    frames: Vec::new(),
                 }],
                 ..Default::default()
             }]

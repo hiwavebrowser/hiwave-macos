@@ -32,7 +32,9 @@
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_css::{
-    Color, ComputedStyle, Length, TimingFunction, TransformList, TransformOp, TransitionItem,
+    AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
+    AnimationPlayState, Color, ComputedStyle, Length, TimingFunction, TransformList, TransformOp,
+    TransitionItem,
 };
 use std::collections::HashMap;
 
@@ -414,12 +416,15 @@ impl Transition {
     }
 }
 
-/// A transition event to fire at an element once the build is over.
+/// A transition or animation event to fire at an element once the build
+/// is over: `property` for a `transition*` event, `name` for an
+/// `animation*` one.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AnimationEvent {
     pub(crate) node: usize,
     pub(crate) kind: &'static str,
     pub(crate) property: String,
+    pub(crate) name: String,
     pub(crate) elapsed_s: f32,
 }
 
@@ -441,6 +446,9 @@ pub(crate) struct Animations {
     /// once each per document, for the Inspector's unsupported APIs.
     reported: std::collections::BTreeSet<String>,
     pending_unsupported: Vec<String>,
+    /// The running `@keyframes` animations, one per element and
+    /// `animation` list index.
+    css: Vec<CssAnimation>,
 }
 
 impl Animations {
@@ -477,7 +485,9 @@ impl Animations {
     /// Whether the live loop has to keep turning for this view: a
     /// transition is running or an event waits to be fired.
     pub(crate) fn active(&self) -> bool {
-        !self.transitions.is_empty() || !self.events.is_empty()
+        !self.transitions.is_empty()
+            || !self.events.is_empty()
+            || self.css.iter().any(CssAnimation::moving)
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<AnimationEvent> {
@@ -489,6 +499,7 @@ impl Animations {
             node: t.node,
             kind,
             property: PROPS[t.prop].name.to_string(),
+            name: String::new(),
             elapsed_s,
         });
     }
@@ -511,11 +522,41 @@ impl Animations {
             self.push_event(&t, "transitioncancel", t.elapsed_at(now));
             self.base.remove(&t.node);
         }
+        let mut gone = Vec::new();
+        self.css.retain(|a| {
+            if alive(a.node) {
+                true
+            } else {
+                gone.push(a.clone());
+                false
+            }
+        });
+        for a in gone {
+            if !a.ended {
+                let elapsed = a.elapsed_at(now);
+                self.push_animation_event(&a, "animationcancel", elapsed);
+            }
+        }
     }
 
     /// The build's hand-off for one element: start the transitions its
-    /// changed values call for and overlay the running ones on `style`.
-    pub(crate) fn on_style(&mut self, node: usize, style: &mut ComputedStyle) {
+    /// changed values call for, run its `@keyframes` animations, and
+    /// overlay both on `style` (animations under transitions, the
+    /// cascade's order). `resolve` reads a `@keyframes` by name against
+    /// the element's cascaded style.
+    pub(crate) fn on_style(
+        &mut self,
+        node: usize,
+        style: &mut ComputedStyle,
+        resolve: &dyn Fn(&str, &ComputedStyle) -> Vec<Frame>,
+    ) {
+        self.transitions_update(node, style);
+        self.animations_update(node, style, resolve);
+        self.transitions_overlay(node, style);
+    }
+
+    /// Start the transitions this element's changed values call for.
+    fn transitions_update(&mut self, node: usize, style: &mut ComputedStyle) {
         let now = self.clock_ms;
         let has_running = self.transitions.iter().any(|t| t.node == node);
         if style.transitions.is_empty() && !has_running {
@@ -623,8 +664,11 @@ impl Animations {
                 self.transitions.push(t);
             }
         }
+    }
 
-        // Overlay the running transitions of this element.
+    /// Overlay the running transitions of this element.
+    fn transitions_overlay(&mut self, node: usize, style: &mut ComputedStyle) {
+        let now = self.clock_ms;
         let mut i = 0;
         while i < self.transitions.len() {
             if self.transitions[i].node != node {
@@ -778,6 +822,487 @@ pub(crate) fn sync_transition_scalars(style: &mut ComputedStyle, none: bool) {
     }
 }
 
+// ------------------------------------------------------------ @keyframes
+
+/// A keyframe of a resolved `@keyframes`: its offset, the values it sets
+/// and its own timing function, when it declares one.
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    pub(crate) offset: f32,
+    pub(crate) values: Vec<(usize, AnimValue)>,
+    pub(crate) timing: Option<TimingFunction>,
+}
+
+/// The indices of the animatable properties `name` sets: its own, or the
+/// longhands a shorthand expands to.
+pub(crate) fn prop_indices(name: &str) -> Vec<usize> {
+    let name = name.to_ascii_lowercase();
+    if let Some(i) = PROPS.iter().position(|p| p.name == name) {
+        return vec![i];
+    }
+    expands_to(&name)
+        .iter()
+        .filter_map(|n| PROPS.iter().position(|p| p.name == *n))
+        .collect()
+}
+
+/// The value of animatable property `index` in `style`.
+pub(crate) fn prop_value(style: &ComputedStyle, index: usize) -> AnimValue {
+    (PROPS[index].get)(style)
+}
+
+/// One running CSS animation (css-animations-1 §4, web-animations-1 §4.8
+/// for the timing).
+#[derive(Clone, Debug)]
+struct CssAnimation {
+    node: usize,
+    /// Its position in the element's `animation` list.
+    index: usize,
+    name: String,
+    frames: Vec<Frame>,
+    /// When its delay was counted from (moved on when it is resumed).
+    created_ms: f64,
+    delay_ms: f64,
+    duration_ms: f64,
+    iterations: f32,
+    direction: AnimationDirection,
+    fill: AnimationFillMode,
+    timing: TimingFunction,
+    /// The local time it was paused at.
+    paused_local: Option<f64>,
+    /// `animationstart` has fired.
+    started: bool,
+    /// The iteration `animationiteration` last fired for.
+    iterations_seen: u32,
+    /// `animationend` has fired: the active phase is over.
+    ended: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Before,
+    Active,
+    After,
+}
+
+impl CssAnimation {
+    fn moving(&self) -> bool {
+        !self.ended && self.paused_local.is_none()
+    }
+    fn local(&self, now: f64) -> f64 {
+        self.paused_local.unwrap_or(now - self.created_ms)
+    }
+    fn active_duration(&self) -> f64 {
+        if self.iterations.is_infinite() {
+            f64::INFINITY
+        } else {
+            self.duration_ms * self.iterations as f64
+        }
+    }
+    fn phase(&self, local: f64) -> Phase {
+        if local < self.delay_ms {
+            Phase::Before
+        } else if local - self.delay_ms < self.active_duration() {
+            Phase::Active
+        } else {
+            Phase::After
+        }
+    }
+    /// The iteration and the directed progress at local time `local`, or
+    /// `None` when the animation is not in effect (outside the active
+    /// phase with no fill that way).
+    fn progress(&self, local: f64) -> Option<(u32, f32)> {
+        let phase = self.phase(local);
+        let active = match phase {
+            Phase::Before => {
+                if matches!(
+                    self.fill,
+                    AnimationFillMode::Backwards | AnimationFillMode::Both
+                ) {
+                    0.0
+                } else {
+                    return None;
+                }
+            }
+            Phase::Active => local - self.delay_ms,
+            Phase::After => {
+                if matches!(
+                    self.fill,
+                    AnimationFillMode::Forwards | AnimationFillMode::Both
+                ) {
+                    self.active_duration()
+                } else {
+                    return None;
+                }
+            }
+        };
+        let (iteration, p) = if self.duration_ms <= 0.0 {
+            match phase {
+                Phase::Before => (0.0, 0.0),
+                _ => ((self.iterations.ceil().max(1.0) - 1.0) as f64, 1.0),
+            }
+        } else {
+            let overall = active / self.duration_ms;
+            let mut iteration = overall.floor();
+            let mut p = overall - iteration;
+            // The end of the active phase is the last iteration's end.
+            if phase == Phase::After && p == 0.0 && overall > 0.0 {
+                iteration -= 1.0;
+                p = 1.0;
+            }
+            (iteration.max(0.0), p)
+        };
+        let iteration = iteration as u32;
+        let p = p as f32;
+        let forwards = match self.direction {
+            AnimationDirection::Normal => true,
+            AnimationDirection::Reverse => false,
+            AnimationDirection::Alternate => iteration % 2 == 0,
+            AnimationDirection::AlternateReverse => iteration % 2 == 1,
+        };
+        Some((iteration, if forwards { p } else { 1.0 - p }))
+    }
+    /// The animatable properties its keyframes set.
+    fn props(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self
+            .frames
+            .iter()
+            .flat_map(|f| f.values.iter().map(|(i, _)| *i))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+    /// The value of `prop` at directed progress `p`: between the keyframes
+    /// around it, eased by the first one's timing function (the
+    /// animation's own when it has none), with the underlying value as an
+    /// implicit 0% and 100% keyframe (css-animations-1 §4.1).
+    fn value_of(&self, prop: usize, p: f32, underlying: &AnimValue) -> AnimValue {
+        let mut list: Vec<(f32, &AnimValue, Option<&TimingFunction>)> = self
+            .frames
+            .iter()
+            .filter_map(|f| {
+                f.values
+                    .iter()
+                    .find(|(i, _)| *i == prop)
+                    .map(|(_, v)| (f.offset, v, f.timing.as_ref()))
+            })
+            .collect();
+        list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        if list.first().is_none_or(|f| f.0 > 0.0) {
+            list.insert(0, (0.0, underlying, None));
+        }
+        if list.last().is_none_or(|f| f.0 < 1.0) {
+            list.push((1.0, underlying, None));
+        }
+        if p >= 1.0 {
+            return list[list.len() - 1].1.clone();
+        }
+        let a = list.iter().rposition(|f| f.0 <= p).unwrap_or(0);
+        let b = (a + 1).min(list.len() - 1);
+        let (ao, av, at) = list[a];
+        let (bo, bv, _) = list[b];
+        let span = bo - ao;
+        let local = if span <= 0.0 { 0.0 } else { (p - ao) / span };
+        let eased = at.unwrap_or(&self.timing).evaluate(local);
+        interpolate(av, bv, eased)
+            .unwrap_or_else(|| if eased < 0.5 { av.clone() } else { bv.clone() })
+    }
+    /// `elapsedTime` of `animationstart`.
+    fn elapsed_at_start(&self) -> f32 {
+        ((-self.delay_ms).max(0.0).min(self.active_duration()) / 1000.0) as f32
+    }
+    /// `elapsedTime` of `animationcancel`: the active time at `now`.
+    fn elapsed_at(&self, now: f64) -> f32 {
+        ((self.local(now) - self.delay_ms).clamp(0.0, self.active_duration()) / 1000.0) as f32
+    }
+}
+
+impl Animations {
+    fn push_animation_event(&mut self, a: &CssAnimation, kind: &'static str, elapsed_s: f32) {
+        self.events.push(AnimationEvent {
+            node: a.node,
+            kind,
+            property: String::new(),
+            name: a.name.clone(),
+            elapsed_s,
+        });
+    }
+
+    /// Match this element's `animation` list to its running animations
+    /// (by list index and name: a renamed or dropped entry is cancelled,
+    /// a new one started, a kept one has its timing refreshed), apply the
+    /// play state, and overlay their values in list order (a later
+    /// animation wins a property both set).
+    fn animations_update(
+        &mut self,
+        node: usize,
+        style: &mut ComputedStyle,
+        resolve: &dyn Fn(&str, &ComputedStyle) -> Vec<Frame>,
+    ) {
+        if self.disabled {
+            return;
+        }
+        let now = self.clock_ms;
+        let items = style.animations.clone();
+        let named = |item: &AnimationItem| {
+            let name = item.name.trim();
+            !name.is_empty() && !name.eq_ignore_ascii_case("none")
+        };
+        let mut cancelled = Vec::new();
+        self.css.retain(|a| {
+            let kept = a.node != node
+                || items
+                    .get(a.index)
+                    .is_some_and(|item| named(item) && item.name.trim() == a.name);
+            if !kept {
+                cancelled.push(a.clone());
+            }
+            kept
+        });
+        for a in cancelled {
+            if !a.ended {
+                let elapsed = a.elapsed_at(now);
+                self.push_animation_event(&a, "animationcancel", elapsed);
+            }
+        }
+        let us = |ms: f64| (ms * 1000.0).round() / 1000.0;
+        for (index, item) in items.iter().enumerate() {
+            if !named(item) {
+                continue;
+            }
+            let name = item.name.trim();
+            let at = match self
+                .css
+                .iter()
+                .position(|a| a.node == node && a.index == index)
+            {
+                Some(at) => at,
+                None => {
+                    self.css.push(CssAnimation {
+                        node,
+                        index,
+                        name: name.to_string(),
+                        frames: resolve(name, style),
+                        created_ms: now,
+                        delay_ms: 0.0,
+                        duration_ms: 0.0,
+                        iterations: 1.0,
+                        direction: AnimationDirection::Normal,
+                        fill: AnimationFillMode::None,
+                        timing: TimingFunction::Ease,
+                        paused_local: None,
+                        started: false,
+                        iterations_seen: 0,
+                        ended: false,
+                    });
+                    self.css.len() - 1
+                }
+            };
+            let a = &mut self.css[at];
+            a.duration_ms = us(item.duration.max(0.0) as f64 * 1000.0);
+            a.delay_ms = us(item.delay as f64 * 1000.0);
+            a.iterations = match item.iteration_count {
+                AnimationIterationCount::Infinite => f32::INFINITY,
+                AnimationIterationCount::One => 1.0,
+                AnimationIterationCount::Count(n) => n.max(0.0),
+            };
+            a.direction = item.direction;
+            a.fill = item.fill_mode;
+            a.timing = item.timing.clone();
+            match (item.play_state, a.paused_local) {
+                (AnimationPlayState::Paused, None) => a.paused_local = Some(now - a.created_ms),
+                (AnimationPlayState::Running, Some(local)) => {
+                    a.created_ms = now - local;
+                    a.paused_local = None;
+                }
+                _ => {}
+            }
+        }
+        let mut events = Vec::new();
+        for a in self.css.iter_mut().filter(|a| a.node == node) {
+            let local = a.local(now);
+            let phase = a.phase(local);
+            if !a.started && phase != Phase::Before {
+                a.started = true;
+                events.push((a.clone(), "animationstart", a.elapsed_at_start()));
+            }
+            if let Some((iteration, p)) = a.progress(local) {
+                if phase == Phase::Active && iteration > a.iterations_seen {
+                    a.iterations_seen = iteration;
+                    let elapsed = (us(iteration as f64 * a.duration_ms) / 1000.0) as f32;
+                    events.push((a.clone(), "animationiteration", elapsed));
+                }
+                for prop in a.props() {
+                    let underlying = (PROPS[prop].get)(style);
+                    let value = a.value_of(prop, p, &underlying);
+                    (PROPS[prop].set)(style, &value);
+                }
+            }
+            if phase == Phase::After && !a.ended {
+                a.ended = true;
+                let elapsed = (a.active_duration() / 1000.0) as f32;
+                events.push((a.clone(), "animationend", elapsed));
+            }
+        }
+        for (a, kind, elapsed) in events {
+            self.push_animation_event(&a, kind, elapsed);
+        }
+        // Paint reads the animated opacity (layout's `group_opacity` takes
+        // the settled frame for a box that names an animation).
+        if items.iter().any(named) {
+            style.animation_settled_opacity = Some(style.opacity);
+        }
+    }
+}
+
+/// `animation` shorthand: a comma-separated list of
+/// `[name] || duration || timing-function || delay || iteration-count ||
+/// direction || fill-mode || play-state` items; the first time is the
+/// duration, the second the delay, a bare number the iteration count.
+pub(crate) fn parse_animation_shorthand(
+    value: &str,
+    parse_time: fn(&str) -> Option<f32>,
+    parse_timing: fn(&str) -> TimingFunction,
+) -> Vec<AnimationItem> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    split_top_level(value, ',')
+        .into_iter()
+        .map(|item| {
+            let mut out = AnimationItem::default();
+            let mut times = 0;
+            for token in split_top_level(item, ' ') {
+                let lower = token.to_ascii_lowercase();
+                if let Some(t) = parse_time(&lower) {
+                    if times == 0 {
+                        out.duration = t;
+                    } else {
+                        out.delay = t;
+                    }
+                    times += 1;
+                } else if is_timing_keyword(&lower) {
+                    out.timing = parse_timing(&lower);
+                } else if let Some(count) = parse_iteration_count(&lower) {
+                    out.iteration_count = count;
+                } else if let Some(direction) = parse_direction(&lower) {
+                    out.direction = direction;
+                } else if let Some(fill) = parse_fill_mode(&lower) {
+                    out.fill_mode = fill;
+                } else if let Some(state) = parse_play_state(&lower) {
+                    out.play_state = state;
+                } else if !lower.is_empty() {
+                    // Case matters in a `@keyframes` name.
+                    out.name = token.to_string();
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+pub(crate) fn parse_iteration_count(token: &str) -> Option<AnimationIterationCount> {
+    let token = token.trim();
+    if token.eq_ignore_ascii_case("infinite") {
+        return Some(AnimationIterationCount::Infinite);
+    }
+    token
+        .parse::<f32>()
+        .ok()
+        .filter(|n| *n >= 0.0)
+        .map(AnimationIterationCount::Count)
+}
+
+pub(crate) fn parse_direction(token: &str) -> Option<AnimationDirection> {
+    Some(match token.trim().to_ascii_lowercase().as_str() {
+        "normal" => AnimationDirection::Normal,
+        "reverse" => AnimationDirection::Reverse,
+        "alternate" => AnimationDirection::Alternate,
+        "alternate-reverse" => AnimationDirection::AlternateReverse,
+        _ => return None,
+    })
+}
+
+pub(crate) fn parse_fill_mode(token: &str) -> Option<AnimationFillMode> {
+    Some(match token.trim().to_ascii_lowercase().as_str() {
+        "none" => AnimationFillMode::None,
+        "forwards" => AnimationFillMode::Forwards,
+        "backwards" => AnimationFillMode::Backwards,
+        "both" => AnimationFillMode::Both,
+        _ => return None,
+    })
+}
+
+pub(crate) fn parse_play_state(token: &str) -> Option<AnimationPlayState> {
+    Some(match token.trim().to_ascii_lowercase().as_str() {
+        "running" => AnimationPlayState::Running,
+        "paused" => AnimationPlayState::Paused,
+        _ => return None,
+    })
+}
+
+/// `animation-name`: the list sets how many items there are; the other
+/// longhands' values repeat to fill them.
+pub(crate) fn set_animation_names(style: &mut ComputedStyle, value: &str) {
+    let names = split_top_level(value, ',');
+    let old = std::mem::take(&mut style.animations);
+    style.animations = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut item = if old.is_empty() {
+                AnimationItem::default()
+            } else {
+                old[i % old.len()].clone()
+            };
+            item.name = name.to_string();
+            item
+        })
+        .collect();
+}
+
+/// An `animation-*` longhand list over the items there are (`none` items
+/// when no name was given yet).
+pub(crate) fn set_animation_component<T: Clone>(
+    style: &mut ComputedStyle,
+    values: Vec<T>,
+    set: fn(&mut AnimationItem, T),
+) {
+    if values.is_empty() {
+        return;
+    }
+    if style.animations.is_empty() {
+        style.animations = values.iter().map(|_| AnimationItem::default()).collect();
+    }
+    let n = values.len();
+    for (i, item) in style.animations.iter_mut().enumerate() {
+        set(item, values[i % n].clone());
+    }
+}
+
+/// The scalar animation fields follow the first item, and `animation_name`
+/// joins every name (what `getComputedStyle` serializes, and what the
+/// parity capture's settle reads: it declines a list).
+pub(crate) fn sync_animation_scalars(style: &mut ComputedStyle) {
+    let initial = AnimationItem::default();
+    let first = style.animations.first().unwrap_or(&initial);
+    style.animation_name = style
+        .animations
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    style.animation_duration = first.duration;
+    style.animation_delay = first.delay;
+    style.animation_timing_function = first.timing.clone();
+    style.animation_iteration_count = first.iteration_count;
+    style.animation_direction = first.direction;
+    style.animation_fill_mode = first.fill_mode;
+    style.animation_play_state = first.play_state;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +1448,7 @@ mod tests {
     #[test]
     fn a_change_starts_a_transition_and_the_overlay_follows_the_clock() {
         let mut anims = Animations::default();
+        let no_frames = |_: &str, _: &ComputedStyle| Vec::<Frame>::new();
         let mut style = ComputedStyle::new();
         style.opacity = 0.0;
         style.transitions = vec![TransitionItem {
@@ -932,17 +1458,17 @@ mod tests {
             timing: TimingFunction::Linear,
         }];
         anims.clock_ms = 1000.0;
-        anims.on_style(7, &mut style);
+        anims.on_style(7, &mut style, &no_frames);
         assert!(!anims.active(), "the first build starts nothing");
         style.opacity = 1.0;
-        anims.on_style(7, &mut style);
+        anims.on_style(7, &mut style, &no_frames);
         assert_eq!(style.opacity, 0.0, "overlaid at the start value");
         let kinds: Vec<&str> = anims.events.iter().map(|e| e.kind).collect();
         assert_eq!(kinds, ["transitionrun", "transitionstart"]);
         anims.take_events();
         anims.clock_ms = 1050.0;
         style.opacity = 1.0;
-        anims.on_style(7, &mut style);
+        anims.on_style(7, &mut style, &no_frames);
         assert!(
             (style.opacity - 0.5).abs() < 1e-4,
             "midway: {}",
@@ -950,7 +1476,7 @@ mod tests {
         );
         anims.clock_ms = 1100.0;
         style.opacity = 1.0;
-        anims.on_style(7, &mut style);
+        anims.on_style(7, &mut style, &no_frames);
         assert_eq!(style.opacity, 1.0);
         let kinds: Vec<&str> = anims.events.iter().map(|e| e.kind).collect();
         assert_eq!(kinds, ["transitionend"]);
@@ -961,6 +1487,7 @@ mod tests {
     #[test]
     fn a_reversal_midway_is_shortened_to_the_distance_covered() {
         let mut anims = Animations::default();
+        let no_frames = |_: &str, _: &ComputedStyle| Vec::<Frame>::new();
         let mut style = ComputedStyle::new();
         style.opacity = 0.0;
         style.transitions = vec![TransitionItem {
@@ -969,20 +1496,20 @@ mod tests {
             delay: 0.0,
             timing: TimingFunction::Linear,
         }];
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         style.opacity = 1.0;
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         anims.clock_ms = 40.0;
         style.opacity = 1.0;
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         assert!((style.opacity - 0.4).abs() < 1e-4);
         // Back to 0 at 40 ms: from 0.4, over 40 ms.
         style.opacity = 0.0;
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         assert!((style.opacity - 0.4).abs() < 1e-4);
         anims.clock_ms = 60.0;
         style.opacity = 0.0;
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         assert!(
             (style.opacity - 0.2).abs() < 1e-4,
             "halfway back: {}",
@@ -990,7 +1517,7 @@ mod tests {
         );
         anims.clock_ms = 80.0;
         style.opacity = 0.0;
-        anims.on_style(1, &mut style);
+        anims.on_style(1, &mut style, &no_frames);
         assert_eq!(style.opacity, 0.0);
         let kinds: Vec<&str> = anims.take_events().iter().map(|e| e.kind).collect();
         assert_eq!(

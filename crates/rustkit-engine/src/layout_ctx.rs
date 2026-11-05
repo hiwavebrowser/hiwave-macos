@@ -119,13 +119,61 @@ impl LayoutCtx {
         build()
     }
 
-    /// The transitions' hand-off for one element of the view being built
-    /// (`Animations::on_style`); nothing outside a build.
-    pub(crate) fn animate_style(&self, node: usize, style: &mut crate::ComputedStyle) {
+    /// The transitions' and animations' hand-off for one element of the
+    /// view being built (`Animations::on_style`); nothing outside a build.
+    /// A `@keyframes` an animation names is resolved here: each block's
+    /// declarations applied to the element's cascaded style, and the values
+    /// of the properties they set read back.
+    pub(crate) fn animate_style(
+        &self,
+        node: usize,
+        style: &mut crate::ComputedStyle,
+        stylesheets: &[rustkit_css::Stylesheet],
+    ) {
         let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone());
-        if let Some(lay) = lay {
-            lay.animations.borrow_mut().on_style(node, style);
-        }
+        let Some(lay) = lay else {
+            return;
+        };
+        let resolve = |name: &str, base: &crate::ComputedStyle| -> Vec<crate::animations::Frame> {
+            let Some(rule) = stylesheets
+                .iter()
+                .rev()
+                .flat_map(|sheet| sheet.keyframes.iter().rev())
+                .find(|rule| rule.name == name)
+            else {
+                return Vec::new();
+            };
+            let mut frames = Vec::new();
+            for block in &rule.frames {
+                let mut probe = base.clone();
+                let mut timing = None;
+                let mut props = Vec::new();
+                for declaration in &block.declarations {
+                    let property = declaration.property.to_ascii_lowercase();
+                    if property == "animation-timing-function" {
+                        timing = Some(crate::parse_timing_function(&declaration.value));
+                        continue;
+                    }
+                    self.apply_style_property(&mut probe, &property, &declaration.value);
+                    props.extend(crate::animations::prop_indices(&property));
+                }
+                props.sort_unstable();
+                props.dedup();
+                let values: Vec<(usize, crate::animations::AnimValue)> = props
+                    .iter()
+                    .map(|&i| (i, crate::animations::prop_value(&probe, i)))
+                    .collect();
+                for &offset in &block.offsets {
+                    frames.push(crate::animations::Frame {
+                        offset,
+                        values: values.clone(),
+                        timing: timing.clone(),
+                    });
+                }
+            }
+            frames
+        };
+        lay.animations.borrow_mut().on_style(node, style, &resolve);
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`

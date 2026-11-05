@@ -8986,9 +8986,13 @@ impl Engine {
             return Ok(laid);
         };
         for event in &events {
-            if let Err(e) = bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
-            {
-                debug!(?id, error = %e, kind = event.kind, "transition event failed");
+            let fired = if event.kind.starts_with("animation") {
+                bindings.fire_animation_event(event.node, event.kind, &event.name, event.elapsed_s)
+            } else {
+                bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
+            };
+            if let Err(e) = fired {
+                debug!(?id, error = %e, kind = event.kind, "animation event failed");
             }
         }
         inspector_glue::drain_errors(bindings, &view.inspector, "timers");
@@ -9941,7 +9945,7 @@ impl layout_ctx::LayoutCtx {
                 // Transitions: start what this cascade's changes call for
                 // and overlay the running ones (after the memo, so the
                 // memo keeps the cascade's own result).
-                self.animate_style(node.id.raw(), &mut style);
+                self.animate_style(node.id.raw(), &mut style, stylesheets);
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -14106,146 +14110,72 @@ impl layout_ctx::LayoutCtx {
                 animations::sync_transition_scalars(style, false);
             }
             // ==================== Animations (parsed, not executed) ====================
+            // ==================== Animations (run by animations.rs) ====================
             "animation" => {
-                // Shorthand: name duration timing-function delay iteration-count direction fill-mode play-state
-                // It replaces the whole of an earlier `animation`.
-                let initial = ComputedStyle::new();
-                style.animation_name = String::new();
-                style.animation_duration = initial.animation_duration;
-                style.animation_timing_function = initial.animation_timing_function;
-                style.animation_delay = initial.animation_delay;
-                style.animation_iteration_count = initial.animation_iteration_count;
-                style.animation_direction = initial.animation_direction;
-                style.animation_fill_mode = initial.animation_fill_mode;
-                style.animation_play_state = initial.animation_play_state;
-                // Several animations are not modelled: the list stays whole in
-                // the name, which is enough for layout to leave the box alone.
-                let mut depth = 0usize;
-                let several = value.chars().any(|c| {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => depth = depth.saturating_sub(1),
-                        _ => {}
-                    }
-                    c == ',' && depth == 0
-                });
-                if several {
-                    style.animation_name = value.trim().to_string();
-                }
-                let parts: Vec<&str> =
-                    if several { Vec::new() } else { value.split_whitespace().collect() };
-                for (i, part) in parts.iter().enumerate() {
-                    // First non-time value is usually the name
-                    if i == 0 && !part.ends_with('s') && !part.ends_with("ms") {
-                        style.animation_name = part.to_string();
-                    } else if let Some(t) = parse_time(part) {
-                        if style.animation_duration == 0.0 {
-                            style.animation_duration = t;
-                        } else {
-                            style.animation_delay = t;
-                        }
-                    } else {
-                        match *part {
-                            "infinite" => {
-                                style.animation_iteration_count =
-                                    rustkit_css::AnimationIterationCount::Infinite
-                            }
-                            "normal" => {
-                                style.animation_direction = rustkit_css::AnimationDirection::Normal
-                            }
-                            "reverse" => {
-                                style.animation_direction = rustkit_css::AnimationDirection::Reverse
-                            }
-                            "alternate" => {
-                                style.animation_direction =
-                                    rustkit_css::AnimationDirection::Alternate
-                            }
-                            "alternate-reverse" => {
-                                style.animation_direction =
-                                    rustkit_css::AnimationDirection::AlternateReverse
-                            }
-                            "forwards" => {
-                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Forwards
-                            }
-                            "backwards" => {
-                                style.animation_fill_mode =
-                                    rustkit_css::AnimationFillMode::Backwards
-                            }
-                            "both" => {
-                                style.animation_fill_mode = rustkit_css::AnimationFillMode::Both
-                            }
-                            "paused" => {
-                                style.animation_play_state = rustkit_css::AnimationPlayState::Paused
-                            }
-                            "running" => {
-                                style.animation_play_state =
-                                    rustkit_css::AnimationPlayState::Running
-                            }
-                            _ => {
-                                // Could be an iteration count, timing function or name
-                                if let Some(n) = part.parse::<f32>().ok().filter(|n| *n >= 0.0) {
-                                    style.animation_iteration_count =
-                                        rustkit_css::AnimationIterationCount::Count(n);
-                                } else if i == 0 || style.animation_name.is_empty() {
-                                    style.animation_name = part.to_string();
-                                } else {
-                                    style.animation_timing_function = parse_timing_function(part);
-                                }
-                            }
-                        }
-                    }
-                }
+                style.animations =
+                    animations::parse_animation_shorthand(value, parse_time, parse_timing_function);
+                animations::sync_animation_scalars(style);
             }
             "animation-name" => {
-                style.animation_name = value.trim().to_string();
+                animations::set_animation_names(style, value);
+                animations::sync_animation_scalars(style);
             }
             "animation-duration" => {
-                if let Some(dur) = parse_time(value) {
-                    style.animation_duration = dur;
-                }
-            }
-            "animation-timing-function" => {
-                style.animation_timing_function = parse_timing_function(value);
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_animation_component(style, times, |item, t| item.duration = t);
+                animations::sync_animation_scalars(style);
             }
             "animation-delay" => {
-                if let Some(delay) = parse_time(value) {
-                    style.animation_delay = delay;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_animation_component(style, times, |item, t| item.delay = t);
+                animations::sync_animation_scalars(style);
+            }
+            "animation-timing-function" => {
+                let timings: Vec<rustkit_css::TimingFunction> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .map(parse_timing_function)
+                    .collect();
+                animations::set_animation_component(style, timings, |item, t| item.timing = t);
+                animations::sync_animation_scalars(style);
             }
             "animation-iteration-count" => {
-                let v = value.trim();
-                if v == "infinite" {
-                    style.animation_iteration_count =
-                        rustkit_css::AnimationIterationCount::Infinite;
-                } else if let Ok(n) = v.parse::<f32>() {
-                    style.animation_iteration_count =
-                        rustkit_css::AnimationIterationCount::Count(n);
-                }
+                let counts: Vec<rustkit_css::AnimationIterationCount> =
+                    animations::split_top_level(value, ',')
+                        .into_iter()
+                        .filter_map(animations::parse_iteration_count)
+                        .collect();
+                animations::set_animation_component(style, counts, |item, c| item.iteration_count = c);
+                animations::sync_animation_scalars(style);
             }
             "animation-direction" => {
-                style.animation_direction = match value.trim() {
-                    "normal" => rustkit_css::AnimationDirection::Normal,
-                    "reverse" => rustkit_css::AnimationDirection::Reverse,
-                    "alternate" => rustkit_css::AnimationDirection::Alternate,
-                    "alternate-reverse" => rustkit_css::AnimationDirection::AlternateReverse,
-                    _ => rustkit_css::AnimationDirection::Normal,
-                };
+                let directions: Vec<rustkit_css::AnimationDirection> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_direction)
+                    .collect();
+                animations::set_animation_component(style, directions, |item, d| item.direction = d);
+                animations::sync_animation_scalars(style);
             }
             "animation-fill-mode" => {
-                style.animation_fill_mode = match value.trim() {
-                    "none" => rustkit_css::AnimationFillMode::None,
-                    "forwards" => rustkit_css::AnimationFillMode::Forwards,
-                    "backwards" => rustkit_css::AnimationFillMode::Backwards,
-                    "both" => rustkit_css::AnimationFillMode::Both,
-                    _ => rustkit_css::AnimationFillMode::None,
-                };
+                let fills: Vec<rustkit_css::AnimationFillMode> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_fill_mode)
+                    .collect();
+                animations::set_animation_component(style, fills, |item, f| item.fill_mode = f);
+                animations::sync_animation_scalars(style);
             }
             "animation-play-state" => {
-                style.animation_play_state = match value.trim() {
-                    "running" => rustkit_css::AnimationPlayState::Running,
-                    "paused" => rustkit_css::AnimationPlayState::Paused,
-                    _ => rustkit_css::AnimationPlayState::Running,
-                };
+                let states: Vec<rustkit_css::AnimationPlayState> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(animations::parse_play_state)
+                    .collect();
+                animations::set_animation_component(style, states, |item, s| item.play_state = s);
+                animations::sync_animation_scalars(style);
             }
             // ==================== Box Sizing ====================
             "box-sizing" => {
@@ -14307,6 +14237,10 @@ impl layout_ctx::LayoutCtx {
             "transition" | "transition-property" => {
                 style.transitions.clear();
                 animations::sync_transition_scalars(style, false);
+            }
+            "animation" | "animation-name" => {
+                style.animations.clear();
+                animations::sync_animation_scalars(style);
             }
             "outline" => {
                 style.outline = rustkit_css::Outline { offset: style.outline.offset.clone(), ..Default::default() };
