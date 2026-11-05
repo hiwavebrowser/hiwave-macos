@@ -357,6 +357,7 @@ mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
+mod canvas_paint;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
@@ -438,6 +439,8 @@ mod computed_content_tests;
 mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
+#[cfg(test)]
+mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
@@ -1006,6 +1009,14 @@ struct ViewState {
     input_pending: Option<InputMark>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
+    /// The canvases of the page's bindings, held apart from them: the
+    /// display list reads what they drew while the page's own scripts have
+    /// the bindings out of the view (`run_page_scripts`).
+    canvases: Option<rustkit_bindings::CanvasSource>,
+    /// Each canvas's paint from the last display list, by node
+    /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
+    /// not change is not painted again.
+    canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
     /// The view's stop state: the interrupt word another thread (the
     /// watchdog, later the user's Stop) sets to end its running script.
     /// Lives as long as the view; each new document's bindings get it.
@@ -1239,6 +1250,11 @@ impl ViewState {
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
+        // The last document's canvases: the next bindings install their own
+        // (Prometheus, #905 R1: a failed bindings creation must not leave
+        // the old page's canvases painting into same-id nodes).
+        self.canvases = None;
+        self.canvas_paints.clear();
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_modules.clear();
@@ -2778,6 +2794,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2885,6 +2903,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3009,6 +3029,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -7846,6 +7868,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8280,6 +8306,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8870,7 +8900,34 @@ impl Engine {
         // image per frame. Rewriting here means the renderer only ever
         // sees keys that match what the loader stored.
         let mut expanded = Vec::with_capacity(dl.commands.len());
+        // The canvases' paints from the last list; what this list does not
+        // reuse or repaint is dropped with it.
+        let (canvas_source, mut last_paints) = match self.views.get_mut(&id) {
+            Some(v) => (v.canvases.clone(), std::mem::take(&mut v.canvas_paints)),
+            None => (None, HashMap::new()),
+        };
+        let mut canvas_paints = HashMap::new();
         for mut cmd in dl.commands.drain(..) {
+            // A canvas paints what script drew on it (canvas_paint), again
+            // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+                if let Some(node) = canvas_paint::canvas_node(url) {
+                    if let Some(source) = &canvas_source {
+                        let paint = canvas_paint::CanvasPaint::reuse_or_paint(
+                            last_paints.remove(&node),
+                            source,
+                            node,
+                            *dest_rect,
+                            *content_box,
+                        );
+                        if let Some(paint) = paint {
+                            expanded.extend(paint.commands.iter().cloned());
+                            canvas_paints.insert(node, paint);
+                        }
+                    }
+                    continue;
+                }
+            }
             match &mut cmd {
                 rustkit_layout::DisplayCommand::Image { url, .. }
                 | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
@@ -8943,6 +9000,9 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        if let Some(v) = self.views.get_mut(&id) {
+            v.canvas_paints = canvas_paints;
+        }
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
@@ -10926,6 +10986,30 @@ impl layout_ctx::LayoutCtx {
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
                     // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
+                // <canvas> is a replaced element whose natural size is its
+                // bitmap's: the `width`/`height` attributes (300x150 without
+                // them). They are not presentational hints: author CSS
+                // width/height stretch the bitmap over the box, and one CSS
+                // axis gives the other through the bitmap's ratio. What
+                // script draws on its 2D context replaces the image command
+                // in the display list (canvas_paint).
+                if tag_lower == "canvas" {
+                    let (natural_width, natural_height) =
+                        canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: canvas_paint::canvas_key(node.id.raw()),
+                            natural_width,
+                            natural_height,
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
                     b.node_id = Some(node.id.raw());
                     return b;
                 }
@@ -20306,12 +20390,14 @@ impl Engine {
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            // A canvas that drew is listed again over the same boxes.
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             // A scroll alone moves what is painted, not the layout.
-            if scrolled || element_scrolled {
+            if scrolled || element_scrolled || canvas_painted {
                 self.render(id)?;
             }
             return Ok(scrolled || element_scrolled);
@@ -20532,8 +20618,9 @@ impl Engine {
                 view.pending_dirty = Some(view.dirty_set(&log));
             }
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             return;
