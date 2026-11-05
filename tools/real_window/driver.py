@@ -34,6 +34,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -321,10 +322,20 @@ class Driver:
     def open_page(self, check, page, env=None):
         """A fresh app on `page`. Returns once the engine has started the load
         (or failed to), with the outcome recorded."""
-        profile = self.out / "profile"
+        profile, seed = self.out / "profile", self.out / "profile-seed"
         if self.template is None:
+            shutil.rmtree(profile, ignore_errors=True)
             profile.mkdir(parents=True, exist_ok=True)
             self.seed_profile(profile)
+            shutil.rmtree(seed, ignore_errors=True)
+            shutil.copytree(profile, seed, symlinks=True)
+        # Every check starts on the profile as the seed launch left it, not on
+        # what an earlier check saved: a4_settings saves 'sidebar open by
+        # default' unticked, and a later check on that profile launched with
+        # no sidebar and clicked where its button or a tab would have been
+        # (CH3.A4b).
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.copytree(seed, profile, symlinks=True)
         url = "%s/%s" % (self.fixture.base, page)
         state = json.loads(self.template)
         set_tab_urls(state, url)
@@ -1833,10 +1844,9 @@ class Driver:
             self.expect(c, "the page lists the added domain (one more item, the domain's)", bool(shown_list),
                         str(self.el(self.last_probe("settings", log_from), ".blocklist-item")))
         # Save at the end of the page: the app takes save_settings and its
-        # reply reaches the page (a postMessage). settings.json is not
-        # written: the page's settings lack focus_duration_minutes and
-        # focus_break_minutes, so the app's UserSettings does not parse
-        # them (both backends; the PR lists it).
+        # reply reaches the page (a postMessage). Since B11 settings.json is
+        # written, with the checkbox flipped; the next check starts on the
+        # seeded profile again (open_page), not on this one.
         cur = scroll_to("#saveBtn", cur)
         self.expect(c, "the wheel over the settings window scrolls it to the Save button", in_view(cur, "#saveBtn"),
                     str(box_of(cur, "#saveBtn")))

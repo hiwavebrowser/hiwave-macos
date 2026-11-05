@@ -37,7 +37,10 @@ page from `pages/` served by a local fixture server, and asserts on:
 The app's profile is isolated by setting `HOME` for the app process only (it
 reads its data directory from `$HOME`), so the person's tabs, history and
 vault are not read or written. The first launch lets the app write its own
-`workspace_state.json`; the driver only swaps the tab URL in it.
+`workspace_state.json`; the driver only swaps the tab URL in it. That
+first-run profile is kept as `profile-seed/` in the output directory and
+copied back before every check, so a check never starts on what an earlier
+check saved (settings, the vault, the focus blocklist).
 
 ## Results
 
