@@ -637,6 +637,80 @@ mod rust_log_tests {
     }
 }
 
+/// The settings page's `save_settings` payload applied to `state` and written
+/// to settings.json; the value is the reply posted back to the page.
+fn save_settings_reply(state: &mut AppState, payload: serde_json::Value) -> serde_json::Value {
+    let settings: Result<crate::state::UserSettings, _> = serde_json::from_value(payload);
+    match settings {
+        Ok(s) => match state.update_settings(s) {
+            Ok(_) => serde_json::json!({ "type": "settings_saved" }),
+            Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
+        },
+        Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
+    }
+}
+
+#[cfg(test)]
+mod settings_save_tests {
+    use super::*;
+
+    /// The keys `collectSettingsFromUI()` in settings.html puts in the
+    /// `save_settings` payload, read from the page the app ships.
+    fn page_save_keys() -> Vec<String> {
+        let start = SETTINGS_HTML
+            .find("function collectSettingsFromUI()")
+            .expect("settings.html has collectSettingsFromUI");
+        let body = &SETTINGS_HTML[start..];
+        let open = body.find("return {").expect("collectSettingsFromUI returns an object literal") + "return {".len();
+        let close = open + body[open..].find("};").expect("the object literal ends");
+        body[open..close]
+            .lines()
+            .filter_map(|line| {
+                let key = line.trim().split(':').next()?.trim();
+                (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| key.to_string())
+            })
+            .collect()
+    }
+
+    fn state_in(dir: &std::path::Path) -> AppState {
+        let config = crate::state::AppConfig {
+            data_dir: dir.to_path_buf(),
+            download_dir: dir.join("downloads"),
+            ..Default::default()
+        };
+        AppState::new(config).expect("app state in a temp dir")
+    }
+
+    /// CH2.B11: 'Save Settings' with the payload the page sends writes
+    /// settings.json (it was rejected for missing focus_* fields while the
+    /// page said 'Settings saved!').
+    #[test]
+    fn the_settings_pages_save_payload_is_written() {
+        let keys = page_save_keys();
+        assert!(keys.contains(&"sidebar_default_open".to_string()), "page keys {keys:?}");
+        // The page's payload: its keys, each with a value of the field's type,
+        // and the toggle the person flipped.
+        let defaults = serde_json::to_value(crate::state::UserSettings::default()).unwrap();
+        let mut payload = serde_json::Map::new();
+        for key in &keys {
+            if let Some(value) = defaults.get(key) {
+                payload.insert(key.clone(), value.clone());
+            }
+        }
+        payload.insert("sidebar_default_open".into(), serde_json::Value::Bool(false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_in(dir.path());
+        let _ = std::fs::remove_file(state.settings_path());
+        let reply = save_settings_reply(&mut state, serde_json::Value::Object(payload));
+        assert_eq!(reply["type"], "settings_saved");
+        assert!(reply.get("error").is_none(), "the save was rejected: {reply}");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.settings_path()).expect("settings.json written")).unwrap();
+        assert_eq!(written["sidebar_default_open"], false);
+    }
+}
+
 /// `RUST_LOG` when it is set to a directive this process can parse.
 /// Unset, blank, and unparseable values stay at info, which is what the
 /// app logged before `RUST_LOG` was read.
@@ -3678,16 +3752,9 @@ fn main() {
                         }
                     }
                     UserEvent::SaveSettings(settings_value) => {
-                        let settings: Result<crate::state::UserSettings, _> = serde_json::from_value(settings_value);
-                        let result_json = match settings {
-                            Ok(s) => {
-                                let mut state = state_for_events.lock().unwrap();
-                                match state.update_settings(s) {
-                                    Ok(_) => serde_json::json!({ "type": "settings_saved" }),
-                                    Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
-                                }
-                            }
-                            Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
+                        let result_json = {
+                            let mut state = state_for_events.lock().unwrap();
+                            save_settings_reply(&mut state, settings_value)
                         }.to_string();
 
                         if let Some((_, ref settings_wv)) = *settings_window_for_events.lock().unwrap() {
