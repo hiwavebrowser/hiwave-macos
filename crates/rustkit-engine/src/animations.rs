@@ -34,8 +34,7 @@
 use rustkit_css::{
     AnimationDirection, AnimationFillMode, AnimationItem, AnimationIterationCount,
     AnimationPlayState, Color, ComputedStyle, Display, Length, TimingFunction, TransformList,
-    TransformOp,
-    TransitionItem,
+    TransformOp, TransitionItem,
 };
 use std::collections::HashMap;
 
@@ -540,6 +539,18 @@ impl Animations {
             self.push_event(&t, "transitioncancel", t.elapsed_at(now));
         }
         self.base.retain(|node, _| seen(*node, &self.seen));
+        let mut gone = Vec::new();
+        self.css.retain(|a| {
+            if seen(a.node, &self.seen) {
+                true
+            } else {
+                gone.push(a.clone());
+                false
+            }
+        });
+        for a in gone {
+            self.cancel_animation_event(&a);
+        }
         self.seen.retain(|_, s| *s == serial);
     }
 
@@ -559,6 +570,27 @@ impl Animations {
             self.push_event(&t, "transitioncancel", t.elapsed_at(now));
         }
         self.base.remove(&node);
+        let mut gone = Vec::new();
+        self.css.retain(|a| {
+            if a.node == node {
+                gone.push(a.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for a in gone {
+            self.cancel_animation_event(&a);
+        }
+    }
+
+    /// `animationcancel` for an animation taken away, once its active
+    /// phase had begun (Chrome fires none for one still in its delay).
+    fn cancel_animation_event(&mut self, a: &CssAnimation) {
+        if a.started {
+            let elapsed = a.elapsed_at(self.clock_ms);
+            self.push_animation_event(a, "animationcancel", elapsed);
+        }
     }
 
     pub(crate) fn prune(&mut self, alive: impl Fn(usize) -> bool) {
@@ -586,10 +618,7 @@ impl Animations {
             }
         });
         for a in gone {
-            if !a.ended {
-                let elapsed = a.elapsed_at(now);
-                self.push_animation_event(&a, "animationcancel", elapsed);
-            }
+            self.cancel_animation_event(&a);
         }
     }
 
@@ -602,8 +631,16 @@ impl Animations {
         &mut self,
         node: usize,
         style: &mut ComputedStyle,
-        resolve: &dyn Fn(&str, &ComputedStyle) -> Vec<Frame>,
+        resolve: &dyn Fn(&str, &ComputedStyle) -> Option<Vec<Frame>>,
     ) {
+        self.seen.insert(node, self.build_serial);
+        // `display: none`: no computed style to animate (its subtree is not
+        // visited at all); nothing to transition from when shown, and an
+        // animation starts over then (Chrome).
+        if style.display == Display::None {
+            self.cancel_node(node);
+            return;
+        }
         self.transitions_update(node, style);
         self.animations_update(node, style, resolve);
         self.transitions_overlay(node, style);
@@ -612,13 +649,6 @@ impl Animations {
     /// Start the transitions this element's changed values call for.
     fn transitions_update(&mut self, node: usize, style: &mut ComputedStyle) {
         let now = self.clock_ms;
-        self.seen.insert(node, self.build_serial);
-        // `display: none`: no computed style to transition (its subtree is
-        // not visited at all), and nothing to transition from when shown.
-        if style.display == Display::None {
-            self.cancel_node(node);
-            return;
-        }
         let has_running = self.transitions.iter().any(|t| t.node == node);
         if style.transitions.is_empty() && !has_running {
             self.base.remove(&node);
@@ -953,8 +983,13 @@ impl CssAnimation {
     fn local(&self, now: f64) -> f64 {
         self.paused_local.unwrap_or(now - self.created_ms)
     }
+    /// web-animations-1 §4.8.2: zero whenever the duration is zero (so
+    /// `0s infinite` is not 0 × ∞ = NaN), else the duration times the
+    /// iteration count.
     fn active_duration(&self) -> f64 {
-        if self.iterations.is_infinite() {
+        if self.duration_ms <= 0.0 || self.iterations <= 0.0 {
+            0.0
+        } else if self.iterations.is_infinite() {
             f64::INFINITY
         } else {
             self.duration_ms * self.iterations as f64
@@ -1099,7 +1134,7 @@ impl Animations {
         &mut self,
         node: usize,
         style: &mut ComputedStyle,
-        resolve: &dyn Fn(&str, &ComputedStyle) -> Vec<Frame>,
+        resolve: &dyn Fn(&str, &ComputedStyle) -> Option<Vec<Frame>>,
     ) {
         if self.disabled {
             return;
@@ -1122,10 +1157,7 @@ impl Animations {
             kept
         });
         for a in cancelled {
-            if !a.ended {
-                let elapsed = a.elapsed_at(now);
-                self.push_animation_event(&a, "animationcancel", elapsed);
-            }
+            self.cancel_animation_event(&a);
         }
         let us = |ms: f64| (ms * 1000.0).round() / 1000.0;
         for (index, item) in items.iter().enumerate() {
@@ -1140,11 +1172,16 @@ impl Animations {
             {
                 Some(at) => at,
                 None => {
+                    // No `@keyframes` of that name: no animation (Chrome
+                    // lists none and fires nothing).
+                    let Some(frames) = resolve(name, style) else {
+                        continue;
+                    };
                     self.css.push(CssAnimation {
                         node,
                         index,
                         name: name.to_string(),
-                        frames: resolve(name, style),
+                        frames,
                         created_ms: now,
                         delay_ms: 0.0,
                         duration_ms: 0.0,
@@ -1509,7 +1546,7 @@ mod tests {
     #[test]
     fn a_change_starts_a_transition_and_the_overlay_follows_the_clock() {
         let mut anims = Animations::default();
-        let no_frames = |_: &str, _: &ComputedStyle| Vec::<Frame>::new();
+        let no_frames = |_: &str, _: &ComputedStyle| None::<Vec<Frame>>;
         let mut style = ComputedStyle::new();
         style.opacity = 0.0;
         style.transitions = vec![TransitionItem {
@@ -1548,7 +1585,7 @@ mod tests {
     #[test]
     fn a_reversal_midway_is_shortened_to_the_distance_covered() {
         let mut anims = Animations::default();
-        let no_frames = |_: &str, _: &ComputedStyle| Vec::<Frame>::new();
+        let no_frames = |_: &str, _: &ComputedStyle| None::<Vec<Frame>>;
         let mut style = ComputedStyle::new();
         style.opacity = 0.0;
         style.transitions = vec![TransitionItem {
