@@ -163,7 +163,9 @@ class App:
         # HIWAVE_TEST_HOOKS=1: the app runs HIWAVE_RUSTKIT_CHROME_EVAL and
         # logs IPC bodies whole, which the checks read (#907 R1 nits 1, 2).
         # A RustKit panel's IPC is never logged whole (#910 R1).
-        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1", **self.env)
+        # A check may turn the hooks off (a6_url_log reads the default log).
+        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1")
+        env.update(self.env)
         self.log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([str(self.binary)], env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, cwd=str(self.profile))
@@ -938,6 +940,24 @@ class Driver:
         self.expect(c, "the saved tab holds the committed URL, not the one restored",
                     final in urls and start not in urls, "tab urls %s" % urls)
         self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
+
+    A6_SECRET = "a6-secret-4Kp"
+
+    def a6_url_log(self):
+        """CH3.A6: without HIWAVE_DEBUG/HIWAVE_TEST_HOOKS a page URL's query and fragment never reach the app log; its path does."""
+        c = "a6_url_log"
+        secret = self.A6_SECRET
+        page = "e9_final.html?token=%s#%s" % (secret, secret)
+        if not self.open_page(c, page, env={"HIWAVE_TEST_HOOKS": "0"}):
+            return
+        path = "%s/e9_final.html" % self.fixture.base
+        nav = self.app.wait_log(r"Navigating content to: [^\n]*e9_final\.html[^\n]*", 10)
+        self.expect(c, "the navigation line names the page's path",
+                    bool(nav) and nav.group(0).rstrip().endswith(path), nav.group(0) if nav else "")
+        time.sleep(1.0)
+        log = self.app.log_text()
+        self.expect(c, "the query and fragment are nowhere in the log", secret not in log,
+                    "; ".join(l.strip()[-160:] for l in log.splitlines() if secret in l)[:600])
 
     def a2_chrome_boots(self):
         """CH3.A2: with HIWAVE_RUSTKIT_CHROME=1 the chrome is a RustKit view whose script reaches the app."""
@@ -2017,7 +2037,7 @@ class Driver:
                     "page said saved: %s, file written: %s" % (said_saved, written))
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a6_url_log", "a2_chrome_boots",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
