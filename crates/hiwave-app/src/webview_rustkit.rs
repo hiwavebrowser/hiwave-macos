@@ -676,6 +676,12 @@ impl RustKitView {
     /// the last call, oldest first (CH2.E9). Content thread only. The app
     /// must hand these to its command handler only for a view showing the
     /// app's own documents (chrome, shelf): a web page can post here too.
+    /// The viewhost id the input of this view's NSView is tagged with.
+    /// Content thread only (the flag-off engine owns its host view).
+    pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
+        self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
+    }
+
     pub fn take_ipc_messages(&self) -> Vec<String> {
         if self.content.is_some() {
             self.harvest();
@@ -960,6 +966,12 @@ impl RustKitView {
         );
         self.set_bounds_internal(bounds)
             .map_err(|e| format!("Failed to set bounds: {}", e))
+    }
+
+    /// The host `NSView`'s pointer (0 when there is none): for stacking
+    /// and the chrome's region (CH3.A3).
+    pub fn host_view_raw(&self) -> isize {
+        self.host_view
     }
 
     /// Get the view ID.

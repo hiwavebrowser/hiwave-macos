@@ -260,7 +260,35 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // before the window is ever key.
             true
         }
+        // CH3.A3: a view with a region (the RustKit chrome stacked over the
+        // page) is absent outside it, so AppKit goes on to the view below.
+        // A view without one keeps NSView's hit test.
+        extern "C" fn hit_test(this: &Object, _sel: Sel, point: cocoa::foundation::NSPoint) -> id {
+            unsafe {
+                let superclass = Class::get("NSView").expect("NSView class");
+                let hit: id = msg_send![super(this, superclass), hitTest: point];
+                if hit == nil {
+                    return nil;
+                }
+                let id = view_id_of(this).raw();
+                let outside = REGIONS.with_region(id, |region| {
+                    let superview: id = msg_send![this, superview];
+                    let local: cocoa::foundation::NSPoint =
+                        msg_send![this, convertPoint: point fromView: superview];
+                    let frame: cocoa::foundation::NSRect = msg_send![this, frame];
+                    !crate::region::region_contains(region, local.x, frame.size.height - local.y)
+                });
+                if outside == Some(true) {
+                    return nil;
+                }
+                hit
+            }
+        }
         unsafe {
+            decl.add_method(
+                sel!(hitTest:),
+                hit_test as extern "C" fn(&Object, Sel, cocoa::foundation::NSPoint) -> id,
+            );
             decl.add_method(
                 sel!(acceptsFirstMouse:),
                 accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
@@ -288,6 +316,135 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
         decl.register();
     });
     Class::get("RustKitContentView").expect("RustKitContentView registered")
+}
+
+/// The regions set with [`set_raw_view_region`], by the raw [`ViewId`] of
+/// the view (CH3.A3). Read by `hitTest:` on the main thread.
+#[cfg(target_os = "macos")]
+struct RegionStore(std::sync::OnceLock<Mutex<HashMap<u64, Vec<crate::region::RegionRect>>>>);
+
+#[cfg(target_os = "macos")]
+impl RegionStore {
+    fn map(&self) -> &Mutex<HashMap<u64, Vec<crate::region::RegionRect>>> {
+        self.0.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn with_region<R>(&self, id: u64, f: impl FnOnce(&[crate::region::RegionRect]) -> R) -> Option<R> {
+        // Copied out so no lock is held across the AppKit calls in `f`.
+        let region = self.map().lock().ok()?.get(&id).cloned()?;
+        Some(f(&region))
+    }
+}
+
+#[cfg(target_os = "macos")]
+static REGIONS: RegionStore = RegionStore(std::sync::OnceLock::new());
+
+/// Give a `RustKitContentView` a region (CH3.A3): outside the rects (view
+/// coordinates, top-left origin) the view is not composited (a mask on its
+/// layer, which clips wgpu's Metal sublayer too) and not hit (`hitTest:`
+/// returns nil). `None` removes both. No-op for a view of another class.
+#[cfg(target_os = "macos")]
+pub fn set_raw_view_region(view: isize, region: Option<Vec<crate::region::RegionRect>>) {
+    use objc::runtime::{Class, Object};
+    if view == 0 {
+        return;
+    }
+    let view = view as id;
+    unsafe {
+        let class: *const Class = msg_send![view, class];
+        if class != rustkit_content_view_class() as *const Class {
+            return;
+        }
+        let id = view_id_of(&*(view as *const Object)).raw();
+        if let Ok(mut map) = REGIONS.map().lock() {
+            match &region {
+                Some(rects) => {
+                    map.insert(id, rects.clone());
+                }
+                None => {
+                    map.remove(&id);
+                }
+            }
+        }
+        let layer: id = msg_send![view, layer];
+        if layer == nil {
+            return;
+        }
+        let transaction = Class::get("CATransaction").expect("CATransaction class");
+        let _: () = msg_send![transaction, begin];
+        let _: () = msg_send![transaction, setDisableActions: true];
+        match region {
+            None => {
+                let _: () = msg_send![layer, setMask: nil];
+            }
+            Some(rects) => {
+                let bounds: cocoa::foundation::NSRect = msg_send![layer, bounds];
+                let flipped: bool = msg_send![layer, isGeometryFlipped];
+                let path = core_graphics_path(&rects, bounds.size.height, flipped);
+                let mut mask: id = msg_send![layer, mask];
+                let shape = Class::get("CAShapeLayer").expect("CAShapeLayer class");
+                let is_shape: bool = mask != nil && msg_send![mask, isKindOfClass: shape];
+                if !is_shape {
+                    mask = msg_send![shape, layer];
+                    let _: () = msg_send![layer, setMask: mask];
+                }
+                let _: () = msg_send![mask, setFrame: bounds];
+                let _: () = msg_send![mask, setPath: path];
+                CGPathRelease(path);
+            }
+        }
+        let _: () = msg_send![transaction, commit];
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPathCreateMutable() -> *mut std::ffi::c_void;
+    fn CGPathAddRect(path: *mut std::ffi::c_void, m: *const std::ffi::c_void, rect: cocoa::foundation::NSRect);
+    fn CGPathRelease(path: *mut std::ffi::c_void);
+}
+
+/// The union of `rects` (top-left origin) as a CGPath in the layer's
+/// coordinates: bottom-left origin unless the layer's geometry is flipped.
+/// A shape layer fills overlapping subpaths with the non-zero rule, so the
+/// union is filled once.
+#[cfg(target_os = "macos")]
+unsafe fn core_graphics_path(
+    rects: &[crate::region::RegionRect],
+    height: f64,
+    flipped: bool,
+) -> *mut std::ffi::c_void {
+    let path = CGPathCreateMutable();
+    for r in rects {
+        let y = if flipped { r.y } else { height - r.y - r.height };
+        let rect = cocoa::foundation::NSRect::new(
+            cocoa::foundation::NSPoint::new(r.x, y),
+            cocoa::foundation::NSSize::new(r.width, r.height),
+        );
+        CGPathAddRect(path, std::ptr::null(), rect);
+    }
+    path
+}
+
+/// Re-add `view` to its superview directly above `below` (CH3.A3: the
+/// RustKit chrome over the page). Both must share a superview.
+#[cfg(target_os = "macos")]
+pub fn raise_raw_view_above(view: isize, below: isize) {
+    if view == 0 || below == 0 {
+        return;
+    }
+    let (view, below) = (view as id, below as id);
+    unsafe {
+        let superview: id = msg_send![below, superview];
+        let own: id = msg_send![view, superview];
+        if superview == nil || own != superview {
+            warn!("raise_raw_view_above: the views do not share a superview");
+            return;
+        }
+        // NSWindowAbove = 1.
+        let _: () = msg_send![superview, addSubview: view positioned: 1i64 relativeTo: below];
+    }
 }
 
 #[cfg(target_os = "macos")]
