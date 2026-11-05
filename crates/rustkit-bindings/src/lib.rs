@@ -1136,8 +1136,10 @@ impl DomBindings {
     }
 
     /// Whether script may read the clipboard (`navigator.clipboard.readText`,
-    /// `execCommand('paste')`). On by default; the user's own paste is
-    /// always allowed.
+    /// `execCommand('paste')`). Off by default, for web content: the
+    /// clipboard is shared across views, so reading it would leak what the
+    /// user copied elsewhere. Trusted pages (HiWave's chrome) opt in. The
+    /// user's own paste is always allowed.
     pub fn set_clipboard_read_allowed(&self, allowed: bool) {
         self.edit.script_read.set(allowed);
     }

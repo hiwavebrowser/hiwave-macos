@@ -2365,6 +2365,9 @@ pub struct Engine {
     host_reentry_override: Option<usize>,
     /// The clipboard every view's edit commands use (CH2.E1).
     clipboard: SharedClipboard,
+    /// Views whose script may read the clipboard (HiWave's own chrome).
+    /// Web content may not: the clipboard is shared by every view.
+    clipboard_readers: std::collections::HashSet<EngineViewId>,
     loader: Arc<ResourceLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
@@ -2622,6 +2625,7 @@ impl Engine {
             nav_seq,
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
             event_tx,
@@ -5131,10 +5135,27 @@ impl Engine {
         self.clipboard.clone()
     }
 
+    /// Let script in view `id` read the clipboard
+    /// (`navigator.clipboard.readText`, `execCommand('paste')`), for this
+    /// and later documents. Off by default: a web page must not read what
+    /// the user copied in another tab. HiWave's own chrome views opt in.
+    /// The user's own paste works either way.
+    pub fn set_script_clipboard_read_allowed(&mut self, id: EngineViewId, allowed: bool) {
+        if allowed {
+            self.clipboard_readers.insert(id);
+        } else {
+            self.clipboard_readers.remove(&id);
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_clipboard_read_allowed(allowed);
+        }
+    }
+
     /// A new page's bindings edit with this engine's clipboard and the
     /// view's edit states (the ones layout paints).
     fn attach_editing(&self, id: EngineViewId, bindings: &DomBindings) {
         bindings.set_clipboard(self.clipboard.clone());
+        bindings.set_clipboard_read_allowed(self.clipboard_readers.contains(&id));
         if let Some(view) = self.views.get(&id) {
             bindings.share_edit_states(view.lay.edit_states.clone());
         }
@@ -24451,6 +24472,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25192,6 +25214,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25262,6 +25285,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25349,6 +25373,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -25562,6 +25587,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25655,6 +25681,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25768,6 +25795,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25845,6 +25873,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25916,6 +25945,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26001,6 +26031,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26102,6 +26133,7 @@ mod tests {
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
                 clipboard: MemoryClipboard::shared(),
+                clipboard_readers: Default::default(),
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
                 event_tx,
                 event_rx: Some(event_rx),
@@ -26204,6 +26236,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26284,6 +26317,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26366,6 +26400,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26448,6 +26483,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26521,6 +26557,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26572,6 +26609,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26763,6 +26801,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26842,6 +26881,7 @@ mod tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -29407,6 +29447,7 @@ mod web_font_tests {
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),

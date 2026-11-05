@@ -24,7 +24,15 @@ impl Page {
     }
 }
 
+/// A page that may read the clipboard, as HiWave's own chrome may.
 fn page() -> Page {
+    let p = web_page();
+    p.b.set_clipboard_read_allowed(true);
+    p
+}
+
+/// A web page: script clipboard reads are denied (the default).
+fn web_page() -> Page {
     let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
     let doc = Rc::new(Document::parse_html(PAGE).unwrap());
     b.set_document(doc.clone()).unwrap();
@@ -86,10 +94,9 @@ fn navigator_clipboard_write_then_read_resolves_the_text() {
 }
 
 #[test]
-fn a_page_denied_clipboard_reads_gets_a_rejection() {
-    let p = page();
+fn a_web_page_is_denied_clipboard_reads_by_default() {
+    let p = web_page();
     p.cb.write_text("private");
-    p.b.set_clipboard_read_allowed(false);
     p.b.evaluate(
         "window.got = []; navigator.clipboard.readText().then(function (t) { got.push('r:' + t); }, \
          function (e) { got.push(e.name); });",
@@ -101,7 +108,16 @@ fn a_page_denied_clipboard_reads_gets_a_rejection() {
         ev(&p.b, "$('q').focus(); document.execCommand('paste')"),
         "false"
     );
-    assert_eq!(ev(&p.b, "$('q').value"), "hello");
+    assert_eq!(
+        ev(
+            &p.b,
+            "$('q').value + '|' + document.queryCommandEnabled('paste')"
+        ),
+        "hello|false"
+    );
+    // The user's own paste still reads it.
+    p.b.user_edit(p.id("q"), &EditCommand::Paste).unwrap();
+    assert_eq!(ev(&p.b, "$('q').value"), "helloprivate");
 }
 
 #[test]

@@ -23,7 +23,10 @@ pub struct EditContext {
     pub(crate) clipboard: RefCell<SharedClipboard>,
     pub(crate) states: RefCell<SharedEditStates>,
     /// Whether script may read the clipboard (`readText`,
-    /// `execCommand('paste')`). A user's paste is always allowed.
+    /// `execCommand('paste')`). Off by default: the clipboard is shared by
+    /// every view, so a web page reading it could see what the user copied
+    /// in another tab. Trusted views (HiWave's own chrome) opt in. A
+    /// user's paste is always allowed.
     pub(crate) script_read: Cell<bool>,
 }
 
@@ -32,7 +35,7 @@ impl Default for EditContext {
         Self {
             clipboard: RefCell::new(MemoryClipboard::shared()),
             states: RefCell::new(Rc::default()),
-            script_read: Cell::new(true),
+            script_read: Cell::new(false),
         }
     }
 }

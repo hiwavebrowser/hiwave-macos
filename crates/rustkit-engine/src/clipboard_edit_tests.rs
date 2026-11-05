@@ -156,6 +156,8 @@ fn exec_command_copy_and_navigator_clipboard_use_the_engines_clipboard() {
     let (mut engine, id) = page();
     let platform = Rc::new(MemoryClipboard::new());
     engine.set_clipboard(platform.clone());
+    // A trusted (chrome) view may read the clipboard from script.
+    engine.set_script_clipboard_read_allowed(id, true);
     focus(&mut engine, id, "q");
     assert_eq!(
         js(
@@ -185,4 +187,54 @@ fn exec_command_copy_and_navigator_clipboard_use_the_engines_clipboard() {
     engine.handle_text_key(id, END, "", false, false, false);
     assert!(chord(&mut engine, id, "v", false));
     assert_eq!(value_of(&mut engine, id, "q"), "hellox");
+}
+
+#[test]
+fn a_web_page_cannot_read_the_clipboard_from_script() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("copied in another tab");
+    js(
+        &mut engine,
+        id,
+        "window.got = ''; navigator.clipboard.readText().then(function (t) { got = 'read:' + t; }, \
+         function (e) { got = e.name; }); 0",
+    );
+    engine.views[&id]
+        .bindings
+        .as_ref()
+        .unwrap()
+        .run_jobs()
+        .unwrap();
+    assert_eq!(js(&mut engine, id, "got"), "NotAllowedError");
+    focus(&mut engine, id, "e");
+    assert_eq!(
+        js(&mut engine, id, "document.execCommand('paste')"),
+        "false"
+    );
+    assert_eq!(value_of(&mut engine, id, "e"), "");
+    // The opt-in holds across a new document in the view.
+    engine.set_script_clipboard_read_allowed(id, true);
+    engine.load_html(id, PAGE).expect("reload");
+    js(
+        &mut engine,
+        id,
+        "window.got = ''; navigator.clipboard.readText().then(function (t) { got = t; }); 0",
+    );
+    engine.views[&id]
+        .bindings
+        .as_ref()
+        .unwrap()
+        .run_jobs()
+        .unwrap();
+    assert_eq!(js(&mut engine, id, "got"), "copied in another tab");
+    // The user's own paste always reads it.
+    engine.set_script_clipboard_read_allowed(id, false);
+    js(
+        &mut engine,
+        id,
+        "var $ = function (i) { return document.getElementById(i); }; 0",
+    );
+    focus(&mut engine, id, "e");
+    assert!(chord(&mut engine, id, "v", false));
+    assert_eq!(value_of(&mut engine, id, "e"), "copied in another tab");
 }
