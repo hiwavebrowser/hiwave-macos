@@ -3554,12 +3554,28 @@ impl LayoutBox {
 
         let (intrinsic_width, intrinsic_height) = form_control_intrinsic_size(&self.style, &control);
 
+        // CSS 2.1 §10.1: a `position: fixed` control's containing block is
+        // the viewport, so its percentages resolve against the viewport, not
+        // against the box that laid it out (whose height here is its flow
+        // cursor). A fixed `<input>` with `height: 50%` was its intrinsic
+        // 19px against Chromium's half viewport (CH2.B13). Bare unit trees
+        // with no viewport keep the passed block.
+        let fixed_viewport = (self.position == Position::Fixed
+            && self.viewport.0 > 0.0
+            && self.viewport.1 > 0.0)
+            .then_some(self.viewport);
+        let width_base = fixed_viewport.map_or(containing_block.content.width, |v| v.0);
+        let percent_height_base = match fixed_viewport {
+            Some(v) => Some(v.1),
+            None => percent_height_base,
+        };
+
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
         let width = match self.style.width {
             Length::Px(px) if px > 0.0 => px,
             Length::Percent(pct) => {
-                let resolved = pct / 100.0 * containing_block.content.width;
+                let resolved = pct / 100.0 * width_base;
                 if resolved > 0.0 {
                     resolved
                 } else {
@@ -3567,13 +3583,26 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
-            _ => intrinsic_width,
+            Length::Auto | Length::Zero => intrinsic_width,
+            // `vw`, `rem`, `calc()` and the rest: only px/%/em were read, so
+            // a `width: calc(25vw + 10px)` button kept its intrinsic width
+            // (CH2.B13).
+            ref other => {
+                let resolved = self.length_to_px(other, width_base);
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_width
+                }
+            }
         };
 
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
-            Length::Percent(_) if self.percent_height_computes_to_auto() => intrinsic_height,
+            Length::Percent(_) if fixed_viewport.is_none() && self.percent_height_computes_to_auto() => {
+                intrinsic_height
+            }
             Length::Percent(pct) => {
                 // The parent's definite height where the caller knows one. The
                 // containing block's own height is the flow cursor (zero on a
@@ -3591,7 +3620,18 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
-            _ => intrinsic_height,
+            Length::Auto | Length::Zero => intrinsic_height,
+            // `vh`, `rem`, `calc()` and the rest, as for the width: an
+            // `<input>` with `height: 50vh` was 19 tall (Chromium 300).
+            ref other => {
+                let base = percent_height_base.unwrap_or(containing_block.content.height);
+                let resolved = self.length_to_px(other, base);
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_height
+                }
+            }
         };
 
         // Author margins are part of the control's margin box: the line box
@@ -3600,7 +3640,7 @@ impl LayoutBox {
         // where Chrome builds 43/39 — the margins were never resolved, so
         // margin_box() was the bare rect). The blob/composed height above is
         // the BORDER box, so padding/border stay folded into content here.
-        let cw = containing_block.content.width;
+        let cw = width_base;
         self.dimensions.margin.top = self.length_to_px(&self.style.margin_top, cw);
         self.dimensions.margin.bottom = self.length_to_px(&self.style.margin_bottom, cw);
         self.dimensions.margin.left = self.length_to_px(&self.style.margin_left, cw);
