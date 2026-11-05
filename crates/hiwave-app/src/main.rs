@@ -2243,6 +2243,14 @@ fn main() {
                             let (vk, text) = match &key_event.logical_key {
                                 Key::ArrowLeft => (0x25u32, String::new()),
                                 Key::ArrowRight => (0x27, String::new()),
+                                // A focused `<select>` opens, moves and
+                                // closes its drop-down with these (CH2.E6);
+                                // the native key path already maps them.
+                                Key::ArrowUp => (0x26, String::new()),
+                                Key::ArrowDown => (0x28, String::new()),
+                                Key::PageUp => (0x21, String::new()),
+                                Key::PageDown => (0x22, String::new()),
+                                Key::Escape => (0x1B, String::new()),
                                 Key::Home => (0x24, String::new()),
                                 Key::End => (0x23, String::new()),
                                 Key::Backspace => (0x08, String::new()),
@@ -2505,7 +2513,17 @@ fn main() {
                             }
                             }
                             rustkit_viewhost::InputKind::Key(key) => {
-                            if key.cmd {
+                            // Cmd chords are menu shortcuts, except the editing
+                            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
+                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
+                            // focused link, button or <select> is not one: its
+                            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
+                            // The engine reads Cmd as its command modifier (`ctrl`).
+                            let edit_chord = key.cmd
+                                && view.has_focused_text_control()
+                                && (matches!(key.text.to_ascii_lowercase().as_str(), "a" | "c" | "v" | "x" | "z")
+                                    || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
+                            if key.cmd && !edit_chord {
                                 continue; // menu shortcuts are not text
                             }
                             // Esc leaves select-element mode; the page does not hear it.
@@ -2548,7 +2566,7 @@ fn main() {
                                 }
                             }
                             let focused = view.has_focused_element();
-                            if view.handle_text_key(vk, text, key.ctrl, key.shift, key.alt) {
+                            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
                                 view.relayout();
                             } else if !focused {
                                 // Nothing focused and the page did not take
