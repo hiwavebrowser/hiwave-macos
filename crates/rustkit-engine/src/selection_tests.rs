@@ -235,3 +235,42 @@ fn typing_in_a_contenteditable_div_edits_it_and_fires_input() {
     engine.handle_text_key(view, 0x41, "x", false, false, false);
     assert_eq!(read(&mut engine, view, "document.body.textContent.indexOf('x') < 0"), "true");
 }
+
+#[test]
+fn text_control_offsets_are_characters_on_a_non_ascii_value() {
+    let (mut engine, view) = page("<html><body style='margin:0'><input id=f value='café latte' style='font-size:16px;width:300px'></body></html>");
+    let (content_x, style) = {
+        let tree = engine.views[&view].layout.clone().unwrap();
+        let raw = engine.views[&view].document.as_ref().unwrap().get_element_by_id("f").unwrap().id.raw();
+        let b = box_of_node(&tree, raw).unwrap();
+        (b.dimensions.content.x, b.style.clone())
+    };
+    let width = |t: &str| -> f32 {
+        t.chars()
+            .map(|c| rustkit_layout::measure_text_advanced(&c.to_string(), &style.font_family, 16.0, style.font_weight, style.font_style).width)
+            .sum()
+    };
+    // A click just after "é", then a key: no panic, the text goes there.
+    let x = content_x + width("café") + 0.5;
+    engine.mouse_down_at_point(view, x, 10.0);
+    engine.click_at_point(view, x, 10.0);
+    engine.handle_text_key(view, 0x31, "!", false, false, false);
+    assert_eq!(engine.edit_value_in(view, engine.focused_node(view).unwrap().raw()).unwrap().0, "café! latte");
+    // A double-click on "café" selects its 4 characters; select-all, all 11.
+    engine.mouse_down_with(view, content_x + 1.0, 10.0, 2, false);
+    engine.click_at_point(view, content_x + 1.0, 10.0);
+    assert_eq!(text_input(&engine, view).1, Some((0, 4)));
+    engine.handle_text_key(view, 0x41, "a", true, false, false);
+    engine.relayout(view).unwrap();
+    assert_eq!(text_input(&engine, view).1, Some((0, 11)));
+}
+
+#[test]
+fn byte_and_char_offsets_convert_on_boundaries() {
+    use selection::{byte_of_char, char_of_byte};
+    assert_eq!(byte_of_char("café x", 4), 5);
+    assert_eq!(byte_of_char("café", 9), 5);
+    assert_eq!(char_of_byte("café x", 5), 4);
+    assert_eq!(char_of_byte("café", 4), 3, "inside é rounds down");
+    assert_eq!(char_of_byte("café", 99), 4);
+}

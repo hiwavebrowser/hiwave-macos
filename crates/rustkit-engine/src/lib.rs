@@ -1008,8 +1008,6 @@ struct ViewState {
     primary_button_down: bool,
     /// The element the press in progress landed on (raw NodeId).
     press_target: Option<usize>,
-    /// The press in progress has had its say on the focus (it moved it, or
-    /// a listener cancelled the press): the release leaves the focus alone.
     /// The document selection as the engine paints it (`selection.rs`),
     /// and the drag that is moving it.
     doc_selection: Option<selection::DocSelection>,
@@ -1017,6 +1015,8 @@ struct ViewState {
     /// Which press of a multi-click the button went down for (1 single,
     /// 2 double...): the release fires `dblclick` after the second.
     press_clicks: u32,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
     press_settled_focus: bool,
     /// Whether the view itself has focus.
     view_focused: bool,
@@ -5492,20 +5492,26 @@ impl Engine {
 }
 
 impl layout_ctx::LayoutCtx {
+    /// The selected characters `[start, end)` of a text control in the view
+    /// being laid out, when its selection is not collapsed. The edit state
+    /// counts bytes; the painter counts characters.
+    fn edit_selection(&self, node_raw: usize) -> Option<(usize, usize)> {
+        self.with_building_lay(|lay| {
+            let states = lay.edit_states.borrow();
+            let state = states.get(&node_raw)?;
+            let sel = state.selection().normalize();
+            let value = state.value();
+            (!sel.is_collapsed()).then(|| {
+                (selection::char_of_byte(&value, sel.start), selection::char_of_byte(&value, sel.end))
+            })
+        })
+        .flatten()
+    }
+
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
     /// while the DOM attribute stays untouched.
-    /// The selected characters `[start, end)` of a text control in the view
-    /// being laid out, when its selection is not collapsed.
-    fn edit_selection(&self, node_raw: usize) -> Option<(usize, usize)> {
-        self.with_building_lay(|lay| {
-            let states = lay.edit_states.borrow();
-            let sel = states.get(&node_raw)?.selection().normalize();
-            (!sel.is_collapsed()).then_some((sel.start, sel.end))
-        })
-        .flatten()
-    }
 
     pub fn edit_value(&self, node_raw: usize) -> Option<(String, usize)> {
         // Resolves against the view currently being laid out; outside a

@@ -61,6 +61,20 @@ fn char_of_utf16(text: &str, offset: usize) -> usize {
     text.chars().count()
 }
 
+/// The byte offset of character `index` of `text` (its length past the
+/// end). `TextEditState` offsets are bytes on character boundaries; the
+/// mouse and the painter count characters.
+pub(crate) fn byte_of_char(text: &str, index: usize) -> usize {
+    text.char_indices().nth(index).map_or(text.len(), |(b, _)| b)
+}
+
+/// The character at byte offset `offset` of `text` (a byte inside a
+/// character rounds down to it).
+pub(crate) fn char_of_byte(text: &str, offset: usize) -> usize {
+    text.char_indices().take_while(|(b, _)| *b < offset.min(text.len())).count()
+        - usize::from(offset < text.len() && !text.is_char_boundary(offset))
+}
+
 fn text_of(node: &Node) -> Option<&str> {
     match &node.node_type {
         NodeType::Text(t) => Some(t.as_str()),
@@ -287,6 +301,13 @@ impl Engine {
         let tree = view.layout.as_ref()?;
         let control = box_of_node(tree, raw)?;
         let value = view.lay.edit_states.borrow().get(&raw)?.value();
+        // A password field paints a bullet per character.
+        let password = matches!(
+            &control.box_type,
+            rustkit_layout::BoxType::FormControl(rustkit_layout::FormControlType::TextInput { input_type, .. })
+                if input_type.eq_ignore_ascii_case("password")
+        );
+        let value = if password { value.chars().map(|_| rustkit_layout::PASSWORD_MASK).collect() } else { value };
         let style = &control.style;
         let font_size = match style.font_size {
             rustkit_css::Length::Px(px) => px,
@@ -342,7 +363,9 @@ impl Engine {
                     return;
                 };
                 let value = state.value();
-                let sel = state.selection();
+                // Characters here; the edit state takes bytes.
+                let sel = state.selection().normalize();
+                let (sel_start, sel_end) = (char_of_byte(&value, sel.start), char_of_byte(&value, sel.end));
                 let (anchor, start, end) = match clicks {
                     2 => {
                         let (s, e) = word_around(&value, at);
@@ -350,12 +373,12 @@ impl Engine {
                     }
                     n if n >= 3 => (0, 0, value.chars().count()),
                     _ if shift => {
-                        let anchor = if at < sel.start { sel.end } else { sel.start };
+                        let anchor = if at < sel_start { sel_end } else { sel_start };
                         (anchor, anchor.min(at), anchor.max(at))
                     }
                     _ => (at, at, at),
                 };
-                state.set_selection(start, end);
+                state.set_selection(byte_of_char(&value, start), byte_of_char(&value, end));
                 anchor
             };
             view.select_drag = Some(SelectDrag::Control { node: raw, anchor });
@@ -474,7 +497,8 @@ impl Engine {
                     let Some(state) = states.get(&node) else {
                         return;
                     };
-                    let (s, e) = (anchor.min(at), anchor.max(at));
+                    let value = state.value();
+                    let (s, e) = (byte_of_char(&value, anchor.min(at)), byte_of_char(&value, anchor.max(at)));
                     let before = state.selection().normalize();
                     state.set_selection(s, e);
                     (before.start, before.end) != (s, e)
