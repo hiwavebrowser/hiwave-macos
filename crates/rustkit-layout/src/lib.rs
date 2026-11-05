@@ -4783,6 +4783,28 @@ impl LayoutBox {
         if self.position != Position::Absolute {
             return;
         }
+        // The flow pass resolved this box's horizontal percentages against
+        // its FLOW parent, which since C15 need not be its containing block
+        // (a static parent hands its absolute child on to the initial one).
+        // When those percentages give a different answer here, lay the box
+        // out again at its current margin-box origin in a stand-in as wide
+        // as the real containing block, so its children flow in the new
+        // width too; the offsets below then move it as usual. A `width:
+        // 100%` overlay under a 300px static parent was 300 wide and 800
+        // tall (Chrome: 1280×800).
+        if self.horizontal_base_changed(containing_block) {
+            let margin_box = self.dimensions.margin_box();
+            let stand_in = Dimensions {
+                content: Rect::new(
+                    margin_box.x,
+                    margin_box.y,
+                    containing_block.content.width,
+                    0.0,
+                ),
+                ..Default::default()
+            };
+            self.layout_with_definite_height(&stand_in, 0.0);
+        }
         let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
         let (origin_w, origin_h) = (
             self.dimensions.content.width,
@@ -4876,6 +4898,84 @@ impl LayoutBox {
         {
             self.reanchor_absolute_children();
         }
+    }
+
+    /// Whether this box's horizontal sizes depend on its containing block's
+    /// width AND come out differently against `containing_block` than what
+    /// it holds now: an auto width stretched between `left` and `right`, or
+    /// a percentage in `width`, `min-width`, `max-width`, left/right padding
+    /// or margins. Auto margins are left out of the comparison: they absorb
+    /// free space, not a percentage.
+    fn horizontal_base_changed(&self, containing_block: &Dimensions) -> bool {
+        fn has_percent(length: &Length) -> bool {
+            match length {
+                Length::Percent(_) => true,
+                Length::Calc(sum) => sum.percent != 0.0,
+                _ => false,
+            }
+        }
+        let style = &self.style;
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // `width: auto` stretched between `left` and `right` (§10.3.7) is as
+        // wide as the containing block allows: a `left: 0; right: 0` bar
+        // under a narrow static parent widens to the initial containing
+        // block here, and its children must flow in that width.
+        if matches!(style.width, Length::Auto) && !matches!(self.box_type, BoxType::Image { .. }) {
+            let offsets = self.resolved_offsets(containing_block);
+            if let (Some(left), Some(right)) = (offsets.left, offsets.right) {
+                let d = &self.dimensions;
+                let stretched = (containing_block.content.width
+                    - left
+                    - right
+                    - d.margin.left
+                    - d.margin.right
+                    - d.border.left
+                    - d.border.right
+                    - d.padding.left
+                    - d.padding.right)
+                    .max(0.0);
+                if !near(stretched, d.content.width) {
+                    return true;
+                }
+            }
+        }
+        let depends = [
+            &style.width,
+            &style.min_width,
+            &style.max_width,
+            &style.padding_left,
+            &style.padding_right,
+            &style.margin_left,
+            &style.margin_right,
+        ]
+        .into_iter()
+        .any(has_percent);
+        if !depends || matches!(self.box_type, BoxType::Image { .. }) {
+            // A replaced box is re-sized by `layout_image_in` below.
+            return false;
+        }
+        let held = self.dimensions.clone();
+        let mut probe = LayoutBox::new(BoxType::Block, self.style.clone());
+        probe.position = self.position;
+        probe.offsets = self.offsets.clone();
+        probe.float = self.float;
+        probe.viewport = self.viewport;
+        // An auto width shrinks to fit its content, which the probe has
+        // none of; compare only what a percentage decides.
+        if matches!(style.width, Length::Auto | Length::FitContent) {
+            let pl = self.length_to_px(&style.padding_left, containing_block.content.width);
+            let pr = self.length_to_px(&style.padding_right, containing_block.content.width);
+            return !near(pl, held.padding.left) || !near(pr, held.padding.right);
+        }
+        probe.calculate_block_width(containing_block);
+        let got = &probe.dimensions;
+        !near(got.content.width, held.content.width)
+            || !near(got.padding.left, held.padding.left)
+            || !near(got.padding.right, held.padding.right)
+            || (!matches!(style.margin_left, Length::Auto)
+                && !near(got.margin.left, held.margin.left))
+            || (!matches!(style.margin_right, Length::Auto)
+                && !near(got.margin.right, held.margin.right))
     }
 
     /// Whether this box is the containing block of the absolutely positioned
