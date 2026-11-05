@@ -1089,6 +1089,183 @@ fn wheel_burst_started() -> bool {
     })
 }
 
+/// One input event for a RustKit view, as drained from the viewhost queue:
+/// the pointer, the wheel and keys. Lifted from the event loop's drain
+/// (CH3.A2 step 3b) so the RustKit chrome's input can take the same path.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn dispatch_view_input(
+    view: &webview_rustkit::RustKitView,
+    kind: rustkit_viewhost::InputKind,
+    devtools: &mut devtools_panel::Devtools,
+    inspector_for_events: &WebView,
+    click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+) {
+    match kind {
+        rustkit_viewhost::InputKind::Pointer(click) => {
+            // The page hears the click before the browser
+            // acts on it: mousedown on press; mouseup and click
+            // on release, and only then focus and the link,
+            // which a listener's preventDefault() cancels. Until
+            // 2026-10-03 no event reached the page at all, so
+            // every script-driven control was dead (Z lane I0).
+            // Where the pointer is, and when it goes: what a
+            // hover menu or a drag listens for.
+            // The Inspector's select-element mode takes the
+            // pointer instead: hover outlines, release picks.
+            if devtools.picking() {
+                let at = (click.x as f32, click.y as f32);
+                match click.input {
+                    rustkit_viewhost::PointerInput::Move => {
+                        devtools.pick_hover(view, &inspector_for_events, Some(at))
+                    }
+                    rustkit_viewhost::PointerInput::Leave => {
+                        devtools.pick_hover(view, &inspector_for_events, None)
+                    }
+                    rustkit_viewhost::PointerInput::Button if !click.down => {
+                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
+                    }
+                    rustkit_viewhost::PointerInput::Button => {}
+                }
+                return;
+            }
+            match click.input {
+                rustkit_viewhost::PointerInput::Move => {
+                    view.mouse_move_at_point(click.x as f32, click.y as f32);
+                    return;
+                }
+                rustkit_viewhost::PointerInput::Leave => {
+                    view.mouse_leave();
+                    return;
+                }
+                rustkit_viewhost::PointerInput::Button => {}
+            }
+            if click.down {
+                view.mouse_down_at_point(click.x as f32, click.y as f32);
+                return;
+            }
+            info!(x = click.x, y = click.y, "content click (view-local)");
+            let outcome = view.click_at_point(click.x as f32, click.y as f32);
+            // ENGINE focus is not APPKIT focus: without making
+            // the content view the window's first responder,
+            // macOS keeps delivering keys to the chrome WebView
+            // — observed live as "text entry goes back up to
+            // the URL bar". Any click on the page takes the
+            // keyboard, focused element or not: the page's own
+            // shortcuts are keys with nothing focused.
+            view.grab_keyboard();
+            if let Some(tag) = outcome.focused {
+                info!(%tag, "Focused content element");
+                view.relayout();
+            }
+            if let Some(url) = outcome.navigate {
+                info!(%url, "Link clicked");
+                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+            }
+        }
+        // The wheel, from the content view's own `scrollWheel:`.
+        // The window-loop MouseWheel arm above stays as it was;
+        // the view consumes the wheel, so only one of the two
+        // fires for an event. Until 2026-10-06 the wheel reached
+        // neither in the built app (hand-test item H6). A burst
+        // arrives summed by the queue, pointer drift between
+        // its steps included, so a drain costs one scroll per
+        // burst and one present (#692), not one per step.
+        rustkit_viewhost::InputKind::Wheel(scroll) => {
+            if wheel_burst_started() {
+                info!(
+                    dx = scroll.dx,
+                    dy = scroll.dy,
+                    "wheel burst started (content view)"
+                );
+            }
+            if view.scroll_at(
+                scroll.x as f32,
+                scroll.y as f32,
+                scroll.dx as f32,
+                scroll.dy as f32,
+            ) {
+                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
+            }
+        }
+        rustkit_viewhost::InputKind::Key(key) => {
+            // Cmd chords are menu shortcuts, except the editing
+            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
+            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
+            // focused link, button or <select> is not one: its
+            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
+            // The engine reads Cmd as its command modifier (`ctrl`).
+            let edit_chord = key.cmd
+                && view.has_focused_text_control()
+                && (matches!(
+                    key.text.to_ascii_lowercase().as_str(),
+                    "a" | "c" | "v" | "x" | "z"
+                ) || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
+            if key.cmd && !edit_chord {
+                return; // menu shortcuts are not text
+            }
+            // Esc leaves select-element mode; the page does not hear it.
+            if devtools.picking() && key.mac_keycode == 53 {
+                if !key.up {
+                    devtools.stop_picker(view, &inspector_for_events);
+                }
+                return;
+            }
+            // macOS keyCodes -> the Win32 VK numbering the edit
+            // model speaks. Text keys carry their characters.
+            let (vk, text): (u32, &str) = match key.mac_keycode {
+                51 => (0x08, ""),      // delete (backspace)
+                117 => (0x2E, ""),     // forward delete
+                123 => (0x25, ""),     // left
+                124 => (0x27, ""),     // right
+                115 => (0x24, ""),     // home
+                119 => (0x23, ""),     // end
+                36 | 76 => (0x0D, ""), // return / keypad enter
+                48 => (0x09, ""),      // tab
+                53 => (0x1B, ""),      // escape
+                116 => (0x21, ""),     // page up
+                121 => (0x22, ""),     // page down
+                126 => (0x26, ""),     // up
+                125 => (0x28, ""),     // down
+                _ => (0, key.text.as_str()),
+            };
+            if vk == 0 && text.is_empty() {
+                return;
+            }
+            if key.up {
+                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
+                return;
+            }
+            if vk == 0x0D {
+                if let Some(url) = view.form_submit_url() {
+                    info!(%url, "Form submitted");
+                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                    return;
+                }
+            }
+            let focused = view.has_focused_element();
+            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
+                view.relayout();
+            } else if !focused {
+                // Nothing focused and the page did not take
+                // the key: the keys that scroll, as in the
+                // window-level arm (wheel sign convention).
+                let dy: Option<f32> = match (vk, text) {
+                    (0x28, _) => Some(-40.0),
+                    (0x26, _) => Some(40.0),
+                    (0x22, _) | (0, " ") => Some(-600.0),
+                    (0x21, _) => Some(600.0),
+                    (0x23, _) => Some(-f32::MAX),
+                    (0x24, _) => Some(f32::MAX),
+                    _ => None,
+                };
+                if let Some(dy) = dy {
+                    view.scroll_by(0.0, dy);
+                }
+            }
+        }
+    }
+}
+
 // The real-window driver's h6 check reads "wheel burst started" from the app
 // log after the first wheel it sends to a freshly launched app.
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
@@ -2564,159 +2741,7 @@ fn main() {
                             // When it arrived, for the W-gate's input-to-present
                             // figure (logged by the presenter with the frame).
                             view.note_input(event.at, event.seq);
-                            match event.kind {
-                            rustkit_viewhost::InputKind::Pointer(click) => {
-                            // The page hears the click before the browser
-                            // acts on it: mousedown on press; mouseup and click
-                            // on release, and only then focus and the link,
-                            // which a listener's preventDefault() cancels. Until
-                            // 2026-10-03 no event reached the page at all, so
-                            // every script-driven control was dead (Z lane I0).
-                            // Where the pointer is, and when it goes: what a
-                            // hover menu or a drag listens for.
-                            // The Inspector's select-element mode takes the
-                            // pointer instead: hover outlines, release picks.
-                            if devtools.picking() {
-                                let at = (click.x as f32, click.y as f32);
-                                match click.input {
-                                    rustkit_viewhost::PointerInput::Move => {
-                                        devtools.pick_hover(view, &inspector_for_events, Some(at))
-                                    }
-                                    rustkit_viewhost::PointerInput::Leave => {
-                                        devtools.pick_hover(view, &inspector_for_events, None)
-                                    }
-                                    rustkit_viewhost::PointerInput::Button if !click.down => {
-                                        devtools.pick_at(view, &inspector_for_events, at.0, at.1)
-                                    }
-                                    rustkit_viewhost::PointerInput::Button => {}
-                                }
-                                continue;
-                            }
-                            match click.input {
-                                rustkit_viewhost::PointerInput::Move => {
-                                    view.mouse_move_at_point(click.x as f32, click.y as f32);
-                                    continue;
-                                }
-                                rustkit_viewhost::PointerInput::Leave => {
-                                    view.mouse_leave();
-                                    continue;
-                                }
-                                rustkit_viewhost::PointerInput::Button => {}
-                            }
-                            if click.down {
-                                view.mouse_down_at_point(click.x as f32, click.y as f32);
-                                continue;
-                            }
-                            info!(x = click.x, y = click.y, "content click (view-local)");
-                            let outcome = view.click_at_point(click.x as f32, click.y as f32);
-                            // ENGINE focus is not APPKIT focus: without making
-                            // the content view the window's first responder,
-                            // macOS keeps delivering keys to the chrome WebView
-                            // — observed live as "text entry goes back up to
-                            // the URL bar". Any click on the page takes the
-                            // keyboard, focused element or not: the page's own
-                            // shortcuts are keys with nothing focused.
-                            view.grab_keyboard();
-                            if let Some(tag) = outcome.focused {
-                                info!(%tag, "Focused content element");
-                                view.relayout();
-                            }
-                            if let Some(url) = outcome.navigate {
-                                info!(%url, "Link clicked");
-                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                            }
-                            }
-                            // The wheel, from the content view's own `scrollWheel:`.
-                            // The window-loop MouseWheel arm above stays as it was;
-                            // the view consumes the wheel, so only one of the two
-                            // fires for an event. Until 2026-10-06 the wheel reached
-                            // neither in the built app (hand-test item H6). A burst
-                            // arrives summed by the queue, pointer drift between
-                            // its steps included, so a drain costs one scroll per
-                            // burst and one present (#692), not one per step.
-                            rustkit_viewhost::InputKind::Wheel(scroll) => {
-                            if wheel_burst_started() {
-                                info!(dx = scroll.dx, dy = scroll.dy, "wheel burst started (content view)");
-                            }
-                            if view.scroll_at(scroll.x as f32, scroll.y as f32, scroll.dx as f32, scroll.dy as f32) {
-                                trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
-                            }
-                            }
-                            rustkit_viewhost::InputKind::Key(key) => {
-                            // Cmd chords are menu shortcuts, except the editing
-                            // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
-                            // (Shift+Z redo), Cmd+arrows and Cmd+Backspace. A
-                            // focused link, button or <select> is not one: its
-                            // Cmd chords stay the menu's (Cmd+arrows Back/Forward).
-                            // The engine reads Cmd as its command modifier (`ctrl`).
-                            let edit_chord = key.cmd
-                                && view.has_focused_text_control()
-                                && (matches!(key.text.to_ascii_lowercase().as_str(), "a" | "c" | "v" | "x" | "z")
-                                    || matches!(key.mac_keycode, 51 | 117 | 123 | 124 | 125 | 126));
-                            if key.cmd && !edit_chord {
-                                continue; // menu shortcuts are not text
-                            }
-                            // Esc leaves select-element mode; the page does not hear it.
-                            if devtools.picking() && key.mac_keycode == 53 {
-                                if !key.up {
-                                    devtools.stop_picker(view, &inspector_for_events);
-                                }
-                                continue;
-                            }
-                            // macOS keyCodes -> the Win32 VK numbering the edit
-                            // model speaks. Text keys carry their characters.
-                            let (vk, text): (u32, &str) = match key.mac_keycode {
-                                51 => (0x08, ""),   // delete (backspace)
-                                117 => (0x2E, ""),  // forward delete
-                                123 => (0x25, ""),  // left
-                                124 => (0x27, ""),  // right
-                                115 => (0x24, ""),  // home
-                                119 => (0x23, ""),  // end
-                                36 | 76 => (0x0D, ""), // return / keypad enter
-                                48 => (0x09, ""),   // tab
-                                53 => (0x1B, ""),   // escape
-                                116 => (0x21, ""),  // page up
-                                121 => (0x22, ""),  // page down
-                                126 => (0x26, ""),  // up
-                                125 => (0x28, ""),  // down
-                                _ => (0, key.text.as_str()),
-                            };
-                            if vk == 0 && text.is_empty() {
-                                continue;
-                            }
-                            if key.up {
-                                view.handle_key_up(vk, text, key.ctrl, key.shift, key.alt);
-                                continue;
-                            }
-                            if vk == 0x0D {
-                                if let Some(url) = view.form_submit_url() {
-                                    info!(%url, "Form submitted");
-                                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
-                                    continue;
-                                }
-                            }
-                            let focused = view.has_focused_element();
-                            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
-                                view.relayout();
-                            } else if !focused {
-                                // Nothing focused and the page did not take
-                                // the key: the keys that scroll, as in the
-                                // window-level arm (wheel sign convention).
-                                let dy: Option<f32> = match (vk, text) {
-                                    (0x28, _) => Some(-40.0),
-                                    (0x26, _) => Some(40.0),
-                                    (0x22, _) | (0, " ") => Some(-600.0),
-                                    (0x21, _) => Some(600.0),
-                                    (0x23, _) => Some(-f32::MAX),
-                                    (0x24, _) => Some(f32::MAX),
-                                    _ => None,
-                                };
-                                if let Some(dy) = dy {
-                                    view.scroll_by(0.0, dy);
-                                }
-                            }
-                            }
-                            }
+                            dispatch_view_input(view, event.kind, &mut devtools, &inspector_for_events, &click_proxy);
                         }
                         // Timers that came due, late fetches, and what the
                         // input above started; then sleep until the next timer.
