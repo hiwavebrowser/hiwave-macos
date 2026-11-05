@@ -39191,6 +39191,15 @@ thread_local! {
     static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
 }
 
+/// Whether the build in progress is a pointer restyle's partial build
+/// (`repaint_restyled`): it builds the changed elements and what is under
+/// them, and skips the rest of the page, which is all still there with
+/// its style. `LayoutCtx::with_building` reads it so the animations' end
+/// of build does not take the skipped elements for gone.
+pub(crate) fn restyle_build_active() -> bool {
+    RESTYLE_BUILD.with(|build| build.borrow().is_some())
+}
+
 /// What the build in progress does with `child` of `parent` (raw NodeIds):
 /// nothing unless it is a [`RestyleBuild`] and `parent` is on its path.
 #[derive(Clone, Copy, PartialEq)]
