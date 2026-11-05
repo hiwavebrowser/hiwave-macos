@@ -45193,6 +45193,18 @@ mod abspos_initial_containing_block_tests {
     }
 
     #[test]
+    fn a_left_right_stretched_box_lays_its_children_out_in_the_icb_width() {
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;width:300px;height:50px"><div id="abs" style="position:absolute;top:0;left:0;right:0"><div id="inner" style="height:10px"></div></div></div>"#
+        ));
+        assert_eq!(origin(&root, "parent"), (200.0, 1000.0), "precondition");
+        let abs = by_id(&root, "abs").dimensions.border_box();
+        let inner = by_id(&root, "inner").dimensions.border_box();
+        assert_eq!((abs.x, abs.width), (0.0, VIEWPORT.0), "left:0;right:0 spans the ICB");
+        assert_eq!((inner.x, inner.width), (0.0, VIEWPORT.0), "and its child fills it");
+    }
+
+    #[test]
     fn the_absolute_box_paints_where_it_is_placed() {
         let root = under("");
         let list = DisplayList::build(&root);
