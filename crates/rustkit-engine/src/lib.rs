@@ -315,6 +315,8 @@ pub use diagnostics::{
 };
 #[cfg(all(test, feature = "headless"))]
 mod diagnostics_tests;
+#[cfg(all(test, feature = "headless"))]
+mod nested_body_tests;
 mod inspector_page;
 pub use inspector_page::{
     diff_root_record, inspector_page_html, inspector_select_script, InspectorInputError, InspectorSelection,

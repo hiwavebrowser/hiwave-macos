@@ -951,6 +951,28 @@ mod tests {
         assert_eq!(main.text_content(), "Hello, world!");
     }
 
+    /// HTML §13.2.6.4.7 "in body", start tags `body` and `html`: a second
+    /// one adds the attributes the existing element lacks (first wins) and
+    /// creates nothing. S11: gmail's nested body kept the UA 8px margin.
+    #[test]
+    fn a_second_body_or_html_start_tag_merges_attributes() {
+        let doc = Document::parse_html(
+            "<html class=h><body class=a><html lang=en class=no><body class=b id=x>hello</body></html>",
+        )
+        .unwrap();
+        let bodies = doc.get_elements_by_tag_name("body");
+        assert_eq!(bodies.len(), 1);
+        let body = doc.body().unwrap();
+        assert_eq!(body.get_attribute("class"), Some("a"));
+        assert_eq!(body.get_attribute("id"), Some("x"));
+        assert_eq!(body.text_content(), "hello");
+        assert_eq!(doc.get_element_by_id("x").map(|n| n.id), Some(body.id));
+        assert_eq!(doc.get_elements_by_tag_name("html").len(), 1);
+        let html = doc.document_element().unwrap();
+        assert_eq!(html.get_attribute("class"), Some("h"));
+        assert_eq!(html.get_attribute("lang"), Some("en"));
+    }
+
     /// HTML §3.1.3 "the body element": the first child of the html element
     /// that is a body OR a frameset element. A frameset document's body
     /// element is its frameset.

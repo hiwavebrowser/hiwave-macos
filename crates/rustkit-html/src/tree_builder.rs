@@ -2455,6 +2455,61 @@ mod tests {
         assert_eq!(texts, ["text:first\n\nthird\n", "text:\nx"]);
     }
 
+    fn events_of(html: &str) -> Vec<String> {
+        build_tree(tokenize(html).unwrap(), TestSink::new()).unwrap().events
+    }
+
+    fn count(events: &[String], prefix: &str) -> usize {
+        events.iter().filter(|e| e.starts_with(prefix)).count()
+    }
+
+    /// HTML §13.2.6.4.7 "in body", start tag `body`: a parse error; the
+    /// attributes go onto the existing body and NO element is created. A
+    /// nested second body kept the UA `margin: 8px` on gmail's sign-in page
+    /// (S11), pushing the page root to x=8.
+    #[test]
+    fn a_second_body_start_tag_creates_no_element() {
+        let events = events_of("<body class=a><body class=b id=x>hello</body>");
+        assert_eq!(count(&events, "start:body"), 1, "{:?}", events);
+        let body = events.iter().position(|e| e.starts_with("start:body")).unwrap();
+        assert_eq!(events[body], "start:body[class=a]", "{:?}", events);
+        // The text after the second tag lands in the one body.
+        assert_eq!(events.get(body + 1).map(String::as_str), Some("text:hello"), "{:?}", events);
+    }
+
+    /// Same with the second body deep inside content and after `</body>`.
+    #[test]
+    fn a_second_body_start_tag_anywhere_creates_no_element() {
+        for html in [
+            "<html><head></head><body><div><p>a<body id=y>b</p></div></body></html>",
+            "<html><body>a</body><body id=y>b</html>",
+            "<body>a<table><tr><td><body id=y>b</td></tr></table>",
+        ] {
+            let events = events_of(html);
+            assert_eq!(count(&events, "start:body"), 1, "{}: {:?}", html, events);
+        }
+    }
+
+    /// HTML §13.2.6.4.7 "in body", start tag `html`: a parse error; the
+    /// attributes go onto the html element and no element is created. The
+    /// same rule is reached from "before head", "in head", "after head",
+    /// "after body" and "after after body".
+    #[test]
+    fn a_second_html_start_tag_creates_no_element() {
+        for html in [
+            "<html><body><html lang=en>x</body></html>",
+            "<html><head><html lang=en></head><body>x</body></html>",
+            "<html><html lang=en><head></head><body>x</body></html>",
+            "<html><head></head><html lang=en><body>x</body></html>",
+            "<html><body>x</body><html lang=en></html>",
+            "<html><body>x</body></html><html lang=en>",
+        ] {
+            let events = events_of(html);
+            assert_eq!(count(&events, "start:html"), 1, "{}: {:?}", html, events);
+            assert_eq!(count(&events, "start:body"), 1, "{}: {:?}", html, events);
+        }
+    }
+
     #[test]
     fn test_implicit_tags() {
         let html = "<p>Hello</p>";
