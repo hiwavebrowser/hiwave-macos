@@ -9155,6 +9155,8 @@ impl layout_ctx::LayoutCtx {
         external_stylesheets: &[Stylesheet],
         javascript_enabled: bool,
     ) -> LayoutBox {
+        // Read by `with_building` once this build is over.
+        relayout_cause::set_last_build_reused_tree(false);
         // A full build replaces the view's styles of boxless elements
         // (`display: contents`, the root). A restyle keeps the ones it does
         // not walk.
@@ -9182,10 +9184,11 @@ impl layout_ctx::LayoutCtx {
         };
 
         // Unless RUSTKIT_TREE_REUSE=0: the images relayout takes the box tree
-        // the sheets relayout built instead of walking the DOM again.
+        // the sheets relayout built instead of walking the DOM again. Not
+        // while a transition runs: its frames come from the walk.
         let traced = self.style_trace.borrow().is_some()
             || RESTYLE_BUILD.with(|build| build.borrow().is_some());
-        if !traced && !self.building_view_has_edits() {
+        if !traced && !self.building_view_has_edits() && !self.building_view_animates() {
             if let Some(tree) = self.reused_tree(&memo_key) {
                 relayout_cause::set_last_build_reused_tree(true);
                 if let Some(started) = parse_started {
@@ -9510,6 +9513,13 @@ impl layout_ctx::LayoutCtx {
     fn building_view_has_edits(&self) -> bool {
         self.with_building_lay(|lay| !lay.edit_states.borrow().is_empty()).unwrap_or(false)
     }
+
+    /// A transition is running in the view being built. Its overlaid
+    /// value is one frame's: a tree kept now would replay that frame, and
+    /// a kept tree taken now would skip the frame due.
+    fn building_view_animates(&self) -> bool {
+        self.with_building_lay(|lay| lay.animations.borrow().running()).unwrap_or(false)
+    }
 }
 
 
@@ -9539,7 +9549,10 @@ impl layout_ctx::LayoutCtx {
     /// build has just walked.
     fn snapshot_tree(&self, build: &StyleMemoBuild, root_box: &LayoutBox) {
         let mode = STYLE_MEMO.with(|m| m.borrow().as_ref().map(|memo| memo.tree_reuse));
-        if matches!(mode, None | Some(TreeReuse::Off)) || self.building_view_has_edits() {
+        if matches!(mode, None | Some(TreeReuse::Off))
+            || self.building_view_has_edits()
+            || self.building_view_animates()
+        {
             return;
         }
         if build.use_ == MemoUse::Record {

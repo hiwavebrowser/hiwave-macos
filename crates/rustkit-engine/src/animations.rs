@@ -511,9 +511,12 @@ impl Animations {
         });
     }
 
-    /// Cancel the transitions of elements that `alive` no longer finds in
-    /// the document (css-transitions-1 §3: an element removed from the
-    /// document ends its transitions with `transitioncancel`).
+    /// Whether a transition is running: a build must then walk the DOM,
+    /// since a kept box tree would carry the overlaid value of one frame.
+    pub(crate) fn running(&self) -> bool {
+        !self.transitions.is_empty()
+    }
+
     /// A full build of the view starts: what it visits is noted.
     pub(crate) fn begin_build(&mut self) {
         self.build_serial += 1;
@@ -521,8 +524,14 @@ impl Animations {
 
     /// The full build is over: elements it did not visit have no computed
     /// style (css-transitions-1 §3: a transition on an element that no
-    /// longer has one is cancelled).
-    pub(crate) fn end_build(&mut self) {
+    /// longer has one is cancelled). A build that took the kept box tree
+    /// (`reused_tree`) visited no element at all, but they are all still
+    /// there with their styles: nothing is cancelled and the before-change
+    /// values stay for the next change.
+    pub(crate) fn end_build(&mut self, reused_tree: bool) {
+        if reused_tree {
+            return;
+        }
         let serial = self.build_serial;
         let seen = |node: usize, seen: &HashMap<usize, u64>| seen.get(&node) == Some(&serial);
         let mut gone = Vec::new();
@@ -593,6 +602,9 @@ impl Animations {
         }
     }
 
+    /// Cancel the transitions of elements that `alive` no longer finds in
+    /// the document (css-transitions-1 §3: an element removed from the
+    /// document ends its transitions with `transitioncancel`).
     pub(crate) fn prune(&mut self, alive: impl Fn(usize) -> bool) {
         let now = self.clock_ms;
         let mut gone = Vec::new();
