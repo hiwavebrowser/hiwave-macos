@@ -369,7 +369,31 @@ impl Engine {
             }
             return;
         }
-        let Some(point) = self.text_point_at(id, viewport_x, viewport_y) else {
+        // In a contenteditable host the caret stays in the host: a press
+        // nearest to text outside it puts the caret at the host's end.
+        let host = hit.and_then(|raw| self.node(id, raw)).and_then(|n| Self::editing_host_of(&n));
+        let point = self.text_point_at(id, viewport_x, viewport_y);
+        let point = match &host {
+            Some((host, _)) => {
+                let inside = point.and_then(|p| self.node(id, p.node)).is_some_and(|n| {
+                    let mut cur = Some(n);
+                    while let Some(c) = cur {
+                        if c.id.raw() == *host {
+                            return true;
+                        }
+                        cur = c.parent();
+                    }
+                    false
+                });
+                if inside {
+                    point
+                } else {
+                    self.node(id, *host).map(|h| DocPoint { node: *host, offset: h.children().len() })
+                }
+            }
+            None => point,
+        };
+        let Some(point) = point else {
             if let Some(view) = self.views.get_mut(&id) {
                 view.select_drag = None;
             }
@@ -465,4 +489,133 @@ impl Engine {
             None => {}
         }
     }
+}
+
+/// Whether an element's `contenteditable` makes it editable (`""`, `true`,
+/// `plaintext-only`), refuses (`false`), or says nothing (inherit).
+fn editable_attr(node: &Node) -> Option<bool> {
+    let value = node.get_attribute("contenteditable")?;
+    Some(matches!(value.to_ascii_lowercase().as_str(), "" | "true" | "plaintext-only"))
+}
+
+impl Engine {
+    /// The editing host `node` is in (HTML §6.8.1): the outermost element
+    /// of its run of editable ancestors, as `(raw id, tag)`. `None` outside
+    /// one, or under `contenteditable=false`.
+    pub(crate) fn editing_host_of(node: &Rc<Node>) -> Option<(usize, String)> {
+        let mut host = None;
+        let mut cur = Some(node.clone());
+        while let Some(n) = cur {
+            if let NodeType::Element { tag_name, .. } = &n.node_type {
+                match editable_attr(&n) {
+                    Some(true) => host = Some((n.id.raw(), tag_name.to_lowercase())),
+                    Some(false) => break,
+                    None if host.is_some() => break,
+                    None => {}
+                }
+            }
+            cur = n.parent();
+        }
+        host
+    }
+
+    /// Whether the node is a contenteditable host.
+    pub(crate) fn is_editing_host(&self, id: EngineViewId, raw: usize) -> bool {
+        self.node(id, raw)
+            .and_then(|n| Self::editing_host_of(&n))
+            .is_some_and(|(host, _)| host == raw)
+    }
+
+    /// An editing key in the focused contenteditable host: the bindings
+    /// edit the DOM at the selection and fire `input`
+    /// (`DomBindings::edit_key`), and what they wrote is laid out. Returns
+    /// whether anything changed.
+    pub(crate) fn editable_key(&mut self, id: EngineViewId, host: usize, key_code: u32, key: &str, ctrl: bool) -> bool {
+        let op = match key_code {
+            0x08 => "back",
+            0x2E => "del",
+            0x0D => "enter",
+            0x25 => "left",
+            0x27 => "right",
+            0x41 if ctrl => "all",
+            _ if !ctrl && !key.is_empty() && !key.chars().any(char::is_control) => "insert",
+            _ => return false,
+        };
+        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+            return false;
+        };
+        let _turn = rustkit_js::DiagTurn::enter("live");
+        let changed = match bindings.edit_key(host, op, key) {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!(?id, error = %e, "editing key threw");
+                false
+            }
+        };
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after an editing key failed");
+        }
+        changed
+    }
+
+    /// Where the caret of a focused contenteditable host is painted: a
+    /// text node and a collapsed character in it (see `selection_paint`),
+    /// or, in a host with no text there, the host's own box.
+    pub(crate) fn caret_paint(&self, id: EngineViewId, root: &LayoutBox) -> Option<CaretPaint> {
+        let view = self.views.get(&id)?;
+        let focused = view.lay.focused_node.get()?.raw();
+        if !self.is_editing_host(id, focused) {
+            return None;
+        }
+        let sel = view.doc_selection?;
+        if sel.anchor != sel.focus {
+            return None;
+        }
+        let doc = view.document.as_ref()?;
+        let node = doc.get_node(rustkit_dom::NodeId::new(sel.focus.node))?;
+        let in_host = {
+            let mut cur = Some(node.clone());
+            let mut found = false;
+            while let Some(n) = cur {
+                if n.id.raw() == focused {
+                    found = true;
+                    break;
+                }
+                cur = n.parent();
+            }
+            found
+        };
+        if !in_host {
+            return None;
+        }
+        let mut collapsible = HashMap::new();
+        collapsible_by_node(root, &mut collapsible);
+        // A point between nodes: the end of the text before it, or the
+        // start of the text after it.
+        let (text_node, char_offset) = match text_of(&node) {
+            Some(text) => (node.clone(), char_of_utf16(text, sel.focus.offset)),
+            None => {
+                let kids = node.children();
+                let before = sel.focus.offset.checked_sub(1).and_then(|i| kids.get(i)).filter(|k| text_of(k).is_some());
+                let after = kids.get(sel.focus.offset).filter(|k| text_of(k).is_some());
+                match (before, after) {
+                    (Some(b), _) => (b.clone(), text_of(b).map_or(0, |t| t.chars().count())),
+                    (None, Some(a)) => (a.clone(), 0),
+                    _ => return Some(CaretPaint::Box(focused)),
+                }
+            }
+        };
+        let raw = text_node.id.raw();
+        let Some(&flag) = collapsible.get(&raw) else {
+            return Some(CaretPaint::Box(focused));
+        };
+        let map = collapse_map(text_of(&text_node)?, flag);
+        Some(CaretPaint::Text(raw, map[char_offset.min(map.len() - 1)]))
+    }
+}
+
+/// See [`Engine::caret_paint`].
+pub(crate) enum CaretPaint {
+    Text(usize, usize),
+    Box(usize),
 }

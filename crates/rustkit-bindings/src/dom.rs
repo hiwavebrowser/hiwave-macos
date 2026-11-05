@@ -3978,6 +3978,190 @@ const WRAPPERS_JS: &str = r#"
         if (!a || !f || a.gen !== gen || f.gen !== gen) return '';
         return a.id + ' ' + e.anchor.offset + ' ' + f.id + ' ' + e.focus.offset;
     }
+    // Plain-text editing in a contenteditable host (CH2.E2): the engine
+    // hands each editing key here; it edits the DOM at the selection,
+    // moves the selection, and fires `input` at the host. Returns true
+    // when something changed.
+    function inside(host, node) {
+        for (var n = node; n; n = n.parentNode) if (n === host) return true;
+        return false;
+    }
+    function lastDeep(n) { while (n.lastChild) n = n.lastChild; return n; }
+    function firstDeep(n) { while (n.firstChild) n = n.firstChild; return n; }
+    function prevLeaf(host, n) {
+        while (n && n !== host) {
+            if (n.previousSibling) return lastDeep(n.previousSibling);
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function nextLeaf(host, n) {
+        while (n && n !== host) {
+            if (n.nextSibling) return firstDeep(n.nextSibling);
+            n = n.parentNode;
+        }
+        return null;
+    }
+    function isLeaf(n) { return (n.nodeType === 3 && n.data.length > 0) || n.localName === 'br'; }
+    // The text node or <br> just before / after a collapsed point, or null.
+    function leafBefore(host, p) {
+        var n = p.node.nodeType === 3 ? prevLeaf(host, p.node)
+              : p.offset > 0 ? lastDeep(p.node.childNodes[p.offset - 1]) : prevLeaf(host, p.node);
+        while (n && !isLeaf(n)) n = prevLeaf(host, n);
+        return n;
+    }
+    function leafAfter(host, p) {
+        var n = p.node.nodeType === 3 ? nextLeaf(host, p.node)
+              : p.offset < p.node.childNodes.length ? firstDeep(p.node.childNodes[p.offset]) : nextLeaf(host, p.node);
+        while (n && !isLeaf(n)) n = nextLeaf(host, n);
+        return n;
+    }
+    function caretAt(node, offset) { setSel({ node: node, offset: offset }, { node: node, offset: offset }); }
+    function insertText(host, p, text) {
+        if (p.node.nodeType === 3) {
+            p.node.data = p.node.data.slice(0, p.offset) + text + p.node.data.slice(p.offset);
+            caretAt(p.node, p.offset + text.length);
+            return;
+        }
+        var before = p.offset > 0 ? p.node.childNodes[p.offset - 1] : null;
+        if (before && before.nodeType === 3) {
+            before.data += text;
+            caretAt(before, before.data.length);
+            return;
+        }
+        var t = g.document.createTextNode(text);
+        p.node.insertBefore(t, p.node.childNodes[p.offset] || null);
+        caretAt(t, text.length);
+    }
+    function preformatted(host) {
+        if (/^plaintext-only$/i.test(host.getAttribute('contenteditable') || '')) return true;
+        var ws = g.getComputedStyle ? String(g.getComputedStyle(host).whiteSpace || '') : '';
+        return /^(pre|pre-wrap|pre-line|break-spaces)$/.test(ws);
+    }
+    Object.defineProperty(Document.prototype, '__rkEditKey', {
+        value: function (hostId, op, text) {
+            var host = typeof hostId === 'number' ? wrap(hostId) : null;
+            if (!host) return false;
+            var r = selRange();
+            if (!r || !inside(host, r[RANGE].start.node) || !inside(host, r[RANGE].end.node)) {
+                caretAt(host, host.childNodes.length);
+                r = selRange();
+            }
+            if (op === 'all') {
+                setSel({ node: host, offset: 0 }, { node: host, offset: host.childNodes.length });
+                return true;
+            }
+            var p = r[RANGE].start, leaf;
+            if (op === 'left' || op === 'right') {
+                if (!r.collapsed) {
+                    var end = op === 'left' ? r[RANGE].start : r[RANGE].end;
+                    caretAt(end.node, end.offset);
+                    return true;
+                }
+                if (op === 'left') {
+                    if (p.node.nodeType === 3 && p.offset > 0) { caretAt(p.node, p.offset - 1); return true; }
+                    leaf = leafBefore(host, p);
+                    if (!leaf) return false;
+                    if (leaf.nodeType === 3) caretAt(leaf, leaf.data.length - 1);
+                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf));
+                } else {
+                    if (p.node.nodeType === 3 && p.offset < p.node.data.length) { caretAt(p.node, p.offset + 1); return true; }
+                    leaf = leafAfter(host, p);
+                    if (!leaf) return false;
+                    if (leaf.nodeType === 3) caretAt(leaf, 1);
+                    else caretAt(leaf.parentNode, childIndex(leaf.parentNode, leaf) + 1);
+                }
+                return true;
+            }
+            var inputType, data = null, changed = false;
+            if (!r.collapsed) {
+                r.deleteContents();
+                p = r[RANGE].start;
+                caretAt(p.node, p.offset);
+                changed = true;
+            }
+            if (op === 'insert') {
+                inputType = 'insertText';
+                data = String(text);
+                // A typed space at an edge or beside another space would
+                // collapse away: it goes in as a no-break space, as in Chrome.
+                if (data === ' ' && !preformatted(host)) {
+                    var t = p.node.nodeType === 3 ? p.node.data : '';
+                    var prev = t.charAt(p.offset - 1), next = t.charAt(p.offset);
+                    if (!prev || !next || prev === ' ' || next === ' ') data = ' ';
+                }
+                insertText(host, p, data);
+                changed = true;
+            } else if (op === 'enter') {
+                inputType = 'insertParagraph';
+                if (preformatted(host)) {
+                    insertText(host, p, '\n');
+                } else {
+                    var br = g.document.createElement('br');
+                    var after = null;
+                    if (p.node.nodeType === 3) {
+                        var rest = p.node.data.slice(p.offset);
+                        p.node.data = p.node.data.slice(0, p.offset);
+                        p.node.parentNode.insertBefore(br, p.node.nextSibling);
+                        after = g.document.createTextNode(rest);
+                        br.parentNode.insertBefore(after, br.nextSibling);
+                    } else {
+                        p.node.insertBefore(br, p.node.childNodes[p.offset] || null);
+                    }
+                    // A line break at the very end needs a second one to
+                    // show the new empty line.
+                    if (!leafAfter(host, { node: br.parentNode, offset: childIndex(br.parentNode, br) + 1 })) {
+                        br.parentNode.insertBefore(g.document.createElement('br'), br.nextSibling);
+                    }
+                    if (after) caretAt(after, 0);
+                    else caretAt(br.parentNode, childIndex(br.parentNode, br) + 1);
+                }
+                changed = true;
+            } else if (op === 'back' || op === 'del') {
+                inputType = op === 'back' ? 'deleteContentBackward' : 'deleteContentForward';
+                if (!changed) {
+                    if (op === 'back' && p.node.nodeType === 3 && p.offset > 0) {
+                        var cut = p.offset - 1;
+                        var code = p.node.data.charCodeAt(cut);
+                        if (cut > 0 && code >= 0xDC00 && code <= 0xDFFF) cut--;
+                        p.node.data = p.node.data.slice(0, cut) + p.node.data.slice(p.offset);
+                        caretAt(p.node, cut);
+                        changed = true;
+                    } else if (op === 'del' && p.node.nodeType === 3 && p.offset < p.node.data.length) {
+                        var stop = p.offset + 1;
+                        var hi = p.node.data.charCodeAt(p.offset);
+                        if (hi >= 0xD800 && hi <= 0xDBFF) stop++;
+                        p.node.data = p.node.data.slice(0, p.offset) + p.node.data.slice(stop);
+                        caretAt(p.node, p.offset);
+                        changed = true;
+                    } else {
+                        leaf = op === 'back' ? leafBefore(host, p) : leafAfter(host, p);
+                        if (leaf && leaf.nodeType === 3) {
+                            if (op === 'back') {
+                                leaf.data = leaf.data.slice(0, -1);
+                                caretAt(leaf, leaf.data.length);
+                            } else {
+                                leaf.data = leaf.data.slice(1);
+                                caretAt(leaf, 0);
+                            }
+                            changed = true;
+                        } else if (leaf) {
+                            var parent = leaf.parentNode, at = childIndex(parent, leaf);
+                            parent.removeChild(leaf);
+                            if (p.node.nodeType !== 3) caretAt(parent, at);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if (!changed) return false;
+            var ev = new g.InputEvent('input', { bubbles: true, composed: true, view: g, data: data, inputType: inputType });
+            ev.isTrusted = true;
+            host.dispatchEvent(ev);
+            return true;
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     // The selection as the engine last heard it changed: null when it did
     // not, else '' (none) or "anchorId anchorOffset focusId focusOffset".
     Object.defineProperty(Document.prototype, '__rkTakeSelection', {

@@ -9526,6 +9526,10 @@ pub struct DisplayList {
     /// characters `[start, end)` of each node's white-space-collapsed text
     /// (see [`TextSource`]). Empty when nothing is selected.
     text_selection: HashMap<usize, (usize, usize)>,
+    /// The caret of a focused contenteditable host: a DOM text node and a
+    /// collapsed character offset in it, painted as a `Caret` in the run
+    /// that has that character.
+    text_caret: Option<(usize, usize)>,
 }
 
 /// One block container's `text-overflow: ellipsis` state while its subtree
@@ -9632,6 +9636,7 @@ impl DisplayList {
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9657,6 +9662,7 @@ impl DisplayList {
             transformed_ancestors: 0,
             ellipsis: None,
             text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9671,9 +9677,15 @@ impl DisplayList {
     /// selected characters of each text run, in [`SELECTION_COLOR`]: one
     /// rect per line of each run, the height of the line box. `selection`
     /// is by DOM text node, in collapsed characters (see `text_selection`).
-    pub fn build_with_selection(root: &LayoutBox, selection: HashMap<usize, (usize, usize)>) -> Self {
+    /// `caret` is an editing caret to paint (see `text_caret`).
+    pub fn build_with_selection(
+        root: &LayoutBox,
+        selection: HashMap<usize, (usize, usize)>,
+        caret: Option<(usize, usize)>,
+    ) -> Self {
         let mut list = DisplayList::for_root(root);
         list.text_selection = selection;
+        list.text_caret = caret;
         list.render_stacking_context(root, 0, &mut 0);
         list
     }
@@ -11549,8 +11561,17 @@ impl DisplayList {
             // starts in the run's characters (lines drop the collapsed
             // space they broke at, so each is found after the last).
             let selected = self.run_selection(layout_box);
+            // The editing caret, as a character of this run.
+            let caret_at = self.text_caret.and_then(|(node, offset)| {
+                layout_box
+                    .text_sources
+                    .iter()
+                    .find(|s| s.node == node && offset >= s.skip && offset <= s.skip + s.len)
+                    .map(|s| s.at + offset - s.skip)
+            });
+            let mut caret_painted = false;
             let mut line_starts: Vec<usize> = Vec::new();
-            if !selected.is_empty() {
+            if !selected.is_empty() || caret_at.is_some() {
                 if let Some(lines) = &layout_box.text_lines {
                     let mut cursor = 0usize;
                     for l in lines.iter().filter(|l| !l.text.is_empty()) {
@@ -11670,6 +11691,24 @@ impl DisplayList {
                             Rect::new(left, line_top, width, line_height),
                         ));
                     }
+                }
+                if let Some(at) = caret_at.filter(|at| !caret_painted && *at >= line_start && *at <= line_start + line_len) {
+                    let before = at - line_start;
+                    let offset: f32 = match &advances {
+                        Some(adv) => adv.iter().take(before).sum(),
+                        None => {
+                            let piece: String = text.chars().take(before).collect();
+                            measure_text_advanced(&piece, &style.font_family, font_size, style.font_weight, style.font_style)
+                                .width
+                        }
+                    };
+                    self.commands.push(DisplayCommand::Caret {
+                        x: x + offset,
+                        y: line_top,
+                        height: line_height,
+                        color: style.color,
+                    });
+                    caret_painted = true;
                 }
 
                 // `text-overflow: ellipsis` on the enclosing block container

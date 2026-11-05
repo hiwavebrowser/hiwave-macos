@@ -17,6 +17,8 @@ use rustkit_css::Length;
 pub struct TextPosition {
     pub node: usize,
     pub offset: usize,
+    /// Whether the node's white space collapses (see [`TextSource`]).
+    pub collapsible: bool,
 }
 
 /// One painted line of a text run: its text, its rect, and the index of its
@@ -155,7 +157,7 @@ impl LayoutBox {
             .or_else(|| self.text_sources.iter().rev().find(|s| index >= s.at))
             .or_else(|| self.text_sources.first())?;
         let within = index.saturating_sub(src.at).min(src.len);
-        Some(TextPosition { node: src.node, offset: src.skip + within })
+        Some(TextPosition { node: src.node, offset: src.skip + within, collapsible: src.collapsible })
     }
 
     /// The run kept its characters `[from, from + len)` (the builder
@@ -216,8 +218,8 @@ mod tests {
         // "ab " + " cd" -> "ab cd": the second run's space is dropped.
         run.append_text_sources(&[src(9, 0, 0, 3)], 3, 3, 1);
         assert_eq!(run.text_sources, vec![src(7, 0, 1, 3), src(9, 3, 1, 2)]);
-        assert_eq!(run.position_of_run_char(4), Some(TextPosition { node: 9, offset: 2 }));
-        assert_eq!(run.position_of_run_char(5), Some(TextPosition { node: 9, offset: 3 }));
-        assert_eq!(run.position_of_run_char(1), Some(TextPosition { node: 7, offset: 2 }));
+        assert_eq!(run.position_of_run_char(4), Some(TextPosition { node: 9, offset: 2, collapsible: true }));
+        assert_eq!(run.position_of_run_char(5), Some(TextPosition { node: 9, offset: 3, collapsible: true }));
+        assert_eq!(run.position_of_run_char(1), Some(TextPosition { node: 7, offset: 2, collapsible: true }));
     }
 }

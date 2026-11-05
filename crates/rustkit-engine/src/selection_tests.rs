@@ -193,3 +193,45 @@ fn dragging_in_an_input_selects_part_of_its_value() {
     engine.click_at_point(view, content_x + 1.0, 10.0);
     assert_eq!(text_input(&engine, view).1, Some((0, 5)));
 }
+
+const EDITABLE: &str = "<html><body style='margin:0'><div id=e contenteditable style='font-size:20px;min-height:30px'>hi</div>\
+    <p style='font-size:20px'>outside</p></body></html>";
+
+fn caret(engine: &Engine, view: EngineViewId) -> Option<f32> {
+    commands(engine, view).iter().find_map(|c| match c {
+        DisplayCommand::Caret { x, .. } => Some(*x),
+        _ => None,
+    })
+}
+
+#[test]
+fn typing_in_a_contenteditable_div_edits_it_and_fires_input() {
+    let (mut engine, view) = page(EDITABLE);
+    read(&mut engine, view, "window.__inputs = [], document.getElementById('e').addEventListener('input', function (e) { window.__inputs.push(e.inputType); })");
+    let (x2, y) = char_x(&engine, view, "hi", 2);
+    engine.mouse_down_at_point(view, x2 + 2.0, y);
+    engine.click_at_point(view, x2 + 2.0, y);
+    assert_eq!(read(&mut engine, view, "document.activeElement.id"), "e", "the host takes the focus");
+    assert!(engine.focused_node(view).is_some());
+    let at = caret(&engine, view).expect("a caret in the host");
+    assert!((at - x2).abs() < 0.5, "caret after 'hi': {at} vs {x2}");
+    assert!(engine.handle_text_key(view, 0x41, "!", false, false, false));
+    assert_eq!(read(&mut engine, view, "document.getElementById('e').textContent"), "hi!");
+    let (x3, _) = char_x(&engine, view, "hi!", 3);
+    let at = caret(&engine, view).expect("the caret moved");
+    assert!((at - x3).abs() < 0.5, "caret after 'hi!': {at} vs {x3}");
+    assert!(engine.handle_text_key(view, 0x08, "", false, false, false));
+    assert_eq!(read(&mut engine, view, "document.getElementById('e').textContent"), "hi");
+    engine.submit_focused_form(view);
+    assert!(engine.handle_text_key(view, 0x0D, "", false, false, false));
+    assert_eq!(read(&mut engine, view, "document.getElementById('e').innerHTML"), "hi<br><br>");
+    assert_eq!(read(&mut engine, view, "window.__inputs.join()"), "insertText,deleteContentBackward,insertParagraph");
+    // The page outside the host is not editable.
+    let (ox, oy) = char_x(&engine, view, "outside", 3);
+    engine.mouse_down_at_point(view, ox, oy);
+    engine.click_at_point(view, ox, oy);
+    assert!(engine.focused_node(view).is_none());
+    assert!(caret(&engine, view).is_none());
+    engine.handle_text_key(view, 0x41, "x", false, false, false);
+    assert_eq!(read(&mut engine, view, "document.body.textContent.indexOf('x') < 0"), "true");
+}

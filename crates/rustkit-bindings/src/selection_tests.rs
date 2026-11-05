@@ -111,3 +111,32 @@ fn the_engine_hears_script_changes_and_script_sees_engine_changes() {
     b.set_selection(None).unwrap();
     assert_eq!(ev(&b, "String(getSelection().rangeCount)"), "0");
 }
+
+#[test]
+fn edit_keys_type_delete_and_break_lines_in_a_contenteditable_host() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    let doc = Rc::new(Document::parse_html("<html><body><div id=e contenteditable>ab</div></body></html>").unwrap());
+    b.set_document(doc.clone()).unwrap();
+    let host = doc.get_element_by_id("e").unwrap().id.raw();
+    ev(&b, "window.__inputs = []; document.getElementById('e').addEventListener('input', function (e) { window.__inputs.push(e.inputType + ':' + e.data); });");
+    // No selection in the host: the caret goes to its end.
+    assert!(b.edit_key(host, "insert", "c").unwrap());
+    assert_eq!(ev(&b, "document.getElementById('e').textContent"), "abc");
+    assert!(b.edit_key(host, "left", "").unwrap());
+    assert!(b.edit_key(host, "back", "").unwrap());
+    assert_eq!(ev(&b, "document.getElementById('e').textContent"), "ac");
+    assert!(b.edit_key(host, "enter", "").unwrap());
+    assert_eq!(ev(&b, "document.getElementById('e').innerHTML"), "a<br>c");
+    assert!(b.edit_key(host, "back", "").unwrap(), "joins the lines again");
+    assert_eq!(ev(&b, "document.getElementById('e').innerHTML"), "ac");
+    assert!(b.edit_key(host, "del", "").unwrap());
+    assert_eq!(ev(&b, "document.getElementById('e').textContent"), "a");
+    assert!(b.edit_key(host, "all", "").unwrap());
+    assert!(b.edit_key(host, "insert", "z").unwrap(), "typing replaces the selection");
+    assert_eq!(ev(&b, "document.getElementById('e').textContent"), "z");
+    assert_eq!(
+        ev(&b, "window.__inputs.join()"),
+        "insertText:c,deleteContentBackward:null,insertParagraph:null,deleteContentBackward:null,deleteContentForward:null,insertText:z"
+    );
+    assert!(!b.edit_key(host, "right", "").unwrap(), "nothing after the caret");
+}

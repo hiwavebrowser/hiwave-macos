@@ -3420,7 +3420,8 @@ impl Engine {
                 let view = self.views.get(&id)?;
                 let doc = view.document.as_ref()?;
                 let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-                let control = Self::form_control(&node);
+                // A contenteditable host takes the focus like a control.
+                let control = Self::form_control(&node).or_else(|| Self::editing_host_of(&node));
                 // A click on a label is a click for the control it labels.
                 let labeled = match control {
                     Some(_) => None,
@@ -3528,7 +3529,11 @@ impl Engine {
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                    if matches!(tag.as_str(), "input" | "textarea" | "select") {
+                        Some((raw, tag))
+                    } else {
+                        Self::editing_host_of(&node).filter(|(host, _)| *host == raw)
+                    }
                 }
                 _ => None,
             }
@@ -5179,6 +5184,10 @@ impl Engine {
             && !self.fire_key(id, Some(focused.raw()), "keydown", key_code, key, ctrl, shift, alt)
         {
             return false;
+        }
+        // A contenteditable host: the page's DOM is what is edited.
+        if self.is_editing_host(id, focused.raw()) {
+            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
@@ -8287,7 +8296,28 @@ impl Engine {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
         let selected = self.selection_paint(id, root_box);
-        let mut dl = DisplayList::build_with_selection(root_box, selected);
+        let caret = self.caret_paint(id, root_box);
+        let text_caret = match caret {
+            Some(selection::CaretPaint::Text(node, offset)) => Some((node, offset)),
+            _ => None,
+        };
+        let mut dl = DisplayList::build_with_selection(root_box, selected, text_caret);
+        // A host with no text where the caret is: the caret at the start of
+        // its content box.
+        if let Some(selection::CaretPaint::Box(host)) = caret {
+            if let Some(b) = box_of_node(root_box, host) {
+                let size = match b.style.font_size {
+                    rustkit_css::Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                dl.commands.push(rustkit_layout::DisplayCommand::Caret {
+                    x: b.dimensions.content.x,
+                    y: b.dimensions.content.y,
+                    height: size * 1.2,
+                    color: b.style.color,
+                });
+            }
+        }
         // Splice cached SVG documents in place of their Image commands.
         // Done once per layout (not per frame): the renderer only speaks
         // raster textures, so vector images become their own command

@@ -2043,6 +2043,19 @@ impl DomBindings {
         Ok(())
     }
 
+    /// An editing key in the contenteditable host `host` (by node id):
+    /// `op` is `insert` (with `text`), `enter`, `back`, `del`, `left`,
+    /// `right` or `all`. The page's DOM and selection change as a plain-text
+    /// editor would change them, and the host hears `input`. Returns whether
+    /// anything changed.
+    pub fn edit_key(&self, host: usize, op: &str, text: &str) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkEditKey({host}, {op:?}, {text:?})"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
     /// The document selection, when script changed it since the last call
     /// (or since [`Self::set_selection`]): `Some(Some(ends))` as in
     /// `set_selection`, `Some(None)` for no selection, `None` when it has
