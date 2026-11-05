@@ -2511,6 +2511,7 @@ fn main() {
                 let chrome_input = if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
                     chrome.process_events();
                     for body in chrome.take_ipc_messages() {
+                        info!(%body, "RustKit chrome IPC");
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
                     }
                     chrome.render();

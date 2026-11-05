@@ -936,8 +936,24 @@ class Driver:
                     final in urls and start not in urls, "tab urls %s" % urls)
         self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
 
+    def a2_chrome_boots(self):
+        """CH3.A2: with HIWAVE_RUSTKIT_CHROME=1 the chrome is a RustKit view whose script reaches the app."""
+        c = "a2_chrome_boots"
+        if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+            return
+        m = self.app.wait_log(r"the chrome is a RustKit view", 10)
+        self.expect(c, "the app built the chrome as a RustKit view", bool(m))
+        # What the WebKit chrome posts at boot: its sidebar width, its workspaces.
+        tabs = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
+        self.expect(c, "the chrome's script posted get_sidebar_width and the app's handler took it", bool(tabs),
+                    tabs.group(0) if tabs else "")
+        spaces = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 5)
+        self.expect(c, "the chrome's script posted get_workspaces", bool(spaces))
+        time.sleep(3)
+        self.expect(c, "the app is still running 3 s later", self.app.alive())
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
