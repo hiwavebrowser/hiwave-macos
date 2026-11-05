@@ -1485,6 +1485,59 @@ mod tests {
         assert!(matches!(out[1], PageCmd::Input(PageInput::MouseDown { .. })));
     }
 
+    /// Z row S2, reopened (Pete's hand test 11-04, reddit): a load held the
+    /// page thread for 11 s while the pointer moved; the user closed the
+    /// tab; the thread then dispatched thirty queued moves, leaves, presses
+    /// and clicks to the document being left (a ~100 ms hover restyle each,
+    /// every listener refused by the navigation's interrupt word and logged
+    /// as a budget stop, 678 lines) before it loaded the new page, three
+    /// seconds late. Pointer input queued ahead of a navigation is for a
+    /// document the user has left: it is dropped, a queued click answered
+    /// with nothing. Input marks stay for the latency figure, and input
+    /// behind the navigation is kept.
+    #[test]
+    fn coalesce_drops_pointer_input_queued_ahead_of_a_navigation() {
+        let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
+        let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
+        let (click_reply, mut clicked) = oneshot::channel();
+        let (html_reply, _) = oneshot::channel();
+        let batch = vec![
+            note(1),
+            mv(1.0),
+            PageCmd::Input(PageInput::MouseLeave),
+            note(2),
+            PageCmd::Input(PageInput::MouseDown { x: 2.0, y: 0.0 }),
+            mv(2.0),
+            PageCmd::Input(PageInput::Click { x: 2.0, y: 0.0, reply: click_reply }),
+            PageCmd::LoadHtml { html: "<p>next</p>".into(), nav_id: 9, reply: html_reply },
+            mv(3.0),
+        ];
+        let out = coalesce(batch);
+        let kinds: Vec<&str> = out
+            .iter()
+            .map(|c| match c {
+                PageCmd::NoteInput { .. } => "note",
+                PageCmd::Input(PageInput::MouseMove { .. }) => "move",
+                PageCmd::Input(PageInput::MouseLeave) => "leave",
+                PageCmd::Input(PageInput::MouseDown { .. }) => "down",
+                PageCmd::Input(PageInput::Click { .. }) => "click",
+                PageCmd::LoadHtml { .. } => "load_html",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["note", "note", "load_html", "move"], "{kinds:?}");
+        assert!(matches!(out[2], PageCmd::LoadHtml { nav_id: 9, .. }));
+        assert!(matches!(out[3], PageCmd::Input(PageInput::MouseMove { x, .. }) if x == 3.0));
+        let outcome = clicked.try_recv().expect("the dropped click is answered");
+        assert!(outcome.navigate.is_none() && outcome.focused.is_none(), "{outcome:?}");
+
+        // A navigation command is what the pointer input waits behind; a
+        // Stop keeps the document and its input.
+        let (stop_reply, _) = oneshot::channel();
+        let out = coalesce(vec![mv(1.0), PageCmd::Stop { reply: stop_reply }]);
+        assert_eq!(out.len(), 2, "a Stop dropped the move");
+    }
+
     fn poll_until(page: &ContentThread, budget: Duration, mut done: impl FnMut(&[PageEvent]) -> bool) -> Vec<PageEvent> {
         let deadline = Instant::now() + budget;
         let mut events = Vec::new();
