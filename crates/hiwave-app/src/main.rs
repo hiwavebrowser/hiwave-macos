@@ -526,18 +526,26 @@ fn rustkit_chrome_enabled() -> bool {
         && rustkit_engine::content_thread_enabled()
 }
 
-/// The chrome document for a RustKit view: `JS_BRIDGE` (the WebKit view
-/// runs it as an initialization script) as the head's first script, and
-/// the overlay reporter (CH3.A3) as the body's last.
+/// The chrome document for a RustKit view: the bridge and the overlay
+/// reporter (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
-    let script = format!("<script>{}</script>", JS_BRIDGE);
-    // The overlay reporter needs the body, so it runs at the document's end.
-    let reporter = format!("<script>{}</script>", CHROME_OVERLAY_REPORTER);
-    let html = match CHROME_HTML.rfind("</body>") {
-        Some(at) => format!("{}{}{}", &CHROME_HTML[..at], reporter, &CHROME_HTML[at..]),
-        None => format!("{}{}", CHROME_HTML, reporter),
+    html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER)
+}
+
+/// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
+/// an initialization script) as the head's first script, and `tail`, when
+/// there is one, as the body's last (CH3.A4: the panels' documents).
+fn html_with_bridge(html: &str, tail: &str) -> String {
+    let html = if tail.is_empty() {
+        html.to_string()
+    } else {
+        let tail = format!("<script>{}</script>", tail);
+        match html.rfind("</body>") {
+            Some(at) => format!("{}{}{}", &html[..at], tail, &html[at..]),
+            None => format!("{}{}", html, tail),
+        }
     };
-    let html = html.as_str();
+    let script = format!("<script>{}</script>", JS_BRIDGE);
     match html.find("<head>") {
         Some(at) => {
             let at = at + "<head>".len();
@@ -545,14 +553,6 @@ fn chrome_html_with_bridge() -> String {
         }
         None => format!("{}{}", script, html),
     }
-}
-
-/// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
-/// an initialization script) as the head's first script, and `tail`, when
-/// there is one, as the body's last (CH3.A4: the panels' documents).
-fn html_with_bridge(html: &str, tail: &str) -> String {
-    let _ = tail;
-    html.to_string()
 }
 
 /// Which view an input event from the viewhost queue is for (CH3.A4): the
@@ -572,8 +572,135 @@ fn route_input(
     chrome: Option<rustkit_viewhost::ViewId>,
     panels: &[Option<rustkit_viewhost::ViewId>],
 ) -> InputRoute {
-    let _ = (view, chrome, panels);
-    InputRoute::Page
+    if chrome == Some(view) {
+        return InputRoute::Chrome;
+    }
+    match panels.iter().position(|id| *id == Some(view)) {
+        Some(at) => InputRoute::Panel(at),
+        None => InputRoute::Page,
+    }
+}
+
+/// `HIWAVE_RUSTKIT_PANEL_PROBE=<selector>,<selector>...` (real-window checks,
+/// flag on; CH3.A4): appended to each RustKit panel's document. Posts the
+/// panel's text and the box and value of each selector whenever they change;
+/// the app logs it (`RustKit panel probe`) and does not hand it to the
+/// panel's handler.
+const PANEL_PROBE: &str = r#"
+(function (selectors) {
+    var last = null;
+    function report() {
+        var body = document.body;
+        var text = body ? (body.innerText !== undefined ? body.innerText : body.textContent) : '';
+        text = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+        var boxes = {};
+        selectors.forEach(function (sel) {
+            var el = document.querySelector(sel);
+            if (!el) { boxes[sel] = null; return; }
+            var r = el.getBoundingClientRect();
+            boxes[sel] = {
+                box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+                value: el.type === 'checkbox' ? el.checked : (el.value !== undefined ? el.value : null)
+            };
+        });
+        var s = JSON.stringify({ cmd: 'panel_probe', size: [innerWidth, innerHeight], text: text, boxes: boxes });
+        if (s === last) return;
+        last = s;
+        window.ipc.postMessage(s);
+    }
+    setInterval(report, 500);
+    report();
+})(SELECTORS);
+"#;
+
+/// The probe for the RustKit panels' documents, or nothing without
+/// `HIWAVE_RUSTKIT_PANEL_PROBE`.
+fn panel_probe_script() -> String {
+    match std::env::var("HIWAVE_RUSTKIT_PANEL_PROBE") {
+        Ok(list) => {
+            let selectors: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+            PANEL_PROBE.replace("SELECTORS", &serde_json::to_string(&selectors).unwrap_or_else(|_| "[]".into()))
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// With `HIWAVE_RUSTKIT_CHROME=1`, a panel (the shelf, the Inspector, the
+/// settings window's page; CH3.A4) is a RustKit view in `window` at `rect`,
+/// loading `html` with the bridge first, as the WebKit view ran it. `None`
+/// otherwise: the caller builds the WebKit view, as before.
+fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &str) -> Option<PanelView> {
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    if rustkit_chrome_enabled() {
+        let at = rect.position.to_logical::<f64>(1.0);
+        let size = rect.size.to_logical::<f64>(1.0);
+        // A hidden panel is 0 pt tall. Its surface is made 1 pt at least;
+        // `place` then gives the view the panel's own rect.
+        let bounds = rustkit_viewhost::Bounds::new(
+            at.x as i32,
+            at.y as i32,
+            (size.width as u32).max(1),
+            (size.height as u32).max(1),
+        );
+        let view = webview_rustkit::RustKitView::new(window, bounds)
+            .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
+        view.load_html_internal(&html_with_bridge(html, &panel_probe_script()))
+            .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
+        info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
+        let panel = PanelView::RustKit(view);
+        panel.place(rect);
+        return Some(panel);
+    }
+    let _ = (window, rect, html, name);
+    None
+}
+
+/// One turn of a RustKit panel (CH3.A4), as the chrome's arm does for the
+/// chrome: its clock, its input, its `window.ipc` messages to `handle`
+/// (the WebKit view's handler), and a frame. The panel's input view, if it
+/// is a RustKit view.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn pump_rustkit_panel(
+    panel: &PanelView,
+    name: &str,
+    handle: &mut dyn FnMut(&str),
+    devtools: &mut devtools_panel::Devtools,
+    inspector: &dyn ChromeUi,
+    click_proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Option<rustkit_viewhost::ViewId> {
+    let PanelView::RustKit(ref view) = *panel else {
+        return None;
+    };
+    view.process_events();
+    if let Some(id) = view.input_view() {
+        for event in rustkit_viewhost::drain_input_view(id) {
+            view.note_input(event.at, event.seq);
+            dispatch_view_input(view, InputTarget::Panel, event.kind, devtools, inspector, click_proxy);
+        }
+    }
+    for body in view.take_ipc_messages() {
+        if body.starts_with("{\"cmd\":\"panel_probe\"") {
+            info!(panel = name, %body, "RustKit panel probe");
+            continue;
+        }
+        info!(panel = name, %body, "RustKit panel IPC");
+        handle(&body);
+    }
+    // A link or `location` in a panel would replace its own document.
+    if let Some((url, _)) = view.take_script_navigation() {
+        warn!(panel = name, %url, "RustKit panel navigation not followed");
+    }
+    view.render();
+    view.input_view()
+}
+
+/// A RustKit panel that closed gives the keyboard back to the page (CH3.A4).
+/// A WebKit panel: nothing, as before.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn panel_closed(panel: &PanelView, content: &UnifiedContentWebView) {
+    if let (PanelView::RustKit(_), UnifiedContentWebView::RustKit(page)) = (panel, content) {
+        page.grab_keyboard();
+    }
 }
 
 impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
@@ -1536,6 +1663,9 @@ fn wheel_burst_started() -> bool {
 enum InputTarget {
     Page,
     Chrome,
+    /// The shelf, the Inspector or the settings page as RustKit views
+    /// (CH3.A4): like the chrome, not the page.
+    Panel,
 }
 
 /// One input event for a RustKit view, as drained from the viewhost queue:
@@ -1598,6 +1728,7 @@ fn dispatch_view_input(
             match target {
                 InputTarget::Page => info!(x = click.x, y = click.y, "content click (view-local)"),
                 InputTarget::Chrome => info!(x = click.x, y = click.y, "chrome click (view-local)"),
+                InputTarget::Panel => info!(x = click.x, y = click.y, "panel click (view-local)"),
             }
             let outcome = view.click_at_point(click.x as f32, click.y as f32);
             // ENGINE focus is not APPKIT focus: without making
@@ -2549,7 +2680,7 @@ fn main() {
     // === SHELF WEBVIEW (created third, at bottom) ===
     let shelf_proxy = proxy.clone();
     let shelf_state = Arc::clone(&state);
-    let shelf_webview = PanelView::WebKit(WebViewBuilder::new()
+    let shelf_webview = if let Some(view) = rustkit_panel(&window, shelf_bounds, SHELF_HTML, "shelf") { view } else { PanelView::WebKit(WebViewBuilder::new()
         .with_html(SHELF_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -2562,14 +2693,14 @@ fn main() {
             handle_shelf_find_ipc(message.body(), &content_proxy5)
         })
         .build_as_child(&window)
-        .expect("Failed to create Shelf WebView"));
+        .expect("Failed to create Shelf WebView")) };
 
     info!("Shelf WebView created (bottom, starts hidden)");
 
     // === INSPECTOR WEBVIEW (created fourth, between content and shelf) ===
     let inspector_proxy = proxy.clone();
     let _inspector_state = Arc::clone(&state);
-    let inspector_webview = PanelView::WebKit(WebViewBuilder::new()
+    let inspector_webview = if let Some(view) = rustkit_panel(&window, inspector_bounds, INSPECTOR_HTML, "Inspector") { view } else { PanelView::WebKit(WebViewBuilder::new()
         .with_html(INSPECTOR_HTML)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -2579,7 +2710,7 @@ fn main() {
             handle_inspector_ipc(message.body(), &inspector_proxy)
         })
         .build_as_child(&window)
-        .expect("Failed to create Inspector WebView"));
+        .expect("Failed to create Inspector WebView")) };
 
     info!("Inspector WebView created (between content and shelf, starts hidden)");
     info!("Four-WebView architecture initialized");
@@ -3060,6 +3191,25 @@ fn main() {
 
                 }
             }
+            // The RustKit settings page follows its own window (CH3.A4).
+            #[cfg(all(target_os = "macos", feature = "rustkit"))]
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                window_id,
+                ..
+            } if window_id != main_window_id && rustkit_chrome_enabled() => {
+                if let Ok(guard) = settings_window_for_events.lock() {
+                    if let Some((ref settings_win, ref settings)) = *guard {
+                        if settings_win.id() == window_id {
+                            let scale = settings_win.scale_factor();
+                            settings.place(Rect {
+                                position: LogicalPosition::new(0, 0).into(),
+                                size: LogicalSize::new(size.width as f64 / scale, size.height as f64 / scale).into(),
+                            });
+                        }
+                    }
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_new_size),
                 ..
@@ -3133,6 +3283,40 @@ fn main() {
                 } else {
                     None
                 };
+                // The RustKit panels (CH3.A4): the same turn as the chrome's,
+                // their messages to the WebKit views' handlers.
+                let panel_inputs = [
+                    pump_rustkit_panel(
+                        &shelf_for_events,
+                        "shelf",
+                        &mut |body| {
+                            handle_shelf_ipc(body, &chrome_ipc_proxy, &chrome_ipc_state);
+                            handle_shelf_find_ipc(body, &chrome_ipc_proxy);
+                        },
+                        &mut devtools,
+                        &*inspector_for_events,
+                        &click_proxy,
+                    ),
+                    pump_rustkit_panel(
+                        &inspector_for_events,
+                        "Inspector",
+                        &mut |body| handle_inspector_ipc(body, &chrome_ipc_proxy),
+                        &mut devtools,
+                        &*inspector_for_events,
+                        &click_proxy,
+                    ),
+                    match settings_window_for_events.lock().as_deref() {
+                        Ok(Some((_, settings))) => pump_rustkit_panel(
+                            settings,
+                            "settings",
+                            &mut |body| handle_settings_ipc(body, &chrome_ipc_proxy),
+                            &mut devtools,
+                            &*inspector_for_events,
+                            &click_proxy,
+                        ),
+                        _ => None,
+                    },
+                ];
                 // Process RustKit events and render
                 if let UnifiedContentWebView::RustKit(ref view) = *content_for_events {
                     // A load in progress gets one slice, then the loop goes back to
@@ -3164,7 +3348,29 @@ fn main() {
                             // Input on the RustKit chrome's view is not the
                             // page's: the chrome's arm above takes it, and
                             // one that came since goes to the chrome too.
-                            if chrome_input == Some(event.view) {
+                            let route = route_input(event.view, chrome_input, &panel_inputs);
+                            if let InputRoute::Panel(at) = route {
+                                // A RustKit panel's (CH3.A4), as the chrome's.
+                                let settings = settings_window_for_events.lock();
+                                let panel = match at {
+                                    0 => Some(&*shelf_for_events),
+                                    1 => Some(&*inspector_for_events),
+                                    _ => settings.as_deref().ok().and_then(|s| s.as_ref()).map(|(_, v)| v),
+                                };
+                                if let Some(PanelView::RustKit(view)) = panel {
+                                    view.note_input(event.at, event.seq);
+                                    dispatch_view_input(
+                                        view,
+                                        InputTarget::Panel,
+                                        event.kind,
+                                        &mut devtools,
+                                        &*inspector_for_events,
+                                        &click_proxy,
+                                    );
+                                }
+                                continue;
+                            }
+                            if route == InputRoute::Chrome {
                                 if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
                                     chrome.note_input(event.at, event.seq);
                                     dispatch_view_input(
@@ -3712,6 +3918,8 @@ fn main() {
                                 }, 50);
                             }
                         "#);
+                        // The RustKit shelf takes the keyboard (CH3.A4).
+                        shelf_for_events.take_keyboard();
                     }
                     UserEvent::CollapseShelf => {
                         let ch = *chrome_height_for_events.lock().unwrap();
@@ -3734,6 +3942,9 @@ fn main() {
                             sidebar_open,
                             right_sidebar_open,
                         );
+                        // The RustKit shelf gives the keyboard back to the page (CH3.A4).
+                        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                        panel_closed(&shelf_for_events, &content_for_events);
                     }
                     UserEvent::SetSidebarOpen(open) => {
                         // Get current width or use default when opening
@@ -3985,7 +4196,14 @@ fn main() {
                                 .expect("Failed to create settings window");
 
                             let settings_proxy = settings_proxy_for_handler.clone();
-                            let settings_webview = PanelView::WebKit(WebViewBuilder::new()
+                            let settings_rect = Rect {
+                                position: LogicalPosition::new(0, 0).into(),
+                                size: {
+                                    let (size, scale) = (settings_win.inner_size(), settings_win.scale_factor());
+                                    LogicalSize::new(size.width as f64 / scale, size.height as f64 / scale).into()
+                                },
+                            };
+                            let settings_webview = if let Some(view) = rustkit_panel(&settings_win, settings_rect, SETTINGS_HTML, "settings page") { view } else { PanelView::WebKit(WebViewBuilder::new()
                                 .with_html(SETTINGS_HTML)
                                 .with_devtools(cfg!(debug_assertions))
                                 .with_clipboard(true)
@@ -3994,7 +4212,7 @@ fn main() {
                                     handle_settings_ipc(msg.body(), &settings_proxy)
                                 })
                                 .build(&settings_win)
-                                .expect("Failed to create settings WebView"));
+                                .expect("Failed to create settings WebView")) };
 
                             *settings_guard = Some((settings_win, settings_webview));
                         }
@@ -5136,6 +5354,9 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        // The RustKit Inspector gives the keyboard back to the page (CH3.A4).
+                        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+                        panel_closed(&inspector_for_events, &content_for_events);
                         if with_rustkit_content!(content_for_events, view => devtools.close(view, &inspector_for_events)) {
                             return;
                         }
