@@ -295,6 +295,12 @@ pub enum PageEvent {
         from_user: bool,
     },
     Focused(bool),
+    /// A message the page posted with `window.ipc.postMessage` (CH2.E9),
+    /// pushed to the window as it arrives; nothing polls the page for it.
+    Ipc {
+        payload: String,
+        nav_id: u64,
+    },
     /// Not produced on this PR. The variant is the protocol's.
     #[allow(dead_code)]
     Cursor(String),

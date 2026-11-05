@@ -1256,7 +1256,7 @@ impl RustKitView {
                     *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
-                PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
+                PageEvent::Ipc { .. } | PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
     }
@@ -1292,7 +1292,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Title { nav_id, .. }
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
-        | PageEvent::NavigateRequested { nav_id, .. } => *nav_id,
+        | PageEvent::NavigateRequested { nav_id, .. }
+        | PageEvent::Ipc { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
         | PageEvent::Cursor(_)
