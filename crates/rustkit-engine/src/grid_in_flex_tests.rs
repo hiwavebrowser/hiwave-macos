@@ -55,13 +55,15 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// percentage (`html, body, #x { height: 100% }`). The block pass resolves
 /// that height and hands it to the flex pass, so a `height: 25%` item, a
 /// `flex: 1` item, `justify-content: center` and a border-box column with
-/// padding are as in Chromium. Two neighbours are not:
+/// padding are as in Chromium. One neighbour is not:
 ///
 /// `percent-height-column-items-shrink`: a `height: 200px` item in an 80px
 /// column stays 200; Chromium shrinks it to 60 beside its 20px sibling.
 ///
-/// `percent-height-row-is-not-touched`: a `height: 50%` item of a row that
-/// is 400 tall is 110; Chromium has 200.
+/// (`percent-height-row-is-not-touched`, a `height: 50%` item of a 400px
+/// row, left this list with CH2.B1: a row hands its resolved percentage
+/// height to its line as the definite cross size, so the item is 200 as in
+/// Chromium, not 110.)
 ///
 /// In the six below the grid is as wide as in Chromium and the columns in
 /// it are not. They are text-free, so the every-OS test reads the list too.
@@ -101,7 +103,6 @@ const GAPS: &[&str] = &[
     "bing-textarea-and-its-replica-in-a-row",
     "bing-textarea-and-its-replica-in-a-block",
     "percent-height-column-items-shrink",
-    "percent-height-row-is-not-touched",
     "auto-tracks-min-width-0-items-flex-1-beside-a-sibling",
     "auto-tracks-min-width-0-items-in-a-narrow-float",
     "auto-tracks-min-width-20px-items-flex-1-beside-a-sibling",
