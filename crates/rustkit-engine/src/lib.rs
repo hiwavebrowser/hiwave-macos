@@ -474,6 +474,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
+mod budget_stop_group_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
@@ -1613,12 +1615,77 @@ pub enum LoadYield {
 /// had run, and how long it ran on past the budget before the host call
 /// that ended it. The window is frozen for all of `elapsed_ms`.
 fn log_script_stopped(source: &str, elapsed_ms: u64, late: Option<std::time::Duration>) {
+    log_script_stopped_folding(source, elapsed_ms, late, 0);
+}
+
+/// [`log_script_stopped`] for a live stop that stands for `repeats` more
+/// of the same page and source since its last line ([`StopLines`]).
+fn log_script_stopped_folding(source: &str, elapsed_ms: u64, late: Option<std::time::Duration>, repeats: u32) {
     warn!(
         %source,
         elapsed_ms,
         late_ms = late.map(|late| late.as_millis() as u64).unwrap_or(0),
+        repeats,
         "Script stopped at the script budget"
     );
+}
+
+/// How often one page's stops from one source get a log line and a stop
+/// note (T20): a listener stopped on every `pointermove` made 959 of each
+/// in one hand test.
+const STOP_LINE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+const STOP_LINES_ON: bool = false; // T20 RED
+/// The stops of one (page, source) since its last line.
+#[derive(Debug, Clone, Copy)]
+struct StopLine {
+    /// When the last line was written.
+    at: std::time::Instant,
+    /// Stops since then that got no line of their own.
+    folded: u32,
+}
+
+/// Which budget stops get a line: per (page, source), the first, then at
+/// most one every [`STOP_LINE_EVERY`], each carrying how many stops it
+/// stands for. Pure, so the rule is tested without a page.
+#[derive(Debug, Default)]
+struct StopLines {
+    lines: HashMap<(usize, String), StopLine>,
+}
+
+impl StopLines {
+    /// A stop of `source` on `page` at `now`: `Some(n)` writes a line for
+    /// it and the `n` stops folded since the last line; `None` folds it.
+    fn admit(&mut self, page: usize, source: &str, now: std::time::Instant) -> Option<u32> {
+        if !STOP_LINES_ON {
+            return Some(0); // T20 RED: every stop gets a line
+        }
+        // A key quiet for a window has said all it had to (its folded stops
+        // go out with its next line, or are counted by the Inspector's
+        // grouped row), so the map holds only the sources stopping now.
+        self.lines.retain(|_, line| now.duration_since(line.at) < STOP_LINE_EVERY * 2);
+        let key = (page, source.to_string());
+        match self.lines.get_mut(&key) {
+            Some(line) if now.duration_since(line.at) < STOP_LINE_EVERY => {
+                line.folded = line.folded.saturating_add(1);
+                None
+            }
+            Some(line) => {
+                let folded = line.folded;
+                *line = StopLine { at: now, folded: 0 };
+                Some(folded)
+            }
+            None => {
+                self.lines.insert(key, StopLine { at: now, folded: 0 });
+                Some(0)
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// This thread's [`StopLines`]: the page thread runs every stop.
+    static STOP_LINES: std::cell::RefCell<StopLines> = std::cell::RefCell::new(StopLines::default());
 }
 
 thread_local! {
@@ -1692,21 +1759,27 @@ fn record_stopped_script(
     elapsed_ms: u64,
     late: Option<std::time::Duration>,
 ) -> ScriptRecord {
-    log_script_stopped(source, elapsed_ms, late);
-    // `console.warn` may be the page's own function by now, so it gets a
-    // limit as well. The note is its own execution: the budget it reports
-    // is the one the stopped script ran past.
-    let limit_ms = if source.starts_with("event:") || source == "timers" || source == "network" {
-        config.live_turn_budget_ms
-    } else {
-        config.script_budget_ms
-    };
-    let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");
-    bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
-    begin_script_turn(bindings, STOP_NOTE_BUDGET);
-    let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
-    end_script_turn(bindings);
-    bindings.set_execution_deadline(None);
+    // One line and one note per (page, source) every few seconds (T20):
+    // the record below is still kept for every stop.
+    let page = bindings as *const DomBindings as usize;
+    let line = STOP_LINES.with(|lines| lines.borrow_mut().admit(page, source, std::time::Instant::now()));
+    if let Some(repeats) = line {
+        log_script_stopped_folding(source, elapsed_ms, late, repeats);
+        // `console.warn` may be the page's own function by now, so it gets
+        // a limit as well. The note is its own execution: the budget it
+        // reports is the one the stopped script ran past.
+        let limit_ms = if source.starts_with("event:") || source == "timers" || source == "network" {
+            config.live_turn_budget_ms
+        } else {
+            config.script_budget_ms
+        };
+        let note = format!("Script stopped: it ran past {limit_ms} ms ({source})");
+        bindings.set_execution_deadline(Some(std::time::Instant::now() + STOP_NOTE_BUDGET));
+        begin_script_turn(bindings, STOP_NOTE_BUDGET);
+        let _ = bindings.evaluate(&format!("console.warn({})", serde_json::Value::String(note)));
+        end_script_turn(bindings);
+        bindings.set_execution_deadline(None);
+    }
     ScriptRecord {
         source: source.to_string(),
         bytes: 0,

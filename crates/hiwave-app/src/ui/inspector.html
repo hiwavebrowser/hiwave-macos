@@ -695,6 +695,15 @@
             white-space: pre-wrap;
         }
 
+        .console-entry-repeat {
+            flex-shrink: 0;
+            margin-left: 8px;
+            padding: 0 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            background: var(--bg-tertiary, rgba(127, 127, 127, 0.2));
+        }
+
         .console-entry-source {
             flex-shrink: 0;
             margin-left: 12px;
@@ -1061,6 +1070,44 @@
                 return rows;
             }
 
+            // The engine folds identical lines in a row into one with a
+            // `repeat` count (T20); a run that spans two answers is folded
+            // here, so 100 budget stops from one listener stay one row.
+            // Same rule as the engine's `same_line`. Pure; tested by
+            // scripts/tests/test_inspector_console_groups.py.
+            function sameConsoleLine(a, b) {
+                return a.doc === b.doc && a.level === b.level && a.kind === b.kind
+                    && a.message === b.message
+                    && JSON.stringify(a.stack || []) === JSON.stringify(b.stack || []);
+            }
+
+            function appendConsoleEntries(shown, entries) {
+                if (true) return shown.concat(entries); // T20 RED
+                const out = shown.slice();
+                for (const entry of entries) {
+                    const last = out[out.length - 1];
+                    if (last && entry.kind && last.kind && sameConsoleLine(last, entry)) {
+                        out[out.length - 1] = Object.assign({}, last, {
+                            id: entry.id,
+                            repeat: (last.repeat || 1) + (entry.repeat || 1),
+                            lastMs: entry.lastMs,
+                        });
+                    } else {
+                        out.push(entry);
+                    }
+                }
+                return out;
+            }
+
+            function formatRepeat(entry) {
+                const n = entry.repeat || 1;
+                if (n < 2) return '';
+                const s = ms => (ms / 1000).toFixed(1) + ' s';
+                const span = entry.firstMs != null && entry.lastMs != null
+                    ? ` · ${s(entry.firstMs)} – ${s(entry.lastMs)}` : '';
+                return `<span class="console-entry-repeat" title="${n} identical lines${span}">×${n}${span}</span>`;
+            }
+
             function renderConsoleRow(row) {
                 if (row.entry) return renderConsoleEntry(row.entry, row.stale);
                 const label = row.stale ? `Document ${row.divider} (earlier page)` : `Document ${row.divider}`;
@@ -1076,6 +1123,7 @@
                     <span class="console-entry-time">${time}</span>
                     ${icon ? `<span class="console-entry-icon">${icon}</span>` : ''}
                     <span class="console-entry-content">${escapeHtml(entry.message)}</span>
+                    ${formatRepeat(entry)}
                     ${source ? `<span class="console-entry-source">${source}</span>` : ''}
                 </div>`;
             }
@@ -1098,8 +1146,11 @@
                 }
 
                 // Update counts
-                const errors = consoleEntries.filter(e => e.level === 'error').length;
-                const warnings = consoleEntries.filter(e => e.level === 'warn').length;
+                const lines = level => consoleEntries
+                    .filter(e => e.level === level)
+                    .reduce((n, e) => n + (e.repeat || 1), 0);
+                const errors = lines('error');
+                const warnings = lines('warn');
                 errorCount.textContent = errors;
                 warnCount.textContent = warnings;
             }
@@ -1623,8 +1674,8 @@
                     const now = Date.now();
                     for (const entry of entries) {
                         entry.timestamp = entry.timestamp || now;
-                        consoleEntries.push(entry);
                     }
+                    consoleEntries = appendConsoleEntries(consoleEntries, entries);
                     updateConsoleDisplay();
                 },
 

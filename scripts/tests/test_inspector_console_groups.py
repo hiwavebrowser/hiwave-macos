@@ -98,6 +98,59 @@ def test_no_lines_no_rows():
     assert _rows([]) == []
 
 
+def _append(shown, *answers):
+    """`appendConsoleEntries` over each answer in turn, as (id, repeat,
+    firstMs, lastMs) per row (T20)."""
+    script = (
+        _function_source("sameConsoleLine")
+        + "\n"
+        + _function_source("appendConsoleEntries")
+        + "\nlet shown = JSON.parse(process.argv[1]);"
+        + "\nfor (const a of JSON.parse(process.argv[2])) shown = appendConsoleEntries(shown, a);"
+        + "\nconsole.log(JSON.stringify(shown.map(e => [e.id, e.repeat || 1, e.firstMs, e.lastMs])));"
+    )
+    out = subprocess.run(
+        ["node", "-e", script, json.dumps(shown), json.dumps(list(answers))],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [tuple(r) for r in json.loads(out.stdout)]
+
+
+def _stop(id, repeat, first, last, doc=1):
+    return {
+        "id": id, "doc": doc, "level": "error", "kind": "script_error",
+        "message": "Uncaught Error (message hidden, 26 chars) [event:pointermove]",
+        "stack": [], "repeat": repeat, "firstMs": first, "lastMs": last,
+    }
+
+
+def test_a_run_of_stops_across_answers_stays_one_row():
+    # T20: 100 budget stops from one listener reach the panel over three
+    # polls; the panel shows one row x100 with the first and last time.
+    rows = _append(
+        [],
+        [_stop(39, 40, 10.0, 400.0)],
+        [_stop(79, 40, 410.0, 800.0)],
+        [_stop(99, 20, 810.0, 1000.0)],
+    )
+    assert rows == [(99, 100, 10.0, 1000.0)]
+
+
+def test_a_different_line_or_document_ends_the_run():
+    other = {"id": 50, "doc": 1, "level": "log", "kind": "console", "message": "<string len=4>", "stack": []}
+    rows = _append([], [_stop(1, 1, 1.0, 1.0), other, _stop(51, 1, 5.0, 5.0)], [_stop(52, 1, 6.0, 6.0, doc=2)])
+    assert rows == [(1, 1, 1.0, 1.0), (50, 1, None, None), (51, 1, 5.0, 5.0), (52, 1, 6.0, 6.0)]
+
+
+def test_console_input_lines_never_fold():
+    # The console's own input and results carry no kind.
+    typed = {"id": None, "level": "log", "message": "1 + 1", "stack": []}
+    rows = _append([], [typed, dict(typed)])
+    assert len(rows) == 2
+
+
 if __name__ == "__main__":
     if shutil.which("node") is None:
         print("SKIP: node is not installed")

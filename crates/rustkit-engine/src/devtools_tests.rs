@@ -397,7 +397,54 @@ fn payloads_serialize_in_the_panels_field_names() {
     let c = serde_json::to_value(c).unwrap();
     assert_eq!(c["nextSeq"], 10);
     assert_eq!(c["pageChanged"], false);
-    assert_eq!(c["entries"][0], serde_json::json!({"id": 9, "doc": 0, "level": "log", "kind": "console", "message": "m …", "stack": []}));
+    assert_eq!(
+        c["entries"][0],
+        serde_json::json!({"id": 9, "doc": 0, "level": "log", "kind": "console", "message": "m …", "stack": [], "repeat": 1, "firstMs": 0.0, "lastMs": 0.0})
+    );
+}
+
+#[test]
+fn identical_lines_in_a_row_are_one_entry_with_a_count() {
+    // T20: a listener stopped on every `pointermove` logs the same error
+    // each time; the panel shows it once with a count and its first and
+    // last time. A different line ends the run; a new document does too.
+    let stop = |seq: u64, doc: u32, t_ms: f64| InspectorRecord {
+        seq,
+        doc,
+        t_ms,
+        event: InspectorEvent::ScriptError {
+            name: "Error".into(),
+            message: None,
+            location: None,
+            stack: None,
+            unhandled_rejection: false,
+            script: "event:pointermove".into(),
+            value: "error".into(),
+            message_len: Some(26),
+            inserted_by: None,
+        },
+    };
+    let mut records: Vec<InspectorRecord> = (0..100).map(|i| stop(i, 1, 10.0 * (i + 1) as f64)).collect();
+    records.push(InspectorRecord {
+        seq: 100,
+        doc: 1,
+        t_ms: 1_005.0,
+        event: InspectorEvent::Console { level: ConsoleLevel::Log, message: "<string len=4>".into(), truncated: false, location: None, stack: None, error_stack: None },
+    });
+    records.push(stop(101, 1, 1_010.0));
+    records.push(stop(102, 2, 1_020.0));
+    let c = devtools_console_entries(&InspectorSnapshot { records, next_seq: 103, dropped: 0 });
+    let rows: Vec<(u64, &str, u32, f64, f64)> =
+        c.entries.iter().map(|e| (e.id, e.kind, e.repeat, e.first_ms, e.last_ms)).collect();
+    assert_eq!(
+        rows,
+        [
+            (99, "script_error", 100, 10.0, 1_000.0),
+            (100, "console", 1, 1_005.0, 1_005.0),
+            (101, "script_error", 1, 1_010.0, 1_010.0),
+            (102, "script_error", 1, 1_020.0, 1_020.0),
+        ]
+    );
 }
 
 #[test]

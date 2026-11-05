@@ -153,6 +153,50 @@ pub struct DevtoolsConsoleEntry {
     pub message: String,
     /// Where it happened, innermost first; at most one frame.
     pub stack: Vec<DevtoolsFrame>,
+    /// How many identical lines in a row this one stands for (T20): a
+    /// listener stopped at the budget on every `pointermove` is one row
+    /// with a count, not hundreds. The panel adds the next answer's
+    /// matching first line to it.
+    pub repeat: u32,
+    /// `t_ms` of the first and the last of them (ms since the document's
+    /// navigation started).
+    #[serde(rename = "firstMs")]
+    pub first_ms: f64,
+    #[serde(rename = "lastMs")]
+    pub last_ms: f64,
+}
+
+impl DevtoolsConsoleEntry {
+    /// Whether `other` is the same line again: same document, level, kind,
+    /// text and place. The panel's `sameConsoleLine` is the same rule.
+    fn same_line(&self, other: &Self) -> bool {
+        self.doc == other.doc
+            && self.level == other.level
+            && self.kind == other.kind
+            && self.message == other.message
+            && self.stack == other.stack
+    }
+}
+
+const COLLAPSE_ON: bool = false; // T20 RED
+/// Folds each run of identical consecutive lines into its first, counted.
+fn collapse_repeats(entries: impl IntoIterator<Item = DevtoolsConsoleEntry>) -> Vec<DevtoolsConsoleEntry> {
+    if !COLLAPSE_ON {
+        return entries.into_iter().collect(); // T20 RED: nothing folded
+    }
+    let mut out: Vec<DevtoolsConsoleEntry> = Vec::new();
+    for entry in entries {
+        match out.last_mut() {
+            Some(last) if last.same_line(&entry) => {
+                last.repeat = last.repeat.saturating_add(entry.repeat);
+                last.last_ms = entry.last_ms;
+                // The newest seq, so a later answer's line can follow it.
+                last.id = entry.id;
+            }
+            _ => out.push(entry),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -482,6 +526,9 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
         kind: record.event.kind(),
         message,
         stack,
+        repeat: 1,
+        first_ms: record.t_ms,
+        last_ms: record.t_ms,
     };
     Some(match &record.event {
         InspectorEvent::Console { level, message, truncated, location, .. } => {
@@ -532,7 +579,7 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
 /// The console lines of `snapshot`, oldest first.
 pub fn devtools_console_entries(snapshot: &InspectorSnapshot) -> DevtoolsConsole {
     DevtoolsConsole {
-        entries: snapshot.records.iter().filter_map(console_entry).collect(),
+        entries: collapse_repeats(snapshot.records.iter().filter_map(console_entry)),
         next_seq: snapshot.next_seq,
         dropped: snapshot.dropped,
         // Keyed on the events, not on a nav id: the ring can drop records,
