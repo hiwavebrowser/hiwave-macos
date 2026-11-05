@@ -481,3 +481,19 @@ fn no_cancel_after_the_end() {
         "no cancel after the end"
     );
 }
+
+/// A quoted name: `@keyframes "fade"` and `animation: "fade" …` (and the
+/// `animation-name` longhand) name the same animation.
+#[test]
+fn a_quoted_name_runs() {
+    for css in [
+        "#h{opacity:0;animation:\"fade\" 100ms linear forwards}@keyframes \"fade\"{from{opacity:0}to{opacity:1}}",
+        "#h{opacity:0;animation:'fade' 100ms linear forwards}@keyframes fade{from{opacity:0}to{opacity:1}}",
+        "#h{opacity:0;animation:fade 100ms linear forwards;animation-name:\"fade\"}@keyframes fade{from{opacity:0}to{opacity:1}}",
+    ] {
+        let (mut engine, view, _server) = load(&page(css));
+        pump(&mut engine, view, 200, 16);
+        assert_eq!(opacity(&mut engine, view), 1.0, "{css}");
+        assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.1", "{css}");
+    }
+}
