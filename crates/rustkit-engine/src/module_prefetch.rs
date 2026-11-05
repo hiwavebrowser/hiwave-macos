@@ -41,17 +41,33 @@ pub(crate) type PrefetchedModule = Shared<LocalBoxFuture<'static, ModuleOutcome>
 /// Prefetched modules by requested URL, answered or still in flight. Taken
 /// (removed) on use: a URL Boa asks for is asked for once.
 #[derive(Clone, Default)]
-pub(crate) struct ModulePrefetch(Rc<RefCell<HashMap<String, PrefetchedModule>>>);
+pub(crate) struct ModulePrefetch(Rc<PrefetchMap>);
+
+#[derive(Default)]
+pub(crate) struct PrefetchMap {
+    modules: RefCell<HashMap<String, PrefetchedModule>>,
+    /// The fetch tasks started, aborted when the map goes (a new document,
+    /// a cancelled load): a prefetch nobody will take stops there.
+    tasks: RefCell<Vec<tokio::task::AbortHandle>>,
+}
+
+impl Drop for PrefetchMap {
+    fn drop(&mut self) {
+        for task in self.tasks.get_mut().drain(..) {
+            task.abort();
+        }
+    }
+}
 
 impl ModulePrefetch {
     /// The prefetch for `url`, if one was started. Awaiting it finishes the
     /// one request already out (or answers at once).
     pub(crate) fn take(&self, url: &str) -> Option<PrefetchedModule> {
-        self.0.borrow_mut().remove(url)
+        self.0.modules.borrow_mut().remove(url)
     }
 
     fn put(&self, url: String, module: PrefetchedModule) {
-        self.0.borrow_mut().entry(url).or_insert(module);
+        self.0.modules.borrow_mut().entry(url).or_insert(module);
     }
 }
 
@@ -102,11 +118,27 @@ pub(crate) async fn walk(
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = FuturesUnordered::new();
     let mut started = 0usize;
+    // Each prefetch is its own task, not a future the walk or the run
+    // polls. The policy's per-origin and per-page slots are a FIFO queue: a
+    // fetch that holds a slot (or its place in line) and that nothing polls
+    // never gives it back, and every later fetch from that origin waits for
+    // its network cap (batch 19: github.com stalled after a module script).
+    // As a task it runs to its answer and frees its slot whether or not the
+    // run has asked for it yet.
     let fetch = |url: String| -> PrefetchedModule {
         let (policy, loader, document, inspector) = (policy.clone(), loader.clone(), document.clone(), inspector.clone());
-        async move { fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await }
-            .boxed_local()
-            .shared()
+        let task = tokio::spawn(async move { fetch_module(&policy, &loader, &url, &document, deadline, &inspector).await });
+        prefetch.0.tasks.borrow_mut().push(task.abort_handle());
+        async move {
+            match task.await {
+                Ok(outcome) => outcome,
+                // Aborted (only when the map is gone) or panicked: the run
+                // fetches it itself.
+                Err(_) => Err(crate::script_net::MODULE_FETCH_TIMED_OUT.to_string()),
+            }
+        }
+        .boxed_local()
+        .shared()
     };
     let follow = |base: &Url, source: &str, seen: &mut HashSet<String>, started: &mut usize| -> Vec<String> {
         let mut next = Vec::new();
