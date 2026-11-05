@@ -638,15 +638,18 @@ mod rust_log_tests {
 }
 
 /// The settings page's `save_settings` payload applied to `state` and written
-/// to settings.json; the value is the reply posted back to the page.
+/// to settings.json; the value is the reply posted back to the page, whose
+/// `ok` says whether the file was written (`error` says why not).
 fn save_settings_reply(state: &mut AppState, payload: serde_json::Value) -> serde_json::Value {
-    let settings: Result<crate::state::UserSettings, _> = serde_json::from_value(payload);
-    match settings {
-        Ok(s) => match state.update_settings(s) {
-            Ok(_) => serde_json::json!({ "type": "settings_saved" }),
-            Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
-        },
-        Err(e) => serde_json::json!({ "type": "settings_saved", "error": e.to_string() }),
+    let result = serde_json::from_value::<crate::state::UserSettings>(payload)
+        .map_err(|e| format!("invalid settings: {e}"))
+        .and_then(|s| state.update_settings(s).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => serde_json::json!({ "type": "settings_saved", "ok": true }),
+        Err(e) => {
+            warn!("Settings not saved: {}", e);
+            serde_json::json!({ "type": "settings_saved", "ok": false, "error": e })
+        }
     }
 }
 
@@ -705,9 +708,36 @@ mod settings_save_tests {
         let reply = save_settings_reply(&mut state, serde_json::Value::Object(payload));
         assert_eq!(reply["type"], "settings_saved");
         assert!(reply.get("error").is_none(), "the save was rejected: {reply}");
+        assert_eq!(reply["ok"], true);
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(state.settings_path()).expect("settings.json written")).unwrap();
         assert_eq!(written["sidebar_default_open"], false);
+    }
+
+    /// A save the app cannot apply is answered with ok:false and the reason,
+    /// so the page does not say 'Settings saved!'; nothing is written.
+    #[test]
+    fn a_rejected_save_replies_not_ok_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state_in(dir.path());
+        let _ = std::fs::remove_file(state.settings_path());
+        let reply = save_settings_reply(&mut state, serde_json::json!({ "theme": "dark" }));
+        assert_eq!(reply["type"], "settings_saved");
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().is_some_and(|e| e.contains("missing field")), "{reply}");
+        assert!(!state.settings_path().exists());
+    }
+
+    /// Every field the app's settings need is in the page's payload, so a
+    /// field added to one side and not the other fails here.
+    #[test]
+    fn the_page_sends_every_settings_field() {
+        let keys = page_save_keys();
+        let defaults = serde_json::to_value(crate::state::UserSettings::default()).unwrap();
+        let fields: Vec<&String> = defaults.as_object().unwrap().keys().collect();
+        let missing: Vec<&&String> = fields.iter().filter(|f| !keys.contains(f)).collect();
+        let unknown: Vec<&String> = keys.iter().filter(|k| !fields.contains(k)).collect();
+        assert!(missing.is_empty() && unknown.is_empty(), "page omits {missing:?}, sends unknown {unknown:?}");
     }
 }
 
