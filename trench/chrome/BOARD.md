@@ -1,6 +1,6 @@
 # Chrome board — HiWave's own UI pages, RustKit vs Chromium (CH3.A1)
 
-Run: 2026-11-05 04:07 UTC · develop `bece56a6` · oracle Chromium 143.0.7499.4 · parity-capture `target/release/parity-capture`
+Run: 2026-11-05 04:29 UTC · head `55bf3a32` on develop `209f6a64` · oracle Chromium 143.0.7499.4 · parity-capture `target/release/parity-capture`
 
 Gate (PLAN-z CH0): every row ≤ 0.5% pixel diff. **5/42 rows green**, 37 over the gate, 0 not scored (a capture failed).
 
@@ -65,7 +65,7 @@ Pixel diff % is pixelmatch over the whole viewport (compare_baseline.mjs). Geome
 
 ## CSS census red list per page
 
-Census 2026-11-05 (`target/chrome_board/census/CSS_PROPERTY_CENSUS_2026-11-05.json`, oracle 143.0.7499.4): 200 red properties. Per page, the red properties the page declares (in its `<style>` blocks and `style=` attributes).
+Census 2026-11-05 (`trench/chrome/census/CSS_PROPERTY_CENSUS_2026-11-05.md`, oracle 143.0.7499.4): 200 red properties. Per page, the red properties the page declares (in its `<style>` blocks and `style=` attributes).
 
 | page | declared properties | red | red properties |
 |---|---:|---:|---|

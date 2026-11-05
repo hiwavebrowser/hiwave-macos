@@ -1,7 +1,8 @@
 {
   "run": {
-    "at": "2026-11-05 04:07 UTC",
-    "sha": "bece56a6",
+    "at": "2026-11-05 04:29 UTC",
+    "sha": "55bf3a32",
+    "base": "209f6a64",
     "chromium": "143.0.7499.4",
     "parity_capture": "target/release/parity-capture",
     "gate_pct": 0.5
@@ -1852,7 +1853,8 @@
     }
   ],
   "census": {
-    "source": "target/chrome_board/census/CSS_PROPERTY_CENSUS_2026-11-05.json",
+    "source": "CSS_PROPERTY_CENSUS_2026-11-05.json",
+    "report": "trench/chrome/census/CSS_PROPERTY_CENSUS_2026-11-05.md",
     "date": "2026-11-05",
     "oracle": "143.0.7499.4",
     "red_total": 200,
