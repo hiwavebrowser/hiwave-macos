@@ -12,6 +12,15 @@ python3 tools/real_window/driver.py --list
 Build the app from the worktree you are testing and pass that binary. The
 driver prints its path and sha256 and writes them to `result.json`.
 
+The `a4_*` checks (the RustKit shelf, Inspector and settings) read the panel
+probe, which is compiled into debug builds and into a release build only
+with `cargo build --release -p hiwave-app --features test-hooks`; on a
+binary without it they report `NOT RUN`. The probe reports shapes only (box,
+match count, `checked`, value length), never text or values. The driver
+starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
+`HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
+is logged as its `cmd` and size only, always.
+
 ## What a run does
 
 For each check it starts a fresh app on a throwaway profile, restored on one
@@ -46,6 +55,7 @@ one `<check>.app.log` per check and the captured frames.
 | frames | Screen Recording grant, screen unlocked |
 | move, click, wheel, keys | Accessibility grant, screen unlocked |
 | resize | Accessibility grant, screen unlocked |
+| `hwdrive find` (elements of the chrome and settings WebViews by their accessible text or role) | Accessibility grant |
 
 The grants belong to the program that starts the driver (the terminal, or
 the program a launchd job runs), not to the script. `hwdrive request`, run by
@@ -84,6 +94,7 @@ of a run (about a minute for all checks).
 | `e4_cursor_hand` | CH2.E4 CSS cursor | `e4_mouse.html`: `hwdrive cursor` reads the system cursor: hand over the link, left-right over `ew-resize`, arrow in the title bar | yes |
 | `e4_tooltip` | CH2.E4 `title` | the link's `title` is the view's tooltip (debug log) and a tooltip window shows after a rest | yes |
 | `e4_chrome_tab` | CH2.E4, `HIWAVE_RUSTKIT_CHROME=1` | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
+| `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks
 

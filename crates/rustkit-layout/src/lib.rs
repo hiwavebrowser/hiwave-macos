@@ -4181,7 +4181,10 @@ impl LayoutBox {
         // box's height when it is definite (CSS 2.1 §10.5); the containing
         // block they are handed carries the flow cursor instead.
         let definite_for_children =
-            self.definite_content_height_for_children(definite_height.unwrap_or(0.0));
+            self.definite_content_height_for_children(
+                definite_height.unwrap_or(0.0),
+                definite_height.is_some(),
+            );
         self.mark_percent_height_bases(definite_for_children, containing_block);
         self.layout_block_children(definite_for_children);
 
@@ -4262,8 +4265,10 @@ impl LayoutBox {
         // does not depend on its children. Children resolve percentage heights
         // against it (CSS 2.1 §10.5); `None` leaves them on the old path.
         let definite_for_children =
-            self.definite_content_height_for_children(percent_height_base
-                .unwrap_or(containing_block.content.height));
+            self.definite_content_height_for_children(
+                percent_height_base.unwrap_or(containing_block.content.height),
+                percent_height_base.is_some(),
+            );
         self.mark_percent_height_bases(definite_for_children, containing_block);
 
         let mut child_margin_context = MarginCollapseContext::new();
@@ -4591,7 +4596,7 @@ impl LayoutBox {
 
         // Layout children
         let definite_for_children =
-            self.definite_content_height_for_children(containing_block.content.height);
+            self.definite_content_height_for_children(containing_block.content.height, false);
         self.layout_block_children(definite_for_children);
         self.calculate_block_height(
             (containing_block.content.height > 0.0).then_some(containing_block.content.height),
@@ -7201,7 +7206,14 @@ impl LayoutBox {
             }
     }
 
-    fn definite_content_height_for_children(&self, containing_block_height: f32) -> Option<f32> {
+    /// `base_is_definite`: the caller knows `containing_block_height` is a
+    /// definite size, so a zero base is a real 0 rather than "unknown"
+    /// (CH2.B7: `height: 100%` under a `height: 0` parent took its content).
+    fn definite_content_height_for_children(
+        &self,
+        containing_block_height: f32,
+        base_is_definite: bool,
+    ) -> Option<f32> {
         if let Some(html_height) = &self.root_element_height {
             let icb_height = self.viewport.1;
             return match html_height {
@@ -7216,7 +7228,7 @@ impl LayoutBox {
         }
         let specified = match self.style.height {
             Length::Px(px) => px,
-            Length::Percent(pct) if containing_block_height > 0.0 => {
+            Length::Percent(pct) if base_is_definite || containing_block_height > 0.0 => {
                 pct / 100.0 * containing_block_height
             }
             // A `calc()` height is as definite as the terms it is made of: it
@@ -7467,8 +7479,11 @@ impl LayoutBox {
         } else {
             max_height_raw
         };
-        if self.dimensions.content.height > max_height {
-            self.dimensions.content.height = max_height;
+        // min-height wins over a smaller max-height (CSS 2.1 §10.7); applied
+        // in this order without the floor, max won (CH2.B7: `min-height:
+        // 30px; max-height: 20px` was 20 tall, Chromium 30).
+        if self.dimensions.content.height > max_height.max(min_height) {
+            self.dimensions.content.height = max_height.max(min_height);
         }
         // A table's specified height is a minimum (CSS 2.1 §17.5.3): its
         // rows, laid out by table.rs before this runs, are never cut.
@@ -12187,11 +12202,9 @@ impl DisplayList {
                     } else {
                         Color::BLACK
                     },
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::new(239, 239, 239, 1.0)
-                    },
+                    // ButtonFace comes from the UA style (engine), so an
+                    // authored `transparent` survives here (CH2.B3).
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {

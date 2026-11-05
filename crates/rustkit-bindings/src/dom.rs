@@ -573,6 +573,12 @@ impl DomHost {
         }
     }
 
+    /// The NodeId of the node `args[0]` (generation) and `args[1]` name,
+    /// if it is in the bound document.
+    pub(crate) fn node_of(host: &SharedDomHost, args: &[JsValue]) -> Option<usize> {
+        host.borrow().node(args).map(|n| n.id.raw())
+    }
+
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
     fn node(&self, args: &[JsValue]) -> Option<Rc<Node>> {
         self.node_at(args, 1)
@@ -2290,12 +2296,15 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
-        // There is no canvas drawing and no media playback here, and a page
-        // must be able to find that out the way it asks: a canvas has no
-        // context of any kind, and a media element is one with nothing to
+        // There is no media playback here, and a page must be able to find
+        // that out the way it asks: a media element is one with nothing to
         // play. Without the methods the question itself threw (github.com's
-        // `getContext("webgl")` and `video.load()`, each in an effect).
-        made.HTMLCanvasElement.prototype.getContext = function getContext() { return null; };
+        // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
+        // which takes this way to a canvas's node and deletes it.
+        Object.defineProperty(g, '__rustkit_canvas_slot', {
+            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
+            configurable: true, writable: true, enumerable: false
+        });
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;
@@ -2842,20 +2851,29 @@ const WRAPPERS_JS: &str = r#"
     }, function (v) {
         v = v === null ? '' : String(v);
         if (inputMode(this) !== 'value') return this.setAttribute('value', v);
-        var n = controlValue(this, v).length;
-        selectionOf(this).start = selectionOf(this).end = n;
+        setValueMovingCaret(this, v);
     });
     accessor(HTMLTextAreaElement.prototype, 'value', function () { return controlValue(this); },
-        function (v) {
-            var n = controlValue(this, v === null ? '' : String(v)).length;
-            selectionOf(this).start = selectionOf(this).end = n;
-        });
-    // Script's view of the selection (HTML §4.10.5.2.10). The engine's caret
-    // is not synced to it yet; setting a value moves both ends to its end.
+        function (v) { setValueMovingCaret(this, v === null ? '' : String(v)); });
+    // Setting a different value moves both ends of the selection to its
+    // end; the same value leaves the selection alone (HTML §4.10.5.4).
+    function setValueMovingCaret(el, v) {
+        if (controlValue(el) === v) return;
+        var n = controlValue(el, v).length;
+        selectionOf(el).start = selectionOf(el).end = n;
+    }
+    // Script's view of the selection (HTML §4.10.5.2.10).
+    // Once a control has an edit state (it was focused, typed in, or
+    // script set its selection), the engine's state is the selection
+    // (`engineSelection`, from dom/editing.js; CH2.E12); this copy stands
+    // in before that.
     var selections = new WeakMap();
+    var engineSelection = null;
     function selectionOf(el) {
         var s = selections.get(el);
         if (!s) { s = { start: 0, end: 0, dir: 'none' }; selections.set(el, s); }
+        var e = engineSelection ? engineSelection(el) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; return s; }
         var n = controlValue(el).length;
         s.start = Math.min(s.start, n); s.end = Math.min(s.end, n);
         return s;
@@ -2865,6 +2883,8 @@ const WRAPPERS_JS: &str = r#"
         s.end = Math.min(end >>> 0, n);
         s.start = Math.min(start >>> 0, s.end);
         s.dir = dir === 'forward' || dir === 'backward' ? dir : 'none';
+        var e = engineSelection ? engineSelection(el, s.start, s.end, s.dir) : null;
+        if (e) { s.start = e.start; s.end = e.end; s.dir = e.dir; }
     }
     // Validity (HTML §4.10.20.3) for the constraints this rung models.
     var customValidity = new WeakMap();
@@ -5159,6 +5179,7 @@ const WRAPPERS_JS: &str = r#"
     g.__rkEditInternals = {
         wrap: wrap, slotOf: slotOf, gen: function () { return gen; },
         selectionOf: function (el) { return selectionOf(el); },
+        setEngineSelection: function (f) { engineSelection = f; },
         setSelection: function (el, start, end, dir) {
             var s = selectionOf(el);
             s.start = start; s.end = end; s.dir = dir;

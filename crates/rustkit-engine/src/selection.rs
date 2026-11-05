@@ -343,6 +343,24 @@ impl Engine {
         Some(before + index)
     }
 
+    /// The focused text control, and how many selections script has set,
+    /// read on each side of a press's focus change.
+    pub(crate) fn press_focus_marks(&self, id: EngineViewId) -> (Option<usize>, u64) {
+        let count = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .map_or(0, |b| b.script_selections());
+        (self.focused_text_control(id), count)
+    }
+
+    /// Paint the selection a focus handler set during a press.
+    pub(crate) fn relayout_after_press_focus(&mut self, id: EngineViewId) {
+        if let Err(e) = self.relayout_for(id, RelayoutCause::HoverOrFocus) {
+            debug!(?id, error = %e, "relayout after a focus handler's selection failed");
+        }
+    }
+
     /// The press's default action for the selection (after the focus has
     /// moved): in a focused text control, place the caret, select a word
     /// (`clicks == 2`) or everything (3), or extend (`shift`); elsewhere

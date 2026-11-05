@@ -125,6 +125,9 @@ mod mutation_observer_tests;
 mod web_messaging_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+mod web_canvas;
+#[cfg(test)]
+mod web_canvas_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
@@ -136,6 +139,8 @@ pub use dom::{
     SharedElementScrolls,
 };
 pub mod events;
+pub use rustkit_canvas as canvas;
+pub use web_canvas::{CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
     AnimationEventData, DataTransfer, DragEventData, DroppedFile, Event, EventDispatcher,
@@ -938,6 +943,8 @@ pub struct DomBindings {
     scroll: web_scroll::SharedScroll,
     /// The clipboard and edit states edit commands use (see `dom::editing`).
     edit: Rc<dom::editing::EditContext>,
+    /// Canvas 2D contexts and what they drew (see `web_canvas`).
+    canvases: web_canvas::SharedCanvases,
 }
 
 impl DomBindings {
@@ -1018,6 +1025,10 @@ impl DomBindings {
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
         web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
+        // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
+        let canvases = web_canvas::SharedCanvases::default();
+        web_canvas::install(&mut runtime, &canvases, &dom_host)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -1043,7 +1054,36 @@ impl DomBindings {
             mutation_log,
             scroll,
             edit,
+            canvases,
         })
+    }
+
+    /// What the canvas element `node` has drawn on its 2D context: `None`
+    /// when script never asked it for one.
+    pub fn canvas_snapshot(&self, node: usize) -> Option<CanvasSnapshot> {
+        self.canvases.borrow().snapshot(node)
+    }
+
+    /// A handle on this page's canvases that outlives a borrow of the
+    /// bindings (the engine's display list reads it).
+    pub fn canvas_source(&self) -> CanvasSource {
+        CanvasSource(self.canvases.clone())
+    }
+
+    /// Whether any canvas drew, cleared or was resized since the last call:
+    /// the engine paints again when it did.
+    pub fn take_canvas_painted(&self) -> bool {
+        self.canvases.borrow_mut().take_painted()
+    }
+
+    /// The text shaper `measureText` and canvas text use (the engine's).
+    pub fn set_canvas_text_measurer(&self, measurer: Option<CanvasTextMeasurer>) {
+        self.canvases.borrow_mut().set_measurer(measurer);
+    }
+
+    /// Measure `text` in the canvas `font` the way the canvas does.
+    pub fn measure_canvas_text(&self, font: &str, text: &str) -> CanvasTextExtent {
+        self.canvases.borrow().measure_font(font, text)
     }
 
     /// Record that script invalidated `bucket`. Marks combine: the pending
@@ -1238,6 +1278,13 @@ impl DomBindings {
             input_type: command.input_type().filter(|_| changed),
             data: r["data"].as_str().map(str::to_string),
         })
+    }
+
+    /// How many times script has set a text control's selection
+    /// (`select()`, `setSelectionRange`). The engine compares it across a
+    /// press's focus change (CH2.E12).
+    pub fn script_selections(&self) -> u64 {
+        self.edit.script_selections.get()
     }
 
     /// Tell script what the user typed into a control, so its `value`
@@ -1838,6 +1885,7 @@ impl DomBindings {
         // Rebind the DOM wrappers. Wrappers handed out for a previous
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
+        self.canvases.borrow_mut().clear();
         runtime.evaluate_script(&format!("__rustkit_dom_reset({generation});"))?;
 
         debug!("Document bound to JS context");
