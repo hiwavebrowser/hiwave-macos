@@ -803,7 +803,20 @@ fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
 /// without its query, fragment or userinfo; a `data:` URL only up to its
 /// media type (the rest is the page).
 fn url_for_log(url: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(url.find(['?', '#']).map_or(url, |at| &url[..at]))
+    use std::borrow::Cow;
+    if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
+        let end = url.find(',').unwrap_or(url.len());
+        return Cow::Borrowed(&url[..end]);
+    }
+    let url = url.find(['?', '#']).map_or(url, |at| &url[..at]);
+    if let Some(scheme_end) = url.find("://") {
+        let auth_start = scheme_end + 3;
+        let auth_end = url[auth_start..].find('/').map_or(url.len(), |i| auth_start + i);
+        if let Some(at) = url[auth_start..auth_end].rfind('@') {
+            return Cow::Owned(format!("{}{}", &url[..auth_start], &url[auth_start + at + 1..]));
+        }
+    }
+    Cow::Borrowed(url)
 }
 
 /// A page URL for an info line (CH3.A6): whole only when IPC bodies are
@@ -1077,7 +1090,7 @@ fn handle_chrome_ipc(
                 if let Ok(s) = chrome_state.lock() {
                     if let Some(active_tab) = s.shell.get_active_tab() {
                         let url = active_tab.url.to_string();
-                        info!("Navigating to new active tab after close: {}", url);
+                        info!("Navigating to new active tab after close: {}", crate::page_url_for_log(&url));
                         let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
                     }
                 }
@@ -1096,7 +1109,7 @@ fn handle_chrome_ipc(
                 if !already_active {
                     if let ipc::IpcResponse::Success { data } = response {
                         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                            info!("Navigating to tab URL: {}", url);
+                            info!("Navigating to tab URL: {}", crate::page_url_for_log(&url));
                             let _ = chrome_proxy
                                 .send_event(UserEvent::Navigate(url.to_string()));
                         }
@@ -2023,7 +2036,7 @@ fn dispatch_view_input(
                 view.relayout();
             }
             if let Some(url) = outcome.navigate.filter(|_| target == InputTarget::Page) {
-                info!(%url, "Link clicked");
+                info!(url = %crate::page_url_for_log(&url), "Link clicked");
                 let _ = click_proxy.send_event(UserEvent::Navigate(url));
             }
         }
@@ -2102,7 +2115,7 @@ fn dispatch_view_input(
             }
             if vk == 0x0D && target == InputTarget::Page {
                 if let Some(url) = view.form_submit_url() {
-                    info!(%url, "Form submitted");
+                    info!(url = %crate::page_url_for_log(&url), "Form submitted");
                     let _ = click_proxy.send_event(UserEvent::Navigate(url));
                     return;
                 }
@@ -2865,7 +2878,7 @@ fn main() {
         .with_clipboard(true)
         .with_bounds(content_bounds)
         .with_navigation_handler(move |url| {
-            info!("Content navigating to: {}", url);
+            info!("Content navigating to: {}", crate::page_url_for_log(&url));
 
             // Check if current tab URL is an internal URL before processing data URLs
             // This prevents overwriting hiwave://about when loading the about page via load_html()
@@ -2973,13 +2986,13 @@ fn main() {
         .with_new_window_req_handler(move |url| {
             // Allow Cloudflare challenges to stay as iframes (required for verification)
             if url.contains("challenges.cloudflare.com") || url.contains("turnstile") {
-                info!("Allowing Cloudflare challenge iframe: {}", url);
+                info!("Allowing Cloudflare challenge iframe: {}", crate::page_url_for_log(&url));
                 return true; // Allow the iframe/popup to render in-place
             }
 
             // Allow Proton authentication popups/iframes
             if url.contains("proton.me") || url.contains("protonmail.com") {
-                info!("Allowing Proton auth iframe: {}", url);
+                info!("Allowing Proton auth iframe: {}", crate::page_url_for_log(&url));
                 return true; // Allow the iframe/popup to render in-place
             }
 
@@ -2991,7 +3004,7 @@ fn main() {
 
             // Filter out unwanted popup/iframe requests using platform layer
             if platform::is_definitely_popup(&url) {
-                info!("New window request blocked (filtered): {}", url);
+                info!("New window request blocked (filtered): {}", crate::page_url_for_log(&url));
                 return false;
             }
 
@@ -2999,7 +3012,7 @@ fn main() {
             if let Ok(mut s) = content_state2.lock() {
                 // Check user blocklist first (hot-editable)
                 if s.user_blocklist.should_block(&url) {
-                    info!("New window request blocked (user blocklist): {}", url);
+                    info!("New window request blocked (user blocklist): {}", crate::page_url_for_log(&url));
                     // Increment Shield counters so all blocks show in UI
                     s.shield.increment_block_count();
                     // Track user blocklist blocks in analytics as popup, tracker, and ad
@@ -3079,7 +3092,7 @@ fn main() {
                                     workspace_id.as_deref()
                                 );
                             }
-                            info!("New window request blocked (Shield): {}", url);
+                            info!("New window request blocked (Shield): {}", crate::page_url_for_log(&url));
                             drop(s);
                             let _ = content_proxy_new_window.send_event(UserEvent::SyncShieldStats);
                             return false;
@@ -3088,7 +3101,7 @@ fn main() {
                 }
             }
 
-            info!("New window request -> new tab: {}", url);
+            info!("New window request -> new tab: {}", crate::page_url_for_log(&url));
             let response = ipc::commands::handle_message(
                 &content_state2,
                 IpcMessage::CreateTab {
@@ -3245,7 +3258,7 @@ fn main() {
             // its thread during the load — that is the engine-thread
             // refactor, a separate unit — but it now blocks behind a
             // painted, visibly-alive window instead of a void.
-            info!(url = %initial_url, "Deferring restored-tab navigation until after first paint");
+            info!(url = %crate::page_url_for_log(&initial_url), "Deferring restored-tab navigation until after first paint");
             let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
         }
         info!("Content WebView created (RustKit)");
@@ -3616,7 +3629,7 @@ fn main() {
                         if !rustkit_engine::content_thread_enabled() {
                             if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
                             {
-                                info!(%url, "Link clicked");
+                                info!(url = %crate::page_url_for_log(&url), "Link clicked");
                                 let _ = click_proxy.send_event(UserEvent::Navigate(url));
                             }
                         }
@@ -3667,7 +3680,7 @@ fn main() {
                                     // single-line field would do nothing
                                     // visible at all.
                                     if let Some(url) = view.form_submit_url() {
-                                        info!(%url, "Form submitted");
+                                        info!(url = %crate::page_url_for_log(&url), "Form submitted");
                                         let _ = click_proxy.send_event(UserEvent::Navigate(url));
                                         return;
                                     }
@@ -3869,7 +3882,7 @@ fn main() {
                     // A link or `location` in the chrome would replace the
                     // chrome's own document; nothing follows it.
                     if let Some((url, _)) = chrome.take_script_navigation() {
-                        warn!(%url, "RustKit chrome navigation not followed");
+                        warn!(url = %crate::page_url_for_log(&url), "RustKit chrome navigation not followed");
                     }
                     chrome.render();
                     // A right press the chrome's script let through (the
@@ -4011,9 +4024,9 @@ fn main() {
                         // submit button went anywhere (hand tests H14, H16).
                         if let Some((url, from_user)) = view.take_script_navigation() {
                             if from_user {
-                                info!(%url, "Link clicked");
+                                info!(url = %crate::page_url_for_log(&url), "Link clicked");
                             } else {
-                                info!(%url, "Script navigation");
+                                info!(url = %crate::page_url_for_log(&url), "Script navigation");
                             }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
@@ -4062,7 +4075,7 @@ fn main() {
             Event::UserEvent(user_event) => {
                 match user_event {
                     UserEvent::Navigate(url) => {
-                        info!("Navigating content to: {}", url);
+                        info!("Navigating content to: {}", crate::page_url_for_log(&url));
                         if is_new_tab_url(&url) {
                             #[cfg(target_os = "macos")]
                             load_new_tab(&*content_for_events);
