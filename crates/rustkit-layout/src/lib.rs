@@ -55,6 +55,8 @@ mod fit_content_width_tests;
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
+#[cfg(test)]
+mod inline_image_percent_base_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
