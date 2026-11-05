@@ -137,3 +137,21 @@ fn an_iframe_name_is_reported_unsupported() {
     // An iframe's id is an id like any other (the element, not its WindowProxy).
     assert_eq!(ev(&b, "byid.localName"), "iframe");
 }
+
+/// Only document-tree elements are named properties: ids inside a shadow
+/// tree or a template's contents are not exposed (as in Chromium).
+#[test]
+fn shadow_and_template_ids_are_not_named_properties() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<!DOCTYPE html><html><body><div id=host></div><template><p id=intemplate></p></template></body></html>").unwrap(),
+    ))
+    .unwrap();
+    b.evaluate("host.attachShadow({ mode: 'open' }).innerHTML = '<span id=inshadow></span><form name=shadowform></form>';")
+        .unwrap();
+    assert_eq!(ev(&b, "host.shadowRoot.getElementById('inshadow') !== null"), "true");
+    assert_eq!(
+        ev(&b, "[typeof inshadow, typeof shadowform, typeof intemplate, 'inshadow' in window].join()"),
+        "undefined,undefined,undefined,false"
+    );
+}

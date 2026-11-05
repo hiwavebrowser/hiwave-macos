@@ -1552,7 +1552,11 @@ pub(crate) fn install(
             // whose id is `arg`, or whose name is `arg` on an embed, form,
             // img or object, in tree order. "frame" when none is but an
             // iframe/frame is named `arg` (a browsing-context name, which
-            // is not supported).
+            // is not supported). The spec gives a child browsing context's
+            // name precedence over element matches; with iframe access
+            // unsupported, an element match wins over a same-named iframe.
+            // Shadow trees and template contents are not children here, so
+            // only document-tree elements are seen (pinned in the tests).
             if string_arg(args, 2) == Some("windowNamed") {
                 if arg.is_empty() {
                     return JsValue::String(String::new());
