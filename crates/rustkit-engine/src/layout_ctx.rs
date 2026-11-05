@@ -110,13 +110,21 @@ impl LayoutCtx {
         // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
         let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
         let _walk_checked = crate::WalkCheckedScope::enter(Some(checked));
-        if let Some(lay) = view.lay.as_ref() {
+        let lay = view.lay.clone();
+        if let Some(lay) = lay.as_ref() {
             let mut anims = lay.animations.borrow_mut();
             anims.last_build_clock = Some(anims.clock_ms);
+            anims.begin_build();
         }
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
-        build()
+        let built = build();
+        // What the build did not visit has no computed style: its
+        // transitions end here.
+        if let Some(lay) = lay.as_ref() {
+            lay.animations.borrow_mut().end_build();
+        }
+        built
     }
 
     /// The transitions' and animations' hand-off for one element of the
