@@ -972,7 +972,7 @@ class Driver:
         # #b: its focus handler calls select(); a click focuses it and the
         # selection stands, so typing replaces. Chrome 143: "new".
         mark = self.fixture.mark()
-        self.hw("click", pid, w * 0.3, h * 0.85)
+        self.hw("click", pid, w * 0.3, h * 0.75)
         self.expect(c, "#b took the focus", self.fixture.wait("beacon?e12-b-focus", 4, mark))
         time.sleep(0.4)
         self.hw("type", pid, "new")

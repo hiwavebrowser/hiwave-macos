@@ -3,12 +3,13 @@
 <title>E12 input select-all</title>
 <style>
   html, body { margin: 0; height: 100%; background: #ffffff; }
-  /* Each input covers half the viewport, so the driver needs only window
-     fractions: #a the top half, #b the bottom half. */
+  /* Two tall inputs, so the driver can aim by window fractions: #a under
+     35% of the window height, #b under 75%. (Pixel heights: the engine
+     does not size a fixed <input> by a percentage height yet.) */
   input { position: fixed; left: 0; right: 0; width: 100%; margin: 0; padding: 0 0 0 8px; border: 0;
           box-sizing: border-box; font: 24px Menlo; }
-  #a { top: 0; height: 50%; background: #ffffe0; }
-  #b { top: 50%; height: 50%; background: #e0ffff; }
+  #a { top: 0; height: 300px; background: #ffffe0; }
+  #b { top: 340px; height: 300px; background: #e0ffff; }
 </style>
 <input id="a" value="old-value">
 <input id="b" value="old-value">
