@@ -79,3 +79,43 @@ document.addEventListener('pointermove', function () { for (;;) { document.body.
         assert_eq!(rows, [("console", "warn", 1), ("script_error", "error", 100)]);
     }
 }
+
+/// The stop note is page script too (`console.warn` may be the page's own
+/// function by now). When it throws, or runs past its own short budget on
+/// a loaded machine, its error lands after the stop's in the same drain:
+/// the stop is still the one the fixed line replaces, not whatever came
+/// last (the T20 suite run under load gave 101 error rows for 100 stops).
+#[test]
+fn an_error_from_the_stop_note_is_not_taken_for_the_stop() {
+    let page = "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">alive</p><script>
+console.warn = function () { throw new TypeError('note'); };
+document.addEventListener('pointermove', function () { for (;;) { document.body.id; } });
+</script></body></html>";
+    let config = EngineConfig {
+        interrupt_scripts_at_budget: true,
+        live_turn_budget_ms: 5,
+        script_loop_iteration_limit: u64::MAX / 2,
+        ..EngineConfig::default()
+    };
+    let server = serve(vec![Route::html("/", page)]);
+    let (mut engine, view) = inspected_engine(config);
+    runtime().block_on(engine.load_url(view, server.url("/"))).expect("load_url");
+    engine.devtools_attach(view, true).unwrap();
+    let since = engine.devtools_console(view, 0).unwrap().next_seq;
+    let started = std::time::Instant::now();
+    for i in 0..3 {
+        engine.mouse_move_at_point(view, 10.0 + (i % 2) as f32, 20.0);
+    }
+    if started.elapsed() >= STOP_LINE_EVERY {
+        // A second window runs the note twice; the rule is the same.
+        return;
+    }
+    let console = engine.devtools_console(view, since).unwrap();
+    let rows: Vec<(&str, &str, u32)> = console.entries.iter().map(|e| (e.kind, e.message.as_str(), e.repeat)).collect();
+    let fixed = "Uncaught Error: stopped at the script budget [event:pointermove]";
+    let stops: u32 = console.entries.iter().filter(|e| e.message == fixed).map(|e| e.repeat).sum();
+    assert_eq!(stops, 3, "each stop is the fixed line once: {rows:?}");
+    let others: Vec<_> = console.entries.iter().filter(|e| e.kind == "script_error" && e.message != fixed).collect();
+    assert_eq!(others.len(), 1, "the note's own error, once: {rows:?}");
+    assert!(others[0].message.contains("TypeError"), "{rows:?}");
+}
