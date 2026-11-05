@@ -547,6 +547,35 @@ fn chrome_html_with_bridge() -> String {
     }
 }
 
+/// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
+/// an initialization script) as the head's first script, and `tail`, when
+/// there is one, as the body's last (CH3.A4: the panels' documents).
+fn html_with_bridge(html: &str, tail: &str) -> String {
+    let _ = tail;
+    html.to_string()
+}
+
+/// Which view an input event from the viewhost queue is for (CH3.A4): the
+/// RustKit chrome, one of the RustKit panels (by its index in `panels`), or
+/// the page.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputRoute {
+    Chrome,
+    Panel(usize),
+    Page,
+}
+
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn route_input(
+    view: rustkit_viewhost::ViewId,
+    chrome: Option<rustkit_viewhost::ViewId>,
+    panels: &[Option<rustkit_viewhost::ViewId>],
+) -> InputRoute {
+    let _ = (view, chrome, panels);
+    InputRoute::Page
+}
+
 impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
     fn eval(&self, js: &str) -> Result<(), String> {
         (**self).eval(js)
@@ -1689,6 +1718,45 @@ fn dispatch_view_input(
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod panel_tests {
+    use super::*;
+    use rustkit_viewhost::ViewId;
+
+    const DOC: &str = "<html><head><title>t</title></head><body><p>x</p></body></html>";
+
+    #[test]
+    fn a_panel_document_gets_the_bridge_first_in_its_head_and_the_tail_last_in_its_body() {
+        let out = html_with_bridge(DOC, "TAIL()");
+        assert!(out.starts_with(&format!("<html><head><script>{}</script><title>", JS_BRIDGE)));
+        assert!(out.ends_with("<p>x</p><script>TAIL()</script></body></html>"), "{out}");
+    }
+
+    #[test]
+    fn no_tail_adds_no_script_to_the_body() {
+        let out = html_with_bridge(DOC, "");
+        assert!(out.ends_with("<title>t</title></head><body><p>x</p></body></html>"), "{out}");
+        assert_eq!(out.matches("<script>").count(), 1);
+    }
+
+    #[test]
+    fn the_chrome_document_is_the_bridge_and_the_overlay_reporter() {
+        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER));
+    }
+
+    #[test]
+    fn input_goes_to_the_view_it_was_recorded_on() {
+        let (page, chrome, shelf, settings) = (ViewId::new(), ViewId::new(), ViewId::new(), ViewId::new());
+        // The Inspector is a WebKit view here: no id.
+        let panels = [Some(shelf), None, Some(settings)];
+        assert_eq!(route_input(chrome, Some(chrome), &panels), InputRoute::Chrome);
+        assert_eq!(route_input(shelf, Some(chrome), &panels), InputRoute::Panel(0));
+        assert_eq!(route_input(settings, None, &panels), InputRoute::Panel(2));
+        assert_eq!(route_input(page, Some(chrome), &panels), InputRoute::Page);
+        assert_eq!(route_input(page, None, &[None, None, None]), InputRoute::Page);
     }
 }
 
