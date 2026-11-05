@@ -936,8 +936,80 @@ class Driver:
                     final in urls and start not in urls, "tab urls %s" % urls)
         self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
 
+    def find(self, query):
+        """hwdrive's Accessibility lookup: the element's box, or None."""
+        code, got = self.hw("find", self.app.proc.pid, query)
+        return got if code == 0 else None
+
+    def b11_settings_save(self):
+        """CH2.B11: the sidebar's Settings opens the settings window; a flipped 'Sidebar Open on Startup' and Save Settings write settings.json, and the page says so only when it was written."""
+        c = "b11_settings_save"
+        if not self.open_page(c, "e9_final.html"):
+            return
+        if not (self.can_input and self.pre.get("accessibility")):
+            return self.not_run(c, "open, flip, save", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        path = self.app.state_file.parent / "settings.json"
+        try:
+            before = json.loads(path.read_text())
+        except (FileNotFoundError, ValueError):
+            before = None
+
+        def click(box):
+            self.hw("click", pid, int(box[0] + box[2] / 2), int(box[1] + box[3] / 2))
+
+        btn = self.find("Settings")
+        if not self.expect(c, "the sidebar shows a Settings item", bool(btn), json.dumps(btn)):
+            return
+        log_from = len(self.app.log_text())
+        click(btn["box"])
+        self.expect(c, "a click on it opened the settings window",
+                    bool(self.app.wait_log(r"Opening settings window", 5, log_from)))
+        label = None
+        end = time.time() + 5
+        while time.time() < end and not label:
+            label = self.find("Sidebar Open on Startup")
+        if not self.expect(c, "the settings page shows 'Sidebar Open on Startup'", bool(label)):
+            return
+        ly = label["box"][1] + label["box"][3] / 2
+        boxes = (self.find("role:AXCheckBox") or {}).get("found", [])
+        row = [b for b in boxes if b["box"][0] > label["box"][0] and abs(b["box"][1] + b["box"][3] / 2 - ly) < 30]
+        if not self.expect(c, "its toggle is on the same row", len(row) == 1, json.dumps(row or boxes[:4])):
+            return
+        was = row[0].get("value")
+        click(row[0]["box"])
+        time.sleep(0.5)
+        now = [b for b in (self.find("role:AXCheckBox") or {}).get("found", []) if b["box"] == row[0]["box"]]
+        self.expect(c, "a click flipped the toggle", bool(now) and now[0].get("value") == 1 - was,
+                    "was %s, now %s" % (was, now and now[0].get("value")))
+        save = self.find("Save Settings")
+        if not self.expect(c, "the page has a Save Settings button", bool(save)):
+            return
+        click(save["box"])
+        # The page shows 'Settings saved!' for 2 s after the reply.
+        time.sleep(0.4)
+        said_saved = bool(self.find("Settings saved!"))
+        after = None
+        end = time.time() + 5
+        while time.time() < end:
+            try:
+                after = json.loads(path.read_text())
+                if after != before:
+                    break
+            except (FileNotFoundError, ValueError):
+                pass
+            time.sleep(0.2)
+        self.expect(c, "Save Settings wrote settings.json with the flipped toggle",
+                    bool(after) and after != before and after.get("sidebar_default_open") == bool(1 - was),
+                    "before %s, after %s" % (before and before.get("sidebar_default_open"),
+                                             after and after.get("sidebar_default_open")))
+        written = bool(after) and after != before
+        self.expect(c, "the page says 'Settings saved!' only when the file was written",
+                    said_saved == written and said_saved,
+                    "page said saved: %s, file written: %s" % (said_saved, written))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "b11_settings_save"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

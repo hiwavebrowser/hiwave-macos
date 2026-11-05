@@ -46,6 +46,7 @@ one `<check>.app.log` per check and the captured frames.
 | frames | Screen Recording grant, screen unlocked |
 | move, click, wheel, keys | Accessibility grant, screen unlocked |
 | resize | Accessibility grant, screen unlocked |
+| `hwdrive find` (elements of the chrome and settings WebViews by their accessible text or role) | Accessibility grant |
 
 The grants belong to the program that starts the driver (the terminal, or
 the program a launchd job runs), not to the script. `hwdrive request`, run by
@@ -77,6 +78,7 @@ of a run (about a minute for all checks).
 | `i0a_layout` | I0(a): very expensive layout | `i0a_layout.html?n=150`: 3000 wrapping flex items, every one resized each 700 ms | controls only |
 | `i0a_nav` | I0(a): repeated navigation while loading | `i0a_nav.html?n=1` to `?n=5`: each visit starts the next, then meets a script held 1.5 s and an image held 3 s | controls only |
 | `i0a_close` | I0(a): closing a busy tab | `i0a_spin.html`, then Cmd+W | yes |
+| `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks
 

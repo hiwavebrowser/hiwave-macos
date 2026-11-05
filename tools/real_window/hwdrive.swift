@@ -9,6 +9,8 @@
 //   hwdrive preflight
 //   hwdrive request                       (show the system's grant prompts)
 //   hwdrive window   <pid>
+//   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
+//   hwdrive find     <pid> <text>|role:<AXRole>  (elements by their accessible text or role)
 //   hwdrive activate <pid>
 //   hwdrive move     <pid> <x> <y>
 //   hwdrive click    <pid> <x> <y>
@@ -151,6 +153,88 @@ switch cmd {
 case "window":
     emit(windowJSON(requireWindow(pid)))
 
+case "windows":
+    // Every ordinary (layer 0) window the process owns, largest first: a
+    // second window (settings) is found here, and clicked at through the
+    // main window's coordinates (its offset from the main window's origin).
+    let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+    var list: [(id: CGWindowID, frame: CGRect, onScreen: Bool)] = []
+    for w in all {
+        guard (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) == pid,
+              (w[kCGWindowLayer as String] as? Int) == 0,
+              let b = w[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: b),
+              let id = w[kCGWindowNumber as String] as? Int
+        else { continue }
+        list.append((CGWindowID(id), frame, (w[kCGWindowIsOnscreen as String] as? Bool) ?? false))
+    }
+    list.sort { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }
+    emit(["windows": list.map(windowJSON)])
+
+case "find":
+    // Where elements are, found through Accessibility, depth first over every
+    // window of the process. `find <pid> <text>`: the first element whose
+    // title, value or description is exactly <text>, scrolled into view first
+    // when it offers that. `find <pid> role:<AXRole>`: every element of that
+    // role (no scrolling), with its value. Boxes are in the main window's
+    // coordinates (the ones `click` takes), so a second window's element is
+    // clicked at directly. This only finds; clicks stay real HID events.
+    guard args.count >= 3 else { emit(["error": "find needs text or role:<AXRole>"], code: 2) }
+    if !AXIsProcessTrusted() {
+        emit(["error": "no Accessibility grant (System Settings > Privacy & Security > Accessibility)"], code: 3)
+    }
+    let query = args[2]
+    let role = query.hasPrefix("role:") ? String(query.dropFirst(5)) : nil
+    func attr(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+    }
+    func matches(_ e: AXUIElement) -> Bool {
+        if let role = role { return (attr(e, kAXRoleAttribute as String) as? String) == role }
+        for name in [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
+            if let s = attr(e, name as String) as? String, s == query { return true }
+        }
+        return false
+    }
+    var seen = 0
+    var hits: [AXUIElement] = []
+    func search(_ e: AXUIElement, _ depth: Int) {
+        seen += 1
+        if seen > 20_000 || depth > 60 || (role == nil && !hits.isEmpty) { return }
+        if matches(e) { hits.append(e); if role == nil { return } }
+        for child in (attr(e, kAXChildrenAttribute as String) as? [AXUIElement]) ?? [] {
+            search(child, depth + 1)
+        }
+    }
+    let app = AXUIElementCreateApplication(pid)
+    // A web view builds its accessibility tree only once an assistive
+    // client says it is there; ask, then look again for up to 3 s.
+    AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    for _ in 0..<15 {
+        seen = 0
+        hits = []
+        for win in (attr(app, kAXWindowsAttribute as String) as? [AXUIElement]) ?? [] { search(win, 0) }
+        if !hits.isEmpty { break }
+        usleep(200_000)
+    }
+    if hits.isEmpty { emit(["error": "nothing matches \(query)", "searched": seen], code: 2) }
+    if role == nil {
+        AXUIElementPerformAction(hits[0], "AXScrollToVisible" as CFString)
+        usleep(300_000)
+    }
+    let origin = requireWindow(pid).frame.origin
+    func describe(_ el: AXUIElement) -> [String: Any] {
+        var pos = CGPoint.zero, size = CGSize.zero
+        if let v = attr(el, kAXPositionAttribute as String) { AXValueGetValue(v as! AXValue, .cgPoint, &pos) }
+        if let v = attr(el, kAXSizeAttribute as String) { AXValueGetValue(v as! AXValue, .cgSize, &size) }
+        var out: [String: Any] = ["role": (attr(el, kAXRoleAttribute as String) as? String) ?? "",
+                                  "box": [pos.x - origin.x, pos.y - origin.y, size.width, size.height]]
+        if let n = attr(el, kAXValueAttribute as String) as? NSNumber { out["value"] = n.intValue }
+        return out
+    }
+    emit(role == nil ? describe(hits[0]) : ["found": hits.prefix(50).map(describe)])
+
 case "activate":
     requireInput()
     let ok = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows]) ?? false
@@ -210,6 +294,10 @@ case "type":
         for down in [true, false] {
             let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
             e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+            // No modifiers: an event with no source takes the session's
+            // flags, and after a `key ... cmd` those still said Command, so
+            // typed text arrived as Cmd chords (CH3.A2, 2026-11-05).
+            e?.flags = []
             post(e)
         }
     }
