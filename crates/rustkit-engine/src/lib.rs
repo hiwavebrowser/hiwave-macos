@@ -442,6 +442,8 @@ mod aspect_ratio_tests;
 #[cfg(test)]
 mod relative_offset_tests;
 #[cfg(test)]
+mod checked_sibling_tests;
+#[cfg(test)]
 mod svg_background_clip_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_scroll_tests;
@@ -16775,6 +16777,9 @@ impl SelectorMatcher {
         }
         #[cfg(test)]
         QUERY_CONTEXT_BUILDS.with(|n| n.set(n.get() + 1));
+        // An ancestor's earlier siblings are read from the DOM, with this
+        // checkedness (`dom_sibling_key`).
+        let _walk_checked = WalkCheckedScope::enter((!checked.is_empty()).then(|| checked.clone()));
         let classes = |attributes: &HashMap<String, String>| -> Vec<String> {
             attributes
                 .get("class")
@@ -16935,17 +16940,34 @@ impl SelectorMatcher {
         // in `RELATIONAL_NODE`: each scope below ends with its test).
         let subject_node = || RELATIONAL_NODE.with(|n| n.borrow().clone());
         let at_ancestor = |compound: &AncestorCompound, idx: usize, anc: &AncestorKey| {
-            let _relational = compound.relational.then(|| {
+            let _relational = compound.needs_node().then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_ancestor_node(&n, idx, anc)))
             });
             compound.matches_ancestor_in_chain(ancestors, idx)
         };
         let at_sibling = |compound: &AncestorCompound, idx: usize, prev: &SiblingKey| {
-            let _relational = compound.relational.then(|| {
+            let _relational = compound.needs_node().then(|| {
                 RelationalNodeScope::enter(subject_node().and_then(|n| chain_sibling_node(&n, idx, prev)))
             });
             compound.matches_sibling_in_chain(prev, ancestors)
         };
+
+        // Where `+` and `~` look. The walk stands at the subject until a
+        // " " or ">" step moves it up to `ancestors[k]` (`level = Some(k)`);
+        // from there they read THAT element's earlier siblings, from the DOM
+        // (`up`: the element the next sibling step looks back from, the
+        // ancestor itself at the first), not the subject's: eBay's
+        // `.ctrl:checked + .icon .off` relates the icon span to its control.
+        // A sibling step that matched the one at j leaves only those before
+        // j to the next (`.t + .u + .v`; `sibling_end` at the subject).
+        // Like the ancestor steps, a `~` takes the nearest match and does
+        // not try a farther one. The DOM steps walk `previous_sibling`
+        // lazily: `+` reads one element, `~` stops at its match and is
+        // memoised (`nearest_earlier_sibling_matching`), so N siblings cost
+        // O(N), not O(N^2) (#878 batch 13 hold).
+        let mut level: Option<usize> = None;
+        let mut up: Option<Rc<Node>> = None;
+        let mut sibling_end = siblings_before.len();
 
         for i in (0..tokens.len() - 1).rev() {
             let combinator = &tokens[i].1;
@@ -16967,6 +16989,8 @@ impl SelectorMatcher {
                         return false;
                     }
                     ancestor_idx = found_idx;
+                    level = Some(found_idx - 1);
+                    up = None;
                 }
                 ">" => {
                     // Child combinator: immediate parent (at current position) must match
@@ -16974,23 +16998,51 @@ impl SelectorMatcher {
                         if !at_ancestor(compound, ancestor_idx, parent) {
                             return false;
                         }
+                        level = Some(ancestor_idx);
+                        up = None;
                         ancestor_idx += 1; // Move to next ancestor
                     } else {
                         return false;
                     }
                 }
-                "+" => {
-                    // Adjacent sibling combinator: immediate previous sibling must match
-                    // Note: sibling combinators only apply at the element level, not up the tree
-                    let last = siblings_before.len().wrapping_sub(1);
-                    if !siblings_before.last().is_some_and(|prev| at_sibling(compound, last, prev)) {
-                        return false;
+                "+" | "~" => {
+                    if let Some(k) = level {
+                        let from = match up.take() {
+                            Some(at) => at,
+                            None => match subject_node().and_then(|n| chain_ancestor_node(&n, k, &ancestors[k])) {
+                                Some(a) => a,
+                                None => return false,
+                            },
+                        };
+                        let above = &ancestors[k + 1..];
+                        let test = |node: &Rc<Node>| {
+                            let Some(key) = dom_sibling_key(node) else {
+                                return false;
+                            };
+                            let _relational =
+                                compound.needs_node().then(|| RelationalNodeScope::enter(Some(node.clone())));
+                            compound.matches_sibling_in_chain(&key, above)
+                        };
+                        let matched = match combinator.as_str() {
+                            "+" => previous_element_sibling(&from).filter(|p| test(p)),
+                            _ => nearest_earlier_sibling_matching(&from, compound, &test),
+                        };
+                        match matched {
+                            Some(at) => up = Some(at),
+                            None => return false,
+                        }
+                        continue;
                     }
-                }
-                "~" => {
-                    // General sibling combinator: any previous sibling must match
-                    if !siblings_before.iter().enumerate().any(|(idx, prev)| at_sibling(compound, idx, prev)) {
-                        return false;
+                    let test = |j: usize| at_sibling(compound, j, &siblings_before[j]);
+                    let matched = match combinator.as_str() {
+                        // Adjacent: the sibling right before must match.
+                        "+" => sibling_end.checked_sub(1).filter(|&j| test(j)),
+                        // General: some earlier sibling must.
+                        _ => (0..sibling_end).rev().find(|&j| test(j)),
+                    };
+                    match matched {
+                        Some(j) => sibling_end = j,
+                        None => return false,
                     }
                 }
                 _ => {
@@ -36309,6 +36361,119 @@ impl Drop for RelationalNodeScope {
     }
 }
 
+/// What a selector walk that reads an ancestor's earlier siblings from the
+/// DOM needs for one build or script query ([`WalkCheckedScope`]).
+#[derive(Default)]
+struct WalkState {
+    /// The checkedness that has left the `checked` attribute (a click, a
+    /// script), by raw NodeId (`dom_sibling_key`). The subject's own
+    /// siblings come with their live state from the build.
+    checked: HashMap<usize, bool>,
+    /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
+    /// it looks back from, inclusive): the nearest element at or before it
+    /// that matches. Valid for one scope: the DOM, checkedness and the
+    /// prepared selectors (kept by the rule index or the query) stand
+    /// still in it. None outside a scope: nothing is kept.
+    memo: Option<HashMap<(usize, usize), Option<Rc<Node>>>>,
+}
+
+thread_local! {
+    static WALK: std::cell::RefCell<WalkState> = std::cell::RefCell::new(WalkState::default());
+}
+
+/// Sets [`WALK`] for its lifetime, with an empty memo, and puts the
+/// previous state back: around a view's build (its `checked_states`) and a
+/// script query. `None` keeps the enclosing scope's checkedness.
+pub(crate) struct WalkCheckedScope(WalkState);
+
+impl WalkCheckedScope {
+    pub(crate) fn enter(checked: Option<HashMap<usize, bool>>) -> Self {
+        WalkCheckedScope(WALK.with(|w| {
+            let checked = checked.unwrap_or_else(|| w.borrow().checked.clone());
+            w.replace(WalkState { checked, memo: Some(HashMap::new()) })
+        }))
+    }
+}
+
+impl Drop for WalkCheckedScope {
+    fn drop(&mut self) {
+        let previous = std::mem::take(&mut self.0);
+        WALK.with(|w| *w.borrow_mut() = previous);
+    }
+}
+
+/// The element sibling right before `node` in the DOM tree. Selectors read
+/// the DOM tree, so a host's light children are siblings as they stand in it.
+fn previous_element_sibling(node: &Rc<Node>) -> Option<Rc<Node>> {
+    let mut at = node.previous_sibling();
+    while let Some(n) = at {
+        if n.is_element() {
+            return Some(n);
+        }
+        at = n.previous_sibling();
+    }
+    None
+}
+
+/// An earlier sibling read from the DOM as `+` / `~` see it: what the walk
+/// tests once a descendant or child step has moved it up to an ancestor
+/// (`.ctrl:checked + .icon .off`), with the live checkedness of the scope.
+fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
+    let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+        return None;
+    };
+    let tag = lower_tag(tag_name).into_owned();
+    let live = WALK.with(|w| w.borrow().checked.get(&node.id.raw()).copied());
+    let state = match live {
+        Some(on) if tag == "input" && on != attributes.contains_key("checked") => {
+            let mut attributes = attributes.clone();
+            if on {
+                attributes.insert("checked".to_string(), String::new());
+            } else {
+                attributes.remove("checked");
+            }
+            ElementState::of(&tag, &attributes)
+        }
+        _ => ElementState::of(&tag, attributes),
+    };
+    Some((tag, element_classes(attributes), attributes.get("id").cloned(), state))
+}
+
+/// The nearest element sibling before `from` that `test` (a `~` step's
+/// compound, as the sibling) accepts. Memoised in the scope's [`WalkState`]:
+/// every subject under one parent asks it, and a compound that matches no
+/// sibling (`.absent ~ li span`) would rescan them all per subject. The
+/// siblings share their ancestors, so the answer is the same for all.
+fn nearest_earlier_sibling_matching(
+    from: &Rc<Node>,
+    compound: &AncestorCompound,
+    test: &dyn Fn(&Rc<Node>) -> bool,
+) -> Option<Rc<Node>> {
+    let id = compound as *const AncestorCompound as usize;
+    let mut visited: Vec<usize> = Vec::new();
+    let mut at = previous_element_sibling(from);
+    let found = loop {
+        let Some(n) = at else { break None };
+        let known = WALK.with(|w| w.borrow().memo.as_ref().and_then(|m| m.get(&(id, n.id.raw())).cloned()));
+        if let Some(hit) = known {
+            break hit;
+        }
+        visited.push(n.id.raw());
+        if test(&n) {
+            break Some(n);
+        }
+        at = previous_element_sibling(&n);
+    };
+    WALK.with(|w| {
+        if let Some(memo) = w.borrow_mut().memo.as_mut() {
+            for raw in visited {
+                memo.insert((id, raw), found.clone());
+            }
+        }
+    });
+    found
+}
+
 /// Keeps [`HAS_MEMO`] for one build. An inner scope joins the outer one.
 struct HasMemoScope(bool);
 
@@ -36594,6 +36759,10 @@ struct AncestorCompound {
     /// `:checked` / `:disabled` / `:enabled`. Checked against a sibling's
     /// state; an ancestor carries none, so it stays permissive there.
     state: Vec<StatePseudo>,
+    /// `:not(:checked)` / `:not(:disabled)` / `:not(:enabled)`: as `state`,
+    /// decided for a sibling (eBay's `.ctrl:not(:checked) + .icon .on`)
+    /// and permissive for an ancestor.
+    not_state: Vec<StatePseudo>,
     /// One entry per `:is()`/`:where()` in the compound: some alternative
     /// must match.
     any_of: Vec<AnyOf>,
@@ -36737,6 +36906,17 @@ impl AncestorCompound {
                             }
                             ("not", Some(a)) => {
                                 for member in SelectorMatcher::split_top_level_commas(a) {
+                                    let lone_state = match member.trim().to_ascii_lowercase().as_str() {
+                                        ":checked" => Some(StatePseudo::Checked),
+                                        ":disabled" => Some(StatePseudo::Disabled),
+                                        ":enabled" => Some(StatePseudo::Enabled),
+                                        _ => None,
+                                    };
+                                    if let Some(s) = lone_state {
+                                        out.not_state.push(s);
+                                        out.undecided = true;
+                                        continue;
+                                    }
                                     let parsed = match SelectorMatcher::selector_has_combinator(&member) {
                                         true => None,
                                         false => Some(AncestorCompound::parse(member.trim())),
@@ -36933,13 +37113,22 @@ impl AncestorCompound {
 
     /// [`Self::matches`] for an earlier sibling, whose form state is known.
     fn matches_sibling(&self, (tag, classes, id, state): &SiblingKey) -> bool {
+        let holds = |want: &StatePseudo| match want {
+            StatePseudo::Checked => state.checked,
+            StatePseudo::Disabled => state.control && state.disabled,
+            StatePseudo::Enabled => state.control && !state.disabled,
+        };
         self.matches(tag, classes, id.as_ref())
             && !self.excluded_by_relational_not(tag, classes, id.as_ref())
-            && self.state.iter().all(|want| match want {
-                StatePseudo::Checked => state.checked,
-                StatePseudo::Disabled => state.control && state.disabled,
-                StatePseudo::Enabled => state.control && !state.disabled,
-            })
+            && self.state.iter().all(holds)
+            && !self.not_state.iter().any(holds)
+    }
+
+    /// The element the compound is tested against must be named in
+    /// [`RELATIONAL_NODE`]: a `:has()` reads its subtree, and a complex
+    /// `:is()` member's own walk reads its DOM siblings.
+    fn needs_node(&self) -> bool {
+        self.relational || self.any_of.iter().any(|alts| !alts.complex.is_empty())
     }
 }
 
@@ -42941,10 +43130,10 @@ mod script_selector_tests {
         assert_eq!(js("document.querySelector('p:last-child').textContent"), "b");
         assert_eq!(js("document.querySelectorAll('p + p').length"), "1");
         assert_eq!(js("document.querySelector('.featured ~ div').className"), "card");
-        // Known gap, shared with the cascade: `+`/`~` are only checked against
-        // the subject's own siblings, so `.featured ~ div span p` (a sibling
-        // combinator up the ancestor chain) matches nothing. Chrome finds #deep.
-        assert_eq!(js("document.querySelectorAll('.featured ~ div span p').length"), "0");
+        // A sibling combinator up the ancestor chain (S7): `~` relates the
+        // `div` ancestor to its earlier siblings, read from the DOM, as the
+        // cascade does. Chrome finds #deep.
+        assert_eq!(js("document.querySelectorAll('.featured ~ div span p').length"), "1");
         assert_eq!(js("document.querySelectorAll('.card, #deep').length"), "3");
         assert_eq!(js("document.querySelectorAll('p:not(.x)').length"), "2");
         // Scoped queries still match against the whole tree: `div p` finds
