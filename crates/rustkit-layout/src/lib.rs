@@ -4878,6 +4878,66 @@ impl LayoutBox {
         }
     }
 
+    /// Whether this box is the containing block of the absolutely positioned
+    /// boxes inside it (CSS 2.1 §10.1, CSS Transforms 1 §2, Filter Effects 1
+    /// §5, CSS Containment 2 §3.2/3.3): a position other than static, a
+    /// transform, a filter, `contain: paint`/`layout`, a `will-change` that
+    /// names one of those — the same set that holds a fixed box — or the
+    /// layout root, which stands for the initial containing block.
+    ///
+    /// Position is read from the COMPUTED STYLE as well as
+    /// `LayoutBox::position`: the engine transfers `position: relative` as
+    /// `Position::Static`.
+    fn establishes_abspos_containing_block(&self) -> bool {
+        if self.position != Position::Static
+            || self.style.position != rustkit_css::Position::Static
+            || self.root_element_height.is_some()
+        {
+            return true;
+        }
+        let style = &self.style;
+        // A transform does not apply to a plain inline box.
+        let transformed = !matches!(self.box_type, BoxType::Inline)
+            && (!style.transform.ops.is_empty()
+                || style.translate.is_some()
+                || style.rotate.is_some()
+                || style.scale.is_some());
+        transformed
+            || !style.filter.is_empty()
+            || style.will_change_holds_fixed
+            || style.contain_holds_fixed
+    }
+
+    /// On the layout root (the engine's anonymous stand-in for `<html>`):
+    /// the initial containing block, the viewport-sized rectangle at the
+    /// document origin (CSS 2.1 §10.1 item 1). `None` elsewhere, or when no
+    /// viewport was set.
+    fn initial_containing_block(&self) -> Option<Dimensions> {
+        let (width, height) = self.viewport;
+        let is_root = self.root_element_height.is_some();
+        (is_root && width > 0.0 && height > 0.0).then(|| Dimensions {
+            content: Rect::new(0.0, 0.0, width, height),
+            ..Default::default()
+        })
+    }
+
+    /// Re-anchor this box against `containing_block` if it is absolutely
+    /// positioned; otherwise, unless it is itself a containing block (which
+    /// anchors its own descendants) or a fixed box, carry on into its
+    /// children.
+    fn reanchor_absolute_through_static(&mut self, containing_block: &Dimensions) {
+        match self.position {
+            Position::Absolute => self.reanchor_absolute(containing_block),
+            Position::Fixed => {}
+            _ if self.establishes_abspos_containing_block() => {}
+            _ => {
+                for child in &mut self.children {
+                    child.reanchor_absolute_through_static(containing_block);
+                }
+            }
+        }
+    }
+
     /// CSS 2.1 §10.1: the containing block of an absolutely positioned
     /// descendant is the PADDING box of its positioned ancestor. Expressed as
     /// a `Dimensions` whose content rect is that padding box, because
@@ -4903,10 +4963,28 @@ impl LayoutBox {
     /// against the parent's top / short of the padding edge. Idempotent:
     /// offsets are recomputed absolutely, so a box the parent's own move
     /// already carried simply lands in the same place.
+    ///
+    /// Only a box that IS a containing block for absolutes
+    /// (`establishes_abspos_containing_block`) gives the final answer, and
+    /// it gives it to every absolute descendant it holds through static
+    /// boxes, not just its own children (C15): a static parent, `overflow`
+    /// or not, is no containing block, so `top: 1800px` under a static box
+    /// at y=1000 reads 1800 against the initial containing block, not 2800.
+    /// A static box still anchors its own absolute children to its padding
+    /// box first — provisionally, so a tree laid out from a static root (no
+    /// containing block above it) keeps its old answer — and the nearest
+    /// containing block, final later, overrides it.
     pub(crate) fn reanchor_absolute_children(&mut self) {
         let cb = self.abspos_containing_block();
-        for child in &mut self.children {
-            child.reanchor_absolute(&cb);
+        if self.establishes_abspos_containing_block() {
+            let anchor = self.initial_containing_block().unwrap_or_else(|| cb.clone());
+            for child in &mut self.children {
+                child.reanchor_absolute_through_static(&anchor);
+            }
+        } else {
+            for child in &mut self.children {
+                child.reanchor_absolute(&cb);
+            }
         }
         // A flex container's out-of-flow children take their static
         // position as the sole flex item (Flexbox 1 §4.1). Step 13 placed
