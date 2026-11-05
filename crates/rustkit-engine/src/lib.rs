@@ -45170,6 +45170,29 @@ mod abspos_initial_containing_block_tests {
     }
 
     #[test]
+    fn percentage_widths_resolve_against_the_initial_containing_block_too() {
+        // R1 nit on #886: the offsets moved to the ICB while a percentage
+        // WIDTH kept the static parent's 300px base, giving 300×800.
+        let root = laid_out(&format!(
+            r#"{SPACER}<div id="parent" style="margin-left:200px;width:300px;height:50px"><div id="abs" style="position:absolute;top:0;left:0;width:100%;height:100%;padding-left:10%"><div id="inner" style="width:50%;height:10px"></div></div></div>"#
+        ));
+        assert_eq!(origin(&root, "parent"), (200.0, 1000.0), "precondition");
+        let abs = by_id(&root, "abs").dimensions.clone();
+        let border = abs.border_box();
+        assert_eq!(
+            (border.x, border.y, border.width, border.height),
+            (0.0, 0.0, VIEWPORT.0 + 128.0, VIEWPORT.1),
+            "width:100% is the ICB's 1280 (plus padding-left:10% = 128), height:100% its 800"
+        );
+        let inner = by_id(&root, "inner").dimensions.border_box();
+        assert_eq!(
+            (inner.x, inner.width),
+            (128.0, 640.0),
+            "the subtree is laid out in the re-resolved width, not the 300px one"
+        );
+    }
+
+    #[test]
     fn the_absolute_box_paints_where_it_is_placed() {
         let root = under("");
         let list = DisplayList::build(&root);
