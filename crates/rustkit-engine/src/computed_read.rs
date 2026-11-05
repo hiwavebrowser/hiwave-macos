@@ -639,9 +639,9 @@ fn font_shorthand(s: &css::ComputedStyle, font_px: f32, line_height: &str) -> St
 pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     let s = &*b.style;
     let d = &b.dimensions;
-    // The border widths as CSS reports them: without the styled
-    // scrollbars' space, which layout keeps in the borders (CH2.E7).
-    let css_border = b.css_dimensions().border;
+    // The border widths as CSS reports them. A styled scrollbar's space
+    // is its own gutter (`Dimensions::scrollbar`), not border (CH2.E7).
+    let css_border = d.border;
     let bx = d.border_box();
     let black = css::Color::BLACK;
     let mut out = String::new();

@@ -345,3 +345,205 @@ fn a_relayout_keeps_the_bar_while_it_overflows_and_drops_it_after() {
     read(&mut engine, view, "document.getElementById('c').style.height = '600px'");
     assert_eq!(read(&mut engine, view, width), "294");
 }
+
+// ---------------------------------------------------------------------------
+// R1 on #900. Chrome numbers: Chrome for Testing 153.0.8010.12 (Linux,
+// launched without --hide-scrollbars), tools/parity_oracle/scrollbar_events_log.mjs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_scrollbar_is_its_own_gutter_not_border() {
+    // Chrome: borderRightWidth 3px, borderBottomWidth 2px, clientLeft 2,
+    // clientTop 2, clientWidth 294, clientHeight 200, offsetWidth 305,
+    // the rect 305 wide, the child 294.
+    let (mut engine, view) = loaded(&page("#s{border:2px solid black;border-right-width:3px}"));
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), getComputedStyle($s).borderRightWidth, \
+         getComputedStyle($s).borderBottomWidth, $s.clientLeft, $s.clientTop, $s.clientWidth, \
+         $s.clientHeight, $s.offsetWidth, $s.getBoundingClientRect().width, \
+         document.getElementById('c').getBoundingClientRect().width].slice(1).join(' ')",
+    );
+    assert_eq!(got, "3px 2px 2 2 294 200 305 305 294");
+    // The bar sits inside the 3px right border, and the border strip is
+    // 3px, not 9.
+    assert_rect(one(&engine, view, TRACK), (306.0, 22.0, 6.0, 200.0));
+    let black = Color { r: 0, g: 0, b: 0, a: 1.0 };
+    let right = fills(&engine, view, black).into_iter().filter(|r| r.height > 200.0 && r.x > 300.0).collect::<Vec<_>>();
+    assert_eq!(right.len(), 1, "one right border strip: {right:?}");
+    assert_rect(right[0], (312.0, 20.0, 3.0, 204.0));
+    // No border at all: Chrome 0px, 0, 294, 300.
+    let (mut engine, view) = loaded(&page(""));
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), getComputedStyle($s).borderRightWidth, $s.clientLeft, \
+         $s.clientWidth, $s.offsetWidth].slice(1).join(' ')",
+    );
+    assert_eq!(got, "0px 0 294 300");
+}
+
+/// (layout passes, builds) the view has run so far.
+fn layout_counts(engine: &Engine, view: EngineViewId) -> (u32, u32) {
+    let lay = &engine.views[&view].lay;
+    (lay.layout_passes.get(), lay.layout_builds.get())
+}
+
+/// Run `script` (a write that changes layout, then a geometry read) and
+/// return what it read, with the (passes, builds) it cost.
+fn counted(engine: &mut Engine, view: EngineViewId, script: &str) -> (String, (u32, u32)) {
+    let before = layout_counts(engine, view);
+    let got = read(engine, view, script);
+    engine.relayout(view).expect("relayout");
+    let after = layout_counts(engine, view);
+    (got, (after.0 - before.0, after.1 - before.1))
+}
+
+#[test]
+fn a_relayout_of_an_overflowing_scroller_takes_one_pass() {
+    let (mut engine, view) = loaded(&page(""));
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').clientWidth"), "294");
+    // The first layout finds the overflow and lays out again for the bar;
+    // every relayout after it starts with the bar reserved: as many
+    // passes as builds.
+    for h in [610, 620, 630] {
+        let (got, (passes, builds)) = counted(
+            &mut engine,
+            view,
+            &format!("(document.getElementById('c').style.height = '{h}px', document.getElementById('s').clientWidth)"),
+        );
+        assert_eq!(got, "294");
+        assert!(builds >= 1, "the write was laid out");
+        assert_eq!(passes, builds, "one layout pass per build");
+    }
+    // Content that stops overflowing drops the bar (Chrome: 300), and
+    // gets it back when it overflows again.
+    assert_eq!(read(&mut engine, view, "(document.getElementById('c').style.height = '50px', document.getElementById('s').clientWidth)"), "300");
+    assert!(fills(&engine, view, TRACK).is_empty());
+    assert_eq!(read(&mut engine, view, "(document.getElementById('c').style.height = '600px', document.getElementById('s').clientWidth)"), "294");
+    let (_, (passes, builds)) = counted(&mut engine, view, "(document.getElementById('c').style.height = '640px', document.getElementById('s').clientWidth)");
+    assert!(builds >= 1);
+    assert_eq!(passes, builds);
+}
+
+#[test]
+fn a_relayout_with_the_root_bar_takes_one_pass() {
+    let html = "<!doctype html><style>body{margin:0}::-webkit-scrollbar{width:6px}\
+                ::-webkit-scrollbar-thumb{background:#888}#c{height:2400px}</style><div id=c></div>";
+    let (mut engine, view) = loaded(html);
+    let (got, (passes, builds)) = counted(
+        &mut engine,
+        view,
+        "(document.getElementById('c').style.height = '2500px', document.getElementById('c').getBoundingClientRect().width)",
+    );
+    assert_eq!(got, "794");
+    assert!(builds >= 1);
+    assert_eq!(passes, builds);
+}
+
+#[test]
+fn a_flex_item_scroller_matches_chrome_in_a_row_and_a_column() {
+    // A row: 100px, the scroller (flex: 1), 120px in a 500px container.
+    // Chrome: the scroller at x 100, 280 x 200, clientWidth 274,
+    // clientHeight 200, its child 274 wide; the last item at x 380.
+    let html = "<!doctype html><style>body{margin:0}#f{display:flex;width:500px;height:200px}\
+                #a{width:100px;flex:none}#s{flex:1;overflow:auto;min-width:0}\
+                #s::-webkit-scrollbar{width:6px}#s::-webkit-scrollbar-track{background:rgb(0,0,255)}\
+                #c{height:600px}#d{width:120px;flex:none}</style>\
+                <div id=f><div id=a></div><div id=s><div id=c></div></div><div id=d></div></div>";
+    let (mut engine, view) = loaded(html);
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), $r = $s.getBoundingClientRect(), $r.x, $r.width, $r.height, \
+         $s.clientWidth, $s.clientHeight, document.getElementById('c').getBoundingClientRect().width, \
+         document.getElementById('d').getBoundingClientRect().x].slice(2).join(' ')",
+    );
+    assert_eq!(got, "100 280 200 274 200 274 380");
+    assert_rect(one(&engine, view, TRACK), (374.0, 0.0, 6.0, 200.0));
+    // A column: a 50px header over the scroller (flex: 1) in 300 x 400.
+    // Chrome: y 50, 300 x 350, clientWidth 294, clientHeight 350, child 294.
+    let html = "<!doctype html><style>body{margin:0}#f{display:flex;flex-direction:column;width:300px;height:400px}\
+                #h{height:50px;flex:none}#s{flex:1;overflow:auto;min-height:0}\
+                #s::-webkit-scrollbar{width:6px}#c{height:600px}</style>\
+                <div id=f><div id=h></div><div id=s><div id=c></div></div></div>";
+    let (mut engine, view) = loaded(html);
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), $r = $s.getBoundingClientRect(), $r.y, $r.width, $r.height, \
+         $s.clientWidth, $s.clientHeight, document.getElementById('c').getBoundingClientRect().width].slice(2).join(' ')",
+    );
+    assert_eq!(got, "50 300 350 294 350 294");
+}
+
+/// Logs the pointer and mouse events the page hears, by target id (or tag).
+const EVENT_LOG_AT: &str = "<script>window.log=[];for (const t of ['pointerdown','mousedown','pointerup','mouseup','click'])\
+    document.addEventListener(t, e => log.push(t + ':' + (e.target.id || e.target.nodeName) \
+    + (t == 'mousedown' ? '@' + e.offsetX : '')), true);</script>";
+
+fn take_log(engine: &mut Engine, view: EngineViewId) -> String {
+    read(engine, view, "[log.join(','), log.length = 0][0]")
+}
+
+#[test]
+fn a_bar_press_goes_to_the_scroller_and_clicks_nothing() {
+    // Chrome 153: pointerdown, mousedown (offsetX 297, past the padding
+    // box), pointerup and mouseup at the scroller, never at the content
+    // under the point, and no click; the focus stays; a press on the
+    // content still clicks it.
+    let html = format!("{}<input id=i style='position:absolute;top:300px'>{EVENT_LOG_AT}", page(""));
+    let (mut engine, view) = loaded(&html);
+    read(&mut engine, view, "document.getElementById('i').focus()");
+    take_log(&mut engine, view);
+    let bar_press = "pointerdown:s,mousedown:s@297,pointerup:s,mouseup:s";
+    // The thumb.
+    engine.mouse_down_at_point(view, 307.0, 30.0);
+    engine.click_at_point(view, 307.0, 30.0);
+    assert_eq!(take_log(&mut engine, view), bar_press);
+    // The track.
+    engine.mouse_down_at_point(view, 307.0, 170.0);
+    engine.click_at_point(view, 307.0, 170.0);
+    assert_eq!(take_log(&mut engine, view), bar_press);
+    // A drag that ends off the bar: the release is still the scroller's.
+    engine.mouse_down_at_point(view, 307.0, 30.0);
+    engine.mouse_move_at_point(view, 450.0, 80.0);
+    engine.click_at_point(view, 450.0, 80.0);
+    assert_eq!(take_log(&mut engine, view), bar_press);
+    assert_eq!(read(&mut engine, view, "document.activeElement.id"), "i");
+    // The content.
+    engine.mouse_down_at_point(view, 100.0, 100.0);
+    engine.click_at_point(view, 100.0, 100.0);
+    assert_eq!(take_log(&mut engine, view), "pointerdown:c,mousedown:c@90,pointerup:c,mouseup:c,click:c");
+}
+
+#[test]
+fn a_cancelled_mousedown_does_not_stop_the_bar() {
+    // Chrome 153: the bar has the press before the page does.
+    let html = format!("{}{EVENT_LOG_AT}", page(""));
+    let (mut engine, view) = loaded(&html);
+    read(&mut engine, view, "document.getElementById('s').addEventListener('mousedown', e => e.preventDefault())");
+    engine.mouse_down_at_point(view, 307.0, 170.0);
+    engine.click_at_point(view, 307.0, 170.0);
+    assert_eq!(read(&mut engine, view, "document.getElementById('s').scrollTop"), "175");
+}
+
+#[test]
+fn a_press_on_the_viewport_bar_goes_to_the_root_element() {
+    // Chrome 153: a fixed 100vw box under the viewport's bar hears
+    // nothing; html hears the four events, and there is no click.
+    let html = format!(
+        "<!doctype html><style>body{{margin:0}}::-webkit-scrollbar{{width:6px}}\
+         ::-webkit-scrollbar-thumb{{background:#888}}#c{{height:2400px}}\
+         #fx{{position:fixed;left:0;top:0;width:100vw;height:100vh}}</style>\
+         <div id=c></div><div id=fx></div>{EVENT_LOG_AT}"
+    );
+    let (mut engine, view) = loaded(&html);
+    take_log(&mut engine, view);
+    engine.mouse_down_at_point(view, 797.0, 300.0);
+    engine.click_at_point(view, 797.0, 300.0);
+    let got = take_log(&mut engine, view);
+    let without_offsets = got.split(',').map(|e| e.split('@').next().unwrap()).collect::<Vec<_>>().join(",");
+    assert_eq!(without_offsets, "pointerdown:HTML,mousedown:HTML,pointerup:HTML,mouseup:HTML");
+}

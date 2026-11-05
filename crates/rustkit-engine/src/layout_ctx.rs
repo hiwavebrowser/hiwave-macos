@@ -230,6 +230,11 @@ pub(crate) struct ViewLayout {
     /// Chrome. Cleared with the document.
     pub(crate) scrollbar_marks: RefCell<HashMap<usize, (bool, bool)>>,
     pub(crate) root_scrollbar: Cell<bool>,
+    /// How many layout passes this view's builds have run in all (one per
+    /// build, or more while styled bars appear or go), and how many builds
+    /// ran them. Read by tests to pin that a relayout takes one pass.
+    pub(crate) layout_passes: Cell<u32>,
+    pub(crate) layout_builds: Cell<u32>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box

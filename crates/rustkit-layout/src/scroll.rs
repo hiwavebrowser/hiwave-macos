@@ -985,7 +985,7 @@ impl LayoutBox {
     /// The space this box's classic scrollbars take, (vertical bar width,
     /// horizontal bar height): an `overflow: scroll` axis always, an
     /// `auto` one once the overflow pass found it overflowing
-    /// (`scrollbar_overflows`). Layout adds it inside the border, out of
+    /// (`scrollbar_overflows`). Layout keeps it as a gutter inside the border (`Dimensions::scrollbar`), out of
     /// the content box, as Chrome does.
     pub fn scrollbar_reserve(&self) -> (f32, f32) {
         let Some(look) = self.scrollbar_look() else {
@@ -1069,17 +1069,6 @@ impl LayoutBox {
         for child in &self.children {
             child.apply_scrollbar_marks(marks);
         }
-    }
-
-    /// This box's dimensions as CSS reports them: the styled scrollbars'
-    /// space, which layout keeps in the right and bottom borders, taken
-    /// back out (`getComputedStyle` border widths).
-    pub fn css_dimensions(&self) -> crate::Dimensions {
-        let mut d = self.dimensions.clone();
-        let (v, h) = self.scrollbar_reserve();
-        d.border.right -= v;
-        d.border.bottom -= h;
-        d
     }
 
     /// This scroller's bars as laid out and scrolled now, in its own
@@ -1238,6 +1227,24 @@ mod styled_scrollbar_tests {
         assert_eq!(bars.len(), 2);
         assert!(bars.iter().all(|b| b.thumb.is_none()));
         assert_eq!(page_step(200.0), 175.0);
+    }
+
+    #[test]
+    fn the_gutter_is_in_the_border_box_but_not_the_border() {
+        // R1 on #900: a 6px bar inside a 3px right border on a 294px
+        // content box: border box 2 + 294 + 6 + 3 = 305, padding box 294,
+        // and `border` keeps the border alone.
+        let d = crate::Dimensions {
+            content: Rect { x: 12.0, y: 22.0, width: 294.0, height: 200.0 },
+            border: crate::EdgeSizes { top: 2.0, right: 3.0, bottom: 2.0, left: 2.0 },
+            scrollbar: crate::EdgeSizes { right: 6.0, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(d.border.right, 3.0);
+        assert_eq!(d.border_with_gutter().right, 9.0);
+        assert_eq!(d.padding_box().width, 294.0);
+        let bb = d.border_box();
+        assert_eq!((bb.x, bb.width, bb.height), (10.0, 305.0, 204.0));
     }
 
     #[test]

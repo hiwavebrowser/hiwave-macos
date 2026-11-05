@@ -9256,6 +9256,7 @@ impl layout_ctx::LayoutCtx {
         let root_bar_always = root_bar > 0.0
             && (root_remembered || root_box.style.overflow_y == rustkit_css::Overflow::Scroll);
         let mut cb_width = bounds.0 as f32 - if root_bar_always { root_bar } else { 0.0 };
+        let mut passes = 0;
         for pass in 0..4 {
             if pass > 0 {
                 let Some(unlaid) = unlaid.as_ref() else { break };
@@ -9265,6 +9266,7 @@ impl layout_ctx::LayoutCtx {
                 fresh.apply_scrollbar_marks(&marks);
                 root_box = fresh;
             }
+            passes += 1;
         // Height 0: layout_block_children uses content.height as the
         // cursor, so children start at y=0, not y=viewport_height.
         let containing_block = Dimensions {
@@ -9317,6 +9319,10 @@ impl layout_ctx::LayoutCtx {
             if !again {
                 break;
             }
+        }
+        if let Some(lay) = lay.as_ref() {
+            lay.layout_passes.set(lay.layout_passes.get() + passes);
+            lay.layout_builds.set(lay.layout_builds.get() + 1);
         }
         if let (Some(lay), true) = (lay.as_ref(), unlaid.is_some()) {
             let mut marks = HashMap::new();
@@ -24050,9 +24056,9 @@ fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
 fn computed_style_lines(b: &LayoutBox) -> String {
     let s = &*b.style;
     let d = &b.dimensions;
-    // The border widths as CSS reports them: without the styled
-    // scrollbars' space, which layout keeps in the borders (CH2.E7).
-    let css_border = b.css_dimensions().border;
+    // The border widths as CSS reports them. A styled scrollbar's space
+    // is its own gutter (`Dimensions::scrollbar`), not border (CH2.E7).
+    let css_border = d.border;
     let font_px = match s.font_size {
         rustkit_css::Length::Px(p) => p,
         _ => 16.0,

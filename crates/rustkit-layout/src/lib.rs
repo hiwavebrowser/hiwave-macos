@@ -1253,9 +1253,28 @@ pub struct Dimensions {
     pub border: EdgeSizes,
     /// Margin.
     pub margin: EdgeSizes,
+    /// CH2.E7: the space a classic (styled) scrollbar takes, between the
+    /// padding and the border: `right` for the vertical bar, `bottom` for
+    /// the horizontal one (`left`/`top` stay 0 until RTL bars). It is not
+    /// border: `getComputedStyle().borderRightWidth`, `clientLeft` and the
+    /// border painter read `border` alone, and `clientWidth` (the padding
+    /// box) excludes it, as in Chrome. The border box includes it.
+    pub scrollbar: EdgeSizes,
 }
 
 impl Dimensions {
+    /// The border plus the scrollbar gutter on each side: what lies
+    /// between the padding box and the border box. Layout sums that size
+    /// a box from its border box read this, not `border`.
+    pub fn border_with_gutter(&self) -> EdgeSizes {
+        EdgeSizes {
+            top: self.border.top + self.scrollbar.top,
+            right: self.border.right + self.scrollbar.right,
+            bottom: self.border.bottom + self.scrollbar.bottom,
+            left: self.border.left + self.scrollbar.left,
+        }
+    }
+
     /// Get the padding box (content + padding).
     pub fn padding_box(&self) -> Rect {
         Rect {
@@ -1269,11 +1288,12 @@ impl Dimensions {
     /// Get the border box (content + padding + border).
     pub fn border_box(&self) -> Rect {
         let pb = self.padding_box();
+        let frame = self.border_with_gutter();
         Rect {
-            x: pb.x - self.border.left,
-            y: pb.y - self.border.top,
-            width: pb.width + self.border.horizontal(),
-            height: pb.height + self.border.vertical(),
+            x: pb.x - frame.left,
+            y: pb.y - frame.top,
+            width: pb.width + frame.horizontal(),
+            height: pb.height + frame.vertical(),
         }
     }
 
@@ -2528,7 +2548,7 @@ impl LayoutBox {
         } else {
             // Inline box with no children and no explicit width:
             // Use horizontal padding + border as minimum (inline-block behavior)
-            self.dimensions.padding.horizontal() + self.dimensions.border.horizontal()
+            self.dimensions.padding.horizontal() + self.dimensions.border_with_gutter().horizontal()
         };
         self.dimensions.content.width = computed_width;
 
@@ -2536,7 +2556,7 @@ impl LayoutBox {
         // descent, §10.6.1) — not line-height. The line box still advances
         // by line-height in the parent loops; only the reported rect
         // changes. See inline_content_area.
-        let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
+        let min_height = self.dimensions.padding.vertical() + self.dimensions.border_with_gutter().vertical();
         let (content_area_height, _) = self.inline_content_area();
         let line_height = content_area_height;
 
@@ -3199,11 +3219,11 @@ impl LayoutBox {
             d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
-            + self.dimensions.border.right
+            + self.dimensions.border_with_gutter().right
             + self.dimensions.padding.left
             + self.dimensions.padding.right;
         let vertical_decoration = self.dimensions.border.top
-            + self.dimensions.border.bottom
+            + self.dimensions.border_with_gutter().bottom
             + self.dimensions.padding.top
             + self.dimensions.padding.bottom;
         let border_box_sizing = self.style.box_sizing == BoxSizing::BorderBox;
@@ -3708,7 +3728,7 @@ impl LayoutBox {
             + half_leading
             + spare_below
             + self.dimensions.padding.bottom
-            + self.dimensions.border.bottom
+            + self.dimensions.border_with_gutter().bottom
     }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
@@ -4184,7 +4204,7 @@ impl LayoutBox {
             && should_collapse_with_last_child(
                 &self.style,
                 self.float,
-                self.dimensions.border.bottom,
+                self.dimensions.border_with_gutter().bottom,
                 self.dimensions.padding.bottom,
             );
 
@@ -4450,8 +4470,8 @@ impl LayoutBox {
         self.dimensions.border.top =
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(&style.border_bottom_width, containing_block.content.width)
-                + self.scrollbar_reserve().1;
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+        self.dimensions.scrollbar.bottom = self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -4776,7 +4796,7 @@ impl LayoutBox {
                 - self.dimensions.margin.top
                 - self.dimensions.margin.bottom
                 - self.dimensions.border.top
-                - self.dimensions.border.bottom
+                - self.dimensions.border_with_gutter().bottom
                 - self.dimensions.padding.top
                 - self.dimensions.padding.bottom)
                 .max(0.0),
@@ -4968,7 +4988,7 @@ impl LayoutBox {
                     - self.dimensions.margin.left
                     - self.dimensions.margin.right
                     - self.dimensions.border.left
-                    - self.dimensions.border.right
+                    - self.dimensions.border_with_gutter().right
                     - self.dimensions.padding.left
                     - self.dimensions.padding.right;
                 self.dimensions.content.width = available_width.max(0.0);
@@ -4990,7 +5010,7 @@ impl LayoutBox {
             self.dimensions.content.x = containing_block.content.right()
                 - right
                 - self.dimensions.margin.right
-                - self.dimensions.border.right
+                - self.dimensions.border_with_gutter().right
                 - self.dimensions.padding.right
                 - self.dimensions.content.width;
         }
@@ -5027,7 +5047,7 @@ impl LayoutBox {
             self.dimensions.content.y = containing_block.content.bottom()
                 - bottom
                 - self.dimensions.margin.bottom
-                - self.dimensions.border.bottom
+                - self.dimensions.border_with_gutter().bottom
                 - self.dimensions.padding.bottom
                 - self.dimensions.content.height;
         }
@@ -5187,11 +5207,12 @@ impl LayoutBox {
 
         // CH2.E7: a classic scrollbar sits between the padding and the
         // border, and comes out of the content box (Chrome): the border
-        // box keeps its width. It rides in `border.right`, so the padding
-        // box (clientWidth) and everything that sums the box agree.
+        // box keeps its width. It is its own gutter
+        // (`dimensions.scrollbar`), not border, so `clientWidth` (the
+        // padding box) excludes it and `borderRightWidth` reads the border.
         let (scrollbar, _) = self.scrollbar_reserve();
         let content_width = (content_width - scrollbar).max(0.0);
-        let border_right = border_right + scrollbar;
+        self.dimensions.scrollbar.right = scrollbar;
 
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
@@ -5213,8 +5234,8 @@ impl LayoutBox {
         self.dimensions.border.top =
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
-            self.length_to_px(&style.border_bottom_width, containing_block.content.width)
-                + self.scrollbar_reserve().1;
+            self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+        self.dimensions.scrollbar.bottom = self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -7151,7 +7172,7 @@ impl LayoutBox {
                 - (self.dimensions.padding.top
                     + self.dimensions.padding.bottom
                     + self.dimensions.border.top
-                    + self.dimensions.border.bottom)
+                    + self.dimensions.border_with_gutter().bottom)
         } else {
             specified
         };
@@ -7178,7 +7199,7 @@ impl LayoutBox {
         let padding_top = self.dimensions.padding.top;
         let padding_bottom = self.dimensions.padding.bottom;
         let border_top = self.dimensions.border.top;
-        let border_bottom = self.dimensions.border.bottom;
+        let border_bottom = self.dimensions.border_with_gutter().bottom;
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
         let table_rows_height = self
@@ -7294,7 +7315,7 @@ impl LayoutBox {
                 let padding_border_width = self.dimensions.padding.left
                     + self.dimensions.padding.right
                     + self.dimensions.border.left
-                    + self.dimensions.border.right;
+                    + self.dimensions.border_with_gutter().right;
                 if let Some(h) = aspect_ratio_content_height(
                     &self.style,
                     self.dimensions.content.width,
@@ -7385,8 +7406,8 @@ impl LayoutBox {
             self.dimensions.content.height = self.dimensions.content.height.max(rows);
         }
         // CH2.E7: a horizontal scrollbar comes out of a specified height
-        // (it rides in `border.bottom`, which border-box sizing already
-        // took out); an auto height grows by it instead.
+        // (border-box sizing already took it out with the border, through
+        // `border_with_gutter`); an auto height grows by it instead.
         let (_, bar) = self.scrollbar_reserve();
         if bar > 0.0 && !is_border_box && !matches!(self.style.height, Length::Auto) {
             self.dimensions.content.height = (self.dimensions.content.height - bar).max(0.0);
@@ -10768,8 +10789,8 @@ impl DisplayList {
         let padding_rect = Rect::new(
             border_rect.x + d.border.left,
             border_rect.y + d.border.top,
-            border_rect.width - d.border.left - d.border.right,
-            border_rect.height - d.border.top - d.border.bottom,
+            border_rect.width - d.border.left - d.border_with_gutter().right,
+            border_rect.height - d.border.top - d.border_with_gutter().bottom,
         );
         if padding_rect.width <= 0.0 || padding_rect.height <= 0.0 {
             return None;
@@ -10780,9 +10801,9 @@ impl DisplayList {
         // borders give an elliptical padding edge (§5.2).
         let inner = BorderRadius {
             top_left: radius.top_left.inset(d.border.left, d.border.top),
-            top_right: radius.top_right.inset(d.border.right, d.border.top),
-            bottom_right: radius.bottom_right.inset(d.border.right, d.border.bottom),
-            bottom_left: radius.bottom_left.inset(d.border.left, d.border.bottom),
+            top_right: radius.top_right.inset(d.border_with_gutter().right, d.border.top),
+            bottom_right: radius.bottom_right.inset(d.border_with_gutter().right, d.border_with_gutter().bottom),
+            bottom_left: radius.bottom_left.inset(d.border.left, d.border_with_gutter().bottom),
         };
 
         Some((padding_rect, inner))
@@ -10815,8 +10836,8 @@ impl DisplayList {
                 Rect::new(
                     border_rect.x + d.border.left,
                     border_rect.y + d.border.top,
-                    border_rect.width - d.border.left - d.border.right,
-                    border_rect.height - d.border.top - d.border.bottom,
+                    border_rect.width - d.border.left - d.border_with_gutter().right,
+                    border_rect.height - d.border.top - d.border_with_gutter().bottom,
                 )
             }
             rustkit_css::BackgroundClip::ContentBox => {
@@ -10826,12 +10847,12 @@ impl DisplayList {
                     border_rect.y + d.border.top + d.padding.top,
                     border_rect.width
                         - d.border.left
-                        - d.border.right
+                        - d.border_with_gutter().right
                         - d.padding.left
                         - d.padding.right,
                     border_rect.height
                         - d.border.top
-                        - d.border.bottom
+                        - d.border_with_gutter().bottom
                         - d.padding.top
                         - d.padding.bottom,
                 )
@@ -11327,20 +11348,6 @@ impl DisplayList {
         // ring command has no dash pattern, so a rounded dashed/dotted border
         // keeps the per-side path below (square corners, correct dashes).
         let radius = self.border_radius_px(layout_box);
-        // The scrollbars' space rides in the right and bottom borders.
-        let (bar_v, bar_h) = layout_box.scrollbar_reserve();
-        let scrollbarless;
-        let d = if (bar_v, bar_h) == (0.0, 0.0) {
-            d
-        } else {
-            let mut plain = d.clone();
-            plain.border.right -= bar_v;
-            plain.border.bottom -= bar_h;
-            plain.content.width += bar_v;
-            plain.content.height += bar_h;
-            scrollbarless = plain;
-            &scrollbarless
-        };
         let widths = [d.border.top, d.border.right, d.border.bottom, d.border.left];
         let all_solid = [
             s.border_top_style,
@@ -14308,6 +14315,7 @@ mod tests {
                 bottom: 10.0,
                 left: 10.0,
             },
+            scrollbar: EdgeSizes::default(),
         };
 
         let pb = d.padding_box();

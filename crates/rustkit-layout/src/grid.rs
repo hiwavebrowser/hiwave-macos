@@ -1909,7 +1909,7 @@ pub fn layout_grid_container(
                             + d.padding.top
                             + d.content.height
                             + d.padding.bottom
-                            + d.border.bottom
+                            + d.border_with_gutter().bottom
                             + d.margin.bottom,
                     );
                 }
@@ -2162,7 +2162,7 @@ pub fn layout_grid_container(
                         let pb = child.dimensions.padding.top
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
-                            + child.dimensions.border.bottom;
+                            + child.dimensions.border_with_gutter().bottom;
                         (max_h - pb).max(0.0)
                     }
                     Some(max_h) => max_h,
@@ -2205,11 +2205,11 @@ pub fn layout_grid_container(
                 let item_pb_width = child.dimensions.padding.left
                     + child.dimensions.padding.right
                     + child.dimensions.border.left
-                    + child.dimensions.border.right;
+                    + child.dimensions.border_with_gutter().right;
                 let item_pb_height = child.dimensions.padding.top
                     + child.dimensions.padding.bottom
                     + child.dimensions.border.top
-                    + child.dimensions.border.bottom;
+                    + child.dimensions.border_with_gutter().bottom;
                 let grid_item_y = child.dimensions.content.y;
                 let grid_item_x = child.dimensions.content.x;
                 let grid_item_width = child.dimensions.content.width;
@@ -2388,7 +2388,7 @@ pub fn layout_grid_container(
                                 - grandchild.dimensions.border.left
                                 - grandchild.dimensions.padding.left
                                 - grandchild.dimensions.margin.right
-                                - grandchild.dimensions.border.right
+                                - grandchild.dimensions.border_with_gutter().right
                                 - grandchild.dimensions.padding.right;
                         }
                     }
@@ -2542,7 +2542,7 @@ pub fn layout_grid_container(
                     // where the next sibling's margin_top will max against it
                     // instead of stacking on top of it.
                     current_y = grandchild.dimensions.content.y + grandchild.dimensions.content.height
-                        + grandchild.dimensions.padding.bottom + grandchild.dimensions.border.bottom;
+                        + grandchild.dimensions.padding.bottom + grandchild.dimensions.border_with_gutter().bottom;
                     seam_margins.reset();
                     seam_margins.add_margin(grandchild.dimensions.margin.bottom);
                 }
@@ -2631,7 +2631,7 @@ pub fn layout_grid_container(
                             let pb = child.dimensions.padding.top
                                 + child.dimensions.padding.bottom
                                 + child.dimensions.border.top
-                                + child.dimensions.border.bottom;
+                                + child.dimensions.border_with_gutter().bottom;
                             if let Some(Some(real_h)) = real_heights.get(idx) {
                                 flex_spanners.push((
                                     rows_spanned,
@@ -2650,7 +2650,7 @@ pub fn layout_grid_container(
                         let pb = child.dimensions.padding.top
                             + child.dimensions.padding.bottom
                             + child.dimensions.border.top
-                            + child.dimensions.border.bottom;
+                            + child.dimensions.border_with_gutter().bottom;
 
                         // `real_h + pb` is a BORDER box; the row is a margin
                         // box. Comparing them directly makes an item with
@@ -2721,7 +2721,7 @@ pub fn layout_grid_container(
                             let pb_w = child.dimensions.padding.left
                                 + child.dimensions.padding.right
                                 + child.dimensions.border.left
-                                + child.dimensions.border.right;
+                                + child.dimensions.border_with_gutter().right;
                             if let Some(ar_h) = crate::aspect_ratio_content_height(
                                 &child.style,
                                 child.dimensions.content.width,
@@ -2837,7 +2837,7 @@ pub fn layout_grid_container(
                     container.dimensions.padding.top
                         + container.dimensions.padding.bottom
                         + container.dimensions.border.top
-                        + container.dimensions.border.bottom
+                        + container.dimensions.border_with_gutter().bottom
                 } else {
                     0.0
                 };
@@ -2907,7 +2907,7 @@ pub fn layout_grid_container(
                             let pb = child.dimensions.padding.top
                                 + child.dimensions.padding.bottom
                                 + child.dimensions.border.top
-                                + child.dimensions.border.bottom;
+                                + child.dimensions.border_with_gutter().bottom;
                             // The whole area: a spanning item stretches over
                             // every row it spans, not just its first.
                             let area = grid.rows[r1 - 1].position + grid.rows[r1 - 1].size
@@ -2951,7 +2951,7 @@ pub fn layout_grid_container(
             container.dimensions.padding.top
                 + container.dimensions.padding.bottom
                 + container.dimensions.border.top
-                + container.dimensions.border.bottom
+                + container.dimensions.border_with_gutter().bottom
         } else {
             0.0
         };
@@ -2992,7 +2992,7 @@ pub fn layout_grid_container(
                     let pb = child.dimensions.padding.top
                         + child.dimensions.padding.bottom
                         + child.dimensions.border.top
-                        + child.dimensions.border.bottom;
+                        + child.dimensions.border_with_gutter().bottom;
                     let area = grid.rows[r1 - 1].position + grid.rows[r1 - 1].size
                         - grid.rows[r0].position;
                     let target = area - vertical_margins(&child.style) - pb;
@@ -3069,11 +3069,11 @@ pub fn layout_grid_container(
             let pb_v = child.dimensions.padding.top
                 + child.dimensions.padding.bottom
                 + child.dimensions.border.top
-                + child.dimensions.border.bottom;
+                + child.dimensions.border_with_gutter().bottom;
             let pb_w = child.dimensions.padding.left
                 + child.dimensions.padding.right
                 + child.dimensions.border.left
-                + child.dimensions.border.right;
+                + child.dimensions.border_with_gutter().right;
             if let Some(ar_h) = crate::aspect_ratio_content_height(
                 &child.style,
                 child.dimensions.content.width,
@@ -3184,11 +3184,11 @@ pub fn layout_grid_container(
             let pb = child.dimensions.padding.top
                 + child.dimensions.padding.bottom
                 + child.dimensions.border.top
-                + child.dimensions.border.bottom;
+                + child.dimensions.border_with_gutter().bottom;
             let pb_w = child.dimensions.padding.left
                 + child.dimensions.padding.right
                 + child.dimensions.border.left
-                + child.dimensions.border.right;
+                + child.dimensions.border_with_gutter().right;
             let has_ratio = crate::aspect_ratio_content_height(
                 &child.style,
                 child.dimensions.content.width,
@@ -4787,8 +4787,10 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     let padding_top = px(&child.style.padding_top, border_box_height);
     let padding_bottom = px(&child.style.padding_bottom, border_box_height);
     let border_left = px(&child.style.border_left_width, border_box_width);
-    // CH2.E7: a styled scrollbar's space rides in the right and bottom
-    // borders, out of the content box.
+    // CH2.E7: a styled scrollbar's gutter sits inside the border, out of
+    // the content box. The content box is derived from the border box
+    // minus `border_right`/`border_bottom` below, so they carry it here;
+    // `dimensions.border` gets the border alone.
     let (bar_v, bar_h) = child.scrollbar_reserve();
     let border_right = px(&child.style.border_right_width, border_box_width) + bar_v;
     let border_top = px(&child.style.border_top_width, border_box_height);
@@ -4800,9 +4802,11 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     child.dimensions.padding.top = padding_top;
     child.dimensions.padding.bottom = padding_bottom;
     child.dimensions.border.left = border_left;
-    child.dimensions.border.right = border_right;
+    child.dimensions.border.right = border_right - bar_v;
     child.dimensions.border.top = border_top;
-    child.dimensions.border.bottom = border_bottom;
+    child.dimensions.border.bottom = border_bottom - bar_h;
+    child.dimensions.scrollbar.right = bar_v;
+    child.dimensions.scrollbar.bottom = bar_h;
 
     // Derive the content box. The alignment helpers hand back the
     // SPECIFIED size: an explicit `width`/`height` verbatim (so
@@ -4881,8 +4885,8 @@ fn place_replaced_item_in_area(
         let border_box = child.style.box_sizing == BoxSizing::BorderBox;
         let d = &child.dimensions;
         let (bp_x, bp_y) = (
-            d.border.left + d.border.right + d.padding.left + d.padding.right,
-            d.border.top + d.border.bottom + d.padding.top + d.padding.bottom,
+            d.border.left + d.border_with_gutter().right + d.padding.left + d.padding.right,
+            d.border.top + d.border_with_gutter().bottom + d.padding.top + d.padding.bottom,
         );
         let (m_x, m_y) = (d.margin.left + d.margin.right, d.margin.top + d.margin.bottom);
         let size = |area: f32, m: f32, bp: f32| {
@@ -4906,14 +4910,14 @@ fn place_replaced_item_in_area(
         + d.padding.left
         + d.content.width
         + d.padding.right
-        + d.border.right
+        + d.border_with_gutter().right
         + d.margin.right;
     let outer_height = d.margin.top
         + d.border.top
         + d.padding.top
         + d.content.height
         + d.padding.bottom
-        + d.border.bottom
+        + d.border_with_gutter().bottom
         + d.margin.bottom;
     let justify = match child.style.justify_self {
         JustifySelf::Auto => match container_style.justify_items {
@@ -5161,7 +5165,7 @@ fn own_definite_height(container: &LayoutBox) -> Option<f32> {
         container.dimensions.padding.top
             + container.dimensions.padding.bottom
             + container.dimensions.border.top
-            + container.dimensions.border.bottom
+            + container.dimensions.border_with_gutter().bottom
     } else {
         0.0
     };
