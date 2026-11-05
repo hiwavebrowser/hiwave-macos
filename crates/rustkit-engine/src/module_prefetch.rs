@@ -488,6 +488,16 @@ const ratio = a / b; import './real.js';
         assert_eq!(specs(src), vec!["./real.js"]);
     }
 
+    /// A body cut off inside a specifier's escape (the network cap) must
+    /// not panic the scanner: page bytes reach it unchecked.
+    #[test]
+    fn a_source_ending_in_an_escape_does_not_panic() {
+        for src in [r#"import "a\"#, r#"import x from "a\"#, r#"export * from 'a\"#, "const r = /a\\", "`a\\", "'\\"] {
+            let _ = specs(src);
+        }
+        assert!(specs(r#"import "a\"#).is_empty());
+    }
+
     #[test]
     fn minified_imports_are_found() {
         assert_eq!(
