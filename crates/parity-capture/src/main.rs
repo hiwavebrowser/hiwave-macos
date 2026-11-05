@@ -1020,6 +1020,16 @@ fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
     Some((x, y))
 }
 
+/// The focused control's value, for telling an engine-typed key from one the
+/// page swallowed.
+const ACTIVE_VALUE_JS: &str =
+    "(function(){ var el = document.activeElement; return String(el && 'value' in el ? el.value : ''); })()";
+/// A one-shot capture listener: did the engine's key reach the page?
+const KEY_SEEN_ARM_JS: &str = "(function(){ window.__parityCaptureKeySeen = false; \
+    document.addEventListener('keydown', function(){ window.__parityCaptureKeySeen = true; }, { once: true, capture: true }); })()";
+const KEY_SEEN_READ_JS: &str =
+    "(window.__parityCaptureKeySeen ? 'seen' : 'unseen')";
+
 fn execute_actions(
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
@@ -1212,19 +1222,39 @@ fn execute_actions(
                     let _ = engine.execute_script(view_id, &focus_js);
                 }
                 if let Some(ref text) = a.text {
-                    let text_json = serde_json::to_string(text).unwrap_or_default();
-                    let key_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement;
-                            if (el && 'value' in el) {{
-                                el.value = (el.value || '') + {0};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }})()"#,
-                        text_json
-                    );
-                    let _ = engine.execute_script(view_id, &key_js);
+                    // Typed through the engine's keyboard, a key at a time, as
+                    // Playwright's keyboard.type does: the page hears a keydown
+                    // per character and the focused control edits its own
+                    // value (selection replaced, caret moved). The value is
+                    // written from script only when no control took the keys.
+                    let before = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    for ch in text.chars() {
+                        let key = ch.to_string();
+                        let _ = engine.handle_text_key(view_id, 0, &key, false, false, false);
+                    }
+                    let after = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    if after == before {
+                        let text_json = serde_json::to_string(text).unwrap_or_default();
+                        let key_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement;
+                                if (el && 'value' in el) {{
+                                    el.value = (el.value || '') + {0};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }})()"#,
+                            text_json
+                        );
+                        let _ = engine.execute_script(view_id, &key_js);
+                        a_res.method = Some("script_value".to_string());
+                    } else {
+                        a_res.method = Some("engine_keys".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 } else if let Some(ref key) = a.key {
                     let key_code = match key.as_str() {
@@ -1234,21 +1264,35 @@ fn execute_actions(
                         "Tab" => 9,
                         _ => 0,
                     };
+                    // The engine fires the DOM keydown itself (fire_key). The
+                    // synthetic event below is only for a key the engine did
+                    // not route to the page; sending both made every listener
+                    // hear the key twice and a toggle undo itself.
+                    let _ = engine.execute_script(view_id, KEY_SEEN_ARM_JS);
                     let _ = engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt);
-                    let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let event_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement || document.body;
-                            if (el) {{
-                                var init = {{ key: {0}, bubbles: true, cancelable: true,
-                                              ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
-                                el.dispatchEvent(new KeyboardEvent('keydown', init));
-                                el.dispatchEvent(new KeyboardEvent('keyup', init));
-                            }}
-                        }})()"#,
-                        key_json, ctrl, shift, alt, meta
-                    );
-                    let _ = engine.execute_script(view_id, &event_js);
+                    let seen = engine
+                        .execute_script(view_id, KEY_SEEN_READ_JS)
+                        .map(|r| r.contains("seen"))
+                        .unwrap_or(false);
+                    if seen {
+                        a_res.method = Some("engine_key".to_string());
+                    } else {
+                        let key_json = serde_json::to_string(key).unwrap_or_default();
+                        let event_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement || document.body;
+                                if (el) {{
+                                    var init = {{ key: {0}, bubbles: true, cancelable: true,
+                                                  ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
+                                    el.dispatchEvent(new KeyboardEvent('keydown', init));
+                                    el.dispatchEvent(new KeyboardEvent('keyup', init));
+                                }}
+                            }})()"#,
+                            key_json, ctrl, shift, alt, meta
+                        );
+                        let _ = engine.execute_script(view_id, &event_js);
+                        a_res.method = Some("synthetic_key".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 }
             }
