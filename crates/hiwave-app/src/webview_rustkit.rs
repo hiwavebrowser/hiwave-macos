@@ -968,6 +968,12 @@ impl RustKitView {
             .map_err(|e| format!("Failed to set bounds: {}", e))
     }
 
+    /// The host `NSView`'s pointer (0 when there is none): for stacking
+    /// and the chrome's region (CH3.A3).
+    pub fn host_view_raw(&self) -> isize {
+        self.host_view
+    }
+
     /// Get the view ID.
     pub fn view_id(&self) -> Option<EngineViewId> {
         self.view_id
