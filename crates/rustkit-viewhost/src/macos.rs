@@ -510,6 +510,40 @@ pub fn raise_raw_view_above(view: isize, below: isize) {
     }
 }
 
+/// Make `view` the frontmost of its superview's subviews, when it is not
+/// already (CH3.A3b: the RustKit chrome over panels built after it). The
+/// window's first responder is kept: a view re-added to its superview can
+/// lose it. True when the view moved.
+#[cfg(target_os = "macos")]
+pub fn raise_raw_view_to_front(view: isize) -> bool {
+    if view == 0 {
+        return false;
+    }
+    let view = view as id;
+    unsafe {
+        let superview: id = msg_send![view, superview];
+        if superview == nil {
+            return false;
+        }
+        let subviews: id = msg_send![superview, subviews];
+        let last: id = msg_send![subviews, lastObject];
+        if last == view {
+            return false;
+        }
+        let window: id = msg_send![view, window];
+        let responder: id = if window != nil { msg_send![window, firstResponder] } else { nil };
+        // NSWindowAbove = 1; relative to nil: above every sibling.
+        let _: () = msg_send![superview, addSubview: view positioned: 1i64 relativeTo: nil];
+        if window != nil && responder != nil {
+            let now: id = msg_send![window, firstResponder];
+            if now != responder {
+                let _: bool = msg_send![window, makeFirstResponder: responder];
+            }
+        }
+        true
+    }
+}
+
 /// The cursor a content view shows: the one `set_view_cursor` stored, else
 /// the arrow.
 #[cfg(target_os = "macos")]

@@ -76,28 +76,57 @@ pub fn region_contains(region: &[RegionRect], x: f64, y: f64) -> bool {
 
 
 /// The region of a view whose overlays come from its own frames
-/// (CH3.A3b): the layout gives the size and the hole, each presented frame
-/// gives the boxes it paints over the hole. Stub.
+/// (CH3.A3b, the RustKit chrome): the layout gives the view's size and the
+/// hole, and each frame, as it is presented, gives the boxes it paints over
+/// the hole. The view applies what [`present`](Self::present) returns in
+/// the same call that presents the frame, so the region (the layer mask
+/// and `hitTest:`) and the pixels change on the same turn of the window
+/// thread: no message from the document, no frame shown under the previous
+/// frame's region.
 #[derive(Debug, Default)]
 pub struct FrameRegion {
+    size: (f64, f64),
+    hole: Option<RegionRect>,
     overlays: Vec<RegionRect>,
+    /// The frame the region was last derived from, or `None` when the next
+    /// present must derive again (a new layout).
+    applied: Option<u64>,
 }
 
 impl FrameRegion {
-    pub fn lay_out(&mut self, _width: f64, _height: f64, _hole: Option<RegionRect>) {}
-
-    pub fn hole(&self) -> Option<RegionRect> {
-        None
+    /// The view was laid out at `width` x `height` with `hole` left to the
+    /// views below. The frame on screen is derived again on its next
+    /// present, against the new hole.
+    pub fn lay_out(&mut self, width: f64, height: f64, hole: Option<RegionRect>) {
+        self.size = (width, height);
+        self.hole = hole;
+        self.applied = None;
     }
 
+    /// The hole of the last layout.
+    pub fn hole(&self) -> Option<RegionRect> {
+        self.hole
+    }
+
+    /// Frame `frame` is being presented. For a frame not yet applied,
+    /// `overlays(hole)` gives the boxes it paints over the hole, and the
+    /// region to apply now is returned; `None` when the region stands (the
+    /// same frame, or no layout yet).
     pub fn present(
         &mut self,
-        _frame: u64,
-        _overlays: impl FnOnce(RegionRect) -> Vec<RegionRect>,
+        frame: u64,
+        overlays: impl FnOnce(RegionRect) -> Vec<RegionRect>,
     ) -> Option<Vec<RegionRect>> {
-        None
+        let hole = self.hole?;
+        if self.applied == Some(frame) {
+            return None;
+        }
+        self.overlays = overlays(hole);
+        self.applied = Some(frame);
+        Some(compose_region(self.size.0, self.size.1, Some(hole), &self.overlays))
     }
 
+    /// The boxes the applied frame paints over the hole.
     pub fn overlays(&self) -> &[RegionRect] {
         &self.overlays
     }

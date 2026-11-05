@@ -86,6 +86,9 @@ pub struct RustKitView {
     script_nav: RefCell<Option<(String, bool, bool)>>,
     /// Newest commit whose navigation is still the one on screen.
     latest_commit: RefCell<Option<FrameCommit>>,
+    /// The view's region when it is stacked over another view (CH3.A3b,
+    /// the RustKit chrome over the page): `None` for every other view.
+    region: RefCell<Option<rustkit_viewhost::FrameRegion>>,
     /// The view ID within the engine. `None` after [`PageCmd::Close`].
     view_id: Option<EngineViewId>,
     /// Current URL (cached).
@@ -372,6 +375,7 @@ impl RustKitView {
             accepted_nav: Cell::new(0),
             script_nav: RefCell::new(None),
             latest_commit: RefCell::new(None),
+            region: RefCell::new(None),
             view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
@@ -1380,7 +1384,76 @@ impl RustKitView {
         };
         if let Err(error) = surface.borrow_mut().present_commit(&commit, &images) {
             warn!(%error, "content frame was not presented");
+            return;
         }
+        // The region follows the frame just presented, on this same turn.
+        self.apply_region(&commit);
+    }
+
+    /// Stack this view over the views below it as a *region* (CH3.A3b,
+    /// `trench/chrome/A3-composition.md`): the view is shown and hit only
+    /// in the `width` x `height` window less `hole`, plus the boxes its own
+    /// frames paint over the hole. Called on every layout; the region is
+    /// applied at once against the frame on screen.
+    pub fn compose_region(&self, width: f64, height: f64, hole: rustkit_viewhost::RegionRect) {
+        self.region
+            .borrow_mut()
+            .get_or_insert_with(rustkit_viewhost::FrameRegion::default)
+            .lay_out(width, height, Some(hole));
+        let commit = self.latest_commit.borrow().clone();
+        match commit {
+            Some(commit) => self.apply_region(&commit),
+            // Before the first frame: the window less the hole.
+            None => self.set_region(rustkit_viewhost::compose_region(width, height, Some(hole), &[])),
+        }
+    }
+
+    /// Whether this view's frame on screen paints anything over its hole
+    /// (an open chrome popup over the page).
+    pub fn region_has_overlays(&self) -> bool {
+        self.region.borrow().as_ref().is_some_and(|r| !r.overlays().is_empty())
+    }
+
+    /// Derive the region from `commit`, the frame on screen, and apply it,
+    /// when the view has a region and the frame (or the layout) is new.
+    fn apply_region(&self, commit: &FrameCommit) {
+        let mut slot = self.region.borrow_mut();
+        let Some(region) = slot.as_mut() else {
+            return;
+        };
+        let before = region.overlays().to_vec();
+        let frame = commit.generation ^ (commit.nav_generation << 40);
+        let next = region.present(frame, |hole| {
+            let Some(list) = commit.list.as_deref() else {
+                return Vec::new();
+            };
+            let within = rustkit_engine::PaintRect::new(hole.x as f32, hole.y as f32, hole.width as f32, hole.height as f32);
+            rustkit_engine::painted_boxes(list, commit.scroll_offset, within)
+                .into_iter()
+                .map(|r| {
+                    // Whole points, outward: a fringe pixel is the box's.
+                    let (x0, y0) = (r.x.floor() as f64, r.y.floor() as f64);
+                    let (x1, y1) = ((r.x + r.width).ceil() as f64, (r.y + r.height).ceil() as f64);
+                    rustkit_viewhost::RegionRect::new(x0, y0, x1 - x0, y1 - y0)
+                })
+                .collect()
+        });
+        let Some(next) = next else {
+            return;
+        };
+        if region.overlays() != before.as_slice() {
+            let rects = region.overlays().to_vec();
+            info!(count = rects.len(), ?rects, "RustKit chrome overlays");
+        }
+        drop(slot);
+        self.set_region(next);
+    }
+
+    fn set_region(&self, region: Vec<rustkit_viewhost::RegionRect>) {
+        #[cfg(target_os = "macos")]
+        rustkit_viewhost::set_raw_view_region(self.host_view, Some(region));
+        #[cfg(not(target_os = "macos"))]
+        let _ = region;
     }
 }
 

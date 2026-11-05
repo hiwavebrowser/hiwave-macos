@@ -305,7 +305,9 @@ mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
 mod painted_region;
-pub use painted_region::painted_boxes;
+pub use painted_region::{painted_boxes, BACKDROP_COVER};
+/// The display list's rect, for `painted_boxes` (CH3.A3b).
+pub use rustkit_layout::Rect as PaintRect;
 #[cfg(test)]
 mod painted_region_tests;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
