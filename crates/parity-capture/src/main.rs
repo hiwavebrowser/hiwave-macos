@@ -2286,4 +2286,63 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // CH3.A1 (chrome board): the board drives HiWave's own chrome pages
+    // through the same action list in RustKit and in Chromium. Two states
+    // need actions the list did not have: "hover on the second tab" (a
+    // pointer move with no press) and "focus mode" (Ctrl+Shift+F — a key
+    // with modifiers). Playwright has `page.hover` and `Control+Shift+F`;
+    // these tests pin the RustKit side.
+    fn board_view(html: &str) -> (rustkit_engine::Engine, rustkit_engine::EngineViewId) {
+        let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load_html");
+        (engine, view)
+    }
+
+    #[test]
+    fn a_hover_action_moves_the_pointer_over_the_selector_without_pressing() {
+        let (mut engine, view) = board_view(
+            "<html><head><style>#t{width:100px;height:40px}</style></head><body>\
+             <div id=\"t\"></div><script>\
+             document.addEventListener('mousedown', function(){ document.body.setAttribute('data-pressed','1'); });\
+             document.addEventListener('click', function(){ document.body.setAttribute('data-pressed','1'); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"hover","selector":"#t"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let res = &result.action_results.as_ref().expect("action results")[0];
+        assert_eq!(res.status, "ok", "hover is an action: {res:?}");
+        assert!(
+            res.method.as_deref().unwrap_or("").starts_with("engine_point("),
+            "hover moves the engine pointer to the element's centre: {res:?}"
+        );
+        let pressed = engine
+            .execute_script(view, "String(document.body.getAttribute('data-pressed'))")
+            .unwrap_or_default();
+        assert!(!pressed.contains('1'), "a hover never presses: {pressed}");
+    }
+
+    #[test]
+    fn a_key_action_carries_its_modifiers_into_the_keyboard_event() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey?'c':'') + (e.shiftKey?'s':'') + (e.metaKey?'m':'') + (e.altKey?'a':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(
+            r#"[{"type":"key","key":"F","modifiers":["Control","Shift"]}]"#,
+        )
+        .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "the page's keydown listener saw Ctrl+Shift+F: {seen}");
+    }
 }
