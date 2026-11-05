@@ -18,6 +18,7 @@
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>
+//   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //
 // x, y are points from the top-left corner of the window's frame (title bar
 // included). Every command prints one JSON object.
@@ -150,6 +151,24 @@ func point(_ at: Int) -> CGPoint {
 switch cmd {
 case "window":
     emit(windowJSON(requireWindow(pid)))
+
+case "windows":
+    // Every ordinary (layer 0) window the process owns, largest first: a
+    // second window (settings) is found here, and clicked at through the
+    // main window's coordinates (its offset from the main window's origin).
+    let all = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+    var list: [(id: CGWindowID, frame: CGRect, onScreen: Bool)] = []
+    for w in all {
+        guard (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) == pid,
+              (w[kCGWindowLayer as String] as? Int) == 0,
+              let b = w[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: b),
+              let id = w[kCGWindowNumber as String] as? Int
+        else { continue }
+        list.append((CGWindowID(id), frame, (w[kCGWindowIsOnscreen as String] as? Bool) ?? false))
+    }
+    list.sort { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }
+    emit(["windows": list.map(windowJSON)])
 
 case "activate":
     requireInput()

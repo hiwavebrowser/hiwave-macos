@@ -1246,10 +1246,349 @@ class Driver:
                 self.expect(c, "a toolbar click reaches the chrome at %dx%d" % (w, h),
                             bool(self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)))
 
+    # ── CH3.A4: the shelf, the Inspector and settings as RustKit views ──────
+
+    A4_PROBE = ("#commandInput,[data-tab=console],#console-input,#sidebarDefaultOpen,#saveBtn,"
+                "#focusBlocklistInput,#focusBlocklistAddBtn")
+
+    def a4_open(self, c, env=None):
+        """A fresh app, flag on, panels probed, on a3_page.html (green, beacons on click/key)."""
+        env = dict({"HIWAVE_RUSTKIT_PANEL_PROBE": self.A4_PROBE}, **(env or {}))
+        return self.a3_open(c, env)
+
+    def probes(self, panel, start=0):
+        """Every probe report a RustKit panel posted since log offset `start`, oldest first."""
+        out = []
+        pat = r'RustKit panel probe panel="%s" body=(\{[^\n]*\})' % re.escape(panel)
+        for m in re.finditer(pat, self.app.log_text()[start:]):
+            try:
+                out.append(json.loads(m.group(1)))
+            except ValueError:
+                pass
+        return out
+
+    def wait_probe(self, panel, pred, timeout, start=0):
+        """The first probe report of `panel` since `start` for which `pred` holds, or None."""
+        end = time.time() + timeout
+        while True:
+            for p in self.probes(panel, start):
+                if pred(p):
+                    return p
+            if time.time() >= end or not self.app.alive():
+                return None
+            time.sleep(0.2)
+
+    def last_probe(self, panel, start=0):
+        got = self.probes(panel, start)
+        return got[-1] if got else None
+
+    def panel_ipc(self, panel, cmd, timeout, start=0):
+        return self.app.wait_log(r'RustKit panel IPC panel="%s" body=\{"cmd":"%s"[^\n]*' % (re.escape(panel), cmd),
+                                 timeout, start)
+
+    def flat_band(self, shot, x0, y0, x1, y1):
+        """How many colours the window shows in a box given in points (1 = one flat colour)."""
+        img, scale, _ = shot
+        band = img.crop((int(x0 * scale), int(y0 * scale), int(x1 * scale), int(y1 * scale)))
+        return len(band.getcolors(maxcolors=band.width * band.height + 1) or [])
+
+    def a4_shelf(self):
+        """CH3.A4: flag on, the shelf (command palette) is a RustKit view: opens, renders its commands, runs one typed command, closes."""
+        c = "a4_shelf"
+        # Nothing in the app sends expand_shelf (the chrome has its own
+        # command palette on Cmd+K), so the check posts it from the chrome,
+        # as a chrome button would.
+        js = "setTimeout(function () { sendIpc('expand_shelf'); }, 4000);"
+        log_from = 0
+        if not self.a4_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": js}):
+            return
+        self.expect(c, "the shelf was built as a RustKit view",
+                    bool(self.app.wait_log(r"the shelf is a RustKit view", 1)))
+        q = self.panel_ipc("shelf", "search_commands", 15)
+        self.expect(c, "the open shelf's script posted search_commands and the app took it", bool(q),
+                    q.group(0)[:160] if q else "")
+        rendered = self.wait_probe("shelf", lambda p: "New Tab" in p["text"] and "Command Palette" in p["text"], 8)
+        self.expect(c, "the shelf rendered the commands the app sent back (hiwaveShelf.showCommands)", bool(rendered),
+                    (rendered or self.last_probe("shelf") or {}).get("text", "no probe")[:160])
+        if not rendered:
+            return
+        pw, ph = rendered["size"]
+        self.expect(c, "the shelf is 280 pt tall", ph == 280, "size %s" % rendered["size"])
+        time.sleep(0.8)
+        code, win = self.hw("window", self.app.proc.pid)
+        x0, y0 = win["w"] - pw, win["h"] - ph
+        shot = self.capture(c, "open")
+        if shot is None:
+            self.not_run(c, "the shelf paints over the bottom of the page", self.why_not("Screen Recording"))
+        else:
+            self.expect(c, "the shelf paints where the page was green (bottom of the page column)",
+                        not self.green_at(shot, x0 + pw / 2, y0 + 20) and not self.green_at(shot, x0 + 30, win["h"] - 20))
+            colours = self.flat_band(shot, x0 + 4, y0 + 4, win["w"] - 4, win["h"] - 4)
+            self.expect(c, "the shelf frame is not blank", colours > 30, "%d colours" % colours)
+            self.expect(c, "the page still shows above the shelf", self.green_at(shot, x0 + pw / 2, y0 - 40))
+        if not self.can_input:
+            return self.not_run(c, "a typed command runs", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        def workspaces():
+            try:
+                return [w.get("name") for w in json.loads(self.app.state_file.read_text())["shell"]["workspaces"]]
+            except (FileNotFoundError, ValueError, KeyError):
+                return []
+        before = workspaces()
+        log_from = len(self.app.log_text())
+        self.hw("type", pid, "workspace")
+        typed = self.wait_probe("shelf", lambda p: (p["boxes"].get("#commandInput") or {}).get("value") == "workspace", 5,
+                                log_from)
+        self.expect(c, "typing goes to the shelf's input", bool(typed),
+                    str((self.last_probe("shelf", log_from) or {}).get("boxes", {}).get("#commandInput")))
+        found = self.wait_probe("shelf", lambda p: "New Workspace" in p["text"] and "New Tab" not in p["text"], 5, log_from)
+        self.expect(c, "the shelf searched for the typed text and shows only the match", bool(found),
+                    (self.last_probe("shelf", log_from) or {}).get("text", "")[:160])
+        self.hw("key", pid, 36)
+        ex = self.panel_ipc("shelf", "execute_command", 5, log_from)
+        self.expect(c, "Return posted execute_command", bool(ex), ex.group(0)[:120] if ex else "")
+        after, end = before, time.time() + 5
+        while time.time() < end and len(after) <= len(before):
+            after = workspaces()
+            time.sleep(0.2)
+        self.expect(c, "the command ran: the saved state has a new workspace", len(after) == len(before) + 1,
+                    "before %s, after %s" % (before, after))
+        time.sleep(1.5)
+        shot = self.capture(c, "closed")
+        if shot is not None:
+            code, win = self.hw("window", pid)
+            self.expect(c, "closed: the page is green to the bottom", self.green_at(shot, x0 + pw / 2, win["h"] - 20))
+        # The keyboard is the page's again.
+        mark = self.fixture.mark()
+        self.hw("type", pid, "q")
+        self.expect(c, "after it closed, keys go to the page", self.fixture.wait("beacon?a3-key-q", 5, mark))
+
+    def a4_inspector(self):
+        """CH3.A4: flag on, the Inspector is a RustKit view: Cmd+Opt+I opens it, it renders the page's tree, shows a page console line, evaluates a typed line, and closes."""
+        c = "a4_inspector"
+        if not self.a4_open(c):
+            return
+        self.expect(c, "the Inspector was built as a RustKit view",
+                    bool(self.app.wait_log(r"the Inspector is a RustKit view", 1)))
+        if not self.can_input:
+            return self.not_run(c, "Cmd+Opt+I", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        log_from = len(self.app.log_text())
+        self.hw("key", pid, 34, "cmd", "alt")  # Cmd+Opt+I
+        self.expect(c, "Cmd+Opt+I opened the Inspector",
+                    bool(self.app.wait_log(r"Opening inspector panel", 5, log_from)))
+        tree = self.wait_probe("Inspector", lambda p: "button" in p["text"] and p["size"][1] == 300, 10, log_from)
+        self.expect(c, "the Inspector rendered the page's tree (the a3 button)", bool(tree),
+                    (tree or self.last_probe("Inspector", log_from) or {}).get("text", "no probe")[:200])
+        if not tree:
+            return
+        pw, ph = tree["size"]
+        time.sleep(0.8)
+        code, win = self.hw("window", pid)
+        x0, y0 = win["w"] - pw, win["h"] - ph
+        shot = self.capture(c, "open")
+        if shot is None:
+            self.not_run(c, "the Inspector paints", self.why_not("Screen Recording"))
+        else:
+            self.expect(c, "the Inspector paints below the page (not green)",
+                        not self.green_at(shot, x0 + pw / 2, y0 + ph / 2))
+            colours = self.flat_band(shot, x0 + 4, y0 + 4, win["w"] - 4, win["h"] - 4)
+            self.expect(c, "the Inspector frame is not blank", colours > 30, "%d colours" % colours)
+            self.expect(c, "the page still shows above the Inspector", self.green_at(shot, x0 + pw / 2, y0 - 40))
+        # A page click logs a console line, which the Inspector shows.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x0 + pw / 2), int(y0 - 60))
+        self.expect(c, "the page heard the click", self.fixture.wait("beacon?a3-click-", 5, mark))
+        # Its Console tab, then the line: the engine's Inspector shows a page
+        # string as its length, "<string len=N>" (by design, T6a).
+        tab = (tree["boxes"].get("[data-tab=console]") or {}).get("box")
+        if not tab:
+            return self.expect(c, "the Console tab has a box", False, str(tree["boxes"]))
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(x0 + tab[0] + tab[2] / 2), int(y0 + tab[1] + tab[3] / 2))
+        console = self.wait_probe("Inspector", lambda p: ((p["boxes"].get("#console-input") or {}).get("box") or [0, 0, 0, 0])[2] > 0,
+                                  5, log_from)
+        self.expect(c, "a click on the Console tab shows the console", bool(console))
+        if not console:
+            return
+        line = re.search(r"Log \d\d:\d\d:\d\d <string len=2\d> inline:\d+", console["text"])
+        self.expect(c, "the Inspector shows the page's console line", bool(line),
+                    line.group(0) if line else console["text"][-200:])
+        # A line typed in its console is evaluated in the page and the result shown.
+        box = console["boxes"]["#console-input"]["box"]
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(x0 + box[0] + min(box[2], 200) / 2), int(y0 + box[1] + box[3] / 2))
+        clicked = self.app.wait_log(r"panel click \(view-local\)", 3, log_from)
+        self.expect(c, "the click on the console input reached the Inspector", bool(clicked))
+        time.sleep(0.4)
+        self.hw("type", pid, "6*7")
+        self.hw("key", pid, 36)
+        ev = self.panel_ipc("Inspector", "inspector_console_eval", 5, log_from)
+        self.expect(c, "Return posted inspector_console_eval", bool(ev), ev.group(0)[:120] if ev else "")
+        # The engine's Inspector writes a number result as Number(42.0).
+        result = r"> 6\*7 \d\d:\d\d:\d\d (Number\()?42(\.0)?\)?"
+        res = self.wait_probe("Inspector", lambda p: re.search(result, p["text"]) is not None, 6, log_from)
+        self.expect(c, "the Inspector shows the line and its result 42", bool(res),
+                    (self.last_probe("Inspector", log_from) or {}).get("text", "")[-120:])
+        log_from = len(self.app.log_text())
+        self.hw("key", pid, 34, "cmd", "alt")
+        self.expect(c, "Cmd+Opt+I again closed it", bool(self.app.wait_log(r"Closing inspector panel", 5, log_from)))
+        time.sleep(1.2)
+        shot = self.capture(c, "closed")
+        if shot is not None:
+            code, win = self.hw("window", pid)
+            self.expect(c, "closed: the page is green to the bottom", self.green_at(shot, x0 + pw / 2, win["h"] - 20))
+
+    A4_SETTINGS_BTN_JS = ("setTimeout(function () { var r = document.getElementById('sidebarSettingsBtn')"
+                          ".getBoundingClientRect(); sendIpc('a4_settings_button', { rect: [r.left, r.top, "
+                          "r.width, r.height] }); }, 4000);")
+
+    def settings_path(self):
+        return self.app.state_file.parent / "settings.json"
+
+    def a4_settings(self):
+        """CH3.A4: flag on, the settings window's page is a RustKit view: the sidebar's button opens it, it shows the saved settings, a changed setting is saved to settings.json, Escape closes it."""
+        c = "a4_settings"
+        if not self.a4_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A4_SETTINGS_BTN_JS}):
+            return
+        m = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"a4_settings_button","rect":\[([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\]', 10)
+        if not self.expect(c, "the chrome reported its settings button's box", bool(m)):
+            return
+        bx, by, bw, bh = (float(m.group(i)) for i in range(1, 5))
+        if not self.can_input:
+            return self.not_run(c, "open, change, save, close", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        try:
+            before = json.loads(self.settings_path().read_text())
+        except (FileNotFoundError, ValueError):
+            before = {}
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(bx + bw / 2), int(self.TITLE_BAR + by + bh / 2))
+        self.expect(c, "the sidebar's settings button opened the settings window",
+                    bool(self.app.wait_log(r"Opening settings window", 5, log_from)))
+        self.expect(c, "the settings page was built as a RustKit view",
+                    bool(self.app.wait_log(r"the settings page is a RustKit view", 5, log_from)))
+        got = self.panel_ipc("settings", "get_settings", 10, log_from)
+        self.expect(c, "the settings page asked for the settings (get_settings)", bool(got))
+        shown = self.wait_probe("settings", lambda p: "Settings" in p["text"] and
+                                (p["boxes"].get("#sidebarDefaultOpen") or {}).get("value") is not None, 10, log_from)
+        self.expect(c, "the settings page rendered", bool(shown),
+                    (shown or self.last_probe("settings", log_from) or {}).get("text", "no probe")[:160])
+        if not shown:
+            return
+        time.sleep(1.0)
+        code, wins = self.hw("windows", pid)
+        wins = wins.get("windows", [])
+        self.expect(c, "the app shows a second window", len(wins) >= 2 and wins[1].get("on_screen"), json.dumps(wins))
+        if len(wins) < 2:
+            return
+        main, sw = wins[0], wins[1]
+        title = sw["h"] - shown["size"][1]
+        # Points in the main window's coordinates (hwdrive's), for a point in the settings page.
+        def at(px, py):
+            return int(sw["x"] - main["x"] + px), int(sw["y"] - main["y"] + title + py)
+        if self.can_capture:
+            path = self.out / ("%s.window.png" % c)
+            subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(sw["id"]), str(path)], capture_output=True)
+            if path.is_file():
+                from PIL import Image
+                img = Image.open(path).convert("RGB")
+                colours = len(img.getcolors(maxcolors=img.width * img.height + 1) or [])
+                self.expect(c, "the settings window is not blank", colours > 50, "%d colours" % colours)
+        cb = shown["boxes"]["#sidebarDefaultOpen"]
+        was = cb["value"]
+        log_from = len(self.app.log_text())
+        # The checkbox is 'Sidebar open by default' in the first section.
+        self.hw("click", pid, *at(cb["box"][0] + cb["box"][2] / 2, cb["box"][1] + cb["box"][3] / 2))
+        flipped = self.wait_probe("settings", lambda p: (p["boxes"].get("#sidebarDefaultOpen") or {}).get("value") == (not was),
+                                  4, log_from)
+        self.expect(c, "a click on 'sidebar open by default' flips it", bool(flipped),
+                    str((self.last_probe("settings", log_from) or {}).get("boxes", {}).get("#sidebarDefaultOpen")))
+        page_h = shown["size"][1]
+        cur = flipped or shown
+
+        def box_of(p, sel):
+            return ((p or {}).get("boxes", {}).get(sel) or {}).get("box")
+
+        def in_view(p, sel):
+            b = box_of(p, sel)
+            return bool(b) and b[2] > 0 and b[1] >= 0 and b[1] + b[3] <= page_h
+
+        def scroll_to(sel, p):
+            """The wheel over the settings window until `sel` is in view; the last probe."""
+            for _ in range(14):
+                if in_view(p, sel):
+                    break
+                b = box_of(p, sel)
+                dy = -300 if (b and b[1] + b[3] > page_h) else 300
+                start = len(self.app.log_text())
+                self.hw("scroll", pid, *at(shown["size"][0] / 2, page_h / 2), 0, dy)
+                prev = box_of(p, sel)
+                p = self.wait_probe("settings", lambda q: box_of(q, sel) != prev, 2, start) or p
+            return p
+
+        # A setting saved on its own: a domain added to the focus blocklist
+        # is written to focus_mode.json at once.
+        focus_path = self.settings_path().parent / "focus_mode.json"
+        cur = scroll_to("#focusBlocklistInput", cur)
+        self.expect(c, "the wheel over the settings window scrolls it to the focus blocklist",
+                    in_view(cur, "#focusBlocklistInput") and in_view(cur, "#focusBlocklistAddBtn"),
+                    "%s %s" % (box_of(cur, "#focusBlocklistInput"), box_of(cur, "#focusBlocklistAddBtn")))
+        ib, ab = box_of(cur, "#focusBlocklistInput"), box_of(cur, "#focusBlocklistAddBtn")
+        if ib and ab:
+            log_from = len(self.app.log_text())
+            self.hw("click", pid, *at(ib[0] + 40, ib[1] + ib[3] / 2))
+            time.sleep(0.4)
+            self.hw("type", pid, "a4-blocked.example")
+            typed = self.wait_probe("settings", lambda p: (p["boxes"].get("#focusBlocklistInput") or {}).get("value")
+                                    == "a4-blocked.example", 4, log_from)
+            self.expect(c, "typing in the settings window goes to its input", bool(typed),
+                        str((self.last_probe("settings", log_from) or {}).get("boxes", {}).get("#focusBlocklistInput")))
+            self.hw("click", pid, *at(ab[0] + ab[2] / 2, ab[1] + ab[3] / 2))
+            add = self.panel_ipc("settings", "add_to_focus_blocklist", 5, log_from)
+            self.expect(c, "Add posted add_to_focus_blocklist", bool(add), add.group(0)[:160] if add else "")
+            text, end = "", time.time() + 5
+            while time.time() < end and "a4-blocked.example" not in text:
+                try:
+                    text = focus_path.read_text()
+                except FileNotFoundError:
+                    text = ""
+                time.sleep(0.2)
+            self.expect(c, "focus_mode.json holds the added domain", "a4-blocked.example" in text, str(focus_path.name))
+            shown_list = self.wait_probe("settings", lambda p: "a4-blocked.example" in p["text"], 3, log_from)
+            self.expect(c, "the page lists the added domain", bool(shown_list))
+        # Save at the end of the page: the app takes save_settings and its
+        # reply reaches the page (a postMessage). settings.json is not
+        # written: the page's settings lack focus_duration_minutes and
+        # focus_break_minutes, so the app's UserSettings does not parse
+        # them (both backends; the PR lists it).
+        cur = scroll_to("#saveBtn", cur)
+        self.expect(c, "the wheel over the settings window scrolls it to the Save button", in_view(cur, "#saveBtn"),
+                    str(box_of(cur, "#saveBtn")))
+        sbox = box_of(cur, "#saveBtn")
+        if in_view(cur, "#saveBtn"):
+            log_from = len(self.app.log_text())
+            self.hw("click", pid, *at(sbox[0] + sbox[2] / 2, sbox[1] + sbox[3] / 2))
+            sv = self.panel_ipc("settings", "save_settings", 5, log_from)
+            self.expect(c, "Save posted save_settings with the flipped setting",
+                        bool(sv) and ('"sidebar_default_open":%s' % ("false" if was else "true")) in sv.group(0),
+                        sv.group(0)[:160] if sv else "")
+            saved = self.wait_probe("settings", lambda p: "Settings saved" in p["text"], 5, log_from)
+            self.expect(c, "the page showed the app's reply (settings_saved, a postMessage)", bool(saved))
+        log_from = len(self.app.log_text())
+        self.hw("key", pid, 53)  # Escape
+        cl = self.panel_ipc("settings", "close_settings", 5, log_from)
+        self.expect(c, "Escape posted close_settings", bool(cl))
+        self.expect(c, "the app hid the settings window", bool(self.app.wait_log(r"Closing settings window", 3, log_from)))
+        time.sleep(0.6)
+        code, wins = self.hw("windows", pid)
+        shown_now = [w for w in wins.get("windows", []) if w.get("on_screen")]
+        self.expect(c, "one window is left on screen", len(shown_now) == 1, json.dumps(wins.get("windows", [])))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
-              "a3_cmd_l_from_page", "a3_resize"]
+              "a3_cmd_l_from_page", "a3_resize", "a4_shelf", "a4_inspector", "a4_settings"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
