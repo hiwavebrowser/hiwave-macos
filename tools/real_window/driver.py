@@ -93,6 +93,13 @@ class Fixture:
                 url = urllib.parse.urlparse(self.path)
                 if url.path == "/beacon":
                     return self.send(200, "text/plain", fixture.reply)
+                if url.path == "/e9_start":
+                    # CH2.E9: the tab is restored here and lands on e9_final.
+                    self.send_response(302)
+                    self.send_header("Location", "/e9_final.html")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if url.path == "/slow":
                     ms = int(urllib.parse.parse_qs(url.query).get("ms", ["1000"])[0])
                     time.sleep(ms / 1000)
@@ -189,6 +196,21 @@ class App:
                 self.proc.wait(timeout=4)
         self.log.close()
         self.proc = None
+
+
+def tab_urls(node):
+    """Every `url` string in the saved state."""
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "url" and isinstance(value, str):
+                found.append(value)
+            else:
+                found.extend(tab_urls(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(tab_urls(value))
+    return found
 
 
 def set_tab_urls(node, url):
@@ -891,8 +913,31 @@ class Driver:
         time.sleep(2.0)
         self.expect_no_hold(c, "2 s after the tab was closed", log_from)
 
+    def e9_redirect(self):
+        """CH2.E9: after a redirect the tab (which feeds the address bar) holds the committed URL and the title."""
+        c = "e9_redirect"
+        if not self.open_page(c, "e9_start"):
+            return
+        self.expect(c, "the app followed the redirect", self.fixture.wait("/e9_final.html", 15, self.since))
+        start = "%s/e9_start" % self.fixture.base
+        final = "%s/e9_final.html" % self.fixture.base
+        urls, text = [], ""
+        end = time.time() + 15
+        while time.time() < end:
+            try:
+                text = self.app.state_file.read_text()
+                urls = tab_urls(json.loads(text))
+            except (FileNotFoundError, ValueError):
+                urls = []
+            if final in urls and "E9 final" in text:
+                break
+            time.sleep(0.2)
+        self.expect(c, "the saved tab holds the committed URL, not the one restored",
+                    final in urls and start not in urls, "tab urls %s" % urls)
+        self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

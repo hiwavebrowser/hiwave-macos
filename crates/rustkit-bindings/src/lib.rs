@@ -48,6 +48,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
     hook(url, replace);
 }
 mod net_bridge;
+pub use dom::editing::SharedEditStates;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
@@ -62,6 +63,8 @@ mod web_components_tests;
 mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
+#[cfg(test)]
+mod dnd_tests;
 #[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
@@ -87,6 +90,8 @@ mod forced_layout_budget_tests;
 #[cfg(test)]
 mod range_tests;
 #[cfg(test)]
+mod selection_tests;
+#[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
 mod observers_tests;
@@ -104,6 +109,8 @@ mod event_target_ctor_tests;
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
+#[cfg(test)]
+mod editing_tests;
 #[cfg(test)]
 mod traversal_tests;
 #[cfg(test)]
@@ -914,8 +921,9 @@ pub struct DomBindings {
     event_listeners: RefCell<Vec<EventListener>>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
-    /// Queue of IPC messages from JavaScript
-    _ipc_queue: RefCell<Vec<IpcMessage>>,
+    /// What the page posted with `window.ipc.postMessage`, held on the
+    /// Rust side (`__rk_ipc_post`), so a drain runs no script.
+    ipc_queue: Rc<RefCell<Vec<IpcMessage>>>,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<DirtyMark>,
@@ -925,6 +933,8 @@ pub struct DomBindings {
     mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
+    /// The clipboard and edit states edit commands use (see `dom::editing`).
+    edit: Rc<dom::editing::EditContext>,
 }
 
 impl DomBindings {
@@ -936,6 +946,22 @@ impl DomBindings {
     /// Create new DOM bindings.
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
+
+        // `window.ipc.postMessage` lands here (CH2.E9). Registered before
+        // the setup scripts: a global added after them made every page
+        // load measurably slower (two app tests 1.4 s -> 3.0 s).
+        let ipc_queue = Rc::new(RefCell::new(Vec::new()));
+        let queue = Rc::clone(&ipc_queue);
+        runtime.register_host_function(
+            "__rk_ipc_post",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(payload)) = args.first() {
+                    queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
+                }
+                JsValue::Undefined
+            }),
+        )?;
 
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
@@ -949,6 +975,9 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // A constructible DataTransfer and the drag data store the engine's drag and
+        // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
+        runtime.evaluate_script(include_str!("web_dnd.js"))?;
         // Named access on the Window object: `<div id=x>` makes bare `x` the
         // element, through a WindowProperties object on the prototype chain
         // that asks the document when read (web_named_access.js).
@@ -975,6 +1004,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
+        // execCommand, navigator.clipboard and the user's edit commands over
+        // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
+        let edit = Rc::new(dom::editing::EditContext::default());
+        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
@@ -1001,11 +1034,12 @@ impl DomBindings {
             window: RefCell::new(WindowState::default()),
             event_listeners: RefCell::new(Vec::new()),
             dom_host,
-            _ipc_queue: RefCell::new(Vec::new()),
+            ipc_queue,
             dirty,
             mutations,
             mutation_log,
             scroll,
+            edit,
         })
     }
 
@@ -1123,6 +1157,86 @@ impl DomBindings {
         Ok(())
     }
 
+    /// Use `clipboard` for this page's edit commands and
+    /// `navigator.clipboard` (the engine's platform clipboard).
+    pub fn set_clipboard(&self, clipboard: rustkit_dom::clipboard::SharedClipboard) {
+        *self.edit.clipboard.borrow_mut() = clipboard;
+    }
+
+    /// The clipboard this page's edit commands use.
+    pub fn clipboard(&self) -> rustkit_dom::clipboard::SharedClipboard {
+        self.edit.clipboard.borrow().clone()
+    }
+
+    /// Whether script may read the clipboard (`navigator.clipboard.readText`,
+    /// `execCommand('paste')`). Off by default, for web content: the
+    /// clipboard is shared across views, so reading it would leak what the
+    /// user copied elsewhere. Trusted pages (HiWave's chrome) opt in. The
+    /// user's own paste is always allowed.
+    pub fn set_clipboard_read_allowed(&self, allowed: bool) {
+        self.edit.script_read.set(allowed);
+    }
+
+    /// The user activated the page (a trusted key or mouse press): for
+    /// the next few seconds script may write the clipboard
+    /// (`navigator.clipboard.writeText`). [`Self::fire_key_event`] and
+    /// [`Self::fire_mouse_event`] call it for the events that activate.
+    pub fn notify_user_activation(&self) {
+        self.edit.activate();
+    }
+
+    /// Whether the page has transient user activation.
+    pub fn has_transient_activation(&self) -> bool {
+        self.edit.has_activation()
+    }
+
+    /// Run edit commands on `states` (the engine's edit states for this
+    /// view) instead of the bindings' own map.
+    pub fn share_edit_states(&self, states: SharedEditStates) {
+        *self.edit.states.borrow_mut() = states;
+    }
+
+    /// The user asked for `command` in the control `node` (a shortcut):
+    /// `beforeinput` (cancelable) for a command that edits, the edit on
+    /// the control's edit state, then `input`. What the command did, or
+    /// the default (nothing) when the control is not a text control or a
+    /// listener cancelled.
+    pub fn user_edit(
+        &self,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Result<rustkit_dom::forms::EditOutcome, BindingError> {
+        use rustkit_dom::forms::EditCommand as C;
+        let (name, value) = match command {
+            C::Copy => ("copy", None),
+            C::Cut => ("cut", None),
+            C::Paste => ("paste", None),
+            C::SelectAll => ("selectAll", None),
+            C::Undo => ("undo", None),
+            C::Redo => ("redo", None),
+            C::InsertText(t) => ("insertText", Some(t.as_str())),
+            C::DeleteWordBackward => ("deleteWordBackward", None),
+            C::DeleteWordForward => ("deleteWordForward", None),
+        };
+        let value = value.map_or("null".to_string(), |v| {
+            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
+        });
+        let script = format!("document.__rkUserEdit({node}, {name:?}, {value})");
+        let report = match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => json,
+            _ => return Ok(Default::default()),
+        };
+        let r: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
+        let changed = r["changed"].as_bool().unwrap_or(false);
+        Ok(rustkit_dom::forms::EditOutcome {
+            handled: r["handled"].as_bool().unwrap_or(false),
+            changed,
+            selection_changed: !changed && r["handled"].as_bool().unwrap_or(false),
+            input_type: command.input_type().filter(|_| changed),
+            data: r["data"].as_str().map(str::to_string),
+        })
+    }
+
     /// Tell script what the user typed into a control, so its `value`
     /// reads the edit state's text rather than the default.
     pub fn sync_control_value(&self, node: usize, value: String) {
@@ -1235,22 +1349,13 @@ impl DomBindings {
 
         // IPC bridge for communication with Rust
         let ipc_js = r#"
-            // IPC queue for postMessage calls
-            window.__ipcQueue = [];
-
-            // IPC object for browser-to-Rust communication
+            // IPC object for browser-to-Rust communication. The message
+            // goes to a queue on the Rust side (`__rk_ipc_post`, installed
+            // after the globals); a non-string is sent as its JSON.
             window.ipc = {
                 postMessage: function(message) {
-                    // Store message in queue for Rust to poll
-                    window.__ipcQueue.push(message);
+                    __rk_ipc_post(typeof message === 'string' ? message : JSON.stringify(message));
                 }
-            };
-
-            // Helper to drain the IPC queue (called from Rust)
-            window.__drainIpcQueue = function() {
-                var queue = window.__ipcQueue;
-                window.__ipcQueue = [];
-                return JSON.stringify(queue);
             };
 
             // HiWave Chrome API (for Chrome UI compatibility)
@@ -1970,6 +2075,10 @@ impl DomBindings {
         event_type: &str,
         data: &MouseEventBindingData,
     ) -> Result<bool, BindingError> {
+        // Activation-triggering input events (HTML §6.4.3).
+        if matches!(event_type, "mousedown" | "pointerdown" | "mouseup" | "pointerup") {
+            self.notify_user_activation();
+        }
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
@@ -1993,6 +2102,49 @@ impl DomBindings {
         Ok(!matches!(result, JsValue::Boolean(false)))
     }
 
+    /// Fire one event of the engine's drag-and-drop processing model at an
+    /// element (by node id) as a trusted, bubbling `DragEvent` whose
+    /// `dataTransfer` is the drag's (web_dnd.js). `dragstart` begins a new
+    /// drag data store, `dragend` (or a cancelled `dragstart`) retires it.
+    /// `operation` is the current drag operation (`none`, `copy`, `link`,
+    /// `move`): the `dropEffect` of `dragleave`, `drop` and `dragend`.
+    /// Returns whether no listener called `preventDefault()`, and the
+    /// operation the `dataTransfer`'s `effectAllowed` and `dropEffect` give
+    /// once the listeners ran.
+    pub fn fire_drag_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &MouseEventBindingData,
+        operation: &str,
+    ) -> Result<(bool, String), BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireDrag({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {}, related: {} }}, {operation:?})",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.button,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
+        ))?;
+        Ok(match result {
+            JsValue::String(s) => {
+                let (flag, op) = s.split_once(':').unwrap_or(("1", "none"));
+                (flag != "0", op.to_string())
+            }
+            _ => (true, "none".to_string()),
+        })
+    }
+
     /// Fire the user's key press or release at an element (by node id) as
     /// a trusted, bubbling, cancelable `KeyboardEvent`. `None` is the
     /// page's active element (the body unless script focused something).
@@ -2004,6 +2156,10 @@ impl DomBindings {
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        // A keydown activates the page, except Escape (HTML §6.4.3).
+        if event_type == "keydown" && data.key != "Escape" {
+            self.notify_user_activation();
+        }
         let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \
@@ -2036,6 +2192,49 @@ impl DomBindings {
         }
     }
 
+    /// The user moved the document selection (a drag, a double-click):
+    /// `Some((anchor, anchor_offset, focus, focus_offset))` by node id and
+    /// UTF-16 offset, or `None` to clear it. Script sees it through
+    /// `getSelection()` and hears `selectionchange`; the move is not echoed
+    /// back by [`Self::take_selection_change`].
+    pub fn set_selection(&self, ends: Option<(usize, usize, usize, usize)>) -> Result<(), BindingError> {
+        let call = match ends {
+            Some((a, ao, f, fo)) => format!("document.__rkSetSelection({a}, {ao}, {f}, {fo});"),
+            None => "document.__rkSetSelection(null, 0, null, 0);".to_string(),
+        };
+        self.runtime.borrow_mut().evaluate_script(&call)?;
+        Ok(())
+    }
+
+    /// An editing key in the contenteditable host `host` (by node id):
+    /// `op` is `insert` (with `text`), `enter`, `back`, `del`, `left`,
+    /// `right` or `all`. The page's DOM and selection change as a plain-text
+    /// editor would change them, and the host hears `input`. Returns whether
+    /// anything changed.
+    pub fn edit_key(&self, host: usize, op: &str, text: &str) -> Result<bool, BindingError> {
+        let result = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkEditKey({host}, {op:?}, {text:?})"))?;
+        Ok(matches!(result, JsValue::Boolean(true)))
+    }
+
+    /// The document selection, when script changed it since the last call
+    /// (or since [`Self::set_selection`]): `Some(Some(ends))` as in
+    /// `set_selection`, `Some(None)` for no selection, `None` when it has
+    /// not changed.
+    #[allow(clippy::type_complexity)]
+    pub fn take_selection_change(&self) -> Option<Option<(usize, usize, usize, usize)>> {
+        match self.evaluate("document.__rkTakeSelection ? document.__rkTakeSelection() : null") {
+            Ok(JsValue::String(s)) if s.is_empty() => Some(None),
+            Ok(JsValue::String(s)) => {
+                let n: Vec<usize> = s.split(' ').filter_map(|p| p.parse().ok()).collect();
+                (n.len() == 4).then(|| Some((n[0], n[1], n[2], n[3])))
+            }
+            _ => None,
+        }
+    }
+
     /// Fire `input` at a control (by node id) whose value the user's typing
     /// changed. `data` is the inserted text, `None` for a deletion.
     pub fn fire_input_event(&self, node: usize, data: Option<&str>) -> Result<(), BindingError> {
@@ -2044,6 +2243,19 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_script(&format!("document.__rkFireInput({node}, {data});"))?;
         Ok(())
+    }
+
+    /// The user picked option `index` of the select `node` (by node id) in
+    /// its drop-down or with a key: its selectedness moves there and the
+    /// select hears `input` and `change`. Returns whether the selection
+    /// changed (a disabled option, or the one already selected, does not
+    /// change it and fires nothing).
+    pub fn pick_option(&self, node: usize, index: usize) -> Result<bool, BindingError> {
+        let picked = self
+            .runtime
+            .borrow_mut()
+            .evaluate_script(&format!("document.__rkPickOption({node}, {index})"))?;
+        Ok(matches!(picked, JsValue::Boolean(true)))
     }
 
     /// Enter in a field (by node id): implicit submission of its form. An
@@ -2278,45 +2490,12 @@ impl DomBindings {
     ///
     /// Returns a Vec of IpcMessage structs.
     pub fn drain_ipc_queue(&self) -> Vec<IpcMessage> {
-        // Call JS to drain the queue and get JSON
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__drainIpcQueue()");
-
-        match result {
-            Ok(JsValue::String(json)) => {
-                // Parse the JSON array
-                match serde_json::from_str::<Vec<String>>(&json) {
-                    Ok(messages) => {
-                        messages
-                            .into_iter()
-                            .map(|payload| IpcMessage { payload })
-                            .collect()
-                    }
-                    Err(e) => {
-                        trace!(error = %e, "Failed to parse IPC queue JSON");
-                        Vec::new()
-                    }
-                }
-            }
-            Ok(_) => {
-                trace!("IPC queue returned non-string value");
-                Vec::new()
-            }
-            Err(e) => {
-                trace!(error = %e, "Failed to drain IPC queue");
-                Vec::new()
-            }
-        }
+        std::mem::take(&mut *self.ipc_queue.borrow_mut())
     }
 
     /// Check if there are pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
-        let result = self.runtime
-            .borrow_mut()
-            .evaluate_script("window.__ipcQueue.length > 0");
-
-        matches!(result, Ok(JsValue::Boolean(true)))
+        !self.ipc_queue.borrow().is_empty()
     }
 
     /// Add an event listener.

@@ -3150,6 +3150,10 @@ pub struct ComputedStyle {
     pub scrollbar_width: ScrollbarWidth,
     pub scrollbar_gutter: ScrollbarGutter,
     pub scrollbar_color: Option<(Color, Color)>, // (thumb, track)
+    /// What the `::-webkit-scrollbar*` rules give this element (CH2.E7);
+    /// `None` when no `::-webkit-scrollbar` rule matches it. Computed by
+    /// the engine for scroll containers and the root only.
+    pub webkit_scrollbar: Option<Box<scrollbar::WebkitScrollbar>>,
 
     // Grid Container
     pub grid_template_columns: GridTemplate,
@@ -3629,6 +3633,8 @@ mod clip_parse_tests;
 #[cfg(test)]
 mod outline_parse_tests;
 pub mod content;
+pub mod scrollbar;
+pub use scrollbar::{parse_scrollbar_color, parse_scrollbar_width, ScrollbarPart, WebkitScrollbar};
 pub mod selector_escape;
 pub use selector_escape::{css_ident, encode_selector_escapes};
 
