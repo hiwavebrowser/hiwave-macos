@@ -28302,7 +28302,7 @@ mod tests {
 
     #[test]
     fn border_radius_shorthand_expands_one_to_four_values() {
-        use rustkit_css::Length::{Percent, Px, Zero};
+        use rustkit_css::Length::{Percent, Px};
         let circular = |value: &str| {
             parse_border_radius_shorthand(value).map(|corners| {
                 corners.map(|c| {
@@ -28317,7 +28317,7 @@ mod tests {
         assert_eq!(circular("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
         assert_eq!(
             circular("8px 8px 0 0"),
-            Some([Px(8.0), Px(8.0), Zero, Zero])
+            Some([Px(8.0), Px(8.0), Px(0.0), Px(0.0)])
         );
         assert_eq!(
             circular("1px 2px"),
