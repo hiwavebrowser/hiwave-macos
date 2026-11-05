@@ -3847,7 +3847,7 @@ const WRAPPERS_JS: &str = r#"
             var edge = /(enter|leave)$/.test(type);
             var press = type === 'mousedown' || type === 'mouseup' || type === 'click';
             init.bubbles = !edge;
-            init.cancelable = !edge;
+            init.cancelable = !edge && type !== 'pointercancel';
             init.composed = !edge;
             init.view = g;
             init.detail = press ? 1 : 0;
@@ -3873,6 +3873,47 @@ const WRAPPERS_JS: &str = r#"
                 Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
             });
             return target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
+
+    // The engine's drag-and-drop processing model (HTML §6.11.5) delivers
+    // a trusted DragEvent with the drag's DataTransfer (web_dnd.js): every
+    // drag event bubbles; dragleave and dragend cannot be cancelled. `op`
+    // is the current drag operation. Returns 'notCancelled:operation',
+    // the operation being what the dataTransfer's effects allow after the
+    // listeners ran.
+    Object.defineProperty(Document.prototype, '__rkFireDrag', {
+        value: function (id, type, init, op) {
+            var store = g.__rkDragStore;
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!store || !target) return '1:none';
+            if (type === 'dragstart') store.begin(target);
+            var dt = store.prepare(type, op);
+            var cancelable = type !== 'dragleave' && type !== 'dragend';
+            init.bubbles = true;
+            init.cancelable = cancelable;
+            init.composed = true;
+            init.view = g;
+            init.detail = 0;
+            init.relatedTarget = typeof init.related === 'number' ? wrap(init.related) : null;
+            init.dataTransfer = dt;
+            var ev = new (g.DragEvent || g.MouseEvent)(type, init);
+            if (!(ev.dataTransfer instanceof Object)) {
+                Object.defineProperty(ev, 'dataTransfer', { value: dt, configurable: true, enumerable: true });
+            }
+            ev.isTrusted = true;
+            var at = {
+                pageX: init.clientX + (g.scrollX || 0), pageY: init.clientY + (g.scrollY || 0),
+                offsetX: init.offsetX, offsetY: init.offsetY, movementX: 0, movementY: 0
+            };
+            Object.keys(at).forEach(function (k) {
+                Object.defineProperty(ev, k, { value: at[k], configurable: true, enumerable: true });
+            });
+            var notCancelled = target.dispatchEvent(ev);
+            // A cancelled dragstart ends the drag before it began.
+            var settled = store.settle(type === 'dragstart' && !notCancelled ? 'dragend' : type);
+            return (notCancelled ? '1:' : '0:') + settled;
         },
         configurable: true, enumerable: false, writable: true
     });

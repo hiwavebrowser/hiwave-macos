@@ -63,6 +63,8 @@ mod web_streams_tests;
 #[cfg(test)]
 mod web_interfaces_tests;
 #[cfg(test)]
+mod dnd_tests;
+#[cfg(test)]
 mod web_blob_tests;
 #[cfg(test)]
 mod web_utils_tests;
@@ -944,6 +946,9 @@ impl DomBindings {
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_script(include_str!("web_interfaces.js"))?;
+        // A constructible DataTransfer and the drag data store the engine's drag and
+        // drop drives (web_dnd.js); replaces web_interfaces.js's interface-only one.
+        runtime.evaluate_script(include_str!("web_dnd.js"))?;
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
@@ -1982,6 +1987,49 @@ impl DomBindings {
             data.related_target.map_or("null".to_string(), |n| n.to_string()),
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
+    }
+
+    /// Fire one event of the engine's drag-and-drop processing model at an
+    /// element (by node id) as a trusted, bubbling `DragEvent` whose
+    /// `dataTransfer` is the drag's (web_dnd.js). `dragstart` begins a new
+    /// drag data store, `dragend` (or a cancelled `dragstart`) retires it.
+    /// `operation` is the current drag operation (`none`, `copy`, `link`,
+    /// `move`): the `dropEffect` of `dragleave`, `drop` and `dragend`.
+    /// Returns whether no listener called `preventDefault()`, and the
+    /// operation the `dataTransfer`'s `effectAllowed` and `dropEffect` give
+    /// once the listeners ran.
+    pub fn fire_drag_event(
+        &self,
+        node: usize,
+        event_type: &str,
+        data: &MouseEventBindingData,
+        operation: &str,
+    ) -> Result<(bool, String), BindingError> {
+        let result = self.runtime.borrow_mut().evaluate_script(&format!(
+            "document.__rkFireDrag({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
+             screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
+             altKey: {}, shiftKey: {}, metaKey: {}, related: {} }}, {operation:?})",
+            data.client_x,
+            data.client_y,
+            data.screen_x,
+            data.screen_y,
+            data.offset_x,
+            data.offset_y,
+            data.button,
+            data.buttons,
+            data.ctrl_key,
+            data.alt_key,
+            data.shift_key,
+            data.meta_key,
+            data.related_target.map_or("null".to_string(), |n| n.to_string()),
+        ))?;
+        Ok(match result {
+            JsValue::String(s) => {
+                let (flag, op) = s.split_once(':').unwrap_or(("1", "none"));
+                (flag != "0", op.to_string())
+            }
+            _ => (true, "none".to_string()),
+        })
     }
 
     /// Fire the user's key press or release at an element (by node id) as
