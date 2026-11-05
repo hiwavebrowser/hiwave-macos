@@ -409,7 +409,44 @@ static REGIONS: RegionStore = RegionStore(std::sync::OnceLock::new());
 /// [`set_raw_view_region`]. No-op for a view of another class.
 #[cfg(target_os = "macos")]
 pub fn set_raw_view_transparent(view: isize, transparent: bool) {
-    let _ = (view, transparent);
+    use objc::runtime::{Class, Object};
+    if view == 0 {
+        return;
+    }
+    let view = view as id;
+    unsafe {
+        let class: *const Class = msg_send![view, class];
+        if class != rustkit_content_view_class() as *const Class {
+            return;
+        }
+        let id = view_id_of(&*(view as *const Object)).raw();
+        if let Ok(mut set) = TRANSPARENT_VIEWS.get_or_init(|| Mutex::new(std::collections::HashSet::new())).lock() {
+            if transparent {
+                set.insert(id);
+            } else {
+                set.remove(&id);
+            }
+        }
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            // wgpu's CAMetalLayer is a sublayer; its own `opaque` follows the
+            // surface's alpha mode (`Compositor::set_surface_transparent`).
+            let _: () = msg_send![layer, setOpaque: !transparent];
+        }
+    }
+}
+
+/// `RustKitContentView`s made transparent (CH3.A3c): their region is a hit
+/// region only.
+#[cfg(target_os = "macos")]
+static TRANSPARENT_VIEWS: std::sync::OnceLock<Mutex<std::collections::HashSet<u64>>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn is_transparent_view(id: u64) -> bool {
+    TRANSPARENT_VIEWS
+        .get()
+        .and_then(|set| set.lock().ok().map(|set| set.contains(&id)))
+        .unwrap_or(false)
 }
 
 /// Give a `RustKitContentView` a region (CH3.A3): outside the rects (view
@@ -446,6 +483,9 @@ pub fn set_raw_view_region(view: isize, region: Option<Vec<crate::region::Region
         let transaction = Class::get("CATransaction").expect("CATransaction class");
         let _: () = msg_send![transaction, begin];
         let _: () = msg_send![transaction, setDisableActions: true];
+        // A transparent view's pixels decide what covers the views below
+        // (CH3.A3c): its region is for `hitTest:` only, never a mask.
+        let region = if is_transparent_view(id) { None } else { region };
         match region {
             None => {
                 let _: () = msg_send![layer, setMask: nil];

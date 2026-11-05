@@ -100,6 +100,8 @@ pub(crate) struct Presenter {
     /// `EngineConfig::background_color`: what a view shows before its
     /// first frame.
     background_color: [f64; 4],
+    /// Host views drawn as transparent surfaces (CH3.A3c).
+    transparent: HashSet<ViewId>,
     /// Images handed to the renderer so far (tests: one upload per image,
     /// however often the frame is drawn).
     #[cfg(test)]
@@ -142,6 +144,7 @@ impl Presenter {
             latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color,
+            transparent: HashSet::new(),
             #[cfg(test)]
             images_uploaded: 0,
         })
@@ -159,6 +162,7 @@ impl Presenter {
             latency: InputLatency::default(),
             render_failing: HashSet::new(),
             background_color: super::EngineConfig::default().background_color,
+            transparent: HashSet::new(),
             images_uploaded: 0,
         }
     }
@@ -248,7 +252,24 @@ impl Presenter {
     /// (0, 0, 0, 0) instead of its canvas, so what it does not paint shows
     /// the views below; the surface is premultiplied and not opaque.
     pub(crate) fn set_transparent(&mut self, viewhost_id: ViewId, transparent: bool) {
-        let _ = (viewhost_id, transparent);
+        if transparent {
+            self.transparent.insert(viewhost_id);
+        } else {
+            self.transparent.remove(&viewhost_id);
+        }
+        match self.compositor.set_surface_transparent(viewhost_id, transparent) {
+            Ok(_) => {}
+            Err(error) => warn!(%error, "surface alpha mode not changed"),
+        }
+    }
+
+    /// The colour a view shows before its first frame: its background, or
+    /// nothing for a transparent view.
+    pub(crate) fn clear_to_empty(&self, viewhost_id: ViewId) -> Result<(), EngineError> {
+        let colour = if self.transparent.contains(&viewhost_id) { [0.0; 4] } else { self.background_color };
+        self.compositor
+            .render_solid_color(viewhost_id, colour)
+            .map_err(|e| EngineError::RenderError(e.to_string()))
     }
 
     /// A headless view's texture as RGBA, alpha kept (tests).
@@ -415,7 +436,10 @@ impl Presenter {
             input: None,
             canvas: self.background_color,
         });
-        let canvas = commit.canvas;
+        // A transparent view clears to nothing: what its document does not
+        // paint shows the views below (CH3.A3c).
+        let transparent = self.transparent.contains(&viewhost_id);
+        let canvas = if transparent { [0.0; 4] } else { commit.canvas };
         let display_list: Option<&DisplayList> = commit.list.as_deref();
         let generation = commit.generation;
         let scroll_offset = commit.scroll_offset;
@@ -472,7 +496,7 @@ impl Presenter {
             let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
             if let Some(renderer) = &mut self.renderer {
                 // A headless view is drawn unscrolled, as it always was.
-                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas)?;
+                Self::execute(renderer, display_list, (0.0, 0.0), &texture_view, canvas, transparent)?;
             } else {
                 // Fallback to compositor solid color
                 self.compositor
@@ -503,7 +527,7 @@ impl Presenter {
             {
                 let _execute_span = tracing::info_span!("renderer_execute", cmd_count).entered();
                 if let Some(renderer) = &mut self.renderer {
-                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas)?;
+                    Self::execute(renderer, display_list, scroll_offset, &texture_view, canvas, transparent)?;
                 } else {
                     // Fallback to compositor solid color (shouldn't normally happen)
                     drop(output); // Release the texture
@@ -549,10 +573,12 @@ impl Presenter {
         scroll_offset: (f32, f32),
         target: &wgpu::TextureView,
         canvas: [f64; 4],
+        transparent: bool,
     ) -> Result<(), EngineError> {
         let commands = display_list.map(|dl| dl.commands.as_slice()).unwrap_or(&[]);
         renderer.set_scroll_offset(scroll_offset);
         renderer.set_clear_color(canvas);
+        renderer.set_transparent(transparent);
         let drawn = renderer
             .execute(commands, target)
             .map_err(|e| EngineError::RenderError(e.to_string()));
@@ -587,6 +613,7 @@ impl Presenter {
                     scroll_offset,
                     &target,
                     [1.0, 1.0, 1.0, 1.0],
+                    false,
                 )
             }
             Some(path) => {
@@ -890,6 +917,16 @@ impl WindowSurface {
 
     pub fn grab_keyboard(&self) {
         self.presenter.grab_keyboard(self.viewhost_id)
+    }
+
+    /// Draw this surface transparent (CH3.A3c, the RustKit chrome over the
+    /// page): the layer is not opaque, frames clear to (0, 0, 0, 0) and hold
+    /// premultiplied colour. The frame on screen is cleared now and the
+    /// next commit is drawn again, whatever it is.
+    pub fn set_transparent(&mut self, transparent: bool) -> Result<(), EngineError> {
+        self.presenter.set_transparent(self.viewhost_id, transparent);
+        self.shown = None;
+        self.presenter.clear_to_empty(self.viewhost_id)
     }
 
     /// Draw `commit` when its navigation, generation or scroll offset

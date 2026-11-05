@@ -1215,8 +1215,13 @@ class Driver:
                         "at %d,%d" % (px, py))
             self.expect(c, "after: the page still shows beside and below the menu",
                         self.green_at(after, x + w + 40, py) and self.green_at(after, px, self.TITLE_BAR + y + h + 30))
-            g0 = sum(n for (n, p) in before[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
-            g1 = sum(n for (n, p) in after[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
+            # The page's pixels: its green, or (CH3.A3c, the transparent
+            # chrome) that green under the menu's shadow, which now reaches
+            # the page outside the menu's box.
+            def page_px(p):
+                return self.is_green(p) or (p[1] > 60 and p[1] > p[0] + 40 and p[1] > p[2] + 40)
+            g0 = sum(n for (n, p) in before[0].getcolors(maxcolors=1 << 24) if page_px(p))
+            g1 = sum(n for (n, p) in after[0].getcolors(maxcolors=1 << 24) if page_px(p))
             scale = after[1]
             self.expect(c, "the page did not move: it lost about the menu's area only",
                         0 < g0 - g1 < w * h * scale * scale * 1.2,
@@ -2170,10 +2175,104 @@ class Driver:
                     said_saved == written and said_saved,
                     "page said saved: %s, file written: %s" % (said_saved, written))
 
+    # ── CH3.A3c: the alpha route (a transparent chrome surface) ─────────────
+
+    # A rounded popup with a wide shadow over the page column, 6 s after boot.
+    A3C_PROBE_JS = ("setTimeout(function () { var d = document.createElement('div'); d.id = 'a3cProbe'; "
+                    "d.style.cssText = 'position:absolute;z-index:9999;left:640px;top:260px;width:160px;"
+                    "height:90px;background:#0000ff;border-radius:24px;box-shadow:0 12px 32px rgba(0,0,0,0.6)'; "
+                    "document.body.appendChild(d); }, 6000);")
+
+    def a3c_probe_shot(self, c):
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A3C_PROBE_JS}):
+            return None
+        time.sleep(5.0)
+        shot = self.capture(c, "probe")
+        if shot is None:
+            self.not_run(c, "the probe popup over the page", self.why_not("Screen Recording"))
+            return None
+        img, scale, win = shot
+        mid = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 305) * scale)))
+        self.expect(c, "the probe popup's blue shows over the page",
+                    all(abs(mid[i] - BLUE[i]) <= 48 for i in range(3)), str(mid))
+        return shot
+
+    def a3c_shadow_over_page(self):
+        """CH3.A3c: just outside a chrome popup's box, its shadow darkens the page (page colour blended with the shadow, not the body colour)."""
+        c = "a3c_shadow_over_page"
+        shot = self.a3c_probe_shot(c)
+        if shot is None:
+            return
+        img, scale, win = shot
+        # 14 px below the box's bottom edge, mid-width: inside the shadow.
+        rgb = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 350 + 14) * scale)))
+        self.expect(c, "the pixel below the box is the page's green darkened by the shadow",
+                    rgb[1] < 235 and rgb[1] > rgb[0] + 40 and rgb[1] > rgb[2] + 40, "at 720,%d: %s" % (350 + 14, rgb))
+        far = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 470) * scale)))
+        self.expect(c, "past the shadow's reach the page is plain green", self.is_green(far, 24), str(far))
+
+    def a3c_rounded_corner(self):
+        """CH3.A3c: the pixel at a rounded chrome popup's corner shows the page, not the body colour."""
+        c = "a3c_rounded_corner"
+        shot = self.a3c_probe_shot(c)
+        if shot is None:
+            return
+        img, scale, win = shot
+        # One point inside the box's top-left corner: outside its 24 px curve.
+        rgb = img.getpixel((int(641 * scale), int((self.TITLE_BAR + 261) * scale)))
+        self.expect(c, "the corner pixel is the page's green (under the shadow), not blue or the body colour",
+                    rgb[1] > rgb[0] + 60 and rgb[1] > rgb[2] + 60, "at 641,261: %s" % (rgb,))
+
+    def a3c_find_dims_page(self):
+        """CH3.A3c: with the chrome's find modal open, its translucent overlay dims the page."""
+        c = "a3c_find_dims_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": "setTimeout(function () { openFindModal(); }, 6000);"}):
+            return
+        before = self.capture(c, "before")
+        time.sleep(5.0)
+        after = self.capture(c, "find_open")
+        if before is None or after is None:
+            return self.not_run(c, "the page dims under the find modal", self.why_not("Screen Recording"))
+        img0, scale, win = before
+        img1 = after[0]
+        at = (int(win["w"] * 0.5 * scale), int(win["h"] * 0.7 * scale))
+        p0, p1 = img0.getpixel(at), img1.getpixel(at)
+        self.expect(c, "before: the page is green there", self.is_green(p0, 24), str(p0))
+        self.expect(c, "with the modal open the same page pixel is darker green (0.3 black over it)",
+                    p1[1] < p0[1] - 40 and p1[1] > 120 and p1[1] > p1[0] + 60, "%s -> %s" % (p0, p1))
+
+    def a3c_chrome_band(self):
+        """CH3.A3c: with the chrome's body unpainted, the strip between the toolbar and the page column still shows the body's colour (default and tab-actions heights), not the window behind the chrome."""
+        c = "a3c_chrome_band"
+        js = ("setTimeout(function () { var t = currentTabs && currentTabs[0]; "
+              "if (t) showTabActionsPanel(t.id); }, 8000);")
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": js}):
+            return
+        shots = [("default", self.capture(c, "default"), 98)]
+        log_from = len(self.app.log_text())
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"expand_chrome_small"', 10, log_from)
+        time.sleep(1.5)
+        # With the tab-actions panel open the page column starts at 148; the
+        # panel ends at 144, and the rows between are the body's colour.
+        shots.append(("tab_actions", self.capture(c, "tab_actions"), 145))
+        for name, shot, y in shots:
+            if shot is None:
+                self.not_run(c, "the band is the body colour (%s)" % name, self.why_not("Screen Recording"))
+                continue
+            img, scale, win = shot
+            # The toolbar's own background at its right end is --bg-primary,
+            # the body's colour.
+            ref = img.getpixel((int((win["w"] - 6) * scale), int((self.TITLE_BAR + 60) * scale)))
+            row = [img.getpixel((int(x * scale), int((self.TITLE_BAR + y) * scale))) for x in range(300, int(win["w"]) - 20, 97)]
+            bad = [p for p in row if max(abs(p[i] - ref[i]) for i in range(3)) > 12]
+            self.expect(c, "%s: the band above the page column is the body colour %s" % (name, ref), not bad,
+                        "y %d: %s" % (y, row))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
+              "a3c_shadow_over_page", "a3c_rounded_corner", "a3c_find_dims_page", "a3c_chrome_band",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
               "e4_chrome_tab",

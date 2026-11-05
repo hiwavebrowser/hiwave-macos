@@ -613,6 +613,36 @@ impl Compositor {
         Ok(view)
     }
 
+    /// Make a window surface transparent or opaque (CH3.A3c). Transparent:
+    /// the surface's composite alpha mode is the first non-opaque one the
+    /// adapter offers, preferring `PreMultiplied`. On Metal that is
+    /// `PostMultiplied` (wgpu offers only it and `Opaque`); its only effect
+    /// there is `CAMetalLayer.opaque = NO`, and Core Animation composites a
+    /// layer's contents as premultiplied whatever wgpu calls the mode, so
+    /// the renderer's premultiplied frames are what it expects. Returns
+    /// whether the surface is now non-opaque. A view with no window
+    /// surface (headless) has nothing to configure: `Ok(false)`.
+    pub fn set_surface_transparent(&self, view_id: ViewId, transparent: bool) -> Result<bool, CompositorError> {
+        let mut surfaces = self.surfaces.write().unwrap();
+        let Some(state) = surfaces.get_mut(&view_id) else {
+            return Ok(false);
+        };
+        let mode = if transparent {
+            let modes = state.surface.get_capabilities(&self.adapter).alpha_modes;
+            [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied]
+                .into_iter()
+                .find(|m| modes.contains(m))
+        } else {
+            None
+        };
+        if transparent && mode.is_none() {
+            warn!(?view_id, "no non-opaque composite alpha mode on this adapter; the surface stays opaque");
+        }
+        state.config.alpha_mode = mode.unwrap_or(wgpu::CompositeAlphaMode::Auto);
+        state.surface.configure(&self.device, &state.config);
+        Ok(mode.is_some())
+    }
+
     /// A headless view's texture as it stands, read back as RGBA rows
     /// (`width * height * 4` bytes, no padding), alpha kept: what a
     /// transparent view's frame holds (CH3.A3c). The channels are the

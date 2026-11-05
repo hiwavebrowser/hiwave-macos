@@ -531,6 +531,22 @@ impl ChromeUi for ChromeView {
         #[cfg(all(target_os = "macos", feature = "rustkit"))]
         if let ChromeView::RustKit(view) = self {
             view.compose_region(width, height, rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
+            // CH3.A3c: with a transparent chrome, its document paints the
+            // body's colour down to the page column's top (chrome.html,
+            // `.rustkit-page-band`); told only when that top moves.
+            if rustkit_chrome_alpha() {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static PAGE_TOP: AtomicU64 = AtomicU64::new(CHROME_HEIGHT_DEFAULT as u64);
+                let top = hole.1.round().max(0.0) as u64;
+                if PAGE_TOP.swap(top, Ordering::Relaxed) != top {
+                    let _ = view.wry_evaluate_script(&format!(
+                        "(function () {{ var s = document.getElementById('rustkitPageTop'); if (!s) {{ \
+                         s = document.createElement('style'); s.id = 'rustkitPageTop'; document.head.appendChild(s); }} \
+                         s.textContent = 'html[data-rustkit-alpha] .rustkit-page-band {{ height: {}px; }}'; }})()",
+                        top
+                    ));
+                }
+            }
         }
         #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
         let _ = (width, height, hole);
@@ -588,6 +604,34 @@ fn rustkit_chrome_enabled() -> bool {
 /// helper (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
     html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK)
+}
+
+/// The alpha route of the RustKit chrome over the page (CH3.A3c,
+/// `trench/chrome/A3-composition.md`): the chrome's surface is transparent
+/// and its pixels decide what covers the page. On with
+/// `HIWAVE_RUSTKIT_CHROME=1` unless `HIWAVE_RUSTKIT_CHROME_ALPHA=0`, which
+/// keeps #925's opaque surface and mask (for comparison).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn rustkit_chrome_alpha() -> bool {
+    std::env::var("HIWAVE_RUSTKIT_CHROME_ALPHA").map(|v| v != "0").unwrap_or(true)
+}
+
+/// The chrome document for the RustKit chrome: with the alpha route, the
+/// root element carries `data-rustkit-alpha`, which chrome.html's CSS uses
+/// to leave the body unpainted (the WebKit chrome never sees it).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn rustkit_chrome_html(alpha: bool) -> String {
+    let html = chrome_html_with_bridge();
+    if !alpha {
+        return html;
+    }
+    match html.find("<html") {
+        Some(at) => {
+            let at = at + "<html".len();
+            format!("{} data-rustkit-alpha{}", &html[..at], &html[at..])
+        }
+        None => html,
+    }
 }
 
 /// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
@@ -2070,6 +2114,19 @@ mod panel_tests {
         assert!(!chrome_html_with_bridge().contains("chrome_overlays"));
     }
 
+    /// CH3.A3c: only the RustKit chrome on the alpha route marks its root
+    /// element; chrome.html's transparent body and page band hang off it.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    #[test]
+    fn the_alpha_route_marks_the_chrome_root_element() {
+        let alpha = rustkit_chrome_html(true);
+        assert!(alpha.contains("<html data-rustkit-alpha lang=\"en\">"), "{}", &alpha[..200]);
+        assert_eq!(alpha.matches("data-rustkit-alpha").count(), CHROME_HTML.matches("data-rustkit-alpha").count() + 1);
+        assert_eq!(rustkit_chrome_html(false), chrome_html_with_bridge());
+        assert!(CHROME_HTML.contains("html[data-rustkit-alpha] body {"));
+        assert!(CHROME_HTML.contains(".rustkit-page-band {\n            display: none;"));
+    }
+
     #[test]
     fn input_goes_to_the_view_it_was_recorded_on() {
         let (page, chrome, shelf, settings) = (ViewId::new(), ViewId::new(), ViewId::new(), ViewId::new());
@@ -2637,7 +2694,7 @@ fn main() {
         );
         let view = webview_rustkit::RustKitView::new(&window, bounds)
             .expect("Failed to create the RustKit chrome view");
-        view.load_html_internal(&chrome_html_with_bridge())
+        view.load_html_internal(&rustkit_chrome_html(rustkit_chrome_alpha()))
             .expect("Failed to load the chrome into RustKit");
         Some(ChromeView::RustKit(view))
     } else {
@@ -3315,6 +3372,13 @@ fn main() {
         (&*chrome_webview, &*content_webview)
     {
         rustkit_viewhost::raise_raw_view_above(chrome.host_view_raw(), page.host_view_raw());
+        // CH3.A3c: a transparent surface, so its shadows, rounded corners
+        // and the find modal's dimming layer reach the page; the region
+        // below is then its hit region only.
+        if rustkit_chrome_alpha() {
+            chrome.set_transparent(true);
+            info!("RustKit chrome surface is transparent (alpha route)");
+        }
         let scale = window.scale_factor();
         let size = window.inner_size();
         let (width, height) = (size.width as f64 / scale, size.height as f64 / scale);

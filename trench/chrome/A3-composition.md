@@ -21,10 +21,12 @@ chrome. The chrome stays the whole window. `expand_chrome` no longer moves the p
 it); `expand_chrome_small` still does, because the tab-actions bar is in the
 chrome's flow and pushes the toolbar down, as before.
 
-## What is transparent: the chrome's painted boxes, not the frame's alpha
+## The region: the chrome's painted boxes (A3, A3b)
 
-The chrome is opaque inside its *region* and absent outside it. The region
-is a list of rects in view coordinates (top-left origin):
+With the region-only route (A3, A3b; `HIWAVE_RUSTKIT_CHROME_ALPHA=0`
+since A3c) the chrome is opaque inside its *region* and absent outside it;
+with the alpha route (A3c, below) the region is its hit region only. The
+region is a list of rects in view coordinates (top-left origin):
 
     region = window − hole + overlays
 
@@ -80,24 +82,78 @@ The region is applied twice, from the same rects:
    continues to the next view down: the page. Views without a region (the
    page, every flag-off view) keep NSView's `hitTest:` unchanged.
 
-Why not the alpha of the painted frame: the renderer clears to opaque
-white and the chrome's `<body>` paints `--bg-primary` over the whole
-window, so alpha transparency needs a transparent body plus a non-opaque
-layer and a premultiplied surface (engine and compositor changes that
-would reach the page view too); and `hitTest:` runs on every mouse move on
-the main thread, where reading the frame's alpha means a GPU read-back.
+Limits of the region alone (the surface opaque, the mask binary): a
+popup's `box-shadow` outside its border box is not shown over the page; a
+rounded popup's corners show the body's colour; a full-window translucent
+overlay (the find modal's dimming layer) is a backdrop and does not dim the
+page; and the Metal drawable and the mask can land a refresh apart. CH3.A3c
+removes these with the alpha route below; `HIWAVE_RUSTKIT_CHROME_ALPHA=0`
+keeps this region-only route (for comparison).
 
-Limits, by construction (the surface is opaque, the mask is binary): a
-popup's `box-shadow` outside its border box is not shown over the page
-(revealing it would show a block of the body's colour, so shadows are left
-out of the region); a rounded popup's corners show the body's colour in
-the corner pixels; a full-window translucent overlay (the find modal's
-dimming layer) covers the hole and is a backdrop, so it does not dim the
-page; a popup the engine draws that is not in the chrome's display list (a
-`<select>`'s native drop-down, CH2.E6) is only visible inside the region.
-All of these need the alpha route above.
+## The alpha route (CH3.A3c): pixels decide what covers the page
 
-### Panels
+On by default with `HIWAVE_RUSTKIT_CHROME=1`. The chrome's surface is
+transparent, and the region above becomes its **hit region only**.
+
+1. **Surface.** `RustKitView::set_transparent(true)` (main.rs calls it when
+   it stacks the chrome over the page) does three things:
+   * `WindowSurface::set_transparent` -> `Presenter::set_transparent`: the
+     view's frames clear to (0, 0, 0, 0) instead of the canvas colour
+     (`commit.canvas`, white for a transparent document), and the renderer's
+     other first-pass clears (gradient, opacity-group, backdrop-filter
+     paths, which cleared to white whatever the canvas) clear to
+     transparent too (`Renderer::set_transparent` / `first_clear`).
+   * `Compositor::set_surface_transparent`: the wgpu surface is reconfigured
+     with a non-opaque composite alpha mode. Metal offers `Opaque` and
+     `PostMultiplied` only; `PostMultiplied` there does exactly one thing,
+     `CAMetalLayer.opaque = NO`. Core Animation always composites a
+     layer's contents as premultiplied (`src + dst * (1 - src.a)`), so what
+     matters is that the frame *is* premultiplied:
+   * the renderer already leaves premultiplied colour in its target: the
+     colour, glyph, image and gradient pipelines draw straight colour
+     through `ALPHA_BLENDING`, whose colour factor is `SrcAlpha` and whose
+     alpha factor is `One, OneMinusSrcAlpha`; starting from (0, 0, 0, 0)
+     that gives `(c * a, a)`, and over a premultiplied pixel it is
+     premultiplied source-over. Emoji, filters and opacity groups composite
+     premultiplied (`PREMULTIPLIED_ALPHA_BLENDING`). No pipeline changed.
+     The unit tests check every pixel of transparent frames (text, shadows,
+     gradients, a faded group) for `r, g, b <= a`; a straight-alpha pixel
+     would fail that and show as a fringe.
+   * `set_raw_view_transparent` (viewhost): the view's backing layer is not
+     opaque, and `set_raw_view_region` no longer installs a `CAShapeLayer`
+     mask for it: the region is kept for `hitTest:` only.
+2. **Document.** The app loads chrome.html into the RustKit chrome with
+   `data-rustkit-alpha` on `<html>`; chrome.html's
+   `html[data-rustkit-alpha], html[data-rustkit-alpha] body { background:
+   transparent }` leaves the body unpainted. The tab strip, toolbar,
+   sidebars, panels and popups keep their own backgrounds; `.chrome-main`
+   paints nothing, so the page column paints nothing. The WebKit chrome
+   (flag off) never gets the attribute.
+3. **What now reaches the page**: a popup's shadow outside its box, the
+   page in a rounded popup's corners, and the find modal's overlay
+   (`rgba(0, 0, 0, 0.3)`, unchanged CSS) dims the page. The pixels are
+   one Metal drawable, so the mask-vs-drawable refresh gap is gone for
+   paint.
+4. **Hit testing: the region from the display list (#925), not an alpha
+   probe.** The frame lives only on the GPU: there is no CPU copy of the
+   chrome's last frame in the engine, so an alpha probe means a read-back
+   (a staging copy and a `map_async` wait) either per frame (a full-window
+   copy on every chrome present) or per `hitTest:` (a GPU sync on the main
+   thread on every mouse move). The region costs one bounds pass per new
+   frame and is exact for boxes. What it gives up: a click on a popup's
+   shadow or in a rounded corner's transparent pixels goes to the chrome
+   (the box's bounds), not the page; a click on the find modal's dimming
+   layer over the page goes to the page (the layer is a backdrop, as with
+   the WebKit chrome, where the page view received it).
+5. **Still not covered**: a popup the engine draws that is not in the
+   chrome's display list (a `<select>`'s native drop-down, CH2.E6) is
+   neither painted by the chrome's frame nor in its hit region.
+
+Cost: the chrome's layer is now composited over the whole window by the
+window server (it was masked to its region); see the PR for the measured
+idle CPU/RSS against #925.
+
+## Panels
 
 The chrome stays the frontmost of the window's views: a panel (shelf,
 Inspector) built after it is added on top, so `apply_layout` re-raises the
