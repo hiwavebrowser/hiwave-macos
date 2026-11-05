@@ -4317,6 +4317,20 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // Likewise the engine's `@keyframes` animations (css-animations-1 §5):
+    // a trusted AnimationEvent that bubbles and cannot be cancelled.
+    Object.defineProperty(Document.prototype, '__rkFireAnimation', {
+        value: function (id, type, init) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            init.bubbles = true;
+            init.cancelable = false;
+            var ev = new (typeof g.AnimationEvent === 'function' ? g.AnimationEvent : g.Event)(type, init);
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     // The engine delivers the user's mouse input: a trusted event that
     // bubbles and can be cancelled (UI Events §3.4), except the enter and
     // leave events, which do neither and go to one element each.
