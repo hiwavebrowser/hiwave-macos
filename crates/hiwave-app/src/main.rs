@@ -762,11 +762,22 @@ fn panel_ipc_log_line(panel: &str, body: &str) -> String {
     format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
 }
 
-/// Input method text as the log carries it (CH2.E3).
+/// Input method text as the log carries it (CH2.E3, #918 R1 must-fix 2):
+/// the variant and the text's size, never the text, whatever the log
+/// level. A dead key's, an IME's, the accent popover's and the emoji
+/// picker's commits are typed text, password fields included; the same
+/// shapes-only rule as the panel IPC lines (#910).
 #[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
 #[cfg(target_os = "macos")]
 fn ime_input_log_line(input: &rustkit_viewhost::ImeInput) -> String {
-    format!("{input:?}")
+    use rustkit_viewhost::ImeInput;
+    match input {
+        ImeInput::SetMarked(text) => format!("ime=SetMarked len={}", text.len()),
+        ImeInput::Insert { text, replace } => {
+            format!("ime=Insert len={} replace={}", text.len(), replace.is_some())
+        }
+        ImeInput::Unmark => "ime=Unmark".to_string(),
+    }
 }
 
 /// A panel probe report as the log carries it (#910 R1 blocker 2), or

@@ -266,6 +266,11 @@ impl Engine {
 /// line, from the content edge, one line of text high. The line height is
 /// the font size times 1.2, the renderer's seat; close enough for an IME's
 /// candidate window, which is all this is for.
+///
+/// Best effort (#918 R1 nit 8): it measures the raw value, not a password
+/// field's bullets, and ignores the field's own horizontal or `<textarea>`
+/// scroll, `text-align` and page zoom, so the window can sit off the caret
+/// in those fields.
 #[allow(clippy::too_many_arguments)]
 fn control_caret(
     rect: rustkit_layout::Rect,

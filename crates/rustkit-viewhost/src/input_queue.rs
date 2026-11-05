@@ -138,6 +138,11 @@ pub fn set_text_input_state(view: ViewId, state: Option<TextInputMirror>) {
     all.retain(|(v, _)| *v != view);
     if let Some(state) = state {
         all.push((view, state));
+    } else {
+        drop(all);
+        // The field lost the focus: its marked text goes with it (#918 R1).
+        #[cfg(target_os = "macos")]
+        crate::macos::forget_marked(view);
     }
 }
 

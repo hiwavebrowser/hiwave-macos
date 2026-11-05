@@ -137,6 +137,13 @@ thread_local! {
     static MARKED: std::cell::RefCell<HashMap<ViewId, (usize, usize)>> = std::cell::RefCell::new(HashMap::new());
 }
 
+/// Drop `view`'s marked text: its field lost the focus (CH2.E3, #918 R1).
+/// Main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn forget_marked(view: ViewId) {
+    MARKED.with(|m| m.borrow_mut().remove(&view));
+}
+
 /// Cmd chords the view took for the page, by token: the retained `NSEvent`
 /// that goes on to the menu when the page does not claim it.
 #[cfg(target_os = "macos")]
@@ -167,7 +174,14 @@ unsafe fn text_of(obj: id) -> String {
 /// on this seat: a page's `preventDefault()` does not stop Cmd+T or Cmd+N,
 /// and the page hears no keydown for them; it does hear Cmd+L, Cmd+D and
 /// Cmd+K (tools/real_window, `e3_cmd_key_to_page`'s probe).
-pub fn is_reserved_chord(_chars: &str, keycode: u16, cmd: bool, shift: bool, alt: bool) -> bool {
+///
+/// `chars` is the event's `charactersIgnoringModifiers`: letters and
+/// brackets match by the character the key types, as the menu's key
+/// equivalents do, so Cmd+W is the W of a Dvorak or AZERTY layout, not the
+/// US W key's position. The arrows, and a key whose character is not
+/// ASCII (a Cyrillic or Greek layout, where AppKit matches the menu by the
+/// US key), go by `keycode`.
+pub fn is_reserved_chord(chars: &str, keycode: u16, cmd: bool, shift: bool, alt: bool) -> bool {
     const Q: u16 = 12;
     const W: u16 = 13;
     const T: u16 = 17;
@@ -179,10 +193,26 @@ pub fn is_reserved_chord(_chars: &str, keycode: u16, cmd: bool, shift: bool, alt
     if !cmd {
         return false;
     }
-    match keycode {
-        Q | W | T | N => !alt,
-        BRACKET_LEFT | BRACKET_RIGHT => shift && !alt,
-        LEFT | RIGHT => alt && !shift,
+    if let LEFT | RIGHT = keycode {
+        return alt && !shift;
+    }
+    let mut it = chars.chars();
+    let ch = match (it.next(), it.next()) {
+        (Some(c), None) if c.is_ascii() => Some(c.to_ascii_lowercase()),
+        _ => None,
+    };
+    let ch = ch.or(match keycode {
+        Q => Some('q'),
+        W => Some('w'),
+        T => Some('t'),
+        N => Some('n'),
+        BRACKET_LEFT => Some('['),
+        BRACKET_RIGHT => Some(']'),
+        _ => None,
+    });
+    match ch {
+        Some('q' | 'w' | 't' | 'n') => !alt,
+        Some('[' | ']' | '{' | '}') => shift && !alt,
         _ => false,
     }
 }
@@ -274,6 +304,20 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             }
         }
         extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
+            // A press mid-composition finishes it first (#918 R1): the input
+            // method forgets its marked text, the page keeps it (unmark:
+            // compositionend), before the press can move the focus. Chrome
+            // keeps the text when the focus leaves a composing field.
+            let view = view_id_of(this);
+            if MARKED.with(|m| m.borrow_mut().remove(&view)).is_some() {
+                unsafe {
+                    let context: id = msg_send![this, inputContext];
+                    if context != nil {
+                        let _: () = msg_send![context, discardMarkedText];
+                    }
+                }
+                push_input(view, InputKind::Ime(ImeInput::Unmark));
+            }
             record(this, event, true, PointerInput::Button);
         }
         extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
@@ -410,8 +454,16 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 // The input method first (CH2.E3): a dead key or an IME
                 // marks and commits through setMarkedText:/insertText:,
                 // a plain key comes back as insertText: or
-                // doCommandBySelector:.
+                // doCommandBySelector:. Only with a text field focused
+                // (#918 R1): with nothing editable the view has no input
+                // context, as Chromium has none for TEXT_INPUT_TYPE_NONE,
+                // so a dead key or an IME's key is a plain key the page's
+                // shortcuts hear.
                 let view = view_id_of(this);
+                if text_input_state(view).is_none() {
+                    forget_marked(view);
+                    return record_key(this, event, false, None);
+                }
                 let marked_before = MARKED.with(|m| m.borrow().contains_key(&view));
                 KEY_DOWN.with(|k| {
                     *k.borrow_mut() = Some(KeyDownContext { view, composed: false, inserted: None })
@@ -493,6 +545,18 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             let view = view_id_of(this);
             if MARKED.with(|m| m.borrow_mut().remove(&view).is_some()) {
                 push_input(view, InputKind::Ime(ImeInput::Unmark));
+            }
+        }
+        // No input context while nothing editable has focus (#918 R1):
+        // Chromium's view answers nil for TEXT_INPUT_TYPE_NONE, so no input
+        // method composes keys that have nowhere to go.
+        extern "C" fn input_context(this: &Object, _sel: Sel) -> id {
+            if text_input_state(view_id_of(this)).is_none() {
+                return nil;
+            }
+            unsafe {
+                let superclass = Class::get("NSView").expect("NSView class");
+                msg_send![super(this, superclass), inputContext]
             }
         }
         extern "C" fn has_marked_text(this: &Object, _sel: Sel) -> bool {
@@ -608,7 +672,8 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     return pass(event);
                 }
                 let key = pending_key(event, false, None);
-                if is_reserved_chord(&key.text, key.mac_keycode, key.cmd, key.shift, key.alt) {
+                let plain = text_of(msg_send![event, charactersIgnoringModifiers]);
+                if is_reserved_chord(&plain, key.mac_keycode, key.cmd, key.shift, key.alt) {
                     return pass(event);
                 }
                 let token = NEXT_KEY_EQUIVALENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -677,6 +742,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             decl.add_method(sel!(insertText:), insert_text as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(unmarkText), unmark_text as extern "C" fn(&Object, Sel));
             decl.add_method(sel!(hasMarkedText), has_marked_text as extern "C" fn(&Object, Sel) -> bool);
+            decl.add_method(sel!(inputContext), input_context as extern "C" fn(&Object, Sel) -> id);
             decl.add_method(sel!(markedRange), marked_range as extern "C" fn(&Object, Sel) -> RkRange);
             decl.add_method(sel!(selectedRange), selected_range as extern "C" fn(&Object, Sel) -> RkRange);
             decl.add_method(

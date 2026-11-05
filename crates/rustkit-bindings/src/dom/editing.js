@@ -166,6 +166,16 @@
         return JSON.stringify(marked());
     });
 
+    // Focus leaving `el` mid-composition (node_apis.js focus()/blur(), a
+    // click elsewhere): Chrome 143 keeps the marked text and fires
+    // compositionend before blur (tools/parity_oracle/ime_gate_log.mjs).
+    hidden(Document.prototype, '__rkFinishComposing', function (el) {
+        var c = composing;
+        if (!c || c.el !== el) return;
+        composing = null;
+        if (c.gen === I.gen()) compose(el, 'compositionend', c.text);
+    });
+
     // ---- navigator.clipboard (Clipboard API §6, text only) ----
     function Clipboard() { throw new TypeError('Illegal constructor'); }
     Object.defineProperty(Clipboard, 'name', { value: 'Clipboard' });

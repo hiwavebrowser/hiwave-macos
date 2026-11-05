@@ -1050,8 +1050,13 @@ class Driver:
         if not self.can_input:
             self.not_run(c, "keys and menu items reach the page", self.why_not("Accessibility"))
             return None
-        self.fixture.wait("beacon?e3-ready", 10, self.since)
+        self.fixture.wait("beacon?e3-ready" if page.startswith("e3_text") else "beacon?e3n-ready", 10, self.since)
         pid = self.app.proc.pid
+        # HID keys go to the frontmost app: never type into another one.
+        code, front = self.hw("activate", pid)
+        if not front.get("frontmost"):
+            self.not_run(c, "keys reach the app", "the app is not frontmost: " + json.dumps(front))
+            return None
         code, win = self.hw("window", pid)
         return pid, win["w"], win["h"]
 
@@ -1099,6 +1104,34 @@ class Driver:
         self.expect(c, "then e commits é (Chrome: é)", value == "é", repr(value))
         end = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-a-compositionend", mark)]
         self.expect(c, "compositionend carries é", end[-1:] == ["/beacon?e3-a-compositionend=é"], str(end))
+
+    def e3_dead_key_no_field(self):
+        """CH2.E3 (#918 R1): with nothing editable focused, Option+e, e and j are plain keydowns; nothing composes or is inserted."""
+        c = "e3_dead_key_no_field"
+        started = self.e3_start(c, page="e3_no_field.html")
+        if not started:
+            return
+        pid, w, h = started
+        mark = self.fixture.mark()
+        self.hw("key", pid, 14, "alt")  # Option+e: the dead acute on a US layout
+        time.sleep(0.3)
+        self.hw("key", pid, 14)  # e
+        time.sleep(0.3)
+        self.hw("key", pid, 38)  # j, a shortcut key
+        time.sleep(1.0)
+        seen = lambda kind: [urllib.parse.unquote(p).split("=", 1)[1]
+                             for p in self.fixture.seen("beacon?e3n-%s=" % kind, mark)]
+        downs, ups = seen("keydown"), seen("keyup")
+        codes = [d.split("-", 1)[0] for d in downs]
+        # e and j are plain keys the page hears. Option+e's own keydown
+        # (Chromium: key "Dead") is not pinned: its characters are empty and
+        # the window drops an empty key, as before E3 (#918 nit 5, open).
+        self.expect(c, "the page hears e and j after Option+e", codes[-2:] == ["69", "74"], str(downs))
+        self.expect(c, "and their keyups", [u.split("-", 1)[0] for u in ups][-2:] == ["69", "74"], str(ups))
+        composed = sum((seen(k) for k in ("compositionstart", "compositionupdate", "compositionend")), [])
+        self.expect(c, "nothing composes", not composed, str(composed))
+        inserted = seen("beforeinput") + seen("input")
+        self.expect(c, "nothing is inserted", not inserted, str(inserted))
 
     def e3_paste(self):
         """CH2.E3: Cmd+V and Edit > Paste put the pasteboard's text in a content <input>."""
@@ -2232,7 +2265,7 @@ class Driver:
               "e4_chrome_tab",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
-              "e3_dead_key", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
