@@ -368,6 +368,22 @@ fn skip_template(b: &[u8], mut i: usize, template_braces: &mut Vec<usize>, brace
     i.min(b.len())
 }
 
+/// Just past the closing quote of the string literal at `i`, if it closes
+/// on its line. Never past the end of `b`.
+fn string_close(b: &[u8], mut i: usize) -> Option<usize> {
+    let quote = b[i];
+    i += 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            c if c == quote => return Some(i + 1),
+            b'\n' => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Skip whitespace and comments.
 fn skip_trivia(b: &[u8], mut i: usize) -> usize {
     loop {
@@ -388,10 +404,11 @@ fn string_at(source: &str, i: usize) -> Option<(String, usize)> {
     if quote != b'\'' && quote != b'"' {
         return None;
     }
-    let end = skip_string(b, i);
-    if end < i + 2 || b[end - 1] != quote {
-        return None;
-    }
+    // Past the closing quote, or `None` when the string never closes: a
+    // source cut off inside a string (even right after an escaped quote,
+    // which `skip_string`'s clamp leaves looking closed) is the module's
+    // syntax error to report at run time, not a specifier.
+    let end = string_close(b, i)?;
     let raw = &source[i + 1..end - 1];
     if raw.contains('\n') {
         return None;
