@@ -952,8 +952,95 @@ class Driver:
         time.sleep(3)
         self.expect(c, "the app is still running 3 s later", self.app.alive())
 
+    def a2_chrome_navigate(self):
+        """CH3.A2 3c: the address bar's navigate, run in the RustKit chrome, reaches the app and the page loads it."""
+        c = "a2_chrome_navigate"
+        target = "%s/h16_b.html?from=a2" % self.fixture.base
+        # The call the address bar's Enter handler makes. Not hiwave.navigate():
+        # chrome.html replaces the bridge's window.hiwave with its own object.
+        env = {"HIWAVE_RUSTKIT_CHROME": "1",
+               "HIWAVE_RUSTKIT_CHROME_EVAL": "sendIpc('navigate', { url: %s })" % json.dumps(target)}
+        if not self.open_page(c, "e9_final.html", env=env):
+            return
+        ran = self.app.wait_log(r"running HIWAVE_RUSTKIT_CHROME_EVAL", 20)
+        self.expect(c, "the app ran the script in the booted chrome", bool(ran))
+        ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"navigate","url":"[^"]*h16_b\.html\?from=a2"', 10)
+        self.expect(c, "the chrome posted navigate and the app's handler took it", bool(ipc),
+                    ipc.group(0) if ipc else "")
+        nav = self.app.wait_log(r"Navigating content to: [^\n]*h16_b\.html\?from=a2", 10)
+        self.expect(c, "the app navigated the content view", bool(nav))
+        self.expect(c, "the app requested the page", self.fixture.wait("/h16_b.html?from=a2", 10, self.since))
+        self.expect(c, "the page's script ran in the content view",
+                    self.fixture.wait("beacon?h16-b-ran-from=a2", 10, self.since))
+        urls = []
+        end = time.time() + 10
+        while time.time() < end and target not in urls:
+            try:
+                urls = tab_urls(json.loads(self.app.state_file.read_text()))
+            except (FileNotFoundError, ValueError):
+                urls = []
+            time.sleep(0.2)
+        self.expect(c, "the saved tab holds the URL the chrome asked for", target in urls, "tab urls %s" % urls)
+
+    def a2_chrome_typed_url(self):
+        """CH3.A2 granted gate: flag on, the tab strip and toolbar are painted, and a URL typed in the address bar navigates."""
+        c = "a2_chrome_typed_url"
+        if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if self.can_capture:
+            time.sleep(0.8)
+            path = self.out / ("%s.before.png" % c)
+            code, win = self.hw("window", self.app.proc.pid)
+            subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)])
+            from PIL import Image
+            img = Image.open(path).convert("RGB")
+            # The window's own title bar is 32 px; the tab strip and toolbar
+            # are the next ~100 px, right of the 220 px sidebar.
+            band = img.crop((230, 36, img.width - 10, 128))
+            colours = len(band.getcolors(maxcolors=band.width * band.height) or [])
+            self.expect(c, "the tab strip and toolbar are painted (not one flat colour)", colours > 50,
+                        "%d colours in the band" % colours)
+        else:
+            self.not_run(c, "the tab strip and toolbar are painted", self.why_not("Screen Recording"))
+        if not self.can_input:
+            return self.not_run(c, "a URL typed in the address bar navigates", self.why_not("Accessibility"))
+        target = "%s/h16_b.html?from=typed" % self.fixture.base
+        pid = self.app.proc.pid
+        # A new tab's address bar is empty: typing over a URL already there
+        # appends to it (select() and Cmd+A select nothing; the PR lists it).
+        log_from = len(self.app.log_text())
+        self.hw("key", pid, 17, "cmd")
+        made = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"create_tab"', 5, log_from)
+        self.expect(c, "Cmd+T made a tab through the chrome", bool(made))
+        time.sleep(1.0)
+        code, win = self.hw("window", pid)
+        # The address bar: right of the sidebar and the three nav buttons,
+        # in the toolbar row (window y 100 with the 32 px title bar).
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the RustKit chrome", bool(clicked), clicked.group(0) if clicked else "")
+        time.sleep(0.5)
+        mark, log_from = self.fixture.mark(), len(self.app.log_text())
+        self.hw("type", pid, target)
+        self.hw("key", pid, 36)
+        ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"navigate","url":"([^"]*)"', 10, log_from)
+        self.expect(c, "Return posted navigate with the typed URL", bool(ipc) and ipc.group(1) == target,
+                    ipc.group(1) if ipc else "no navigate")
+        asked = self.fixture.wait("/h16_b.html?from=typed", 10, mark) and \
+            "/h16_b.html?from=typed" in self.fixture.seen("/h16_b.html", mark)
+        self.expect(c, "the content view requested the typed URL", asked)
+        self.expect(c, "the page's script ran", self.fixture.wait("beacon?h16-b-ran-from=typed", 10, mark))
+        time.sleep(1.0)
+        frame = self.frame(c, "after", [GREEN])
+        if frame is None:
+            return self.not_run(c, "the window shows the typed page's green", self.why_not("Screen Recording"))
+        self.expect(c, "the window shows the typed page's green", frame[GREEN] > 100000, str(frame))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots"]
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
+              "a2_chrome_navigate", "a2_chrome_typed_url"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
