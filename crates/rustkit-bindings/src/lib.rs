@@ -48,6 +48,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
     hook(url, replace);
 }
 mod net_bridge;
+pub use dom::editing::SharedEditStates;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
@@ -104,6 +105,8 @@ mod event_target_ctor_tests;
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
+#[cfg(test)]
+mod editing_tests;
 #[cfg(test)]
 mod traversal_tests;
 #[cfg(test)]
@@ -1112,6 +1115,44 @@ impl DomBindings {
             })(globalThis);"#,
         )?;
         Ok(())
+    }
+
+    /// Use `clipboard` for this page's edit commands and
+    /// `navigator.clipboard` (the engine's platform clipboard).
+    pub fn set_clipboard(&self, clipboard: rustkit_dom::clipboard::SharedClipboard) {
+        let _ = clipboard;
+    }
+
+    /// The clipboard this page's edit commands use.
+    pub fn clipboard(&self) -> rustkit_dom::clipboard::SharedClipboard {
+        rustkit_dom::clipboard::MemoryClipboard::shared()
+    }
+
+    /// Whether script may read the clipboard (`navigator.clipboard.readText`,
+    /// `execCommand('paste')`). On by default; the user's own paste is
+    /// always allowed.
+    pub fn set_clipboard_read_allowed(&self, allowed: bool) {
+        let _ = allowed;
+    }
+
+    /// Run edit commands on `states` (the engine's edit states for this
+    /// view) instead of the bindings' own map.
+    pub fn share_edit_states(&self, states: SharedEditStates) {
+        let _ = states;
+    }
+
+    /// The user asked for `command` in the control `node` (a shortcut):
+    /// `beforeinput` (cancelable) for a command that edits, the edit on
+    /// the control's edit state, then `input`. What the command did, or
+    /// the default (nothing) when the control is not a text control or a
+    /// listener cancelled.
+    pub fn user_edit(
+        &self,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Result<rustkit_dom::forms::EditOutcome, BindingError> {
+        let _ = (node, command);
+        Ok(Default::default())
     }
 
     /// Tell script what the user typed into a control, so its `value`

@@ -12,6 +12,7 @@
 //! 5. **Event dispatch**: DOM Events with capture/bubble phases
 
 pub mod events;
+pub mod clipboard;
 pub mod forms;
 pub mod images;
 pub mod shadow;
@@ -23,7 +24,8 @@ pub use events::{
 };
 pub use forms::{
     CheckableState, FormDataEntry, FormDataValue, FormEnctype, FormMethod, FormState, InputType,
-    SelectionDirection, SelectionRange, TextEditState,
+    EditCommand, EditOutcome, KeyPlatform, SelectionDirection, SelectionRange, TextControlKind,
+    TextEditState,
 };
 pub use images::{
     CrossOrigin, FaviconLink, ImageDecoding, ImageElement, ImageElementManager, ImageLoading,

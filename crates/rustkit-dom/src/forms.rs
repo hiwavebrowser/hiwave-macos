@@ -516,6 +516,139 @@ impl TextEditState {
     }
 }
 
+/// How many edits a text control can undo.
+pub const UNDO_LIMIT: usize = 100;
+
+/// What kind of text control a [`TextEditState`] edits: decides what a
+/// paste may insert and whether the text may leave the control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextControlKind {
+    /// A single-line `<input>` (text, search, url, tel, email, ...): a
+    /// paste drops line breaks (the value sanitization algorithm).
+    #[default]
+    SingleLine,
+    /// `<input type=password>`: single-line, and copy/cut are refused.
+    Password,
+    /// `<textarea>`: line breaks are kept (normalized to LF).
+    MultiLine,
+}
+
+/// Which platform's editing key conventions apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPlatform {
+    /// macOS: Cmd is the command key, Option+arrow moves by word,
+    /// Cmd+arrow moves to the line's ends.
+    Mac,
+    /// Windows/Linux: Ctrl is the command key and Ctrl+arrow moves by word.
+    Other,
+}
+
+impl KeyPlatform {
+    /// The platform this build runs on.
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            KeyPlatform::Mac
+        } else {
+            KeyPlatform::Other
+        }
+    }
+}
+
+/// An edit command on a text control: what a shortcut,
+/// `document.execCommand` or the engine asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditCommand {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    Undo,
+    Redo,
+    /// Insert (or replace the selection with) this text.
+    InsertText(String),
+    DeleteWordBackward,
+    DeleteWordForward,
+}
+
+impl EditCommand {
+    /// The `document.execCommand` name's command, if supported here.
+    pub fn from_exec_name(name: &str, value: Option<&str>) -> Option<Self> {
+        let _ = (name, value);
+        None
+    }
+
+    /// The Input Events `inputType` of the edit this command makes, `None`
+    /// for one that never changes the value (copy, select-all).
+    pub fn input_type(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether the command can change the control's value.
+    pub fn mutates(&self) -> bool {
+        false
+    }
+}
+
+/// What running an [`EditCommand`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditOutcome {
+    /// The command applied to this control (it was enabled).
+    pub handled: bool,
+    /// The value changed.
+    pub changed: bool,
+    /// The selection changed (and the value did not).
+    pub selection_changed: bool,
+    /// The `inputType` of the change, when `changed`.
+    pub input_type: Option<&'static str>,
+    /// The `data` of the change's input event (inserted text), when any.
+    pub data: Option<String>,
+}
+
+impl TextEditState {
+    pub fn kind(&self) -> TextControlKind {
+        TextControlKind::SingleLine
+    }
+    pub fn set_kind(&self, _kind: TextControlKind) {}
+    pub fn copy(&self, _clipboard: &dyn crate::clipboard::Clipboard) -> bool {
+        false
+    }
+    pub fn cut(&self, _clipboard: &dyn crate::clipboard::Clipboard) -> bool {
+        false
+    }
+    pub fn paste(&self, _clipboard: &dyn crate::clipboard::Clipboard) -> bool {
+        false
+    }
+    pub fn paste_text(&self, _text: &str) -> bool {
+        false
+    }
+    pub fn undo(&self) -> bool {
+        false
+    }
+    pub fn redo(&self) -> bool {
+        false
+    }
+    pub fn can_undo(&self) -> bool {
+        false
+    }
+    pub fn can_redo(&self) -> bool {
+        false
+    }
+    pub fn move_word_left(&self, _extend: bool) {}
+    pub fn move_word_right(&self, _extend: bool, _platform: KeyPlatform) {}
+    pub fn delete_word_backward(&self) -> bool {
+        false
+    }
+    pub fn delete_word_forward(&self) -> bool {
+        false
+    }
+    pub fn can_run(&self, _cmd: &EditCommand, _clipboard: &dyn crate::clipboard::Clipboard) -> bool {
+        false
+    }
+    pub fn run_command(&self, _cmd: &EditCommand, _clipboard: &dyn crate::clipboard::Clipboard) -> EditOutcome {
+        EditOutcome::default()
+    }
+}
+
 /// State for checkbox/radio inputs.
 #[derive(Debug, Default)]
 pub struct CheckableState {
@@ -1201,6 +1334,40 @@ pub enum KeyHandleResult {
 /// This module bridges key events from rustkit-core to TextEditState operations.
 pub mod keyboard {
     use super::*;
+
+    /// The edit command a key chord means on `platform`, if it is one
+    /// (clipboard, history, select-all, delete-word). `primary` is the
+    /// command modifier: Cmd on macOS, Ctrl elsewhere.
+    pub fn command_for_key(
+        _platform: KeyPlatform,
+        _key_code: u32,
+        _key: &str,
+        _primary: bool,
+        _shift: bool,
+        _alt: bool,
+    ) -> Option<EditCommand> {
+        None
+    }
+
+    /// A key for a text control, with the clipboard and platform explicit.
+    /// `area` is the textarea wrapping `state`, for line movement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_key(
+        state: &TextEditState,
+        area: Option<&TextAreaState>,
+        _clipboard: &dyn crate::clipboard::Clipboard,
+        _platform: KeyPlatform,
+        key_code: u32,
+        key: &str,
+        primary: bool,
+        shift: bool,
+        alt: bool,
+    ) -> KeyHandleResult {
+        match area {
+            Some(a) => handle_textarea_key(a, key_code, key, primary, shift, alt),
+            None => handle_input_key(state, key_code, key, primary, shift, alt),
+        }
+    }
 
     /// Handle a key event for a single-line text input.
     /// Returns what action was taken.
@@ -2135,5 +2302,357 @@ mod tests {
         assert_eq!(resolve_url(base, "//example.test/p?q#f").as_deref(), Some("https://example.test/p?q#f"));
         assert_eq!(resolve_url("http://localhost:8080/a/b", "c").as_deref(), Some("http://localhost:8080/a/c"));
         assert_eq!(resolve_url("invalid", "/x"), None);
+    }
+}
+
+#[cfg(test)]
+mod edit_command_tests {
+    //! CH2.E1: clipboard, cut/copy/paste, undo/redo and word movement in
+    //! text controls, through the same key entry point the engine uses.
+    use super::keyboard::{command_for_key, handle_key};
+    use super::*;
+    use crate::clipboard::{Clipboard, MemoryClipboard};
+
+    const VK_BACK: u32 = 0x08;
+    const VK_DELETE: u32 = 0x2E;
+    const VK_LEFT: u32 = 0x25;
+    const VK_RIGHT: u32 = 0x27;
+    const VK_HOME: u32 = 0x24;
+    const VK_END: u32 = 0x23;
+
+    /// A key on `platform` with the command modifier held (Cmd/Ctrl).
+    fn cmd(s: &TextEditState, cb: &dyn Clipboard, p: KeyPlatform, letter: &str, shift: bool) -> KeyHandleResult {
+        // The window delivers Cmd+C as vk 0 + text "c" (hiwave-app).
+        handle_key(s, None, cb, p, 0, letter, true, shift, false)
+    }
+
+    fn key(s: &TextEditState, cb: &dyn Clipboard, p: KeyPlatform, vk: u32, shift: bool, primary: bool, alt: bool) -> KeyHandleResult {
+        handle_key(s, None, cb, p, vk, "", primary, shift, alt)
+    }
+
+    fn typed(s: &TextEditState, cb: &dyn Clipboard, text: &str) {
+        for ch in text.chars() {
+            let k = ch.to_string();
+            assert_eq!(handle_key(s, None, cb, KeyPlatform::Mac, 0, &k, false, false, false), KeyHandleResult::ValueChanged);
+        }
+    }
+
+    #[test]
+    fn select_all_copy_end_paste_doubles_the_text() {
+        for p in [KeyPlatform::Mac, KeyPlatform::Other] {
+            let cb = MemoryClipboard::new();
+            let s = TextEditState::with_value("hello");
+            assert_eq!(cmd(&s, &cb, p, "a", false), KeyHandleResult::SelectionChanged);
+            assert_eq!(s.selected_text(), "hello");
+            assert_eq!(cmd(&s, &cb, p, "c", false), KeyHandleResult::Handled);
+            assert_eq!(cb.read_text().as_deref(), Some("hello"));
+            assert_eq!(key(&s, &cb, p, VK_END, false, false, false), KeyHandleResult::SelectionChanged);
+            assert_eq!(cmd(&s, &cb, p, "v", false), KeyHandleResult::ValueChanged);
+            assert_eq!(s.value(), "hellohello", "{p:?}");
+            assert_eq!(s.selection(), SelectionRange::caret(10));
+        }
+    }
+
+    #[test]
+    fn cut_empties_the_field_and_fills_the_clipboard() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("hello");
+        cmd(&s, &cb, KeyPlatform::Other, "a", false);
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Other, "x", false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "");
+        assert_eq!(cb.read_text().as_deref(), Some("hello"));
+        // Undo puts the cut text back, selected as it was.
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Other, "z", false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "hello");
+        assert_eq!(s.selected_text(), "hello");
+    }
+
+    #[test]
+    fn undo_after_typing_restores_empty_and_redo_restores_the_typing() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::new();
+        typed(&s, &cb, "abc");
+        // Consecutive typed characters are one history entry.
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "z", false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "");
+        assert!(!s.can_undo());
+        // Cmd+Shift+Z (mac) and Ctrl+Y (elsewhere) redo.
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "Z", true), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "abc");
+        assert_eq!(s.caret_position(), 3);
+        cmd(&s, &cb, KeyPlatform::Other, "z", false);
+        assert_eq!(s.value(), "");
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Other, "y", false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "abc");
+        // Nothing left to redo.
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Other, "y", false), KeyHandleResult::Handled);
+    }
+
+    #[test]
+    fn a_paste_and_a_delete_are_their_own_history_entries() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::new();
+        typed(&s, &cb, "ab");
+        cb.write_text("XY");
+        cmd(&s, &cb, KeyPlatform::Mac, "v", false);
+        typed(&s, &cb, "c");
+        key(&s, &cb, KeyPlatform::Mac, VK_BACK, false, false, false);
+        assert_eq!(s.value(), "abXY");
+        let mut seen = Vec::new();
+        while s.undo() {
+            seen.push(s.value());
+        }
+        assert_eq!(seen, ["abXYc", "abXY", "ab", ""]);
+        // A new edit after undo drops the redo branch.
+        typed(&s, &cb, "q");
+        assert!(!s.redo());
+    }
+
+    #[test]
+    fn caret_movement_closes_the_typing_group() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::new();
+        typed(&s, &cb, "ab");
+        key(&s, &cb, KeyPlatform::Other, VK_LEFT, false, false, false);
+        typed(&s, &cb, "c");
+        assert_eq!(s.value(), "acb");
+        assert!(s.undo());
+        assert_eq!(s.value(), "ab");
+        assert!(s.undo());
+        assert_eq!(s.value(), "");
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let s = TextEditState::new();
+        for _ in 0..(UNDO_LIMIT + 20) {
+            s.paste_text("x");
+        }
+        let mut undos = 0;
+        while s.undo() {
+            undos += 1;
+        }
+        assert_eq!(undos, UNDO_LIMIT);
+        assert_eq!(s.value(), "x".repeat(20));
+    }
+
+    #[test]
+    fn a_paste_past_maxlength_is_truncated() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("abc");
+        s.set_max_length(Some(5));
+        cb.write_text("12345");
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "v", false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "abc12");
+        // Full: a paste inserts nothing and changes nothing.
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "v", false), KeyHandleResult::Handled);
+        assert_eq!(s.value(), "abc12");
+        // Replacing a selection frees its length; truncation keeps whole chars.
+        s.set_selection(0, 3);
+        cb.write_text("éèêë");
+        cmd(&s, &cb, KeyPlatform::Mac, "v", false);
+        assert_eq!(s.value(), "éèê12");
+    }
+
+    #[test]
+    fn a_single_line_paste_drops_line_breaks_and_a_textarea_keeps_them() {
+        let cb = MemoryClipboard::new();
+        cb.write_text("a\r\nb\nc");
+        let s = TextEditState::new();
+        cmd(&s, &cb, KeyPlatform::Mac, "v", false);
+        assert_eq!(s.value(), "abc");
+        let t = TextAreaState::new();
+        assert_eq!(t.edit.kind(), TextControlKind::MultiLine);
+        handle_key(&t.edit, Some(&t), &cb, KeyPlatform::Mac, 0, "v", true, false, false);
+        assert_eq!(t.value(), "a\nb\nc");
+    }
+
+    #[test]
+    fn a_password_field_refuses_copy_and_cut_but_takes_a_paste() {
+        let cb = MemoryClipboard::new();
+        cb.write_text("before");
+        let s = TextEditState::with_value("secret");
+        s.set_kind(TextControlKind::Password);
+        s.select_all();
+        cmd(&s, &cb, KeyPlatform::Other, "c", false);
+        cmd(&s, &cb, KeyPlatform::Other, "x", false);
+        assert_eq!(cb.read_text().as_deref(), Some("before"));
+        assert_eq!(s.value(), "secret");
+        cmd(&s, &cb, KeyPlatform::Other, "v", false);
+        assert_eq!(s.value(), "before");
+    }
+
+    #[test]
+    fn a_read_only_field_copies_but_does_not_cut_paste_or_undo() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("fixed");
+        s.set_read_only(true);
+        s.select_all();
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "c", false), KeyHandleResult::Handled);
+        assert_eq!(cb.read_text().as_deref(), Some("fixed"));
+        cmd(&s, &cb, KeyPlatform::Mac, "x", false);
+        cmd(&s, &cb, KeyPlatform::Mac, "v", false);
+        assert_eq!(s.value(), "fixed");
+    }
+
+    #[test]
+    fn shift_left_twice_selects_two_chars_and_typing_replaces_them() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("hello");
+        key(&s, &cb, KeyPlatform::Mac, VK_LEFT, true, false, false);
+        key(&s, &cb, KeyPlatform::Mac, VK_LEFT, true, false, false);
+        assert_eq!(s.selected_text(), "lo");
+        typed(&s, &cb, "p");
+        assert_eq!(s.value(), "help");
+        assert_eq!(s.caret_position(), 4);
+    }
+
+    #[test]
+    fn shift_arrows_extend_from_the_anchor_both_ways() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("hello");
+        s.set_caret(2);
+        key(&s, &cb, KeyPlatform::Other, VK_LEFT, true, false, false);
+        key(&s, &cb, KeyPlatform::Other, VK_RIGHT, true, false, false);
+        key(&s, &cb, KeyPlatform::Other, VK_RIGHT, true, false, false);
+        assert_eq!(s.selection(), SelectionRange::new(2, 3));
+        assert_eq!(s.selected_text(), "l");
+        // Shift+Home from there selects back to the start from the anchor.
+        key(&s, &cb, KeyPlatform::Other, VK_HOME, true, false, false);
+        assert_eq!(s.selected_text(), "he");
+        key(&s, &cb, KeyPlatform::Other, VK_END, true, false, false);
+        assert_eq!(s.selected_text(), "llo");
+        // An arrow without Shift collapses to that side.
+        key(&s, &cb, KeyPlatform::Other, VK_LEFT, false, false, false);
+        assert_eq!(s.selection(), SelectionRange::caret(2));
+    }
+
+    #[test]
+    fn word_movement_uses_option_on_mac_and_ctrl_elsewhere() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("one two, three");
+        // macOS: Option+Left/Right by word; Cmd+Left/Right to the ends.
+        key(&s, &cb, KeyPlatform::Mac, VK_LEFT, false, false, true);
+        assert_eq!(s.caret_position(), 9);
+        key(&s, &cb, KeyPlatform::Mac, VK_LEFT, false, false, true);
+        assert_eq!(s.caret_position(), 4);
+        key(&s, &cb, KeyPlatform::Mac, VK_RIGHT, false, false, true);
+        assert_eq!(s.caret_position(), 7, "mac moves to the end of the word");
+        key(&s, &cb, KeyPlatform::Mac, VK_LEFT, false, true, false);
+        assert_eq!(s.caret_position(), 0);
+        key(&s, &cb, KeyPlatform::Mac, VK_RIGHT, false, true, false);
+        assert_eq!(s.caret_position(), 14);
+        // Elsewhere: Ctrl+Left/Right by word; Right lands on the next word.
+        s.set_caret(0);
+        key(&s, &cb, KeyPlatform::Other, VK_RIGHT, false, true, false);
+        assert_eq!(s.caret_position(), 4);
+        key(&s, &cb, KeyPlatform::Other, VK_RIGHT, true, true, false);
+        assert_eq!(s.selected_text(), "two, ");
+        // Alt alone does nothing to the caret off macOS.
+        s.set_caret(4);
+        assert_eq!(key(&s, &cb, KeyPlatform::Other, VK_LEFT, false, false, true), KeyHandleResult::Unhandled);
+        assert_eq!(s.caret_position(), 4);
+    }
+
+    #[test]
+    fn word_movement_respects_multibyte_text() {
+        let s = TextEditState::with_value("héllo wörld");
+        s.move_word_left(false);
+        assert_eq!(&s.value()[s.caret_position()..], "wörld");
+        s.move_word_left(true);
+        assert_eq!(s.selected_text(), "héllo ");
+        s.move_left(false);
+        s.move_right(false);
+        assert_eq!(&s.value()[..s.caret_position()], "h");
+        s.move_right(false);
+        assert_eq!(&s.value()[..s.caret_position()], "hé");
+    }
+
+    #[test]
+    fn delete_word_is_option_backspace_on_mac_and_ctrl_backspace_elsewhere() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("one two three");
+        assert_eq!(key(&s, &cb, KeyPlatform::Mac, VK_BACK, false, false, true), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "one two ");
+        assert_eq!(key(&s, &cb, KeyPlatform::Other, VK_BACK, false, true, false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), "one ");
+        s.set_caret(0);
+        assert_eq!(key(&s, &cb, KeyPlatform::Other, VK_DELETE, false, true, false), KeyHandleResult::ValueChanged);
+        assert_eq!(s.value(), " ");
+        // Each deletion is its own undo step.
+        assert!(s.undo());
+        assert_eq!(s.value(), "one ");
+        assert!(s.undo());
+        assert_eq!(s.value(), "one two ");
+    }
+
+    #[test]
+    fn the_command_modifier_never_types_its_letter() {
+        let cb = MemoryClipboard::new();
+        let s = TextEditState::with_value("ab");
+        assert_eq!(cmd(&s, &cb, KeyPlatform::Mac, "q", false), KeyHandleResult::Unhandled);
+        assert_eq!(s.value(), "ab");
+    }
+
+    #[test]
+    fn chords_map_to_commands_per_platform() {
+        let m = KeyPlatform::Mac;
+        let o = KeyPlatform::Other;
+        assert_eq!(command_for_key(m, 0, "c", true, false, false), Some(EditCommand::Copy));
+        assert_eq!(command_for_key(o, 0x43, "", true, false, false), Some(EditCommand::Copy));
+        assert_eq!(command_for_key(o, 0, "X", true, true, false), Some(EditCommand::Cut));
+        assert_eq!(command_for_key(m, 0, "v", true, false, false), Some(EditCommand::Paste));
+        assert_eq!(command_for_key(m, 0, "a", true, false, false), Some(EditCommand::SelectAll));
+        assert_eq!(command_for_key(m, 0, "z", true, false, false), Some(EditCommand::Undo));
+        assert_eq!(command_for_key(m, 0, "z", true, true, false), Some(EditCommand::Redo));
+        assert_eq!(command_for_key(o, 0, "y", true, false, false), Some(EditCommand::Redo));
+        assert_eq!(command_for_key(m, VK_BACK, "", false, false, true), Some(EditCommand::DeleteWordBackward));
+        assert_eq!(command_for_key(o, VK_DELETE, "", true, false, false), Some(EditCommand::DeleteWordForward));
+        assert_eq!(command_for_key(m, 0, "c", false, false, false), None);
+        assert_eq!(command_for_key(o, VK_BACK, "", false, false, true), None);
+    }
+
+    #[test]
+    fn exec_command_names_and_input_types() {
+        assert_eq!(EditCommand::from_exec_name("selectAll", None), Some(EditCommand::SelectAll));
+        assert_eq!(EditCommand::from_exec_name("SELECTALL", None), Some(EditCommand::SelectAll));
+        assert_eq!(
+            EditCommand::from_exec_name("insertText", Some("hi")),
+            Some(EditCommand::InsertText("hi".into()))
+        );
+        assert_eq!(EditCommand::from_exec_name("bold", None), None);
+        assert_eq!(EditCommand::Paste.input_type(), Some("insertFromPaste"));
+        assert_eq!(EditCommand::Cut.input_type(), Some("deleteByCut"));
+        assert_eq!(EditCommand::Undo.input_type(), Some("historyUndo"));
+        assert_eq!(EditCommand::Redo.input_type(), Some("historyRedo"));
+        assert_eq!(EditCommand::Copy.input_type(), None);
+        assert!(EditCommand::Paste.mutates() && !EditCommand::Copy.mutates());
+    }
+
+    #[test]
+    fn run_command_reports_the_input_event_to_fire() {
+        let cb = MemoryClipboard::new();
+        cb.write_text("zz");
+        let s = TextEditState::with_value("ab");
+        assert!(s.can_run(&EditCommand::Paste, &cb));
+        assert!(!s.can_run(&EditCommand::Redo, &cb));
+        let out = s.run_command(&EditCommand::Paste, &cb);
+        assert!(out.handled && out.changed);
+        assert_eq!(out.input_type, Some("insertFromPaste"));
+        assert_eq!(out.data.as_deref(), Some("zz"));
+        let out = s.run_command(&EditCommand::Undo, &cb);
+        assert_eq!((out.changed, out.input_type), (true, Some("historyUndo")));
+        assert_eq!(s.value(), "ab");
+        let out = s.run_command(&EditCommand::Copy, &cb);
+        assert!(out.handled && !out.changed);
+    }
+
+    #[test]
+    fn setting_the_value_clears_the_history() {
+        let s = TextEditState::new();
+        s.paste_text("abc");
+        s.set_value("script");
+        assert!(!s.can_undo());
+        assert_eq!(s.value(), "script");
     }
 }

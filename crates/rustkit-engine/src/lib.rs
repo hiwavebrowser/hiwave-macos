@@ -18,6 +18,9 @@ use std::sync::Arc;
 use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
+/// The clipboard edit commands use (CH2.E1); a platform one plugs in with
+/// [`Engine::set_clipboard`].
+pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -471,6 +474,8 @@ mod container_query_tests;
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -5094,6 +5099,19 @@ impl Engine {
             debug!(?id, ?out, "Live turn");
         }
         out
+    }
+
+    /// Use `clipboard` for every view's copy/cut/paste and
+    /// `navigator.clipboard`. The default is an in-memory clipboard
+    /// ([`MemoryClipboard`]); the macOS `NSPasteboard` one (CH2.E3) is
+    /// installed here by the app.
+    pub fn set_clipboard(&mut self, clipboard: SharedClipboard) {
+        let _ = clipboard;
+    }
+
+    /// The clipboard this engine's views edit with.
+    pub fn clipboard(&self) -> SharedClipboard {
+        MemoryClipboard::shared()
     }
 
     /// Deliver a key to the focused form control.

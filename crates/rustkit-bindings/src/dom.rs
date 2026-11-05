@@ -28,6 +28,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+pub(crate) mod editing;
 mod node_apis;
 mod shadow;
 
