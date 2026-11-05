@@ -291,6 +291,27 @@ fn only_the_named_property_transitions() {
     assert_eq!(log(&mut engine, view), "");
 }
 
+/// A transition on an element styled inline, triggered by an `el.style`
+/// write: `getComputedStyle` reads the transition's value midway, not the
+/// inline text the write left (the at-once read-back of a plain inline
+/// `opacity`, #861, yields to an animated property).
+#[test]
+fn an_inline_styled_element_reads_the_transition_not_the_inline_text() {
+    let page =
+        "<!doctype html><style>body{margin:0}#h{width:100px;height:100px;background:#00f}</style>\
+<div id=h style=\"opacity:0;transition:opacity 100ms linear\"></div>\
+<script>var h=document.getElementById('h');window.log=[];\
+h.addEventListener('transitionend',function(e){log.push('end:'+e.propertyName)});</script>";
+    let (mut engine, view, _server) = load(page);
+    run(&mut engine, view, "h.style.opacity='1'");
+    pump(&mut engine, view, 50, 10);
+    let mid = opacity(&mut engine, view);
+    assert!((mid - 0.5).abs() <= 0.12, "opacity at 50 ms: {mid}");
+    pump(&mut engine, view, 100, 10);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(log(&mut engine, view), "end:opacity");
+}
+
 /// An ancestor going `display: none` midway cancels the transitions under
 /// it (`transitioncancel`, no `transitionend`), and nothing keeps the view
 /// laying out afterwards.

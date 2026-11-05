@@ -125,7 +125,15 @@ impl LayoutCtx {
         let _walk_checked = crate::WalkCheckedScope::enter(Some(checked), Some(pointer));
         let lay = view.lay.clone();
         if let Some(lay) = lay.as_ref() {
+            // Script's pause/play/cancel/finish of CSS animations, before
+            // the build reads them: here rather than in the relayout
+            // entry, so a forced layout (`getComputedStyle` right after
+            // `a.pause()` in the same task) reads the controlled state.
+            let controls = std::mem::take(&mut lay.animated.borrow_mut().controls);
             let mut anims = lay.animations.borrow_mut();
+            for control in &controls {
+                anims.control(control);
+            }
             anims.last_build_clock = Some(anims.clock_ms);
             anims.begin_build();
         }
@@ -204,6 +212,35 @@ impl LayoutCtx {
                 Some(frames)
             };
         lay.animations.borrow_mut().on_style(node, style, &resolve);
+        // Script's animated values, above the CSS ones: each entry parsed
+        // against the style as it stands and composed on it.
+        let entries = lay.animated.borrow().script.get(&node).cloned();
+        if let Some(entries) = entries {
+            for (property, value, composite) in &entries {
+                let property = property.to_ascii_lowercase();
+                let indices = crate::animations::prop_indices(&property);
+                if indices.is_empty() {
+                    self.apply_style_property(style, &property, value);
+                    continue;
+                }
+                let mut probe = style.clone();
+                self.apply_style_property(&mut probe, &property, value);
+                for i in indices {
+                    let under = crate::animations::prop_value(style, i);
+                    let new = crate::animations::prop_value(&probe, i);
+                    let composed = crate::animations::compose(&under, &new, composite);
+                    crate::animations::set_prop_value(style, i, &composed);
+                }
+            }
+            // Paint's `group_opacity` takes the settled frame for a box
+            // that names a CSS animation (the parity settle path, set in
+            // `Animations::on_style` above). The script layer composed
+            // over it just now, so the settled value is restated here or
+            // paint would show the CSS-only opacity under a script fade.
+            if !style.animation_name.trim().is_empty() && !style.animation_name.eq_ignore_ascii_case("none") {
+                style.animation_settled_opacity = Some(style.opacity);
+            }
+        }
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`
@@ -351,6 +388,10 @@ pub(crate) struct ViewLayout {
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
+    /// The animated-style layer script's Web Animations write (shared
+    /// with the bindings), overlaid above the CSS animations, and the
+    /// engine's CSS animations as script sees them.
+    pub(crate) animated: rustkit_bindings::SharedAnimatedStyles,
     /// CH2.E7: the `overflow: auto` scrollers the last layout gave a styled
     /// bar (raw NodeId → vertical, horizontal), and whether the viewport
     /// had one. The next layout starts from them, so a relayout does not

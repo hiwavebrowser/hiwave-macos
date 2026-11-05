@@ -1,30 +1,36 @@
-// Web Animations, the part sites call: `Element.animate(keyframes, options)`,
-// `Animation`, `KeyframeEffect`, `document.timeline`, `getAnimations()`.
-// Without `animate` a page that ships an element at `opacity:0` and fades it
-// in with `el.animate(...).finished.then(() => el.style.opacity = "")`
-// threw and left the element transparent (a site's hero, 2026-11-04, S8).
+// Web Animations: `Element.animate(keyframes, options)`, `Animation`,
+// `KeyframeEffect`, `document.timeline`, `getAnimations()` (the engine's
+// CSS animations and transitions among them, as `CSSAnimation` and
+// `CSSTransition`), `playbackRate`, `reverse()`, `updatePlaybackRate()`,
+// composite `add`/`accumulate`, `commitStyles()`.
 //
-// Clock: the page's own timer clock. The engine has no animation clock of
-// its own (CSS animations settle on their end frame, transitions do not
-// run), so animations tick on animation frames (`requestAnimationFrame`, as
-// installed before page script), and the timeline's time is the frame's
-// timestamp. A played animation starts on the next frame, as in a browser.
+// Clock: the page's own timer clock. Animations tick on animation frames
+// (`requestAnimationFrame`, as installed before page script), the
+// timeline's time is the frame's timestamp, and the engine's CSS
+// animations run on the same clock. A played animation starts on the next
+// frame, as in a browser.
 //
-// Effect: the animated values are written into the element's inline style
-// and the style the page had is put back, exactly, when no animation is in
-// effect any more (finished without a forwards fill, cancelled). A value the
-// page writes during the animation becomes the new underlying value.
-// Stated limits: the writes are visible as `style` attribute changes
-// (getAttribute, MutationObserver) while an animation is in effect; an
-// inline `!important` declaration is left alone (as in a browser, where it
-// wins). Interpolated: numbers with matching units (opacity, lengths,
-// transforms with the same function list or `none`, rgb()/rgba()/#hex
-// colours); anything else flips at the midpoint. Reported unsupported:
-// `composite` other than replace, `pseudoElement`, `reverse()`,
-// `updatePlaybackRate()`, a `playbackRate` other than 1.
+// Effect: the animated values go to the engine's animated-style layer
+// (`__rustkit_animated_style.write`, one entry per property in animation
+// order, with its composite), which the build overlays on the element's
+// cascaded style above its CSS animations and transitions. The `style`
+// attribute is never touched (a MutationObserver on it sees nothing;
+// S13c), and `commitStyles()` is the one write to it. Interpolated here:
+// numbers with matching units (opacity, lengths, transforms with the same
+// function list or `none`, rgb()/rgba()/#hex colours); anything else flips
+// at the midpoint. The underlying value of an implicit 0%/100% keyframe is
+// the computed value read before this animation's first write (the
+// computed `matrix()` form for a transform). Composite `add`/`accumulate`
+// of lengths in different units (px + %, px + em) is not a `calc()` as in
+// Chrome: the engine takes the new value, which is `replace` for that
+// property. Reported unsupported: `pseudoElement`; a `CSSAnimation`'s
+// `currentTime`/`playbackRate` writes and a `CSSTransition`'s `pause()`.
 (function (g) {
     var document = g.document;
     if (!document || !g.Element) return;
+    var layer = g.__rustkit_animated_style;
+    try { delete g.__rustkit_animated_style; } catch (_) {}
+    if (!layer) return;
 
     var raf = g.requestAnimationFrame;
     var Promise_ = Promise;
@@ -187,6 +193,9 @@
         return key.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
     }
     var RESERVED = { offset: 1, easing: 1, composite: 1 };
+    function compositeOf(v) {
+        return v === 'add' || v === 'accumulate' || v === 'replace' ? v : 'auto';
+    }
     function parseKeyframes(input) {
         if (input == null) return [];
         var frames = [];
@@ -194,8 +203,8 @@
             var list = Array.prototype.slice.call(input);
             for (var i = 0; i < list.length; i++) {
                 var f = list[i] || {};
-                var kf = { offset: f.offset == null ? null : Number(f.offset), easing: f.easing || 'linear', values: {} };
-                if (f.composite && f.composite !== 'replace' && f.composite !== 'auto') __rk.unsupported('Element', 'animate(composite)');
+                var kf = { offset: f.offset == null ? null : Number(f.offset), easing: f.easing || 'linear',
+                           composite: compositeOf(f.composite), values: {} };
                 Object.keys(f).forEach(function (k) {
                     if (!RESERVED[k] && f[k] != null) kf.values[cssName(k)] = String(f[k]);
                 });
@@ -217,15 +226,18 @@
                 v.forEach(function (val, j) {
                     var off = v.length === 1 ? 1 : j / (v.length - 1);
                     var key = String(off);
-                    var kf = byOffset[key] || (byOffset[key] = { offset: off, easing: 'linear', values: {} });
+                    var kf = byOffset[key] || (byOffset[key] = { offset: off, easing: 'linear', composite: 'auto', values: {} });
                     kf.values[cssName(k)] = String(val);
                 });
             });
-            if (input.composite && input.composite !== 'replace' && input.composite !== 'auto') __rk.unsupported('Element', 'animate(composite)');
+            var composites = input.composite == null ? [] : (Array.isArray(input.composite) ? input.composite : [input.composite]);
             var easings = input.easing == null ? [] : (Array.isArray(input.easing) ? input.easing : [input.easing]);
             frames = Object.keys(byOffset).map(function (k) { return byOffset[k]; })
                 .sort(function (x, y) { return x.offset - y.offset; });
-            frames.forEach(function (f, j) { if (easings.length) f.easing = easings[j % easings.length]; });
+            frames.forEach(function (f, j) {
+                if (easings.length) f.easing = easings[j % easings.length];
+                if (composites.length) f.composite = compositeOf(composites[j % composites.length]);
+            });
         } else {
             throw new TypeError("Failed to execute 'animate' on 'Element': The provided value is not of type '(sequence<object> or object)'.");
         }
@@ -253,13 +265,13 @@
     // ----------------------------------------------------------------- timing
     function parseTiming(options) {
         var t = { delay: 0, endDelay: 0, fill: 'auto', iterationStart: 0, iterations: 1,
-                  duration: 'auto', direction: 'normal', easing: 'linear' };
+                  duration: 'auto', direction: 'normal', easing: 'linear', composite: 'replace' };
         if (typeof options === 'number') t.duration = options;
         else if (options && typeof options === 'object') {
             ['delay', 'endDelay', 'fill', 'iterationStart', 'iterations', 'duration', 'direction', 'easing']
                 .forEach(function (k) { if (options[k] !== undefined) t[k] = options[k]; });
             if (options.pseudoElement) __rk.unsupported('Element', 'animate(pseudoElement)');
-            if (options.composite && options.composite !== 'replace' && options.composite !== 'auto') __rk.unsupported('Element', 'animate(composite)');
+            if (options.composite === 'add' || options.composite === 'accumulate') t.composite = options.composite;
         }
         t.delay = Number(t.delay) || 0;
         t.endDelay = Number(t.endDelay) || 0;
@@ -314,13 +326,16 @@
             this._frames = parseKeyframes(keyframes);
             this._timing = parseTiming(options);
         }
-        this.composite = 'replace';
         this.pseudoElement = null;
         this._animation = null;
     }
+    Object.defineProperty(KeyframeEffect.prototype, 'composite', {
+        get: function () { return this._timing.composite; },
+        set: function (v) { if (v === 'add' || v === 'accumulate' || v === 'replace') { this._timing.composite = v; touch(this); } }
+    });
     KeyframeEffect.prototype.getKeyframes = function () {
         return this._frames.map(function (f) {
-            var o = { offset: f.offset, computedOffset: f.offset, easing: f.easing, composite: 'auto' };
+            var o = { offset: f.offset, computedOffset: f.offset, easing: f.easing, composite: f.composite };
             Object.keys(f.values).forEach(function (k) {
                 o[k.replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); })] = f.values[k];
             });
@@ -350,24 +365,30 @@
     KeyframeEffect.prototype.updateTiming = function (opts) {
         var merged = this.getTiming();
         Object.keys(opts || {}).forEach(function (k) { merged[k] = opts[k]; });
+        merged.composite = this._timing.composite;
         this._timing = parseTiming(merged);
         if (this._animation) this._animation._updateFinished(false);
         touch(this);
     };
-    // Property values at progress: { prop: value }.
+    // Property values at progress: [[prop, value, composite], ...].
     KeyframeEffect.prototype._values = function (p, underlying) {
-        var frames = this._frames, out = {};
+        var frames = this._frames, out = [], effectComposite = this._timing.composite;
         var props = {};
         frames.forEach(function (f) { Object.keys(f.values).forEach(function (k) { props[k] = 1; }); });
         Object.keys(props).forEach(function (prop) {
             var list = frames.filter(function (f) { return prop in f.values; })
-                .map(function (f) { return { offset: f.offset, value: f.values[prop], ease: f.ease }; });
-            if (list[0].offset !== 0) list.unshift({ offset: 0, value: underlying(prop), ease: linear });
-            if (list[list.length - 1].offset !== 1) list.push({ offset: 1, value: underlying(prop), ease: linear });
+                .map(function (f) { return { offset: f.offset, value: f.values[prop], ease: f.ease, composite: f.composite }; });
+            if (list[0].offset !== 0) list.unshift({ offset: 0, value: underlying(prop), ease: linear, composite: 'replace' });
+            if (list[list.length - 1].offset !== 1) list.push({ offset: 1, value: underlying(prop), ease: linear, composite: 'replace' });
             var a, b;
             if (p < 0) { a = list[0]; b = list[1]; }
-            else if (p >= 1) { a = list[list.length - 2]; b = list[list.length - 1]; if (p === 1) { out[prop] = finalValue(prop, b.value); return; } }
-            else {
+            else if (p >= 1) {
+                a = list[list.length - 2]; b = list[list.length - 1];
+                if (p === 1) {
+                    out.push([prop, finalValue(prop, b.value), b.composite === 'auto' ? effectComposite : b.composite]);
+                    return;
+                }
+            } else {
                 for (var i = 0; i < list.length - 1; i++) {
                     if (p >= list[i].offset && p < list[i + 1].offset) { a = list[i]; b = list[i + 1]; break; }
                 }
@@ -375,14 +396,15 @@
             }
             var span = b.offset - a.offset;
             var local = span === 0 ? 0 : (p - a.offset) / span;
-            out[prop] = finalValue(prop, interpolate(prop, a.value, b.value, a.ease(local)));
+            var composite = a.composite === 'auto' ? effectComposite : a.composite;
+            out.push([prop, finalValue(prop, interpolate(prop, a.value, b.value, a.ease(local))), composite]);
         });
         return out;
     };
 
     // ------------------------------------------------------------- timeline
     var timeNow = 0;          // the last frame's time
-    var all = [];             // animations, oldest first (composite order)
+    var all = [];             // script animations, oldest first (composite order)
     var frameQueued = false;
     var timeline = {};
     Object.defineProperty(timeline, 'currentTime', { get: function () { return timeNow; }, enumerable: true });
@@ -404,8 +426,8 @@
         for (var i = 0; i < list.length; i++) {
             var a = list[i];
             if (a._pending === 'play') {
-                a._startTime = timeNow - (a._holdTime || 0);
-                a._holdTime = null;
+                a._startTime = a._rate === 0 ? timeNow : timeNow - (a._holdTime || 0) / a._rate;
+                if (a._rate !== 0) a._holdTime = null;
                 a._pending = null;
                 a._resolveReady();
             } else if (a._pending === 'pause') {
@@ -416,50 +438,20 @@
             if (a._pending || a.playState === 'running') more = true;
         }
         applyAll();
+        if (refreshCss()) more = true;
         if (more) queueFrame();
     }
 
-    // ------------------------------------------------------ inline write-back
-    // One record per animated element: the style attribute the page had
-    // (`base`), what we last wrote (`wrote`), and the values in it.
+    // ------------------------------------------------ the animated-style layer
+    // One record per animated element: what was last written, and the
+    // underlying values read before the first write of each property.
     var records = [];
     function recordFor(el, make) {
         for (var i = 0; i < records.length; i++) if (records[i].el === el) return records[i];
         if (!make) return null;
-        var r = { el: el, base: el.getAttribute('style'), wrote: null, values: {} };
+        var r = { el: el, wrote: null, under: {} };
         records.push(r);
         return r;
-    }
-    function setAttr(el, v) {
-        if (v == null) el.removeAttribute('style'); else el.setAttribute('style', v);
-    }
-    // The page wrote the style attribute since we did: what it now holds,
-    // less our values where it left them, is the new base.
-    function rebase(r) {
-        var el = r.el;
-        if (r.wrote == null || el.getAttribute('style') === r.wrote) return;
-        var keep = {};
-        var baseDecl = parseDecls(r.base);
-        Object.keys(r.values).forEach(function (p) {
-            if (el.style.getPropertyValue(p) === r.values[p]) keep[p] = baseDecl[p];
-        });
-        Object.keys(keep).forEach(function (p) {
-            if (keep[p]) el.style.setProperty(p, keep[p].value, keep[p].priority);
-            else el.style.removeProperty(p);
-        });
-        r.base = el.getAttribute('style');
-        r.wrote = null;
-        r.values = {};
-    }
-    function parseDecls(text) {
-        var out = {};
-        if (!text) return out;
-        var el = probe(text);
-        for (var i = 0; i < el.style.length; i++) {
-            var p = el.style.item(i);
-            out[p] = { value: el.style.getPropertyValue(p), priority: el.style.getPropertyPriority(p) };
-        }
-        return out;
     }
     function inEffect(a) {
         if (!a._effect || !a._effect.target) return false;
@@ -475,57 +467,37 @@
         });
         touched.forEach(applyTo);
     }
-    var probeEl = null;
-    function probe(text) {
-        if (!probeEl) probeEl = document.createElement('div');
-        if (text == null) probeEl.removeAttribute('style'); else probeEl.setAttribute('style', text);
-        return probeEl;
-    }
     function applyTo(el) {
         var mine = all.filter(function (a) { return a._effect && a._effect.target === el && inEffect(a); });
         var r = recordFor(el, mine.length > 0);
         if (!r) return;
-        rebase(r);
         if (!mine.length) {
-            if (r.wrote != null && el.getAttribute('style') === r.wrote) setAttr(el, r.base);
+            if (r.wrote != null) layer.write(el, null);
             records.splice(records.indexOf(r), 1);
             return;
         }
-        // Build the new attribute off-tree: one write to the element.
-        var p = probe(r.base);
-        var important = {};
-        for (var i = 0; i < p.style.length; i++) {
-            var name = p.style.item(i);
-            if (p.style.getPropertyPriority(name) === 'important') important[name] = 1;
-        }
-        var values = {};
+        var entries = [];
+        var seen = {};
         mine.forEach(function (a) {
             var e = a._effect;
             var c = computed(e._timing, a.currentTime);
             var v = e._values(c.progress, function (prop) {
-                if (prop in values) return values[prop];
-                var s = p.style.getPropertyValue(prop);
-                if (s) return s;
-                // Underlying computed value, read once, before any write of ours.
-                var under = e._under || (e._under = {});
-                if (!(prop in under)) {
-                    try { under[prop] = r.wrote == null ? (g.getComputedStyle(el).getPropertyValue(prop) || '') : ''; }
-                    catch (_) { under[prop] = ''; }
+                // An earlier animation's output this frame is the underlying.
+                for (var i = entries.length - 1; i >= 0; i--) if (entries[i][0] === prop) return entries[i][1];
+                // Else the computed value, read once before any write of ours.
+                if (!(prop in r.under)) {
+                    try { r.under[prop] = g.getComputedStyle(el).getPropertyValue(prop) || ''; }
+                    catch (_) { r.under[prop] = ''; }
                 }
-                return under[prop];
+                return r.under[prop];
             });
-            Object.keys(v).forEach(function (k) { values[k] = v[k]; });
+            v.forEach(function (entry) { if (entry[1] !== '') { entries.push(entry); seen[entry[0]] = 1; } });
         });
-        var written = {};
-        Object.keys(values).forEach(function (name) {
-            if (important[name] || values[name] === '') return;
-            p.style.setProperty(name, values[name]);
-            written[name] = p.style.getPropertyValue(name);
-        });
-        var text = p.getAttribute('style');
-        if (el.getAttribute('style') !== text) setAttr(el, text);
-        r.values = written;
-        r.wrote = el.getAttribute('style');
+        var text = JSON.stringify(entries);
+        if (text !== r.wrote) {
+            layer.write(el, entries);
+            r.wrote = text;
+        }
     }
     function touch(effect) {
         if (effect && effect.target) applyTo(effect.target);
@@ -542,6 +514,7 @@
         this._holdTime = null;
         this._pending = null;
         this._idle = true;
+        this._rate = 1;
         this._finishedState = false;
         this._listeners = {};
         this.onfinish = null;
@@ -583,7 +556,7 @@
         get: function () { return this._startTime; },
         set: function (v) {
             this._startTime = v == null ? null : Number(v);
-            this._holdTime = null;
+            if (this._rate !== 0) this._holdTime = null;
             this._pending = null;
             this._idle = this._startTime == null;
             if (all.indexOf(this) < 0) all.push(this);
@@ -592,23 +565,42 @@
             queueFrame();
         }
     });
+    // "Set the playback rate": the current time is kept, the start time
+    // re-anchored to it.
+    Animation.prototype._setRate = function (rate) {
+        rate = Number(rate);
+        if (!isFinite(rate)) throw new TypeError("playbackRate must be a finite number");
+        var ct = this.currentTime;
+        this._rate = rate;
+        if (ct != null && this._holdTime == null && this._startTime != null && this._pending !== 'pause') {
+            if (rate === 0) this._holdTime = ct;
+            else this._startTime = timeNow - ct / rate;
+        }
+    };
     Object.defineProperty(Animation.prototype, 'playbackRate', {
-        get: function () { return 1; },
-        set: function (v) { if (Number(v) !== 1) __rk.unsupported('Animation', 'playbackRate'); }
+        get: function () { return this._rate; },
+        set: function (v) { this._setRate(v); this._updateFinished(false); touch(this._effect); queueFrame(); }
     });
+    Animation.prototype.updatePlaybackRate = function (rate) {
+        this._setRate(rate);
+        if (this._pending == null && this._startTime != null) { this._newReady(false); this._pending = 'play'; this._holdTime = this.currentTime; this._startTime = null; }
+        this._updateFinished(false);
+        touch(this._effect);
+        queueFrame();
+    };
     Object.defineProperty(Animation.prototype, 'currentTime', {
         get: function () {
             if (this._idle) return null;
             if (this._holdTime != null) return this._holdTime;
             if (this._startTime == null) return null;
-            return timeNow - this._startTime;
+            return (timeNow - this._startTime) * this._rate;
         },
         set: function (v) {
             if (v == null) throw new TypeError("Failed to set the 'currentTime' property on 'Animation': currentTime may not be changed from resolved to unresolved");
             v = Number(v);
             this._idle = false;
-            if (this._holdTime != null || this._startTime == null || this._pending === 'pause') this._holdTime = v;
-            else this._startTime = timeNow - v;
+            if (this._holdTime != null || this._startTime == null || this._pending === 'pause' || this._rate === 0) this._holdTime = v;
+            else this._startTime = timeNow - v / this._rate;
             if (all.indexOf(this) < 0) all.push(this);
             this._updateFinished(true);
             touch(this._effect);
@@ -619,20 +611,21 @@
             var ct = this.currentTime;
             if (ct == null && this._startTime == null && this._pending == null) return 'idle';
             if (this._pending === 'pause' || (this._startTime == null && this._pending !== 'play')) return 'paused';
-            if (ct != null && ct >= this._end()) return 'finished';
+            if (ct != null && ((this._rate > 0 && ct >= this._end()) || (this._rate < 0 && ct <= 0))) return 'finished';
             return 'running';
         }
     });
     Animation.prototype._end = function () { return this._effect ? endTime(this._effect._timing) : 0; };
-    // Clamp at the end and settle `finished` (Web Animations "update an
-    // animation's finished state", playback rate 1).
+    // Clamp at the end (or the start, running backwards) and settle
+    // `finished` (Web Animations "update an animation's finished state").
     Animation.prototype._updateFinished = function (didSeek) {
         var end = this._end();
         if (this._startTime != null && this._pending == null) {
             var ct = this.currentTime;
-            if (ct != null && ct >= end) this._holdTime = didSeek ? ct : end;
-            else if (didSeek && this._holdTime != null) {
-                this._startTime = timeNow - this._holdTime;
+            if (ct != null && this._rate > 0 && ct >= end) this._holdTime = didSeek ? ct : end;
+            else if (ct != null && this._rate < 0 && ct <= 0) this._holdTime = didSeek ? ct : 0;
+            else if (didSeek && this._holdTime != null && this._rate !== 0) {
+                this._startTime = timeNow - this._holdTime / this._rate;
                 this._holdTime = null;
             }
         }
@@ -678,12 +671,19 @@
         for (var i = 0; i < list.length; i++) { try { list[i].call(this, ev); } catch (e) { report(e); } }
         return true;
     };
+    // "Play an animation" with auto-rewind: from the start running
+    // forwards, from the end running backwards.
     Animation.prototype.play = function () {
         var ct = this.currentTime, end = this._end();
-        if (this._idle || ct == null || ct < 0 || ct >= end) this._holdTime = 0;
+        if (this._rate > 0 && (this._idle || ct == null || ct < 0 || ct >= end)) this._holdTime = 0;
+        else if (this._rate < 0 && (this._idle || ct == null || ct <= 0 || ct > end)) {
+            if (end === Infinity) throw domError('InvalidStateError', "Failed to execute 'play' on 'Animation': Cannot play reversed Animation with infinite target effect end.");
+            this._holdTime = end;
+        }
+        else if (this._rate === 0 && (this._idle || ct == null)) this._holdTime = 0;
         else if (this._pending === 'play') return;
-        else if (this._startTime != null && this._pending == null) return;
-        else this._holdTime = ct;
+        else if (this._holdTime == null && this._startTime != null && this._pending == null) return;
+        else if (this._holdTime == null) this._holdTime = ct;
         this._idle = false;
         if (all.indexOf(this) < 0) all.push(this);
         if (this._pending == null) this._newReady(false);
@@ -696,7 +696,7 @@
     Animation.prototype.pause = function () {
         if (this._pending === 'pause' || (this._startTime == null && this._pending == null && !this._idle)) return;
         var ct = this.currentTime;
-        if (this._idle || ct == null) ct = 0;
+        if (this._idle || ct == null) ct = this._rate < 0 ? this._end() : 0;
         this._idle = false;
         this._holdTime = ct;
         this._startTime = null;
@@ -708,15 +708,15 @@
         queueFrame();
     };
     Animation.prototype.finish = function () {
-        if (this._effect && this._effect._timing.iterations === Infinity && dur(this._effect._timing) > 0) {
+        if (this._effect && this._effect._timing.iterations === Infinity && dur(this._effect._timing) > 0 && this._rate >= 0) {
             throw domError('InvalidStateError', "Failed to execute 'finish' on 'Animation': Cannot finish Animation with an infinite target effect end.");
         }
-        var end = this._end();
+        var limit = this._rate < 0 ? 0 : this._end();
         this._idle = false;
         if (all.indexOf(this) < 0) all.push(this);
-        if (this._holdTime != null || this._startTime == null) this._holdTime = end;
-        else this._startTime = timeNow - end;
-        if (this._startTime == null) this._startTime = timeNow - end;
+        if (this._holdTime != null || this._startTime == null || this._rate === 0) this._holdTime = limit;
+        else this._startTime = timeNow - limit / this._rate;
+        if (this._startTime == null) this._startTime = this._rate === 0 ? timeNow : timeNow - limit / this._rate;
         if (this._pending === 'pause') this._holdTime = null;
         if (this._pending) { this._pending = null; this._resolveReady(); }
         this._updateFinished(true);
@@ -736,23 +736,30 @@
         }
         touch(this._effect);
     };
-    Animation.prototype.reverse = function () { __rk.unsupported('Animation', 'reverse'); };
-    Animation.prototype.updatePlaybackRate = function (r) { if (Number(r) !== 1) __rk.unsupported('Animation', 'updatePlaybackRate'); };
+    // "Reverse an animation": the rate flips and it plays from where it is
+    // (with auto-rewind from an end).
+    Animation.prototype.reverse = function () {
+        var before = this._rate;
+        this._setRate(-this._rate);
+        try { this.play(); }
+        catch (e) { this._setRate(before); throw e; }
+    };
     Animation.prototype.persist = function () { this.replaceState = 'persisted'; };
+    // Into the `style` attribute: the one write to it (css-animations-2
+    // commitStyles), of the computed values as they stand.
     Animation.prototype.commitStyles = function () {
         var e = this._effect;
         if (!e || !e.target) return;
         var el = e.target;
         var c = computed(e._timing, this.currentTime);
         if (c.progress == null) return;
-        var r = recordFor(el, false);
-        if (r) rebase(r);
-        var vals = e._values(c.progress, function (p) { return g.getComputedStyle(el).getPropertyValue(p); });
-        // Into the base, so it stays once the animation is gone.
-        var pe = probe(r ? r.base : el.getAttribute('style'));
-        Object.keys(vals).forEach(function (p) { pe.style.setProperty(p, vals[p]); });
-        if (r) { r.base = pe.getAttribute('style'); applyTo(el); }
-        else setAttr(el, pe.getAttribute('style'));
+        var props = {};
+        e._frames.forEach(function (f) { Object.keys(f.values).forEach(function (k) { props[k] = 1; }); });
+        var cs = g.getComputedStyle(el);
+        Object.keys(props).forEach(function (p) {
+            var v = cs.getPropertyValue(p);
+            if (v !== '') el.style.setProperty(p, v);
+        });
     };
     Animation.prototype._relevant = function () {
         var s = this.playState;
@@ -772,9 +779,137 @@
     AnimationPlaybackEvent.prototype.stopPropagation = function () {};
     AnimationPlaybackEvent.prototype.stopImmediatePropagation = function () {};
 
+    // --------------------------------------- the engine's CSS animations
+    // `CSSAnimation`/`CSSTransition`: one object per engine record, keyed
+    // on the record's id (never its `animation-name` slot: a replaced,
+    // restarted or same-name-again animation is a new record and a new
+    // object, as in Chrome), kept while the record lives, its state
+    // refreshed from the engine on each frame and each `getAnimations()`.
+    function CSSAnimation() { throw new TypeError('Illegal constructor'); }
+    CSSAnimation.prototype = Object.create(Animation.prototype);
+    CSSAnimation.prototype.constructor = CSSAnimation;
+    function CSSTransition() { throw new TypeError('Illegal constructor'); }
+    CSSTransition.prototype = Object.create(Animation.prototype);
+    CSSTransition.prototype.constructor = CSSTransition;
+    var cssWrappers = {};
+    function cssKey(info) { return String(info.id); }
+    function cssTiming(info) {
+        return { duration: info.duration, delay: info.delay, iterations: info.iterations == null ? Infinity : info.iterations,
+                 direction: info.direction, fill: info.fill, easing: info.easing };
+    }
+    function cssCurrentTime(info) {
+        return info.paused != null ? info.paused : timeNow - info.start;
+    }
+    function cssPlayState(info) {
+        return info.ended ? 'finished' : info.paused != null ? 'paused' : 'running';
+    }
+    function wrapCss(info) {
+        var key = cssKey(info), w = cssWrappers[key];
+        if (!w) {
+            var target = layer.byId(info.node);
+            if (!target) return null;
+            w = Object.create(info.kind === 'transition' ? CSSTransition.prototype : CSSAnimation.prototype);
+            w._css = info; w._listeners = {}; w.id = ''; w.onfinish = null; w.oncancel = null; w.onremove = null;
+            w.replaceState = 'active'; w.timeline = timeline; w._idle = false; w._pending = null; w._rate = 1;
+            w._effect = new KeyframeEffect(target, null, cssTiming(info));
+            w._effect._animation = w;
+            if (info.kind === 'transition') w.transitionProperty = info.name; else w.animationName = info.name;
+            w._newReady(true); w._newFinished();
+            cssWrappers[key] = w;
+        } else {
+            w._css = info;
+            w._effect._timing = parseTiming(cssTiming(info));
+        }
+        if (info.ended && !w._finishedState) {
+            w._finishedState = true;
+            w._finRes(w);
+            microtask(function () { if (w._finishedState) w._dispatch('finish'); });
+        }
+        return w;
+    }
+    function cssTarget(w) { return w._effect.target; }
+    function cssGone(w, cancelled) {
+        delete cssWrappers[cssKey(w._css)];
+        if (cancelled && !w._finishedState) {
+            w._finRej(domError('AbortError', 'The user aborted a request.'));
+            w._newFinished();
+            microtask(function () { w._dispatch('cancel'); });
+        }
+        w._gone = true;
+    }
+    // Refresh the wrappers from the engine; true while any still runs.
+    function refreshCss() {
+        var keys = Object.keys(cssWrappers);
+        if (!keys.length) return false;
+        var infos = layer.css(), live = {}, running = false;
+        infos.forEach(function (info) {
+            var w = wrapCss(info);
+            if (w) { live[cssKey(info)] = 1; if (!info.ended && info.paused == null) running = true; }
+        });
+        keys.forEach(function (key) {
+            var w = cssWrappers[key];
+            if (!w || live[key]) return;
+            var c = w._css, over = c.ended || (c.paused == null && timeNow - c.start >= c.delay + c.duration * (c.iterations == null ? Infinity : c.iterations));
+            if (over && !w._finishedState) { w._finishedState = true; w._finRes(w); microtask(function () { w._dispatch('finish'); }); }
+            cssGone(w, !over);
+        });
+        return running;
+    }
+    function cssProto(proto, kind) {
+        Object.defineProperty(proto, 'currentTime', {
+            get: function () { return this._gone ? null : cssCurrentTime(this._css); },
+            set: function () { __rk.unsupported('CSSAnimation', 'currentTime'); }
+        });
+        Object.defineProperty(proto, 'startTime', {
+            get: function () { return this._gone ? null : this._css.start; },
+            set: function () { __rk.unsupported('CSSAnimation', 'currentTime'); }
+        });
+        Object.defineProperty(proto, 'playbackRate', {
+            get: function () { return 1; },
+            set: function () { __rk.unsupported('CSSAnimation', 'playbackRate'); }
+        });
+        Object.defineProperty(proto, 'playState', {
+            get: function () { return this._gone ? 'idle' : cssPlayState(this._css); }
+        });
+        Object.defineProperty(proto, 'pending', { get: function () { return false; } });
+        Object.defineProperty(proto, 'effect', { get: function () { return this._effect; }, set: function () {} });
+        function control(w, op) {
+            if (w._gone) return;
+            layer.control(cssTarget(w), w._css.kind, w._css.id, op);
+            queueFrame();
+        }
+        proto.play = function () { control(this, 'play'); };
+        proto.pause = function () {
+            if (kind === 'transition') { __rk.unsupported('CSSTransition', 'pause'); return; }
+            control(this, 'pause');
+        };
+        proto.finish = function () { control(this, 'finish'); };
+        proto.cancel = function () { control(this, 'cancel'); cssGone(this, true); };
+        proto.reverse = function () { __rk.unsupported('CSSAnimation', 'playbackRate'); };
+        proto.updatePlaybackRate = function () { __rk.unsupported('CSSAnimation', 'playbackRate'); };
+        proto._relevant = function () { return !this._gone; };
+    }
+    cssProto(CSSAnimation.prototype, 'animation');
+    cssProto(CSSTransition.prototype, 'transition');
+    // The engine's records as wrappers: transitions first, then
+    // animations, in document order (Web Animations §5.4.1).
+    function cssAnimations() {
+        var out = [];
+        layer.css().forEach(function (info) {
+            var w = wrapCss(info);
+            if (w) out.push(w);
+        });
+        out.sort(function (x, y) {
+            var kx = x._css.kind === 'transition' ? 0 : 1, ky = y._css.kind === 'transition' ? 0 : 1;
+            return kx - ky || x._css.node - y._css.node || x._css.index - y._css.index;
+        });
+        if (out.length) queueFrame();
+        return out;
+    }
+
     function animationsOf(filter) {
         // Drop idle animations nobody can reach through getAnimations.
-        return all.filter(function (a) { return a._relevant() && filter(a); });
+        return cssAnimations().filter(filter).concat(all.filter(function (a) { return a._relevant() && filter(a); }));
     }
 
     g.Element.prototype.animate = function (keyframes, options) {
@@ -803,6 +938,8 @@
     g.AnimationTimeline = AnimationTimeline;
     g.DocumentTimeline = DocumentTimeline;
     g.AnimationPlaybackEvent = AnimationPlaybackEvent;
+    g.CSSAnimation = CSSAnimation;
+    g.CSSTransition = CSSTransition;
 
     // Idle animations fall out of the list so a page that animates on every
     // hover does not keep them all.

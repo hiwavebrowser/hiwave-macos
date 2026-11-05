@@ -480,6 +480,8 @@ mod web_animations_tests;
 mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
+#[cfg(all(test, feature = "headless"))]
+mod waapi_layer_tests;
 mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
@@ -8587,6 +8589,10 @@ impl Engine {
         }
         relayout_cause::set_last_build_reused_tree(false);
         relayout_cause::take_stage_ms();
+
+        // Script's pause/play/cancel/finish of CSS animations are taken by
+        // the build itself (`LayoutCtx::with_building`), so a forced
+        // layout sees them too.
 
         let layout_skipped = self.relayout_uncounted(id)?;
         // A drop-down whose select left the document, lost the focus or
@@ -24023,6 +24029,15 @@ fn publish_geometry(
     lay: Rc<layout_ctx::ViewLayout>,
 ) {
     bindings.share_element_scrolls(lay.element_scrolls.clone());
+    // The CSS animations as of this layout, for `getAnimations()`, and the
+    // properties they animate, for computed reads.
+    {
+        let anims = lay.animations.borrow();
+        let mut animated = lay.animated.borrow_mut();
+        animated.css = anims.describe();
+        animated.css_props = anims.animated_props();
+    }
+    bindings.share_animated_styles(lay.animated.clone());
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
