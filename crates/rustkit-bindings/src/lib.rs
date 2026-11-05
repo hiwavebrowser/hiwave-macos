@@ -936,6 +936,22 @@ impl DomBindings {
     pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
         debug!("Initializing DOM bindings");
 
+        // `window.ipc.postMessage` lands here (CH2.E9). Registered before
+        // the setup scripts: a global added after them made every page
+        // load measurably slower (two app tests 1.4 s -> 3.0 s).
+        let ipc_queue = Rc::new(RefCell::new(Vec::new()));
+        let queue = Rc::clone(&ipc_queue);
+        runtime.register_host_function(
+            "__rk_ipc_post",
+            1,
+            Box::new(move |args| {
+                if let Some(JsValue::String(payload)) = args.first() {
+                    queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
+                }
+                JsValue::Undefined
+            }),
+        )?;
+
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
@@ -994,19 +1010,6 @@ impl DomBindings {
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
         runtime.evaluate_with_host(include_str!("web_animations.js"))?;
-        // `window.ipc.postMessage` lands here (CH2.E9).
-        let ipc_queue = Rc::new(RefCell::new(Vec::new()));
-        let queue = Rc::clone(&ipc_queue);
-        runtime.register_host_function(
-            "__rk_ipc_post",
-            1,
-            Box::new(move |args| {
-                if let Some(JsValue::String(payload)) = args.first() {
-                    queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
-                }
-                JsValue::Undefined
-            }),
-        )?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
