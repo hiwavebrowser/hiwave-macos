@@ -12,14 +12,22 @@ use super::*;
 use crate::script_net_tests::serve_routes;
 
 fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
 }
 
 fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
     let server = serve_routes(vec![("/", "text/html", page.to_string())]);
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
-        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        })
         .expect("view");
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt().block_on(engine.load_url(view, url)).expect("load_url");
@@ -27,7 +35,9 @@ fn load(page: &str) -> (Engine, EngineViewId, crate::script_net_tests::Server) {
 }
 
 fn read(engine: &mut Engine, view: EngineViewId, expr: &str) -> String {
-    let value = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    let value = engine
+        .execute_script(view, &format!("String({expr})"))
+        .unwrap();
     value
         .strip_prefix("String(\"")
         .and_then(|v| v.strip_suffix("\")"))
@@ -59,7 +69,8 @@ fn computed(engine: &mut Engine, view: EngineViewId, prop: &str) -> String {
 
 fn opacity(engine: &mut Engine, view: EngineViewId) -> f64 {
     let s = computed(engine, view, "opacity");
-    s.parse().unwrap_or_else(|_| panic!("computed opacity {s:?}"))
+    s.parse()
+        .unwrap_or_else(|_| panic!("computed opacity {s:?}"))
 }
 
 fn log(engine: &mut Engine, view: EngineViewId) -> String {
@@ -88,9 +99,16 @@ fn a_class_toggle_transitions_opacity_and_fires_transitionend_once() {
     assert!(mid > 0.05 && mid < 0.95, "midway opacity {mid}");
     pump(&mut engine, view, 160, 16);
     assert_eq!(opacity(&mut engine, view), 1.0);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,end:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
     pump(&mut engine, view, 200, 16);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,end:opacity", "end fires once");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity",
+        "end fires once"
+    );
 }
 
 /// `getComputedStyle` reads the interpolated value midway: linear timing,
@@ -101,7 +119,10 @@ fn get_computed_style_reads_the_interpolated_value_midway() {
     run(&mut engine, view, "h.classList.add('on')");
     pump(&mut engine, view, 50, 10);
     let mid = opacity(&mut engine, view);
-    assert!((mid - 0.5).abs() <= 0.12, "opacity at 50 ms of a linear 100 ms fade: {mid}");
+    assert!(
+        (mid - 0.5).abs() <= 0.12,
+        "opacity at 50 ms of a linear 100 ms fade: {mid}"
+    );
 }
 
 /// Taking the transition away midway (`transition: none`) cancels it:
@@ -115,7 +136,10 @@ fn a_cancelled_transition_fires_transitioncancel_not_end() {
     assert!(opacity(&mut engine, view) < 0.95);
     run(&mut engine, view, "h.style.transition='none'");
     pump(&mut engine, view, 200, 16);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,cancel:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,cancel:opacity"
+    );
     assert_eq!(opacity(&mut engine, view), 1.0);
 }
 
@@ -128,7 +152,10 @@ fn removing_the_element_cancels_its_transition() {
     pump(&mut engine, view, 48, 16);
     run(&mut engine, view, "h.remove()");
     pump(&mut engine, view, 200, 16);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,cancel:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,cancel:opacity"
+    );
 }
 
 /// Toggling back midway reverses from the value reached: the first
@@ -142,7 +169,10 @@ fn retargeting_midway_reverses_from_the_current_value() {
     run(&mut engine, view, "h.classList.remove('on')");
     pump(&mut engine, view, 16, 16);
     let back = opacity(&mut engine, view);
-    assert!(back <= reached && back > 0.0, "reversing from {reached}: {back}");
+    assert!(
+        back <= reached && back > 0.0,
+        "reversing from {reached}: {back}"
+    );
     pump(&mut engine, view, 200, 16);
     assert_eq!(opacity(&mut engine, view), 0.0);
     assert_eq!(
@@ -174,10 +204,16 @@ fn transform_colour_and_length_interpolate() {
         .trim_start_matches("rgb(")
         .trim_end_matches(')')
         .split(',')
-        .map(|c| c.trim().parse().unwrap_or_else(|_| panic!("colour {colour:?}")))
+        .map(|c| {
+            c.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("colour {colour:?}"))
+        })
         .collect();
     assert!(
-        (channels[0] - 128.0).abs() <= 30.0 && channels[1] == 0.0 && (channels[2] - 128.0).abs() <= 30.0,
+        (channels[0] - 128.0).abs() <= 30.0
+            && channels[1] == 0.0
+            && (channels[2] - 128.0).abs() <= 30.0,
         "background-color at 50 ms: {colour}"
     );
     let transform = computed(&mut engine, view, "transform");
@@ -190,23 +226,38 @@ fn transform_colour_and_length_interpolate() {
         .trim()
         .parse()
         .unwrap();
-    assert!((tx - 50.0).abs() <= 12.0, "translateX at 50 ms: {transform}");
+    assert!(
+        (tx - 50.0).abs() <= 12.0,
+        "translateX at 50 ms: {transform}"
+    );
     pump(&mut engine, view, 200, 16);
     assert_eq!(computed(&mut engine, view, "width"), "200px");
-    assert_eq!(computed(&mut engine, view, "background-color"), "rgb(255, 0, 0)");
-    assert_eq!(computed(&mut engine, view, "transform"), "matrix(1, 0, 0, 1, 100, 0)");
+    assert_eq!(
+        computed(&mut engine, view, "background-color"),
+        "rgb(255, 0, 0)"
+    );
+    assert_eq!(
+        computed(&mut engine, view, "transform"),
+        "matrix(1, 0, 0, 1, 100, 0)"
+    );
     let mut ended: Vec<&str> = Vec::new();
     let logged = log(&mut engine, view);
     ended.extend(logged.split(',').filter(|s| !s.is_empty()));
     ended.sort();
-    assert_eq!(ended, ["end:background-color", "end:transform", "end:width"]);
+    assert_eq!(
+        ended,
+        ["end:background-color", "end:transform", "end:width"]
+    );
 }
 
 /// A delay holds the start value, then the transition runs: `transitionrun`
 /// at once, `transitionstart` when the delay is over.
 #[test]
 fn delay_holds_the_start_value_then_runs() {
-    let page = PAGE.replace("transition:opacity 100ms linear", "transition:opacity 100ms linear 100ms");
+    let page = PAGE.replace(
+        "transition:opacity 100ms linear",
+        "transition:opacity 100ms linear 100ms",
+    );
     let (mut engine, view, _server) = load(&page);
     run(&mut engine, view, "h.classList.add('on')");
     pump(&mut engine, view, 50, 10);
@@ -218,14 +269,20 @@ fn delay_holds_the_start_value_then_runs() {
     assert_eq!(log(&mut engine, view), "run:opacity,start:opacity");
     pump(&mut engine, view, 150, 10);
     assert_eq!(opacity(&mut engine, view), 1.0);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,end:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
 }
 
 /// `transition-property: width` does not run opacity (no event), and a
 /// property with a zero duration changes at once.
 #[test]
 fn only_the_named_property_transitions() {
-    let page = PAGE.replace("transition:opacity 100ms linear", "transition:width 100ms linear");
+    let page = PAGE.replace(
+        "transition:opacity 100ms linear",
+        "transition:width 100ms linear",
+    );
     let (mut engine, view, _server) = load(&page);
     run(&mut engine, view, "h.classList.add('on')");
     pump(&mut engine, view, 16, 16);

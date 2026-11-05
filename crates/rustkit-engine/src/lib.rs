@@ -463,6 +463,7 @@ mod feed_reveal_trigger_tests;
 mod web_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_tests;
+mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
@@ -1147,6 +1148,8 @@ impl ViewState {
         self.lay.checked_states.borrow_mut().clear();
         self.lay.element_scrolls.borrow_mut().clear();
         self.lay.focused_node.set(None);
+        // Likewise the old page's transitions and their per-node values.
+        self.lay.animations.borrow_mut().reset();
         self.wheel_gesture = None;
         self.hovered_node = None;
         self.lay.hover_chain.borrow_mut().clear();
@@ -4785,6 +4788,10 @@ impl Engine {
             timer_stopped
         };
         out.yielded_for_frame = frame_yield.get();
+        // The animation clock is the timer clock as the timers left it, so
+        // the layout below (and the one `settle_animations` makes) reads
+        // the transitions at this turn's time.
+        view.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -5016,6 +5023,19 @@ impl Engine {
             // Or the resize above already did.
             Ok(relaid_out) => out.relaid_out |= relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout after a live turn failed"),
+        }
+        // Running transitions: a frame of theirs, their events, and the
+        // next turn no later than the next frame.
+        match self.settle_animations(id) {
+            Ok(relaid_out) => out.relaid_out |= relaid_out,
+            Err(e) => debug!(?id, error = %e, "relayout for animations failed"),
+        }
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.lay.animations.borrow().active())
+        {
+            out.next_timer_ms = Some(out.next_timer_ms.map_or(LIVE_FRAME_MS, |ms| ms.min(LIVE_FRAME_MS)));
         }
         // What the callbacks added may show images the load never saw. Their
         // fetch starts here and no turn waits for it (until 2026-10-05 this
@@ -8921,8 +8941,77 @@ impl Engine {
     }
 
     /// What a build of view `id` reads of it, as it is now.
+    /// A frame of the view's transitions (css-transitions-1 §3): lay the
+    /// view out at the animation clock unless this turn already did, fire
+    /// the transition events the builds queued (cancelling first those of
+    /// elements no longer in the document), and lay out again for what
+    /// their listeners wrote. Returns whether the view was laid out.
+    fn settle_animations(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let needs_frame = {
+            let anims = view.lay.animations.borrow();
+            anims.active() && anims.last_build_clock != Some(anims.clock_ms)
+        };
+        let mut laid = false;
+        if needs_frame {
+            self.relayout_for(id, RelayoutCause::Animation)?;
+            laid = true;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return Ok(laid);
+        };
+        let (events, unsupported) = {
+            let document = view.document.clone();
+            let mut anims = view.lay.animations.borrow_mut();
+            anims.prune(|raw| {
+                document
+                    .as_ref()
+                    .is_some_and(|document| Self::node_connected(document, raw))
+            });
+            (anims.take_events(), anims.take_unsupported())
+        };
+        // A `transition` naming a property the engine does not run is a
+        // gap the Inspector lists (`CSSTransition.<property>`).
+        for property in unsupported {
+            view.inspector.unsupported_api("CSSTransition", &property, 1, None);
+        }
+        if events.is_empty() {
+            return Ok(laid);
+        }
+        let Some(bindings) = view.bindings.as_ref() else {
+            return Ok(laid);
+        };
+        for event in &events {
+            if let Err(e) = bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
+            {
+                debug!(?id, error = %e, kind = event.kind, "transition event failed");
+            }
+        }
+        inspector_glue::drain_errors(bindings, &view.inspector, "timers");
+        laid |= self.flush_script_dom_writes(id, Some(RelayoutCause::Animation))?;
+        Ok(laid)
+    }
+
+    /// Whether the node of raw id `raw` is in `document`'s tree.
+    fn node_connected(document: &Document, raw: usize) -> bool {
+        let Some(mut node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+            return false;
+        };
+        loop {
+            match node.parent() {
+                Some(parent) => node = parent,
+                None => return matches!(node.node_type, NodeType::Document),
+            }
+        }
+    }
+
     fn build_view(&self, id: EngineViewId) -> layout_ctx::BuildView {
         let view = self.views.get(&id);
+        if let Some(view) = view {
+            view.lay.animations.borrow_mut().disabled = self.config.disable_animations;
+        }
         layout_ctx::BuildView {
             id,
             lay: view.map(|v| v.lay.clone()),
@@ -9847,6 +9936,10 @@ impl layout_ctx::LayoutCtx {
                     })
                 });
                 drop(own_rules);
+                // Transitions: start what this cascade's changes call for
+                // and overlay the running ones (after the memo, so the
+                // memo keeps the cascade's own result).
+                self.animate_style(node.id.raw(), &mut style);
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -13976,42 +14069,39 @@ impl layout_ctx::LayoutCtx {
                     style.scale = op;
                 }
             }
-            // ==================== Transitions (parsed, not executed) ====================
+            // ==================== Transitions (run by animations.rs) ====================
             "transition" => {
-                // Shorthand: property duration timing-function delay
-                let parts: Vec<&str> = value.split_whitespace().collect();
-                if !parts.is_empty() {
-                    style.transition_property = parts[0].to_string();
-                }
-                if parts.len() > 1 {
-                    if let Some(dur) = parse_time(parts[1]) {
-                        style.transition_duration = dur;
-                    }
-                }
-                if parts.len() > 2 {
-                    style.transition_timing_function = parse_timing_function(parts[2]);
-                }
-                if parts.len() > 3 {
-                    if let Some(delay) = parse_time(parts[3]) {
-                        style.transition_delay = delay;
-                    }
-                }
+                style.transitions =
+                    animations::parse_transition_shorthand(value, parse_time, parse_timing_function);
+                animations::sync_transition_scalars(style, value.trim().eq_ignore_ascii_case("none"));
             }
             "transition-property" => {
-                style.transition_property = value.trim().to_string();
+                animations::set_transition_properties(style, value);
+                animations::sync_transition_scalars(style, value.trim().eq_ignore_ascii_case("none"));
             }
             "transition-duration" => {
-                if let Some(dur) = parse_time(value) {
-                    style.transition_duration = dur;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_transition_component(style, times, |item, t| item.duration = t);
+                animations::sync_transition_scalars(style, false);
             }
             "transition-timing-function" => {
-                style.transition_timing_function = parse_timing_function(value);
+                let timings: Vec<rustkit_css::TimingFunction> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .map(parse_timing_function)
+                    .collect();
+                animations::set_transition_component(style, timings, |item, t| item.timing = t);
+                animations::sync_transition_scalars(style, false);
             }
             "transition-delay" => {
-                if let Some(delay) = parse_time(value) {
-                    style.transition_delay = delay;
-                }
+                let times: Vec<f32> = animations::split_top_level(value, ',')
+                    .into_iter()
+                    .filter_map(parse_time)
+                    .collect();
+                animations::set_transition_component(style, times, |item, t| item.delay = t);
+                animations::sync_transition_scalars(style, false);
             }
             // ==================== Animations (parsed, not executed) ====================
             "animation" => {
@@ -14212,6 +14302,10 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            "transition" | "transition-property" => {
+                style.transitions.clear();
+                animations::sync_transition_scalars(style, false);
+            }
             "outline" => {
                 style.outline = rustkit_css::Outline { offset: style.outline.offset.clone(), ..Default::default() };
             }

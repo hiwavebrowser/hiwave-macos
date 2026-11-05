@@ -3833,6 +3833,22 @@ const WRAPPERS_JS: &str = r#"
         },
         configurable: true, enumerable: false, writable: true
     });
+    // The engine's CSS transitions report their phases (css-transitions-2
+    // §4): a trusted TransitionEvent that bubbles; `transitionend` can be
+    // cancelled, the others not. An element taken out of the document
+    // still hears its `transitioncancel`.
+    Object.defineProperty(Document.prototype, '__rkFireTransition', {
+        value: function (id, type, init) {
+            var target = typeof id === 'number' ? wrap(id) : null;
+            if (!target) return;
+            init.bubbles = true;
+            init.cancelable = type === 'transitionend';
+            var ev = new (typeof g.TransitionEvent === 'function' ? g.TransitionEvent : g.Event)(type, init);
+            try { ev.isTrusted = true; } catch (_) {}
+            target.dispatchEvent(ev);
+        },
+        configurable: true, enumerable: false, writable: true
+    });
     // The engine delivers the user's mouse input: a trusted event that
     // bubbles and can be cancelled (UI Events §3.4), except the enter and
     // leave events, which do neither and go to one element each.

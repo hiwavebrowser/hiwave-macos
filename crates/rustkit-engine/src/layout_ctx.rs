@@ -110,9 +110,22 @@ impl LayoutCtx {
         // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
         let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
         let _walk_checked = crate::WalkCheckedScope::enter(Some(checked));
+        if let Some(lay) = view.lay.as_ref() {
+            let mut anims = lay.animations.borrow_mut();
+            anims.last_build_clock = Some(anims.clock_ms);
+        }
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         build()
+    }
+
+    /// The transitions' hand-off for one element of the view being built
+    /// (`Animations::on_style`); nothing outside a build.
+    pub(crate) fn animate_style(&self, node: usize, style: &mut crate::ComputedStyle) {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone());
+        if let Some(lay) = lay {
+            lay.animations.borrow_mut().on_style(node, style);
+        }
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`
@@ -223,6 +236,9 @@ pub(crate) struct ViewLayout {
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+    /// This view's running CSS transitions and the values they compare
+    /// against, read and advanced by every build (`animations.rs`).
+    pub(crate) animations: RefCell<crate::animations::Animations>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box
