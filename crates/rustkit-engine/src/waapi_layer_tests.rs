@@ -310,3 +310,128 @@ fn animation_constructor_and_document_timeline() {
     assert_eq!(read(&mut engine, view, "a.playState"), "finished");
     assert_eq!(opacity(&mut engine, view), 1.0);
 }
+
+/// (a) A `CSSAnimation` object is one engine animation, not one
+/// `animation-name` slot: a class swap that replaces the name mid-run gives
+/// a new object with the new name, the old one's `finished` rejected and
+/// its state `idle`, the new one's pending. An animation that ended and is
+/// then replaced keeps its resolved `finished`, and the replacement is a
+/// third object (Chrome: a new `CSSAnimation` per animation).
+#[test]
+fn a_swapped_animation_name_is_a_new_css_animation_object() {
+    let (mut engine, view, _server) = load(&page(
+        "#h{opacity:0}#h.enter{animation:fadeIn 1s linear forwards}#h.leave{animation:fadeOut 1s linear forwards}\
+         @keyframes fadeIn{to{opacity:1}}@keyframes fadeOut{from{opacity:1}to{opacity:0}}",
+        "<div id=h class=enter></div>",
+        "window.watch=function(tag,a){a.finished.then(function(){log.push(tag+':res')},function(e){log.push(tag+':rej:'+e.name)});\
+         a.oncancel=function(){log.push(tag+':cancel')}};",
+    ));
+    pump(&mut engine, view, 16, 16);
+    run(&mut engine, view, "window.a=h.getAnimations()[0];watch('a',a);");
+    assert_eq!(read(&mut engine, view, "a.animationName+','+a.playState"), "fadeIn,running");
+    run(&mut engine, view, "h.classList.replace('enter','leave');");
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "window.b=h.getAnimations()[0];watch('b',b);");
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        read(
+            &mut engine,
+            view,
+            "[b!==a, a.animationName, b.animationName, a.playState, b.playState, a.currentTime===null].join()"
+        ),
+        "true,fadeIn,fadeOut,idle,running,true"
+    );
+    assert_eq!(read(&mut engine, view, "log.join()"), "a:rej:AbortError,a:cancel", "the old one was cancelled, the new one is pending");
+    pump(&mut engine, view, 1100, 50);
+    assert_eq!(read(&mut engine, view, "b.playState+','+log.join()"), "finished,a:rej:AbortError,a:cancel,b:res");
+    // The ended one is replaced: its `finished` stays resolved, it goes
+    // idle, and the replacement is a new object with a pending `finished`.
+    run(&mut engine, view, "h.classList.replace('leave','enter');");
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "window.c=h.getAnimations()[0];watch('c',c);");
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        read(
+            &mut engine,
+            view,
+            "[c!==a, c!==b, c.animationName, c.playState, b.playState, h.getAnimations().length].join()"
+        ),
+        "true,true,fadeIn,running,idle,1"
+    );
+    assert_eq!(read(&mut engine, view, "log.join()"), "a:rej:AbortError,a:cancel,b:res");
+}
+
+/// (b) `display: none` then shown again restarts the CSS animation (#885)
+/// as a new `CSSAnimation` object, whether or not a frame ran in between;
+/// the hidden one's wrapper is cancelled.
+#[test]
+fn a_hidden_then_shown_css_animation_is_a_new_object() {
+    let (mut engine, view, _server) = load(&page(
+        "#h{opacity:0;animation:fade 1s linear forwards}#h.hide{display:none}@keyframes fade{to{opacity:1}}",
+        "<div id=h></div>",
+        "window.watch=function(tag,a){a.finished.then(function(){log.push(tag+':res')},function(e){log.push(tag+':rej:'+e.name)});\
+         a.oncancel=function(){log.push(tag+':cancel')}};",
+    ));
+    pump(&mut engine, view, 16, 16);
+    run(&mut engine, view, "window.a=h.getAnimations()[0];watch('a',a);");
+    run(&mut engine, view, "h.classList.add('hide');");
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "h.classList.remove('hide');");
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "window.b=h.getAnimations()[0];watch('b',b);");
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        read(&mut engine, view, "[b!==a, a.playState, b.playState, b.currentTime<200, log.join()].join()"),
+        "true,idle,running,true,a:rej:AbortError,a:cancel"
+    );
+    // Hidden and shown within one task, with a forced style read between:
+    // still a new animation and a new object.
+    run(&mut engine, view, "h.classList.add('hide');h.offsetWidth;h.classList.remove('hide');");
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "window.c=h.getAnimations()[0];watch('c',c);");
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        read(&mut engine, view, "[c!==b, c!==a, b.playState, c.playState, c.currentTime<200, log.join()].join()"),
+        "true,true,idle,running,true,a:rej:AbortError,a:cancel,b:rej:AbortError,b:cancel"
+    );
+}
+
+/// (c) The CSS dropping the name mid-run cancels the wrapper: `finished`
+/// rejects with `AbortError`, a `cancel` event fires, and it reads as
+/// `idle` with a null `currentTime`.
+#[test]
+fn dropping_the_animation_name_mid_run_cancels_its_wrapper() {
+    let (mut engine, view, _server) = load(&page(
+        "#h{opacity:0}#h.go{animation:fade 1s linear forwards}@keyframes fade{to{opacity:1}}",
+        "<div id=h class=go></div>",
+        "",
+    ));
+    pump(&mut engine, view, 16, 16);
+    run(
+        &mut engine,
+        view,
+        "window.a=h.getAnimations()[0];\
+         a.finished.then(function(){log.push('res')},function(e){log.push('rej:'+e.name)});\
+         a.addEventListener('cancel',function(e){log.push('cancel:'+e.type)});",
+    );
+    assert_eq!(read(&mut engine, view, "a.playState"), "running");
+    run(&mut engine, view, "h.classList.remove('go');");
+    pump(&mut engine, view, 32, 16);
+    assert_eq!(
+        read(&mut engine, view, "[a.playState, a.currentTime, h.getAnimations().length, log.join()].join()"),
+        "idle,,0,rej:AbortError,cancel:cancel"
+    );
+}
+
+/// `composite: 'add'` on `opacity` clamps at 1, as the property's range
+/// does (`.75 + .5` is 1, not 1.25).
+#[test]
+fn an_opacity_add_clamps_at_one() {
+    let (mut engine, view, _server) = load(&page(
+        "#h{opacity:.75}",
+        "<div id=h></div>",
+        "window.a=h.animate({opacity:[0.5,0.5]},{duration:100,composite:'add',fill:'forwards'});",
+    ));
+    pump(&mut engine, view, 150, 10);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+}
