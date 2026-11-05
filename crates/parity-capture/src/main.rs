@@ -73,7 +73,8 @@ struct Args {
     #[arg(long)]
     dump_layout: Option<String>,
 
-    /// JSON string or path to JSON file defining interaction sequence (wait/click/key/resize/capture)
+    /// JSON string or path to JSON file defining interaction sequence
+    /// (wait/click/hover/key/resize/capture; `key` takes `modifiers`)
     #[arg(long)]
     actions: Option<String>,
 
@@ -301,6 +302,10 @@ struct ActionItem {
     label: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// `key` only: modifier names held while the key is pressed, as
+    /// Playwright spells them (`Control`, `Shift`, `Alt`, `Meta`).
+    #[serde(default)]
+    modifiers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -524,6 +529,13 @@ fn main() {
             println!("{}", serde_json::to_string(&timeout_result).unwrap());
             std::process::exit(3);
         });
+    }
+
+    // The Chrome baselines are captured with `--hide-scrollbars`
+    // (Playwright's default): styled scrollbars take no space there, so
+    // they take none here (CH2.E7). RUSTKIT_SHOW_SCROLLBARS=1 keeps them.
+    if std::env::var("RUSTKIT_SHOW_SCROLLBARS").map_or(true, |v| v != "1") {
+        rustkit_layout::scroll::set_scrollbars_hidden(true);
     }
 
     let started = Instant::now();
@@ -1015,6 +1027,78 @@ fn parse_point(eval_res: &str) -> Option<(f32, f32)> {
     Some((x, y))
 }
 
+/// The focused control's value, for telling an engine-typed key from one the
+/// page swallowed.
+const ACTIVE_VALUE_JS: &str =
+    "(function(){ var el = document.activeElement; return String(el && 'value' in el ? el.value : ''); })()";
+/// A one-shot capture listener: did the engine's key reach the page? The
+/// listener is kept on `window` so a read for a key the page never heard
+/// can remove it; otherwise it would fire on the next key before that key
+/// was pressed.
+const KEY_SEEN_ARM_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); } \
+    window.__parityCaptureKeySeen = false; \
+    window.__parityCaptureKeyListener = function(){ window.__parityCaptureKeySeen = true; window.__parityCaptureKeyListener = null; }; \
+    document.addEventListener('keydown', window.__parityCaptureKeyListener, { once: true, capture: true }); })()";
+/// Two answers that are not substrings of each other: `execute_script`
+/// returns the value's debug form (`String("key-heard")`), so the read is a
+/// `contains`, and 'unseen' contains 'seen' (#898 R1).
+const KEY_SEEN_READ_JS: &str = "(function(){ \
+    if (window.__parityCaptureKeySeen) return 'key-heard'; \
+    if (window.__parityCaptureKeyListener) { \
+        document.removeEventListener('keydown', window.__parityCaptureKeyListener, true); \
+        window.__parityCaptureKeyListener = null; } \
+    return 'key-silent'; })()";
+
+/// Did the page hear the engine's key? Reads what `KEY_SEEN_READ_JS` returned.
+fn key_was_seen(read: &str) -> bool {
+    read.contains("key-heard")
+}
+
+/// A `selector` field may name several selectors to try in order, comma
+/// separated, as `click` has always read it. Top-level commas only: a comma
+/// inside `:is(a, b)`, `[title="x, y"]` or quotes belongs to the selector.
+fn split_selector_list(selector: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in selector.chars() {
+        match quote {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '(' | '[' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
 fn execute_actions(
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
@@ -1071,9 +1155,9 @@ fn execute_actions(
             }
             "click" => {
                 if let Some(ref sel) = a.selector {
-                    let selectors: Vec<&str> = sel.split(',').map(|s| s.trim()).collect();
+                    let selectors = split_selector_list(sel);
                     let mut clicked = false;
-                    for s in selectors {
+                    for s in selectors.iter().map(String::as_str) {
                         let s_json = serde_json::to_string(s).unwrap_or_default();
                         let query_js = format!(
                             r#"(function() {{
@@ -1142,7 +1226,62 @@ fn execute_actions(
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
                 }
             }
+            "hover" => {
+                // A pointer move to the element's centre and nothing else: the
+                // page sees mousemove/mouseover and `:hover` applies, no press.
+                let point = match (a.selector.as_ref(), a.x, a.y) {
+                    (Some(sel), _, _) => split_selector_list(sel).into_iter().find_map(|s| {
+                        let sel_json = serde_json::to_string(&s).unwrap_or_default();
+                        let query_js = format!(
+                            r#"(function() {{
+                                var el = document.querySelector({0});
+                                if (!el || typeof el.getBoundingClientRect !== 'function') return 'missing';
+                                var r = el.getBoundingClientRect();
+                                if (!r || !(r.width > 0 && r.height > 0)) return 'missing';
+                                return 'point:' + (r.left + r.width / 2.0) + ':' + (r.top + r.height / 2.0);
+                            }})()"#,
+                            sel_json
+                        );
+                        let found = engine
+                            .execute_script(view_id, &query_js)
+                            .ok()
+                            .and_then(|res| parse_point(&res));
+                        if found.is_some() {
+                            a_res.selector_used = Some(s);
+                        }
+                        found
+                    }),
+                    (None, Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                };
+                match point {
+                    Some((cx, cy)) => {
+                        engine.mouse_move_at_point(view_id, cx, cy);
+                        let _ = engine.relayout(view_id);
+                        a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                    }
+                    None if a.selector.is_some() => {
+                        a_res.status = "selector_not_found".to_string();
+                        a_res.error = Some(format!(
+                            "no matching element found for selector {}",
+                            a.selector.as_deref().unwrap_or("")
+                        ));
+                    }
+                    None => {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some("hover action requires selector or (x, y)".to_string());
+                    }
+                }
+            }
             "key" => {
+                let held = |name: &str| {
+                    a.modifiers
+                        .as_ref()
+                        .map(|m| m.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                        .unwrap_or(false)
+                };
+                let (ctrl, shift, alt, meta) =
+                    (held("Control"), held("Shift"), held("Alt"), held("Meta"));
                 if let Some(ref sel) = a.selector {
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
                     let focus_js = format!(
@@ -1152,19 +1291,39 @@ fn execute_actions(
                     let _ = engine.execute_script(view_id, &focus_js);
                 }
                 if let Some(ref text) = a.text {
-                    let text_json = serde_json::to_string(text).unwrap_or_default();
-                    let key_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement;
-                            if (el && 'value' in el) {{
-                                el.value = (el.value || '') + {0};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }})()"#,
-                        text_json
-                    );
-                    let _ = engine.execute_script(view_id, &key_js);
+                    // Typed through the engine's keyboard, a key at a time, as
+                    // Playwright's keyboard.type does: the page hears a keydown
+                    // per character and the focused control edits its own
+                    // value (selection replaced, caret moved). The value is
+                    // written from script only when no control took the keys.
+                    let before = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    for ch in text.chars() {
+                        let key = ch.to_string();
+                        let _ = engine.handle_text_key(view_id, 0, &key, false, false, false);
+                    }
+                    let after = engine
+                        .execute_script(view_id, ACTIVE_VALUE_JS)
+                        .unwrap_or_default();
+                    if after == before {
+                        let text_json = serde_json::to_string(text).unwrap_or_default();
+                        let key_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement;
+                                if (el && 'value' in el) {{
+                                    el.value = (el.value || '') + {0};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }})()"#,
+                            text_json
+                        );
+                        let _ = engine.execute_script(view_id, &key_js);
+                        a_res.method = Some("script_value".to_string());
+                    } else {
+                        a_res.method = Some("engine_keys".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 } else if let Some(ref key) = a.key {
                     let key_code = match key.as_str() {
@@ -1174,19 +1333,37 @@ fn execute_actions(
                         "Tab" => 9,
                         _ => 0,
                     };
-                    let _ = engine.handle_text_key(view_id, key_code, key, false, false, false);
-                    let key_json = serde_json::to_string(key).unwrap_or_default();
-                    let event_js = format!(
-                        r#"(function() {{
-                            var el = document.activeElement || document.body;
-                            if (el) {{
-                                el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {0}, bubbles: true }}));
-                                el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {0}, bubbles: true }}));
-                            }}
-                        }})()"#,
-                        key_json
-                    );
-                    let _ = engine.execute_script(view_id, &event_js);
+                    // The engine fires the DOM keydown itself (fire_key). The
+                    // synthetic event below is only for a key the engine did
+                    // not route to the page; sending both made every listener
+                    // hear the key twice and a toggle undo itself.
+                    let _ = engine.execute_script(view_id, KEY_SEEN_ARM_JS);
+                    // The engine's keyboard has no meta flag; Meta is Ctrl's
+                    // equivalent on macOS and the chrome takes either.
+                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl || meta, shift, alt);
+                    let seen = engine
+                        .execute_script(view_id, KEY_SEEN_READ_JS)
+                        .map(|r| key_was_seen(&r))
+                        .unwrap_or(false);
+                    if seen {
+                        a_res.method = Some("engine_key".to_string());
+                    } else {
+                        let key_json = serde_json::to_string(key).unwrap_or_default();
+                        let event_js = format!(
+                            r#"(function() {{
+                                var el = document.activeElement || document.body;
+                                if (el) {{
+                                    var init = {{ key: {0}, bubbles: true, cancelable: true,
+                                                  ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
+                                    el.dispatchEvent(new KeyboardEvent('keydown', init));
+                                    el.dispatchEvent(new KeyboardEvent('keyup', init));
+                                }}
+                            }})()"#,
+                            key_json, ctrl, shift, alt, meta
+                        );
+                        let _ = engine.execute_script(view_id, &event_js);
+                        a_res.method = Some("synthetic_key".to_string());
+                    }
                     let _ = engine.relayout(view_id);
                 }
             }
@@ -2285,5 +2462,172 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             "{lines:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // CH3.A1 (chrome board): the board drives HiWave's own chrome pages
+    // through the same action list in RustKit and in Chromium. Two states
+    // need actions the list did not have: "hover on the second tab" (a
+    // pointer move with no press) and "focus mode" (Ctrl+Shift+F — a key
+    // with modifiers). Playwright has `page.hover` and `Control+Shift+F`;
+    // these tests pin the RustKit side.
+    fn board_view(html: &str) -> (rustkit_engine::Engine, rustkit_engine::EngineViewId) {
+        let mut engine = EngineBuilder::new().javascript_enabled(true).build().expect("engine");
+        let view = engine
+            .create_headless_view(Bounds { x: 0, y: 0, width: 300, height: 200 })
+            .expect("view");
+        engine.load_html(view, html).expect("load_html");
+        (engine, view)
+    }
+
+    #[test]
+    fn a_hover_action_moves_the_pointer_over_the_selector_without_pressing() {
+        let (mut engine, view) = board_view(
+            "<html><head><style>#t{width:100px;height:40px}</style></head><body>\
+             <div id=\"t\"></div><script>\
+             document.addEventListener('mousedown', function(){ document.body.setAttribute('data-pressed','1'); });\
+             document.addEventListener('click', function(){ document.body.setAttribute('data-pressed','1'); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"hover","selector":"#t"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let res = &result.action_results.as_ref().expect("action results")[0];
+        assert_eq!(res.status, "ok", "hover is an action: {res:?}");
+        assert!(
+            res.method.as_deref().unwrap_or("").starts_with("engine_point("),
+            "hover moves the engine pointer to the element's centre: {res:?}"
+        );
+        let pressed = engine
+            .execute_script(view, "String(document.body.getAttribute('data-pressed'))")
+            .unwrap_or_default();
+        assert!(!pressed.contains('1'), "a hover never presses: {pressed}");
+    }
+
+    #[test]
+    fn a_key_action_carries_its_modifiers_into_the_keyboard_event() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey?'c':'') + (e.shiftKey?'s':'') + (e.metaKey?'m':'') + (e.altKey?'a':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(
+            r#"[{"type":"key","key":"F","modifiers":["Control","Shift"]}]"#,
+        )
+        .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "the page's keydown listener saw Ctrl+Shift+F: {seen}");
+    }
+
+    // The engine's `handle_text_key` fires the DOM keydown itself (fire_key),
+    // and the action then dispatched a synthetic one on top: a page listener
+    // heard every key twice, and a toggle (the chrome's Ctrl+Shift+F focus
+    // mode) switched on and straight off again (chrome board, 2026-11-05).
+    #[test]
+    fn a_key_action_reaches_the_page_listener_once() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             var n = 0;\
+             document.addEventListener('keydown', function(e){ n += 1; document.body.setAttribute('data-n', String(n)); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F3"}]"#).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-n'))")
+            .unwrap_or_default();
+        assert!(seen.contains('1') && !seen.contains('2'), "one keydown per key action: {seen}");
+    }
+
+    // `key` with `text` wrote the string onto the control's value from
+    // script: no keydown, no selection replaced. Playwright types it. The
+    // chrome's address bar selects all on focus, so Chromium showed the typed
+    // URL and RustKit the old one with the typed URL appended (chrome board,
+    // 2026-11-05). Typed text goes through the engine's keyboard, a key at a
+    // time, as a user's does.
+    #[test]
+    fn typed_text_goes_through_the_engines_keyboard_a_key_at_a_time() {
+        let (mut engine, view) = board_view(
+            "<html><body><input id=\"i\" value=\"abc\"><script>\
+             var keys = [];\
+             document.addEventListener('keydown', function(e){ keys.push(e.key); document.body.setAttribute('data-keys', keys.join('')); });\
+             </script></body></html>",
+        );
+        let actions = parse_actions(r##"[{"type":"key","selector":"#i","text":"xy"}]"##).expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let keys = engine
+            .execute_script(view, "String(document.body.getAttribute('data-keys'))")
+            .unwrap_or_default();
+        assert!(keys.contains("xy"), "the page heard a keydown per typed character: {keys}");
+        let value = engine
+            .execute_script(view, "String(document.getElementById('i').value)")
+            .unwrap_or_default();
+        assert!(value.contains("abcxy"), "the text landed in the focused control: {value}");
+    }
+
+    // #898 R1 (Prometheus): `KEY_SEEN_READ_JS` answers 'unseen' and the check
+    // was `contains("seen")` — true either way, so the synthetic-key fallback
+    // was dead and every key was labelled engine_key.
+    #[test]
+    fn a_key_the_page_did_not_hear_reads_as_not_seen() {
+        assert!(!key_was_seen("String(\"unseen\")"), "'unseen' is not seen");
+        assert!(!key_was_seen("String(\"key-silent\")"), "the silent answer is not seen");
+        assert!(key_was_seen("String(\"key-heard\")"), "the heard answer is seen");
+    }
+
+    // The one-shot listener armed for a key the page never heard must not
+    // stay armed: the next key would read as seen before it was pressed.
+    #[test]
+    fn an_unheard_key_leaves_no_armed_listener_behind() {
+        let (mut engine, view) = board_view("<html><body></body></html>");
+        let _ = engine.execute_script(view, KEY_SEEN_ARM_JS);
+        let read = engine.execute_script(view, KEY_SEEN_READ_JS).unwrap_or_default();
+        assert!(!key_was_seen(&read), "nothing pressed: {read}");
+        let later = engine
+            .execute_script(
+                view,
+                "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); \
+                 String(window.__parityCaptureKeySeen)",
+            )
+            .unwrap_or_default();
+        assert!(later.contains("false"), "the stale listener was cleared: {later}");
+    }
+
+    // Meta is Ctrl's equivalent on macOS and the chrome's shortcuts take either
+    // (`e.ctrlKey || e.metaKey`); the engine's keyboard has no meta flag, so a
+    // Meta chord goes through as Ctrl.
+    #[test]
+    fn a_meta_chord_reaches_the_page_as_a_control_chord() {
+        let (mut engine, view) = board_view(
+            "<html><body><script>\
+             document.addEventListener('keydown', function(e){\
+               document.body.setAttribute('data-k', (e.ctrlKey||e.metaKey?'c':'') + (e.shiftKey?'s':'') + e.key);\
+             });</script></body></html>",
+        );
+        let actions = parse_actions(r#"[{"type":"key","key":"F","modifiers":["Meta","Shift"]}]"#)
+            .expect("actions parse");
+        let mut result = CaptureResult::new(&parsed(&[]));
+        execute_actions(&mut engine, view, &actions, None, &mut result);
+        let seen = engine
+            .execute_script(view, "String(document.body.getAttribute('data-k'))")
+            .unwrap_or_default();
+        assert!(seen.contains("csF"), "Meta+Shift+F reached the page as a modifier chord: {seen}");
+    }
+
+    // A selector list splits on top-level commas only: `:is(a, b)` is one
+    // selector, not two broken ones.
+    #[test]
+    fn a_selector_list_splits_on_top_level_commas_only() {
+        assert_eq!(split_selector_list("#a, .b"), vec!["#a", ".b"]);
+        assert_eq!(
+            split_selector_list(":is(#a, .b) > span, [title=\"x, y\"]"),
+            vec![":is(#a, .b) > span", "[title=\"x, y\"]"]
+        );
     }
 }

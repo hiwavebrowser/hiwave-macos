@@ -16,6 +16,7 @@
 
 pub mod flex;
 pub mod forms;
+pub mod selection;
 pub mod fragment;
 pub mod grid;
 pub mod images;
@@ -107,6 +108,7 @@ pub use text::{
 pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
 use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
+use std::collections::HashMap;
 use std::cmp::Ordering;
 
 /// The `word-break` the line breaker should run with.
@@ -1253,9 +1255,28 @@ pub struct Dimensions {
     pub border: EdgeSizes,
     /// Margin.
     pub margin: EdgeSizes,
+    /// CH2.E7: the space a classic (styled) scrollbar takes, between the
+    /// padding and the border: `right` for the vertical bar, `bottom` for
+    /// the horizontal one (`left`/`top` stay 0 until RTL bars). It is not
+    /// border: `getComputedStyle().borderRightWidth`, `clientLeft` and the
+    /// border painter read `border` alone, and `clientWidth` (the padding
+    /// box) excludes it, as in Chrome. The border box includes it.
+    pub scrollbar: EdgeSizes,
 }
 
 impl Dimensions {
+    /// The border plus the scrollbar gutter on each side: what lies
+    /// between the padding box and the border box. Layout sums that size
+    /// a box from its border box read this, not `border`.
+    pub fn border_with_gutter(&self) -> EdgeSizes {
+        EdgeSizes {
+            top: self.border.top + self.scrollbar.top,
+            right: self.border.right + self.scrollbar.right,
+            bottom: self.border.bottom + self.scrollbar.bottom,
+            left: self.border.left + self.scrollbar.left,
+        }
+    }
+
     /// Get the padding box (content + padding).
     pub fn padding_box(&self) -> Rect {
         Rect {
@@ -1269,11 +1290,12 @@ impl Dimensions {
     /// Get the border box (content + padding + border).
     pub fn border_box(&self) -> Rect {
         let pb = self.padding_box();
+        let frame = self.border_with_gutter();
         Rect {
-            x: pb.x - self.border.left,
-            y: pb.y - self.border.top,
-            width: pb.width + self.border.horizontal(),
-            height: pb.height + self.border.vertical(),
+            x: pb.x - frame.left,
+            y: pb.y - frame.top,
+            width: pb.width + frame.horizontal(),
+            height: pb.height + frame.vertical(),
         }
     }
 
@@ -1433,6 +1455,63 @@ pub struct StackingContext {
     /// Positioned children in this stacking context.
     pub positioned_children: Vec<usize>,
 }
+
+/// Where some characters of a text run came from: the DOM text node
+/// `node`, whose white-space-collapsed text (see [`collapse_map`]) supplies
+/// `len` characters from its character `skip` on, at the run's character
+/// `at`. Runs join adjacent text nodes and strip collapsed spaces at their
+/// edges, so a run can have several sources and a source can start part
+/// way into its node's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSource {
+    pub node: usize,
+    pub at: usize,
+    pub skip: usize,
+    pub len: usize,
+    /// Whether the node's white space collapses (it does not under the pre
+    /// family): the same rule the run was built with.
+    pub collapsible: bool,
+}
+
+/// For each character of a DOM text node, the index of the character it
+/// becomes in the white-space-collapsed text (css-text §4.1, as the
+/// engine's box builder collapses it: document white space runs become one
+/// space, at the index of that space), plus one final entry for the end of
+/// the text. Under `collapsible == false` the map is the identity.
+pub fn collapse_map(text: &str, collapsible: bool) -> Vec<usize> {
+    let mut map = Vec::with_capacity(text.len() + 1);
+    if !collapsible {
+        let n = text.chars().count();
+        map.extend(0..=n);
+        return map;
+    }
+    let mut out = 0usize;
+    let mut in_ws = false;
+    for c in text.chars() {
+        if matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}') {
+            if !in_ws {
+                in_ws = true;
+            }
+            map.push(out);
+        } else {
+            if in_ws {
+                out += 1;
+                in_ws = false;
+            }
+            map.push(out);
+            out += 1;
+        }
+    }
+    if in_ws {
+        out += 1;
+    }
+    map.push(out);
+    map
+}
+
+/// The selection colour Chrome paints behind selected text and behind the
+/// selected part of a text control's value (macOS light appearance).
+pub const SELECTION_COLOR: Color = Color { r: 180, g: 215, b: 255, a: 1.0 };
 
 /// One line of a wrapped text box.
 ///
@@ -1640,6 +1719,15 @@ pub struct LayoutBox {
     /// previously impossible ("focus tracking requires DOM node ID in
     /// LayoutBox") and is unblocked by `node_id` below.
     pub focused_caret: Option<usize>,
+    /// The selected characters `[start, end)` of the FOCUSED text control's
+    /// value, when its selection is not collapsed. Set with `focused_caret`;
+    /// the painter fills them with the selection colour behind the text.
+    pub focused_selection: Option<(usize, usize)>,
+    /// For a text run: which DOM text nodes its characters came from (see
+    /// [`TextSource`]). Empty for every other box. Mouse selection maps a
+    /// point in the run back to a node and offset through it, and painting
+    /// maps a document selection forward onto the run's characters.
+    pub text_sources: Vec<TextSource>,
     /// Raw `NodeId` of the originating DOM node, when there is one.
     ///
     /// Carried as a plain `usize` so `rustkit-layout` keeps no dependency on
@@ -1701,6 +1789,13 @@ pub struct LayoutBox {
     pub sticky_shift: std::cell::Cell<(f32, f32)>,
     /// On the root box: the path to each sticky box, outermost first.
     pub sticky_paths: std::cell::RefCell<Vec<Vec<usize>>>,
+    /// CH2.E7: whether the overflow pass found this `overflow: auto`
+    /// scroller overflowing (vertically, horizontally), so its styled
+    /// scrollbar takes space (`scroll::LayoutBox::scrollbar_reserve`).
+    pub scrollbar_overflows: std::cell::Cell<(bool, bool)>,
+    /// Whether the pointer is over this scroller's thumb
+    /// (`::-webkit-scrollbar-thumb:hover`). Set by the engine.
+    pub scrollbar_thumb_hovered: std::cell::Cell<bool>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -1740,6 +1835,8 @@ impl LayoutBox {
             identity: None,
             link_href: None,
             focused_caret: None,
+            focused_selection: None,
+            text_sources: Vec::new(),
             node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
@@ -1752,6 +1849,8 @@ impl LayoutBox {
             sticky_rule: std::cell::Cell::new(None),
             sticky_shift: std::cell::Cell::new((0.0, 0.0)),
             sticky_paths: std::cell::RefCell::new(Vec::new()),
+            scrollbar_overflows: std::cell::Cell::new((false, false)),
+            scrollbar_thumb_hovered: std::cell::Cell::new(false),
         }
     }
 
@@ -2519,7 +2618,7 @@ impl LayoutBox {
         } else {
             // Inline box with no children and no explicit width:
             // Use horizontal padding + border as minimum (inline-block behavior)
-            self.dimensions.padding.horizontal() + self.dimensions.border.horizontal()
+            self.dimensions.padding.horizontal() + self.dimensions.border_with_gutter().horizontal()
         };
         self.dimensions.content.width = computed_width;
 
@@ -2527,7 +2626,7 @@ impl LayoutBox {
         // descent, §10.6.1) — not line-height. The line box still advances
         // by line-height in the parent loops; only the reported rect
         // changes. See inline_content_area.
-        let min_height = self.dimensions.padding.vertical() + self.dimensions.border.vertical();
+        let min_height = self.dimensions.padding.vertical() + self.dimensions.border_with_gutter().vertical();
         let (content_area_height, _) = self.inline_content_area();
         let line_height = content_area_height;
 
@@ -3190,11 +3289,11 @@ impl LayoutBox {
             d.padding = padding;
         }
         let horizontal_decoration = self.dimensions.border.left
-            + self.dimensions.border.right
+            + self.dimensions.border_with_gutter().right
             + self.dimensions.padding.left
             + self.dimensions.padding.right;
         let vertical_decoration = self.dimensions.border.top
-            + self.dimensions.border.bottom
+            + self.dimensions.border_with_gutter().bottom
             + self.dimensions.padding.top
             + self.dimensions.padding.bottom;
         let border_box_sizing = self.style.box_sizing == BoxSizing::BorderBox;
@@ -3699,7 +3798,7 @@ impl LayoutBox {
             + half_leading
             + spare_below
             + self.dimensions.padding.bottom
-            + self.dimensions.border.bottom
+            + self.dimensions.border_with_gutter().bottom
     }
 
     /// Content area of a NON-REPLACED inline box and the half-leading that
@@ -4175,7 +4274,7 @@ impl LayoutBox {
             && should_collapse_with_last_child(
                 &self.style,
                 self.float,
-                self.dimensions.border.bottom,
+                self.dimensions.border_with_gutter().bottom,
                 self.dimensions.padding.bottom,
             );
 
@@ -4442,6 +4541,7 @@ impl LayoutBox {
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
             self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+        self.dimensions.scrollbar.bottom = self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -4766,7 +4866,7 @@ impl LayoutBox {
                 - self.dimensions.margin.top
                 - self.dimensions.margin.bottom
                 - self.dimensions.border.top
-                - self.dimensions.border.bottom
+                - self.dimensions.border_with_gutter().bottom
                 - self.dimensions.padding.top
                 - self.dimensions.padding.bottom)
                 .max(0.0),
@@ -4958,7 +5058,7 @@ impl LayoutBox {
                     - self.dimensions.margin.left
                     - self.dimensions.margin.right
                     - self.dimensions.border.left
-                    - self.dimensions.border.right
+                    - self.dimensions.border_with_gutter().right
                     - self.dimensions.padding.left
                     - self.dimensions.padding.right;
                 self.dimensions.content.width = available_width.max(0.0);
@@ -4980,7 +5080,7 @@ impl LayoutBox {
             self.dimensions.content.x = containing_block.content.right()
                 - right
                 - self.dimensions.margin.right
-                - self.dimensions.border.right
+                - self.dimensions.border_with_gutter().right
                 - self.dimensions.padding.right
                 - self.dimensions.content.width;
         }
@@ -5017,7 +5117,7 @@ impl LayoutBox {
             self.dimensions.content.y = containing_block.content.bottom()
                 - bottom
                 - self.dimensions.margin.bottom
-                - self.dimensions.border.bottom
+                - self.dimensions.border_with_gutter().bottom
                 - self.dimensions.padding.bottom
                 - self.dimensions.content.height;
         }
@@ -5175,6 +5275,15 @@ impl LayoutBox {
             (margin_left, margin_right)
         };
 
+        // CH2.E7: a classic scrollbar sits between the padding and the
+        // border, and comes out of the content box (Chrome): the border
+        // box keeps its width. It is its own gutter
+        // (`dimensions.scrollbar`), not border, so `clientWidth` (the
+        // padding box) excludes it and `borderRightWidth` reads the border.
+        let (scrollbar, _) = self.scrollbar_reserve();
+        let content_width = (content_width - scrollbar).max(0.0);
+        self.dimensions.scrollbar.right = scrollbar;
+
         self.dimensions.content.width = content_width;
         self.dimensions.margin.left = margin_left;
         self.dimensions.margin.right = margin_right;
@@ -5196,6 +5305,7 @@ impl LayoutBox {
             self.length_to_px(&style.border_top_width, containing_block.content.width);
         self.dimensions.border.bottom =
             self.length_to_px(&style.border_bottom_width, containing_block.content.width);
+        self.dimensions.scrollbar.bottom = self.scrollbar_reserve().1;
         self.dimensions.padding.top =
             self.length_to_px(&style.padding_top, containing_block.content.width);
         self.dimensions.padding.bottom =
@@ -7132,7 +7242,7 @@ impl LayoutBox {
                 - (self.dimensions.padding.top
                     + self.dimensions.padding.bottom
                     + self.dimensions.border.top
-                    + self.dimensions.border.bottom)
+                    + self.dimensions.border_with_gutter().bottom)
         } else {
             specified
         };
@@ -7159,7 +7269,7 @@ impl LayoutBox {
         let padding_top = self.dimensions.padding.top;
         let padding_bottom = self.dimensions.padding.bottom;
         let border_top = self.dimensions.border.top;
-        let border_bottom = self.dimensions.border.bottom;
+        let border_bottom = self.dimensions.border_with_gutter().bottom;
         let padding_border_height = padding_top + padding_bottom + border_top + border_bottom;
         let is_border_box = self.style.box_sizing == BoxSizing::BorderBox;
         let table_rows_height = self
@@ -7275,7 +7385,7 @@ impl LayoutBox {
                 let padding_border_width = self.dimensions.padding.left
                     + self.dimensions.padding.right
                     + self.dimensions.border.left
-                    + self.dimensions.border.right;
+                    + self.dimensions.border_with_gutter().right;
                 if let Some(h) = aspect_ratio_content_height(
                     &self.style,
                     self.dimensions.content.width,
@@ -7364,6 +7474,13 @@ impl LayoutBox {
         // rows, laid out by table.rs before this runs, are never cut.
         if let Some(rows) = table_rows_height {
             self.dimensions.content.height = self.dimensions.content.height.max(rows);
+        }
+        // CH2.E7: a horizontal scrollbar comes out of a specified height
+        // (border-box sizing already took it out with the border, through
+        // `border_with_gutter`); an auto height grows by it instead.
+        let (_, bar) = self.scrollbar_reserve();
+        if bar > 0.0 && !is_border_box && !matches!(self.style.height, Length::Auto) {
+            self.dimensions.content.height = (self.dimensions.content.height - bar).max(0.0);
         }
     }
 
@@ -8531,6 +8648,10 @@ pub enum DisplayCommand {
         padding: [f32; 4],
         /// Which control this is; see `TextControlKind`.
         kind: TextControlKind,
+        /// The selected characters `[start, end)` of `value` when the
+        /// control is focused with a non-collapsed selection: painted in
+        /// [`SELECTION_COLOR`] behind the text (`forms::calculate_selection_rects`).
+        selection: Option<(usize, usize)>,
     },
     /// Draw a list box (`<select>` with `size > 1` or `multiple`): one row
     /// per option inside the frame, the selected rows highlighted, rows past
@@ -9448,6 +9569,14 @@ pub struct DisplayList {
     /// text runs paint inside it; a nested block container replaces it with
     /// its own (or none) for the duration of its subtree.
     ellipsis: Option<EllipsisScope>,
+    /// The document selection to paint, by DOM text node: the selected
+    /// characters `[start, end)` of each node's white-space-collapsed text
+    /// (see [`TextSource`]). Empty when nothing is selected.
+    text_selection: HashMap<usize, (usize, usize)>,
+    /// The caret of a focused contenteditable host: a DOM text node and a
+    /// collapsed character offset in it, painted as a `Caret` in the run
+    /// that has that character.
+    text_caret: Option<(usize, usize)>,
 }
 
 /// One block container's `text-overflow: ellipsis` state while its subtree
@@ -9553,6 +9682,8 @@ impl DisplayList {
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
+            text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9577,6 +9708,8 @@ impl DisplayList {
             in_viewport_fixed: false,
             transformed_ancestors: 0,
             ellipsis: None,
+            text_selection: HashMap::new(),
+            text_caret: None,
         }
     }
 
@@ -9585,6 +9718,41 @@ impl DisplayList {
         let mut list = DisplayList::for_root(root);
         list.render_stacking_context(root, 0, &mut 0);
         list
+    }
+
+    /// [`Self::build`], with the document selection painted behind the
+    /// selected characters of each text run, in [`SELECTION_COLOR`]: one
+    /// rect per line of each run, the height of the line box. `selection`
+    /// is by DOM text node, in collapsed characters (see `text_selection`).
+    /// `caret` is an editing caret to paint (see `text_caret`).
+    pub fn build_with_selection(
+        root: &LayoutBox,
+        selection: HashMap<usize, (usize, usize)>,
+        caret: Option<(usize, usize)>,
+    ) -> Self {
+        let mut list = DisplayList::for_root(root);
+        list.text_selection = selection;
+        list.text_caret = caret;
+        list.render_stacking_context(root, 0, &mut 0);
+        list
+    }
+
+    /// The selected characters `[start, end)` of a text run, from the
+    /// document selection and the run's sources. Sorted, not merged.
+    fn run_selection(&self, layout_box: &LayoutBox) -> Vec<(usize, usize)> {
+        if self.text_selection.is_empty() {
+            return Vec::new();
+        }
+        layout_box
+            .text_sources
+            .iter()
+            .filter_map(|src| {
+                let &(start, end) = self.text_selection.get(&src.node)?;
+                let from = start.max(src.skip);
+                let to = end.min(src.skip + src.len);
+                (from < to).then(|| (src.at + from - src.skip, src.at + to - src.skip))
+            })
+            .collect()
     }
 
     /// Build display list from a layout box with scroll state applied.
@@ -9931,6 +10099,9 @@ impl DisplayList {
                 self.escapable_clips.pop();
             }
         }
+        // CH2.E7: a scroller's styled scrollbars, over its content, in the
+        // border box but outside the padding-box clip.
+        self.commands.extend(scroll::scrollbar_commands(layout_box));
         if let Some(outer) = outer_ellipsis {
             self.ellipsis = outer;
         }
@@ -10739,8 +10910,8 @@ impl DisplayList {
         let padding_rect = Rect::new(
             border_rect.x + d.border.left,
             border_rect.y + d.border.top,
-            border_rect.width - d.border.left - d.border.right,
-            border_rect.height - d.border.top - d.border.bottom,
+            border_rect.width - d.border.left - d.border_with_gutter().right,
+            border_rect.height - d.border.top - d.border_with_gutter().bottom,
         );
         if padding_rect.width <= 0.0 || padding_rect.height <= 0.0 {
             return None;
@@ -10751,9 +10922,9 @@ impl DisplayList {
         // borders give an elliptical padding edge (§5.2).
         let inner = BorderRadius {
             top_left: radius.top_left.inset(d.border.left, d.border.top),
-            top_right: radius.top_right.inset(d.border.right, d.border.top),
-            bottom_right: radius.bottom_right.inset(d.border.right, d.border.bottom),
-            bottom_left: radius.bottom_left.inset(d.border.left, d.border.bottom),
+            top_right: radius.top_right.inset(d.border_with_gutter().right, d.border.top),
+            bottom_right: radius.bottom_right.inset(d.border_with_gutter().right, d.border_with_gutter().bottom),
+            bottom_left: radius.bottom_left.inset(d.border.left, d.border_with_gutter().bottom),
         };
 
         Some((padding_rect, inner))
@@ -10786,8 +10957,8 @@ impl DisplayList {
                 Rect::new(
                     border_rect.x + d.border.left,
                     border_rect.y + d.border.top,
-                    border_rect.width - d.border.left - d.border.right,
-                    border_rect.height - d.border.top - d.border.bottom,
+                    border_rect.width - d.border.left - d.border_with_gutter().right,
+                    border_rect.height - d.border.top - d.border_with_gutter().bottom,
                 )
             }
             rustkit_css::BackgroundClip::ContentBox => {
@@ -10797,12 +10968,12 @@ impl DisplayList {
                     border_rect.y + d.border.top + d.padding.top,
                     border_rect.width
                         - d.border.left
-                        - d.border.right
+                        - d.border_with_gutter().right
                         - d.padding.left
                         - d.padding.right,
                     border_rect.height
                         - d.border.top
-                        - d.border.bottom
+                        - d.border_with_gutter().bottom
                         - d.padding.top
                         - d.padding.bottom,
                 )
@@ -11436,6 +11607,32 @@ impl DisplayList {
             // regardless of their own font's leading. `justify_space` is the
             // per-word-separator expansion of a justified line (0 otherwise);
             // the line's width already includes it.
+            // The selected characters of this run, and where each line
+            // starts in the run's characters (lines drop the collapsed
+            // space they broke at, so each is found after the last).
+            let selected = self.run_selection(layout_box);
+            // The editing caret, as a character of this run.
+            let caret_at = self.text_caret.and_then(|(node, offset)| {
+                layout_box
+                    .text_sources
+                    .iter()
+                    .find(|s| s.node == node && offset >= s.skip && offset <= s.skip + s.len)
+                    .map(|s| s.at + offset - s.skip)
+            });
+            let mut caret_painted = false;
+            let mut line_starts: Vec<usize> = Vec::new();
+            if !selected.is_empty() || caret_at.is_some() {
+                if let Some(lines) = &layout_box.text_lines {
+                    let mut cursor = 0usize;
+                    for l in lines.iter().filter(|l| !l.text.is_empty()) {
+                        let rest: String = raw_text.chars().skip(cursor).collect();
+                        let found = rest.find(l.text.as_str()).map(|b| rest[..b].chars().count()).unwrap_or(0);
+                        line_starts.push(cursor + found);
+                        cursor += found + l.text.chars().count();
+                    }
+                }
+            }
+            let mut line_index = 0usize;
             let render_lines: Vec<(String, f32, f32, f32, f32, f32)> = match &layout_box.text_lines {
                 Some(lines) => lines
                     .iter()
@@ -11487,6 +11684,8 @@ impl DisplayList {
             }
 
             for (text, x, y, text_width, line_top, justify_space) in render_lines {
+                let line_start = line_starts.get(line_index).copied().unwrap_or(0);
+                line_index += 1;
                 // ADVANCE CONTRACT: ONE shape call feeds BOTH command types —
                 // layout's per-char advances and ascent ride the command so
                 // paint places glyphs exactly where layout measured them.
@@ -11513,6 +11712,53 @@ impl DisplayList {
                             }
                         }
                     }
+                }
+
+                // The document selection, behind this line's glyphs: from
+                // the advance of the characters before it to the advance
+                // of the selected ones, the height of the line box.
+                let line_len = text.chars().count();
+                for &(from, to) in &selected {
+                    let a = from.max(line_start).min(line_start + line_len) - line_start;
+                    let b = to.max(line_start).min(line_start + line_len) - line_start;
+                    if a >= b {
+                        continue;
+                    }
+                    let width_of = |range: std::ops::Range<usize>| -> f32 {
+                        match &advances {
+                            Some(adv) => adv.get(range).map(|r| r.iter().sum()).unwrap_or(0.0),
+                            None => {
+                                let piece: String = text.chars().skip(range.start).take(range.len()).collect();
+                                measure_text_advanced(&piece, &style.font_family, font_size, style.font_weight, style.font_style).width
+                            }
+                        }
+                    };
+                    let left = x + width_of(0..a);
+                    let width = width_of(a..b);
+                    if width > 0.0 {
+                        self.commands.push(DisplayCommand::SolidColor(
+                            SELECTION_COLOR,
+                            Rect::new(left, line_top, width, line_height),
+                        ));
+                    }
+                }
+                if let Some(at) = caret_at.filter(|at| !caret_painted && *at >= line_start && *at <= line_start + line_len) {
+                    let before = at - line_start;
+                    let offset: f32 = match &advances {
+                        Some(adv) => adv.iter().take(before).sum(),
+                        None => {
+                            let piece: String = text.chars().take(before).collect();
+                            measure_text_advanced(&piece, &style.font_family, font_size, style.font_weight, style.font_style)
+                                .width
+                        }
+                    };
+                    self.commands.push(DisplayCommand::Caret {
+                        x: x + offset,
+                        y: line_top,
+                        height: line_height,
+                        color: style.color,
+                    });
+                    caret_painted = true;
                 }
 
                 // `text-overflow: ellipsis` on the enclosing block container
@@ -11889,6 +12135,7 @@ impl DisplayList {
                     // LayoutBox::node_id).
                     focused: layout_box.focused_caret.is_some(),
                     caret_position: layout_box.focused_caret,
+                    selection: layout_box.focused_selection.filter(|_| layout_box.focused_caret.is_some()),
                 });
             }
             FormControlType::TextArea {
@@ -11917,6 +12164,7 @@ impl DisplayList {
                     border_width,
                     focused: layout_box.focused_caret.is_some(),
                     caret_position: layout_box.focused_caret,
+                    selection: layout_box.focused_selection.filter(|_| layout_box.focused_caret.is_some()),
                 });
             }
             FormControlType::Button { label, .. } => {
@@ -12070,6 +12318,7 @@ impl DisplayList {
                     border_width,
                     focused: false,
                     caret_position: None,
+                    selection: None,
                 });
             }
         }
@@ -14265,6 +14514,7 @@ mod tests {
                 bottom: 10.0,
                 left: 10.0,
             },
+            scrollbar: EdgeSizes::default(),
         };
 
         let pb = d.padding_box();
