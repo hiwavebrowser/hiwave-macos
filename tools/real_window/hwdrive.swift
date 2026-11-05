@@ -209,6 +209,10 @@ case "type":
         let units = Array(String(ch).utf16)
         for down in [true, false] {
             let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
+            // No modifiers: an event with no source takes the session's
+            // flags, and after a `key ... cmd` those still said Command, so
+            // typed text arrived as Cmd chords (CH3.A2, 2026-11-05).
+            e?.flags = []
             e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             post(e)
         }
