@@ -125,6 +125,8 @@ mod mutation_observer_tests;
 mod web_messaging_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod web_canvas_tests;
 mod web_crypto;
 mod web_match_media;
 mod web_scroll;
