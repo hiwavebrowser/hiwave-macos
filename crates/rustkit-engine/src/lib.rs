@@ -290,6 +290,10 @@ mod relayout_cause;
 mod selection;
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod button_background_tests;
+#[cfg(test)]
+mod text_transform_layout_tests;
 mod drag_drop;
 mod select_popup;
 mod select_popup_engine;
@@ -353,6 +357,7 @@ mod consent_click_tests;
 use presenter::Presenter;
 use relayout_cause::{time_stage, PendingCauses, Stage};
 mod shadow_tree;
+mod canvas_paint;
 mod container_query;
 pub use relayout_cause::{CauseCounts, RelayoutCause, RelayoutStats, StageMs};
 pub use inspector::{
@@ -416,6 +421,8 @@ mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
+mod load_geometry_read_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -433,7 +440,15 @@ mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
+mod canvas_context_tests;
+#[cfg(test)]
 mod flex_percent_cross_tests;
+#[cfg(test)]
+mod flex_hidden_gap_tests;
+#[cfg(test)]
+mod flex_column_definite_height_tests;
+#[cfg(test)]
+mod percent_height_chain_tests;
 #[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
@@ -496,6 +511,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod text_control_select_tests;
+#[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
@@ -551,6 +568,8 @@ mod grid_auto_repeat_percent_tests;
 mod nested_layout_matrix_tests;
 #[cfg(test)]
 mod zero_font_size_tests;
+#[cfg(test)]
+mod zero_size_overflow_clip_tests;
 #[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -992,6 +1011,14 @@ struct ViewState {
     input_pending: Option<InputMark>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
+    /// The canvases of the page's bindings, held apart from them: the
+    /// display list reads what they drew while the page's own scripts have
+    /// the bindings out of the view (`run_page_scripts`).
+    canvases: Option<rustkit_bindings::CanvasSource>,
+    /// Each canvas's paint from the last display list, by node
+    /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
+    /// not change is not painted again.
+    canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
     /// The view's stop state: the interrupt word another thread (the
     /// watchdog, later the user's Stop) sets to end its running script.
     /// Lives as long as the view; each new document's bindings get it.
@@ -1225,6 +1252,11 @@ impl ViewState {
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
+        // The last document's canvases: the next bindings install their own
+        // (Prometheus, #905 R1: a failed bindings creation must not leave
+        // the old page's canvases painting into same-id nodes).
+        self.canvases = None;
+        self.canvas_paints.clear();
         // The last document's requests are nobody's now.
         self.live_requests.clear();
         self.live_modules.clear();
@@ -2764,6 +2796,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2871,6 +2905,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -2995,6 +3031,8 @@ impl Engine {
             presented: None,
             frames_presented: 0,
             bindings: None,
+            canvases: None,
+            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3913,8 +3951,22 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         // A press on a scrollbar moves no focus.
         if !suppressed && not_cancelled && on_scrollbar.is_none() {
+            let before = self.press_focus_marks(id);
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
-            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            let after = self.press_focus_marks(id);
+            // A press that focused a text control whose focus handler set
+            // its selection (`select()`) keeps that selection, as the
+            // oracle's Chrome does (CH2.E12); otherwise the press places
+            // the caret.
+            let focus_handler_selected = after.0 != before.0 && after.1 != before.1 && after.0.is_some();
+            if focus_handler_selected {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.select_drag = None;
+                }
+                self.relayout_after_press_focus(id);
+            } else {
+                self.press_selects(id, viewport_x, viewport_y, clicks, shift);
+            }
             // A press on a drop-down `<select>` opens it, as Chrome's
             // does (a cancelled `mousedown` keeps it shut).
             self.open_select_popup_at_press(id, viewport_x, viewport_y);
@@ -7832,6 +7884,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8266,6 +8322,10 @@ impl Engine {
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
+            bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            if let Some(view) = self.views.get_mut(&id) {
+                view.canvases = Some(bindings.canvas_source());
+            }
 
             bindings
                 .set_document(document.clone())
@@ -8856,7 +8916,34 @@ impl Engine {
         // image per frame. Rewriting here means the renderer only ever
         // sees keys that match what the loader stored.
         let mut expanded = Vec::with_capacity(dl.commands.len());
+        // The canvases' paints from the last list; what this list does not
+        // reuse or repaint is dropped with it.
+        let (canvas_source, mut last_paints) = match self.views.get_mut(&id) {
+            Some(v) => (v.canvases.clone(), std::mem::take(&mut v.canvas_paints)),
+            None => (None, HashMap::new()),
+        };
+        let mut canvas_paints = HashMap::new();
         for mut cmd in dl.commands.drain(..) {
+            // A canvas paints what script drew on it (canvas_paint), again
+            // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, dest_rect, content_box, .. } = &cmd {
+                if let Some(node) = canvas_paint::canvas_node(url) {
+                    if let Some(source) = &canvas_source {
+                        let paint = canvas_paint::CanvasPaint::reuse_or_paint(
+                            last_paints.remove(&node),
+                            source,
+                            node,
+                            *dest_rect,
+                            *content_box,
+                        );
+                        if let Some(paint) = paint {
+                            expanded.extend(paint.commands.iter().cloned());
+                            canvas_paints.insert(node, paint);
+                        }
+                    }
+                    continue;
+                }
+            }
             match &mut cmd {
                 rustkit_layout::DisplayCommand::Image { url, .. }
                 | rustkit_layout::DisplayCommand::BackgroundImage { url, .. }
@@ -8929,6 +9016,9 @@ impl Engine {
             expanded.push(cmd);
         }
         dl.commands = expanded;
+        if let Some(v) = self.views.get_mut(&id) {
+            v.canvas_paints = canvas_paints;
+        }
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
@@ -9247,7 +9337,7 @@ impl Engine {
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
         // Elements only: an anonymous block around collapsed white space is
         // no box at all (and no flex item) in Chrome.
-        if !matches!(child.box_type, BoxType::Block) {
+        if !matches!(child.box_type, BoxType::Block) || child.style.display == rustkit_css::Display::None {
             return false;
         }
         let s = &child.style;
@@ -10793,7 +10883,13 @@ impl layout_ctx::LayoutCtx {
                     let mut styled = LayoutBox::new(BoxType::Block, style);
                     styled.node_id = Some(node.id.raw());
                     self.note_boxless_style(&styled, parent_style);
-                    return LayoutBox::new(BoxType::Block, ComputedStyle::new());
+                    // The empty box handed back says `none`, so the parent
+                    // drops it even where an empty block is kept (a flex or
+                    // grid item): CH2.B10, chrome.html's hidden panels were
+                    // flex items and took a `gap` each.
+                    let mut none = ComputedStyle::new();
+                    none.display = rustkit_css::Display::None;
+                    return LayoutBox::new(BoxType::Block, none);
                 }
 
                 // CSS Display 3 §2.7 / CSS 2.1 §9.7: flex and grid items,
@@ -10906,6 +11002,30 @@ impl layout_ctx::LayoutCtx {
                     );
                     note_snapshot_image(&b, explicit_width, explicit_height);
                     // A click on the image targets the image.
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
+                // <canvas> is a replaced element whose natural size is its
+                // bitmap's: the `width`/`height` attributes (300x150 without
+                // them). They are not presentational hints: author CSS
+                // width/height stretch the bitmap over the box, and one CSS
+                // axis gives the other through the bitmap's ratio. What
+                // script draws on its 2D context replaces the image command
+                // in the display list (canvas_paint).
+                if tag_lower == "canvas" {
+                    let (natural_width, natural_height) =
+                        canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: canvas_paint::canvas_key(node.id.raw()),
+                            natural_width,
+                            natural_height,
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
                     b.node_id = Some(node.id.raw());
                     return b;
                 }
@@ -11107,6 +11227,19 @@ impl layout_ctx::LayoutCtx {
 
                     if !has_element_children {
                         let text = node.text_content();
+                        // CSS Text §4.1.1: under a collapsing white-space
+                        // (a button's UA `normal`), runs collapse to one
+                        // space and the line's leading/trailing spaces go.
+                        // The raw text kept template indentation: chrome.html's
+                        // expander measured ~113px for "▾" (Chromium 15.7).
+                        let text = match style.white_space {
+                            rustkit_css::WhiteSpace::Normal
+                            | rustkit_css::WhiteSpace::Nowrap
+                            | rustkit_css::WhiteSpace::PreLine => {
+                                text.split_whitespace().collect::<Vec<_>>().join(" ")
+                            }
+                            _ => text,
+                        };
                         let label = if text.trim().is_empty() {
                             // No text, no children: an empty button renders
                             // empty, not a placeholder word.
@@ -11941,6 +12074,23 @@ impl layout_ctx::LayoutCtx {
                         s
                     };
                     let len = content.chars().count();
+                    // CH2.B6: text-transform changes the text that is laid
+                    // out, not only the text that is painted. Paint applied
+                    // it alone, so an uppercase title measured its lowercase
+                    // width (chrome.html section titles ~15px narrow at 12px;
+                    // the next sibling started inside the painted glyphs).
+                    // Kept raw when the transform changes the character count
+                    // (ß → SS): `text_sources` maps run characters 1:1 to the
+                    // DOM text, and paint still transforms such a run.
+                    let content = {
+                        let transformed =
+                            rustkit_layout::apply_text_transform(&content, style.text_transform);
+                        if transformed.chars().count() == len {
+                            transformed
+                        } else {
+                            content
+                        }
+                    };
                     let mut run = LayoutBox::new(BoxType::Text(content), style);
                     // Where the run's characters came from: mouse
                     // selection and selection paint map through it.
@@ -12671,12 +12821,23 @@ impl layout_ctx::LayoutCtx {
                 // unreachable from the day it landed. The compiler said so on
                 // every build ("unreachable pattern"); nobody read it until
                 // Pete asked what the warnings meant.
-                if tag_name != "button" {
-                    // input/select/textarea get Chrome's white field; buttons
-                    // are ButtonFace-themed, not white — leave them to the
-                    // themed paint path.
-                    style.background_color = rustkit_css::Color::WHITE;
-                }
+                // Buttons (and input type=button/submit/reset, which lay out
+                // as buttons) get ButtonFace, Chrome's rgb(239, 239, 239);
+                // input/select/textarea get the white field. Both live here
+                // so an author `background: transparent` overrides them
+                // (CH2.B3: the painter used to put ButtonFace back under
+                // every alpha-0 button, so chrome.html's transparent
+                // expanders and lock buttons painted as white blocks).
+                let button_like = tag_name == "button"
+                    || (tag_name == "input"
+                        && attributes.get("type").is_some_and(|t| {
+                            matches!(t.to_ascii_lowercase().as_str(), "button" | "submit" | "reset")
+                        }));
+                style.background_color = if button_like {
+                    rustkit_css::Color::new(239, 239, 239, 1.0)
+                } else {
+                    rustkit_css::Color::WHITE
+                };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }
@@ -14513,7 +14674,7 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 1, length.is_some(), value);
                 if let Some(length) = length {
                     style.width = length;
@@ -14528,19 +14689,19 @@ impl layout_ctx::LayoutCtx {
                     .all(|part| part.eq_ignore_ascii_case("auto"));
             }
             "height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.height = length;
                 }
             }
             "min-width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 2, length.is_some(), value);
                 if let Some(length) = length {
                     style.min_width = length;
                 }
             }
             "min-height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.min_height = length;
                 }
             }
@@ -14550,7 +14711,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 container_query::note_width_value(style, 4, length.is_some(), value);
                 if let Some(length) = length {
@@ -14561,7 +14722,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 if let Some(length) = length {
                     style.max_height = length;
@@ -20245,12 +20406,14 @@ impl Engine {
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            // A canvas that drew is listed again over the same boxes.
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             // A scroll alone moves what is painted, not the layout.
-            if scrolled || element_scrolled {
+            if scrolled || element_scrolled || canvas_painted {
                 self.render(id)?;
             }
             return Ok(scrolled || element_scrolled);
@@ -20332,6 +20495,9 @@ impl Engine {
         // same path typed text takes.
         for (raw, value) in writes.values.drain(..) {
             match edit_states.get(&raw) {
+                // The same value keeps the selection (HTML §4.10.5.4), so a
+                // `select()` after it stands.
+                Some(state) if state.value() == value => {}
                 Some(state) => state.set_value(value),
                 None => {
                     let state = rustkit_dom::forms::TextEditState::with_value(value);
@@ -20471,8 +20637,9 @@ impl Engine {
                 view.pending_dirty = Some(view.dirty_set(&log));
             }
         }
+        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
-            if element_scrolled {
+            if element_scrolled || canvas_painted {
                 self.relist_after_element_scroll(id);
             }
             return;
@@ -21877,6 +22044,20 @@ fn resolve_position_pair(a: &str, b: &str) -> (f32, f32) {
 /// calc/min/max/clamp helpers are deleted.
 fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
+}
+
+/// A length for `width`/`height` and their `min-`/`max-` forms.
+///
+/// A unitless `0` parses to `Length::Zero`, the enum's default, and layout's
+/// sizing code reads only `Px` as a specified size: `height: 0` was laid out
+/// as `auto` and `max-height: 0` / `max-width: 0` as `none`, while `0px` was
+/// right (CH2.B7: a `height:0` column flex 84px tall, Chromium 0). Stored as
+/// `Px(0.0)`, the same as `font-size: 0`.
+fn parse_size_length(value: &str) -> Option<rustkit_css::Length> {
+    match parse_length(value)? {
+        rustkit_css::Length::Zero => Some(rustkit_css::Length::Px(0.0)),
+        other => Some(other),
+    }
 }
 
 /// The `ch`-bearing declarations that won their property in the cascade.
@@ -24482,23 +24663,34 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
     // fills the window; html is not. With `height: auto` it is as tall as
     // what it holds (body's margin box), shorter than the viewport on a
     // short page. Only an explicit html height keeps the box's own.
-    let floor = match &root.root_element_height {
-        None | Some(rustkit_css::Length::Auto) => bb.y,
-        Some(_) => bb.y + bb.height,
-    };
-    let bottom = root
+    let content_bottom = root
         .children
         .iter()
         .map(|c| {
             let m = c.dimensions.margin_box();
             m.y + m.height
         })
-        .fold(floor, f32::max);
+        .fold(bb.y, f32::max);
+    // An explicit html height is the rect's height, resolved against the
+    // initial containing block; body's margin box overflows it rather than
+    // growing it, and the root box itself is stretched to the viewport, so
+    // neither can stand in for it (CH2.B8: `html, body { height: 100% }`
+    // with body's 8px margin read 216, Chromium 200; `html { height: 50px }`
+    // read the viewport's 200).
+    let (vw, vh) = root.viewport;
+    let edges = root.dimensions.padding.vertical() + root.dimensions.border.vertical();
+    let height = match &root.root_element_height {
+        None | Some(rustkit_css::Length::Auto) | Some(rustkit_css::Length::FitContent) => {
+            content_bottom - bb.y
+        }
+        Some(l) => l.to_px_with_viewport(16.0, 16.0, vh, vw, vh).max(0.0) + edges,
+    };
+    let bottom = content_bottom;
     rustkit_bindings::BoxGeometry {
         x: bb.x,
         y: bb.y,
         width: bb.width,
-        height: bottom - bb.y,
+        height,
         border_left: root.dimensions.border.left,
         border_top: root.dimensions.border.top,
         client_width: pb.width,

@@ -405,6 +405,13 @@ impl TextEditState {
         self.close_typing();
     }
 
+    /// Set the selection range and its direction, as script's
+    /// `setSelectionRange(start, end, direction)` does.
+    pub fn set_selection_with_direction(&self, start: usize, end: usize, direction: SelectionDirection) {
+        self.set_selection(start, end);
+        self.selection_direction.set(direction);
+    }
+
     /// Get the caret position (selection start).
     pub fn caret_position(&self) -> usize {
         self.selection.get().start

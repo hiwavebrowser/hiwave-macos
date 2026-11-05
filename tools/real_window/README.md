@@ -12,6 +12,15 @@ python3 tools/real_window/driver.py --list
 Build the app from the worktree you are testing and pass that binary. The
 driver prints its path and sha256 and writes them to `result.json`.
 
+The `a4_*` checks (the RustKit shelf, Inspector and settings) read the panel
+probe, which is compiled into debug builds and into a release build only
+with `cargo build --release -p hiwave-app --features test-hooks`; on a
+binary without it they report `NOT RUN`. The probe reports shapes only (box,
+match count, `checked`, value length), never text or values. The driver
+starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
+`HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
+is logged as its `cmd` and size only, always.
+
 ## What a run does
 
 For each check it starts a fresh app on a throwaway profile, restored on one

@@ -20,6 +20,7 @@
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>
+//   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //
 // x, y are points from the top-left corner of the window's frame (title bar
 // included). Every command prints one JSON object.
@@ -293,11 +294,11 @@ case "type":
         let units = Array(String(ch).utf16)
         for down in [true, false] {
             let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
-            e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             // No modifiers: an event with no source takes the session's
             // flags, and after a `key ... cmd` those still said Command, so
             // typed text arrived as Cmd chords (CH3.A2, 2026-11-05).
             e?.flags = []
+            e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             post(e)
         }
     }

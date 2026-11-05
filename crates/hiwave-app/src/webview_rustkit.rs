@@ -655,13 +655,6 @@ impl RustKitView {
             .flatten()
     }
 
-    /// Where the page's own script asked to go since the last call
-    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
-    /// from a timer). The caller navigates.
-    /// A reload, `location.replace()` or a meta refresh replaces the
-    /// current history entry when it is loaded, as in Chrome.
-    /// The URL, and whether the user activated the navigation (a click or
-    /// a form submit) rather than the page's script.
     /// What the chrome must be told since the last call (CH2.E9).
     /// Filled from the content thread's events, so only with the page on
     /// its own thread (the default); flag off the events are dropped.
@@ -670,6 +663,12 @@ impl RustKitView {
             self.harvest();
         }
         std::mem::take(&mut *self.chrome_updates.borrow_mut())
+    }
+
+    /// The viewhost id the input of this view's NSView is tagged with.
+    /// Content thread only (the flag-off engine owns its host view).
+    pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
+        self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
     }
 
     /// The messages the page posted with `window.ipc.postMessage` since
@@ -683,6 +682,13 @@ impl RustKitView {
         std::mem::take(&mut *self.ipc_inbox.borrow_mut())
     }
 
+    /// Where the page's own script asked to go since the last call
+    /// (`location.href = url`, `link.click()`, `form.submit()`, a submit
+    /// from a timer). The caller navigates.
+    /// A reload, `location.replace()` or a meta refresh replaces the
+    /// current history entry when it is loaded, as in Chrome.
+    /// The URL, and whether the user activated the navigation (a click or
+    /// a form submit) rather than the page's script.
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
@@ -960,6 +966,12 @@ impl RustKitView {
         );
         self.set_bounds_internal(bounds)
             .map_err(|e| format!("Failed to set bounds: {}", e))
+    }
+
+    /// The host `NSView`'s pointer (0 when there is none): for stacking
+    /// and the chrome's region (CH3.A3).
+    pub fn host_view_raw(&self) -> isize {
+        self.host_view
     }
 
     /// Get the view ID.
