@@ -14515,7 +14515,7 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 1, length.is_some(), value);
                 if let Some(length) = length {
                     style.width = length;
@@ -14530,19 +14530,19 @@ impl layout_ctx::LayoutCtx {
                     .all(|part| part.eq_ignore_ascii_case("auto"));
             }
             "height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.height = length;
                 }
             }
             "min-width" => {
-                let length = parse_length(value);
+                let length = parse_size_length(value);
                 container_query::note_width_value(style, 2, length.is_some(), value);
                 if let Some(length) = length {
                     style.min_width = length;
                 }
             }
             "min-height" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_size_length(value) {
                     style.min_height = length;
                 }
             }
@@ -14552,7 +14552,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 container_query::note_width_value(style, 4, length.is_some(), value);
                 if let Some(length) = length {
@@ -14563,7 +14563,7 @@ impl layout_ctx::LayoutCtx {
                 let length = if value.eq_ignore_ascii_case("none") {
                     Some(rustkit_css::Length::Auto)
                 } else {
-                    parse_length(value)
+                    parse_size_length(value)
                 };
                 if let Some(length) = length {
                     style.max_height = length;
@@ -21879,6 +21879,20 @@ fn resolve_position_pair(a: &str, b: &str) -> (f32, f32) {
 /// calc/min/max/clamp helpers are deleted.
 fn parse_length(value: &str) -> Option<rustkit_css::Length> {
     rustkit_css::parse_length(value)
+}
+
+/// A length for `width`/`height` and their `min-`/`max-` forms.
+///
+/// A unitless `0` parses to `Length::Zero`, the enum's default, and layout's
+/// sizing code reads only `Px` as a specified size: `height: 0` was laid out
+/// as `auto` and `max-height: 0` / `max-width: 0` as `none`, while `0px` was
+/// right (CH2.B7: a `height:0` column flex 84px tall, Chromium 0). Stored as
+/// `Px(0.0)`, the same as `font-size: 0`.
+fn parse_size_length(value: &str) -> Option<rustkit_css::Length> {
+    match parse_length(value)? {
+        rustkit_css::Length::Zero => Some(rustkit_css::Length::Px(0.0)),
+        other => Some(other),
+    }
 }
 
 /// The `ch`-bearing declarations that won their property in the cascade.
