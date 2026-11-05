@@ -453,18 +453,21 @@ impl<V: ChromeUi> ChromeUi for LazyPanel<V> {
 }
 
 /// The `cmd` of an IPC message, for the log (#907 R1 nit 1): `?` when it
-/// has none.
+/// has none, or when it is not a command name (letters, digits, `_`; a page
+/// can post anything to the content view's handler).
 fn ipc_cmd(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|msg| msg.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
+        .filter(|cmd| !cmd.is_empty() && cmd.len() <= 64 && cmd.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
         .unwrap_or_else(|| "?".to_string())
 }
 
 /// Whether IPC messages are logged whole: only with `HIWAVE_DEBUG=1` (the
 /// app's verbose switch) or `HIWAVE_TEST_HOOKS=1` (the real-window checks,
 /// which read them). By default a line says the message's `cmd` and size:
-/// a body carries URLs with their queries and find-in-page text.
+/// a body carries URLs with their queries and find-in-page text. The
+/// RustKit panels' messages are never logged whole (`panel_ipc_log_line`).
 fn ipc_bodies_logged() -> bool {
     static LOGGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LOGGED.get_or_init(|| {
@@ -474,14 +477,12 @@ fn ipc_bodies_logged() -> bool {
     })
 }
 
-/// One IPC message in the log, as `ipc_bodies_logged` allows; `panel` names
-/// a RustKit panel.
-fn log_ipc(what: &str, panel: Option<&str>, body: &str) {
-    match (ipc_bodies_logged(), panel) {
-        (true, Some(panel)) => info!(panel, %body, "{}", what),
-        (true, None) => info!(%body, "{}", what),
-        (false, Some(panel)) => info!(panel, cmd = %ipc_cmd(body), len = body.len(), "{}", what),
-        (false, None) => info!(cmd = %ipc_cmd(body), len = body.len(), "{}", what),
+/// One IPC message in the log, as `ipc_bodies_logged` allows.
+fn log_ipc(what: &str, body: &str) {
+    if ipc_bodies_logged() {
+        info!(%body, "{}", what);
+    } else {
+        info!(cmd = %ipc_cmd(body), len = body.len(), "{}", what);
     }
 }
 
@@ -489,6 +490,7 @@ fn log_ipc(what: &str, panel: Option<&str>, body: &str) {
 /// the RustKit chrome once it boots: only with the flag on and
 /// `HIWAVE_TEST_HOOKS=1` as well (#907 R1 nit 2), so a release build does
 /// not run a script from the environment in the privileged chrome.
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
 fn chrome_boot_eval(flag_on: bool, test_hooks: Option<&str>, eval: Option<String>) -> Option<String> {
     (flag_on && test_hooks == Some("1"))
         .then_some(eval)
@@ -716,27 +718,31 @@ fn route_input(
 
 /// `HIWAVE_RUSTKIT_PANEL_PROBE=<selector>,<selector>...` (real-window checks,
 /// flag on; CH3.A4): appended to each RustKit panel's document. Posts the
-/// panel's text and the box and value of each selector whenever they change;
-/// the app logs it (`RustKit panel probe`) and does not hand it to the
-/// panel's handler.
+/// panel's size and, for each selector, its first match's box, how many
+/// elements match, a checkbox's `checked` and a field's value length,
+/// whenever they change; the app logs that (`RustKit panel probe`, through
+/// `panel_probe_log_line`) and does not hand it to the panel's handler.
+/// Shapes only: no text, no values (#910 R1 blocker 2). Compiled into debug
+/// builds and `--features test-hooks` builds only.
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 const PANEL_PROBE: &str = r#"
 (function (selectors) {
     var last = null;
     function report() {
-        var body = document.body;
-        var text = body ? (body.innerText !== undefined ? body.innerText : body.textContent) : '';
-        text = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
         var boxes = {};
         selectors.forEach(function (sel) {
-            var el = document.querySelector(sel);
+            var all = document.querySelectorAll(sel);
+            var el = all[0];
             if (!el) { boxes[sel] = null; return; }
             var r = el.getBoundingClientRect();
             boxes[sel] = {
                 box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
-                value: el.type === 'checkbox' ? el.checked : (el.value !== undefined ? el.value : null)
+                n: all.length,
+                checked: el.type === 'checkbox' ? !!el.checked : null,
+                len: typeof el.value === 'string' ? el.value.length : null
             };
         });
-        var s = JSON.stringify({ cmd: 'panel_probe', size: [innerWidth, innerHeight], text: text, boxes: boxes });
+        var s = JSON.stringify({ cmd: 'panel_probe', size: [innerWidth, innerHeight], boxes: boxes });
         if (s === last) return;
         last = s;
         window.ipc.postMessage(s);
@@ -746,16 +752,92 @@ const PANEL_PROBE: &str = r#"
 })(SELECTORS);
 "#;
 
-/// The probe for the RustKit panels' documents, or nothing without
-/// `HIWAVE_RUSTKIT_PANEL_PROBE`.
-fn panel_probe_script() -> String {
-    match std::env::var("HIWAVE_RUSTKIT_PANEL_PROBE") {
-        Ok(list) => {
-            let selectors: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
-            PANEL_PROBE.replace("SELECTORS", &serde_json::to_string(&selectors).unwrap_or_else(|_| "[]".into()))
-        }
-        Err(_) => String::new(),
+/// A RustKit panel's `window.ipc` message as the log carries it (#910 R1
+/// blocker 1): its `cmd` and size, never its body, whatever the log level
+/// or switches. The settings page posts `unlock_vault {password}`,
+/// `save_credential {url, username, password}` and the whole state export;
+/// the Inspector the console's code; the shelf search queries and URLs.
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+fn panel_ipc_log_line(panel: &str, body: &str) -> String {
+    format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
+}
+
+/// A panel probe report as the log carries it (#910 R1 blocker 2), or
+/// `None` for one that is not a report: rebuilt from its shapes only (the
+/// size, and for each of `selectors` the box, the match count, `checked`
+/// and the value length), so nothing else the document put in it is
+/// logged.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "rustkit", any(debug_assertions, feature = "test-hooks"))),
+    allow(dead_code)
+)]
+fn panel_probe_log_line(body: &str, selectors: &[&str]) -> Option<String> {
+    use serde_json::{json, Map, Value};
+    let report: Value = serde_json::from_str(body).ok()?;
+    if report.get("cmd").and_then(Value::as_str) != Some("panel_probe") {
+        return None;
     }
+    let numbers = |v: Option<&Value>| -> Value {
+        match v.and_then(Value::as_array) {
+            Some(items) if items.iter().all(Value::is_number) => Value::Array(items.clone()),
+            _ => Value::Null,
+        }
+    };
+    let mut boxes = Map::new();
+    for &sel in selectors {
+        let shape = match report.get("boxes").and_then(|b| b.get(sel)) {
+            Some(Value::Object(el)) => json!({
+                "box": numbers(el.get("box")),
+                "n": el.get("n").filter(|v| v.is_u64()).cloned().unwrap_or(Value::Null),
+                "checked": el.get("checked").filter(|v| v.is_boolean()).cloned().unwrap_or(Value::Null),
+                "len": el.get("len").filter(|v| v.is_u64()).cloned().unwrap_or(Value::Null),
+            }),
+            _ => Value::Null,
+        };
+        boxes.insert(sel.to_string(), shape);
+    }
+    Some(json!({ "size": numbers(report.get("size")), "boxes": boxes }).to_string())
+}
+
+/// A URL for the log (#910 R1 nit 3): without its query or fragment.
+fn url_for_log(url: &str) -> &str {
+    url.find(['?', '#']).map_or(url, |at| &url[..at])
+}
+
+/// The selectors of `HIWAVE_RUSTKIT_PANEL_PROBE`, in a build with the
+/// probe; none otherwise.
+#[cfg_attr(not(any(debug_assertions, feature = "test-hooks")), allow(dead_code))]
+fn panel_probe_selectors() -> Vec<String> {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if let Ok(list) = std::env::var("HIWAVE_RUSTKIT_PANEL_PROBE") {
+        return list.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    }
+    Vec::new()
+}
+
+/// Says once at launch whether `HIWAVE_RUSTKIT_PANEL_PROBE` is honoured:
+/// a release build without `--features test-hooks` has no probe, and the
+/// real-window checks that read it say so instead of failing.
+fn announce_panel_probe() {
+    if std::env::var_os("HIWAVE_RUSTKIT_PANEL_PROBE").is_none() {
+        return;
+    }
+    if cfg!(any(debug_assertions, feature = "test-hooks")) {
+        info!("HIWAVE_RUSTKIT_PANEL_PROBE: on (shapes only)");
+    } else {
+        warn!("HIWAVE_RUSTKIT_PANEL_PROBE ignored: this build has no test hooks");
+    }
+}
+
+/// The probe for the RustKit panels' documents, or nothing without
+/// `HIWAVE_RUSTKIT_PANEL_PROBE` or in a build without the probe.
+fn panel_probe_script() -> String {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    if std::env::var_os("HIWAVE_RUSTKIT_PANEL_PROBE").is_some() {
+        let selectors = panel_probe_selectors();
+        return PANEL_PROBE.replace("SELECTORS", &serde_json::to_string(&selectors).unwrap_or_else(|_| "[]".into()));
+    }
+    String::new()
 }
 
 /// With `HIWAVE_RUSTKIT_CHROME=1`, a panel (the shelf, the Inspector, the
@@ -812,16 +894,21 @@ fn pump_rustkit_panel(
         }
     }
     for body in view.take_ipc_messages() {
+        #[cfg(any(debug_assertions, feature = "test-hooks"))]
         if body.starts_with("{\"cmd\":\"panel_probe\"") {
-            info!(panel = name, %body, "RustKit panel probe");
+            let selectors = panel_probe_selectors();
+            let selectors: Vec<&str> = selectors.iter().map(String::as_str).collect();
+            if let Some(report) = panel_probe_log_line(&body, &selectors) {
+                info!(panel = name, body = %report, "RustKit panel probe");
+            }
             continue;
         }
-        log_ipc("RustKit panel IPC", Some(name), &body);
+        info!("RustKit panel IPC {}", panel_ipc_log_line(name, &body));
         handle(&body);
     }
     // A link or `location` in a panel would replace its own document.
     if let Some((url, _)) = view.take_script_navigation() {
-        warn!(panel = name, %url, "RustKit panel navigation not followed");
+        warn!(panel = name, url = url_for_log(&url), "RustKit panel navigation not followed");
     }
     view.render();
     view.input_view()
@@ -2031,6 +2118,67 @@ mod panel_tests {
     }
 }
 
+// #910 R1: what the log carries of a RustKit panel's messages: shapes only,
+// never a body, page text, a field's value or a URL's query.
+#[cfg(test)]
+mod panel_log_tests {
+    use super::*;
+
+    const SECRET: &str = "hunter2-a4-secret";
+
+    #[test]
+    fn a_panel_ipc_line_names_the_cmd_and_size_never_the_body() {
+        let bodies = [
+            format!(r#"{{"cmd":"unlock_vault","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"save_credential","url":"https://a.test/login?next={SECRET}","username":"{SECRET}","password":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"inspector_console_eval","code":"{SECRET}"}}"#),
+            format!(r#"{{"cmd":"search_commands","query":"{SECRET}"}}"#),
+        ];
+        for body in &bodies {
+            let line = panel_ipc_log_line("settings", body);
+            assert!(!line.contains(SECRET), "{line}");
+            assert!(!line.contains("password") && !line.contains("https"), "{line}");
+            assert!(line.contains(&format!("len={}", body.len())), "{line}");
+        }
+        assert_eq!(
+            panel_ipc_log_line("settings", &bodies[0]),
+            format!("panel=\"settings\" cmd=unlock_vault len={}", bodies[0].len())
+        );
+        // Not JSON, or a cmd that is not a command name: `?`.
+        let line = panel_ipc_log_line("shelf", SECRET);
+        assert_eq!(line, format!("panel=\"shelf\" cmd=? len={}", SECRET.len()));
+        let line = panel_ipc_log_line("shelf", &format!(r#"{{"cmd":"{SECRET} x"}}"#));
+        assert!(line.contains("cmd=?") && !line.contains(SECRET), "{line}");
+    }
+
+    #[test]
+    fn a_probe_report_in_the_log_is_shapes_only() {
+        let body = format!(
+            r##"{{"cmd":"panel_probe","size":[800,280],"text":"{SECRET}","boxes":{{"#vaultPassword":{{"box":[1,2,3,4],"n":1,"checked":null,"len":17,"value":"{SECRET}"}},"#cb":{{"box":[5,6,7,8],"n":1,"checked":true,"len":2}},"#gone":null,"#{SECRET}":{{"box":[0,0,0,0],"n":1}}}}}}"##
+        );
+        let line = panel_probe_log_line(&body, &["#vaultPassword", "#cb", "#gone"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert!(!line.contains("text") && !line.contains("value"), "{line}");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["size"], serde_json::json!([800, 280]));
+        assert_eq!(v["boxes"]["#vaultPassword"], serde_json::json!({"box": [1, 2, 3, 4], "n": 1, "checked": null, "len": 17}));
+        assert_eq!(v["boxes"]["#cb"]["checked"], serde_json::json!(true));
+        assert_eq!(v["boxes"]["#gone"], serde_json::Value::Null);
+        // A text where a shape belongs is dropped, not logged.
+        let body = format!(r##"{{"cmd":"panel_probe","size":["{SECRET}",1],"boxes":{{"#cb":{{"box":["{SECRET}"],"len":"{SECRET}"}}}}}}"##);
+        let line = panel_probe_log_line(&body, &["#cb"]).expect("a report");
+        assert!(!line.contains(SECRET), "{line}");
+        assert_eq!(panel_probe_log_line(SECRET, &["#cb"]), None);
+    }
+
+    #[test]
+    fn a_url_in_the_log_has_no_query_or_fragment() {
+        assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
+        assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
+        assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+}
+
 // The real-window driver's h6 check reads "wheel burst started" from the app
 // log after the first wheel it sends to a freshly launched app.
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
@@ -2440,7 +2588,7 @@ fn main() {
         .with_ipc_handler(move |message| {
             // Logged here, not in the handler: the RustKit chrome logs its
             // own (#907 R1 nit 1: once, without the body by default).
-            log_ipc("Chrome IPC", None, message.body());
+            log_ipc("Chrome IPC", message.body());
             handle_chrome_ipc(message.body(), &chrome_proxy, &chrome_state)
         })
         .build_as_child(&window)
@@ -2777,7 +2925,7 @@ fn main() {
         })
         .with_ipc_handler(move |message| {
             let body = message.body();
-            log_ipc("Content IPC", None, body);
+            log_ipc("Content IPC", body);
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
                 match &msg {
                     IpcMessage::GoBack => {
@@ -2950,7 +3098,7 @@ fn main() {
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(shelf_bounds)
         .with_ipc_handler(move |message| {
-            log_ipc("Shelf IPC", None, message.body());
+            log_ipc("Shelf IPC", message.body());
             handle_shelf_ipc(message.body(), &shelf_proxy, &shelf_state)
         })
         .with_ipc_handler(move |message| {
@@ -2971,7 +3119,7 @@ fn main() {
         .with_initialization_script(JS_BRIDGE)
         .with_bounds(inspector_bounds)
         .with_ipc_handler(move |message| {
-            log_ipc("Inspector IPC", None, message.body());
+            log_ipc("Inspector IPC", message.body());
             handle_inspector_ipc(message.body(), &inspector_proxy)
         })
         .build_as_child(&window)
@@ -2979,6 +3127,7 @@ fn main() {
 
     info!("Inspector WebView created (between content and shelf, starts hidden)");
     info!("Four-WebView architecture initialized");
+    announce_panel_probe();
 
     // DIAGNOSTIC: dump the contentView subview stack, bottom to top. Subview
     // array order IS z-order (later = on top). A full session of clicking
@@ -3526,7 +3675,7 @@ fn main() {
                         if take_chrome_overlays(&body, chrome) {
                             continue;
                         }
-                        log_ipc("RustKit chrome IPC", None, &body);
+                        log_ipc("RustKit chrome IPC", &body);
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
                         booted = true;
                     }
@@ -5580,6 +5729,10 @@ fn main() {
                             sw,
                             right_sidebar_open,
                         );
+                        // The RustKit Inspector takes the keyboard, as the
+                        // shelf does: its console without a click first
+                        // (#910 R1 nit 6).
+                        inspector_for_events.take_keyboard();
                         if with_rustkit_content!(content_for_events, view => devtools.open(view, &inspector_for_events)) {
                             return;
                         }
