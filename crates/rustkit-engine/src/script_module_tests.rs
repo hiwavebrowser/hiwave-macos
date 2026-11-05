@@ -558,3 +558,59 @@ log.push('classic');</script>"#,
         "{records:#?}"
     );
 }
+
+/// Batch 19 HOLD on S15 (github.com stalled after a module script, 6 of 8
+/// captures). The prefetch walk stops once the page's scripts are in, but
+/// the fetches it started kept their place in the policy's per-origin queue
+/// (six at a time, first come first served) with nothing polling them: an
+/// answered prefetch never gave its slot back. A fetch the walk did not
+/// start (`late.js`, imported by a module that arrived after the walk
+/// stopped) then waited for a slot until its network cap. Here one graph
+/// shares a slow import with another and the second graph alone fills the
+/// origin's six slots.
+#[test]
+fn prefetches_left_running_never_starve_a_later_module_fetch() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<script type="module" src="/m1.js"></script>
+<script type="module" src="/m2.js"></script>
+<script src="/held-classic.js"></script>"#,
+            ),
+        ),
+        // Held 300 ms: the walk is still going when every prefetch has been
+        // polled into the origin's queue (six slots, eight fetches), and has
+        // stopped before their 400 ms answers.
+        ("/held-classic.js", JS, "log.push('classic');".into()),
+        ("/m1.js", JS, "import './a.js?delay=400'; import './shared.js?delay=400'; log.push('m1');".into()),
+        ("/a.js?delay=400", JS, "import './late.js'; log.push('a');".into()),
+        ("/late.js", JS, "log.push('late');".into()),
+        ("/shared.js?delay=400", JS, "log.push('shared');".into()),
+        (
+            "/m2.js",
+            JS,
+            "import './shared.js?delay=400'; import './b1.js?delay=400'; import './b2.js?delay=400'; \
+             import './b3.js?delay=400'; import './b4.js?delay=400'; import './b5.js?delay=400'; \
+             import './b6.js?delay=400'; log.push('m2');"
+                .into(),
+        ),
+        ("/b1.js?delay=400", JS, "log.push('b1');".into()),
+        ("/b2.js?delay=400", JS, "log.push('b2');".into()),
+        ("/b3.js?delay=400", JS, "log.push('b3');".into()),
+        ("/b4.js?delay=400", JS, "log.push('b4');".into()),
+        ("/b5.js?delay=400", JS, "log.push('b5');".into()),
+        ("/b6.js?delay=400", JS, "log.push('b6');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,late,a,shared,m1,b1,b2,b3,b4,b5,b6,m2");
+    // Timed on the server, from the document's request to `late.js`'s
+    // answer (the engine's own start can wait on the GPU test guard).
+    let document = served_once(&server, "/");
+    let late = served_once(&server, "/late.js").answered.expect("late.js answered");
+    let elapsed = late - document.arrived;
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "late.js was answered {elapsed:?} after the page was requested: it waited on prefetch slots nobody polled"
+    );
+}
