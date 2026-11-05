@@ -287,8 +287,13 @@ pub fn ct_weight_trait(css_weight: u16) -> f64 {
 /// exactly TWO faces (`kCTFontSystemFontType` = Regular,
 /// `kCTFontEmphasizedSystemFontType` = Bold) — which is why the old
 /// `weight >= 600 ? bold : regular` gate collapsed all of 100..500 onto
-/// `.SFNS-Regular` and 600..900 onto `.SFNS-Bold`. Chrome does not: it applies
-/// `kCTFontWeightTrait` to the descriptor and gets the real face.
+/// `.SFNS-Regular` and 600..900 onto `.SFNS-Bold`. Chrome does not: it sets
+/// the variable font's `wght` axis to the CSS weight (`apply_wght_axis`).
+/// A `kCTFontWeightTrait` descriptor, the step before that, snapped to the
+/// nearest named instance and is now only the fallback for a face with no
+/// `wght` axis. CH2.B6c receipt: 'Downloads and Tabs 1' at 13px, weights
+/// 300/500/600/800 = 132.84/137.42/139.51/146.56 by trait, Chrome
+/// 133.19/137.17/139.78/144.98, wght axis equal to Chrome within 0.05px.
 ///
 /// Receipts (20px, `about`'s `.tagline`, `parity-tests/probe/ct_weight_advance.py`):
 /// Light 659.1px vs Regular 670.0px — an 11px error on one line of `font-weight:300`
@@ -298,7 +303,9 @@ pub fn create_system_font_with_weight(size: f64, css_weight: u16) -> CTFont {
     if css_weight == 400 {
         return base;
     }
-    apply_weight_trait(&base, size, css_weight).unwrap_or_else(|| {
+    apply_wght_axis(&base, size, css_weight)
+        .or_else(|| apply_weight_trait(&base, size, css_weight))
+        .unwrap_or_else(|| {
         // Descriptor matching failed (unusual): keep the old two-face split
         // rather than silently returning Regular for bold text.
         let ui_type = if css_weight >= 600 {
@@ -308,6 +315,64 @@ pub fn create_system_font_with_weight(size: f64, css_weight: u16) -> CTFont {
         };
         font::new_ui_font_for_language(ui_type, size, None)
     })
+}
+
+/// The OpenType `wght` axis tag, as Core Text keys a variation dictionary.
+const WGHT_AXIS_TAG: i64 = 0x7767_6874;
+
+/// `base` (the variable system font) with its `wght` axis set to the CSS
+/// weight itself — what Chrome does. A `kCTFontWeightTrait` descriptor
+/// instead snaps to the nearest NAMED instance (Light 300, Medium 510,
+/// Semibold 590, Heavy 860 on SF), so 300/500/600/800 measured up to 1.6px
+/// off Chrome on a 13px chrome label (CH2.B6c). Returns `None` when the face
+/// has no `wght` axis (the caller falls back to the weight trait).
+fn apply_wght_axis(base: &CTFont, size: f64, css_weight: u16) -> Option<CTFont> {
+    use core_foundation::base::CFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_foundation::string::CFStringRef;
+    use core_text::font_descriptor;
+
+    #[link(name = "CoreText", kind = "framework")]
+    extern "C" {
+        static kCTFontVariationAxisIdentifierKey: CFStringRef;
+        static kCTFontVariationAxisMinimumValueKey: CFStringRef;
+        static kCTFontVariationAxisMaximumValueKey: CFStringRef;
+    }
+    let key = |k: CFStringRef| unsafe { CFString::wrap_under_get_rule(k) };
+    let (id_key, min_key, max_key) = unsafe {
+        (
+            key(kCTFontVariationAxisIdentifierKey),
+            key(kCTFontVariationAxisMinimumValueKey),
+            key(kCTFontVariationAxisMaximumValueKey),
+        )
+    };
+
+    // Only a face that has the axis: elsewhere Core Text ignores the
+    // attribute and we would return the Regular face for every weight.
+    let axes = base.get_variation_axes()?;
+    let (min, max) = axes.iter().find_map(|axis| {
+        let num = |k: &CFString| axis.find(k).and_then(|v| v.downcast::<CFNumber>());
+        if num(&id_key)?.to_i64()? != WGHT_AXIS_TAG {
+            return None;
+        }
+        Some((num(&min_key)?.to_f64()?, num(&max_key)?.to_f64()?))
+    })?;
+    let wght = (css_weight as f64).clamp(min, max);
+
+    let variation: CFDictionary<CFNumber, CFType> = CFDictionary::from_CFType_pairs(&[(
+        CFNumber::from(WGHT_AXIS_TAG),
+        CFNumber::from(wght).as_CFType(),
+    )]);
+    let var_key = unsafe { CFString::wrap_under_get_rule(font_descriptor::kCTFontVariationAttribute) };
+    let attrs: CFDictionary<CFString, CFType> =
+        CFDictionary::from_CFType_pairs(&[(var_key, variation.as_CFType())]);
+    let desc = base
+        .copy_descriptor()
+        .create_copy_with_attributes(attrs.into_untyped())
+        .ok()?;
+    Some(font::new_from_descriptor(&desc, size))
 }
 
 /// Copy `base`'s descriptor with `kCTFontWeightTrait` overridden, and
@@ -1674,10 +1739,11 @@ mod tests {
         let bold = create_font_with_traits("system-ui", 32.0, 700, false).unwrap();
         let (rn, bn) = (regular.postscript_name(), bold.postscript_name());
         assert_ne!(rn, bn, "bold system face must differ from regular");
-        assert!(
-            bn.to_lowercase().contains("bold"),
-            "emphasized face expected, got {bn}"
-        );
+        // The face is the variable font at wght 700 (CH2.B6c), named
+        // `.SFNS-Regular_…_wght2BC0000`, not `.SFNS-Bold`: read its weight.
+        use core_text::font_descriptor::TraitAccessors;
+        let wt = bold.all_traits().normalized_weight();
+        assert!(wt >= 0.3, "a bold face expected, got {bn} (weight trait {wt})");
     }
     
     #[test]
@@ -1707,9 +1773,14 @@ mod tests {
         // The specific regression: 300 must be lighter than 400, and 600 must
         // NOT be the same face as 700 (the two ends of the old binary gate).
         let name = |w: u16| faces.iter().find(|(x, _)| *x == w).unwrap().1.clone();
+        // The faces are wght-axis instances (CH2.B6c), so their names carry
+        // the axis value, not "Light": read the weight trait.
+        use core_text::font_descriptor::TraitAccessors;
+        let trait_of =
+            |w: u16| create_font_with_traits("system-ui", 32.0, w, false).unwrap().all_traits().normalized_weight();
         assert!(
-            name(300).to_lowercase().contains("light"),
-            "font-weight:300 must resolve to the Light face, got {}",
+            trait_of(300) < trait_of(400),
+            "font-weight:300 must resolve lighter than 400, got {}",
             name(300)
         );
         assert_ne!(
