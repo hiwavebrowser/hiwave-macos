@@ -43,6 +43,9 @@ pub enum RelayoutCause {
     /// A click, mouse, key or form-submit event's listeners changed the DOM,
     /// or an edit changed a control's value.
     Input,
+    /// A frame of a running CSS transition, or what a transition event's
+    /// listeners wrote.
+    Animation,
     /// Anything else, named. The name is also the key it is counted under,
     /// so it must come from a fixed set of literals, never be built at run
     /// time.
@@ -64,6 +67,7 @@ impl RelayoutCause {
             RelayoutCause::ObserverCallback => "observer_callback",
             RelayoutCause::HoverOrFocus => "hover_or_focus",
             RelayoutCause::Input => "input",
+            RelayoutCause::Animation => "animation",
             RelayoutCause::Other(name) => name,
         }
     }

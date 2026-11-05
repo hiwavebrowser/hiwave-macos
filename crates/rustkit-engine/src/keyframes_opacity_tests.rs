@@ -1,7 +1,9 @@
 //! The static frame of a box whose `animation` names `@keyframes` that set
-//! `opacity`. The engine runs no animations, so it paints the frame the
-//! animation settles on (reddit's interstitial disc, `opacity: .75` with an
-//! infinite animation, painted solid at 1).
+//! `opacity` when the engine runs no animations (`disable_animations`, a
+//! parity capture): it paints the frame the animation settles on (reddit's
+//! interstitial disc, `opacity: .75` with an infinite animation, painted
+//! solid at 1). With animations running (the default since S13b) the frame
+//! follows the clock; see `css_animations_tests`.
 
 use super::*;
 
@@ -11,7 +13,11 @@ fn red_fade(css: &str, body: &str) -> f32 {
         "<!doctype html><style>body{{margin:0}}\
          .r{{background:#f00;width:100px;height:100px}}{css}</style><body>{body}</body>"
     );
-    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let config = EngineConfig {
+        disable_animations: true,
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::new(config).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 })
         .expect("view");

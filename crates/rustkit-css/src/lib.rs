@@ -2403,6 +2403,108 @@ impl Default for TransformOrigin {
 
 // ==================== Animation/Transition Types ====================
 
+/// One entry of the `transition` list: a property name (`all` for every
+/// animatable one), with its duration, delay (seconds) and timing function.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TransitionItem {
+    pub property: String,
+    pub duration: f32,
+    pub delay: f32,
+    pub timing: TimingFunction,
+}
+
+/// One entry of the `animation` list (css-animations-1 §4): a `@keyframes`
+/// name (`none` for no animation) with its timing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationItem {
+    pub name: String,
+    pub duration: f32,
+    pub delay: f32,
+    pub timing: TimingFunction,
+    pub iteration_count: AnimationIterationCount,
+    pub direction: AnimationDirection,
+    pub fill_mode: AnimationFillMode,
+    pub play_state: AnimationPlayState,
+}
+
+impl Default for AnimationItem {
+    fn default() -> Self {
+        Self {
+            name: "none".to_string(),
+            duration: 0.0,
+            delay: 0.0,
+            timing: TimingFunction::Ease,
+            iteration_count: AnimationIterationCount::One,
+            direction: AnimationDirection::Normal,
+            fill_mode: AnimationFillMode::None,
+            play_state: AnimationPlayState::Running,
+        }
+    }
+}
+
+impl TimingFunction {
+    /// The output progress for input progress `t` in 0..=1 (css-easing-1):
+    /// the cubic Bézier solved for `x = t`, or the step function.
+    pub fn evaluate(&self, t: f32) -> f32 {
+        let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
+        let bezier = |x1: f32, y1: f32, x2: f32, y2: f32| {
+            if t <= 0.0 {
+                return 0.0;
+            }
+            if t >= 1.0 {
+                return 1.0;
+            }
+            let at = |p1: f32, p2: f32, s: f32| {
+                let a = 1.0 - 3.0 * p2 + 3.0 * p1;
+                let b = 3.0 * p2 - 6.0 * p1;
+                let c = 3.0 * p1;
+                ((a * s + b) * s + c) * s
+            };
+            // Bisection on x: robust for every bounded curve.
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            let mut s = t;
+            for _ in 0..40 {
+                let x = at(x1, x2, s);
+                if (x - t).abs() < 1e-5 {
+                    break;
+                }
+                if x < t {
+                    lo = s;
+                } else {
+                    hi = s;
+                }
+                s = (lo + hi) / 2.0;
+            }
+            at(y1, y2, s)
+        };
+        let steps = |n: u32, jump_start: bool| {
+            if n == 0 {
+                return t;
+            }
+            let n_f = n as f32;
+            let mut step = (t * n_f).floor();
+            if jump_start {
+                step += 1.0;
+            }
+            if t >= 1.0 {
+                step = n_f;
+            }
+            (step / n_f).clamp(0.0, 1.0)
+        };
+        match self {
+            TimingFunction::Linear => t,
+            TimingFunction::Ease => bezier(0.25, 0.1, 0.25, 1.0),
+            TimingFunction::EaseIn => bezier(0.42, 0.0, 1.0, 1.0),
+            TimingFunction::EaseOut => bezier(0.0, 0.0, 0.58, 1.0),
+            TimingFunction::EaseInOut => bezier(0.42, 0.0, 0.58, 1.0),
+            TimingFunction::StepStart => steps(1, true),
+            TimingFunction::StepEnd => steps(1, false),
+            TimingFunction::Steps(n, jump_start) => steps(*n, *jump_start),
+            TimingFunction::CubicBezier(x1, y1, x2, y2) => bezier(*x1, *y1, *x2, *y2),
+        }
+    }
+}
+
 /// Animation timing function.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum TimingFunction {
@@ -2950,11 +3052,18 @@ pub struct ComputedStyle {
     pub rotate: Option<TransformOp>,
     pub scale: Option<TransformOp>,
 
-    // Transitions (parsed but not executed during parity capture)
+    // Transitions. The four scalars are the first item's (what
+    // `getComputedStyle` serializes); `transitions` is the whole list the
+    // engine runs (css-transitions-1 §2: one entry per `transition-property`
+    // name, the other longhands repeated to that length).
     pub transition_property: String,
     pub transition_duration: f32, // seconds
     pub transition_timing_function: TimingFunction,
     pub transition_delay: f32, // seconds
+    pub transitions: Vec<TransitionItem>,
+    /// The whole `animation` list the engine runs; the scalars below are
+    /// the first item's, and `animation_name` joins every name.
+    pub animations: Vec<AnimationItem>,
 
     // Animations (parsed but not executed during parity capture)
     pub animation_name: String,
@@ -5319,6 +5428,7 @@ mod settle_animation_opacity_tests {
                     name: "x".into(),
                     first,
                     last,
+                    frames: Vec::new(),
                 }],
                 ..Default::default()
             }]

@@ -432,6 +432,16 @@ fn layout_flex_container_at(
     let style_definite_inner_main = used_inner_height
         .or(resolved_percent_inner_height.filter(|_| !container.style.flex_direction.is_row()))
         .or_else(|| definite_inner_main_size(container));
+    // In a ROW the same resolved percentage height is the definite CROSS
+    // size (css-flexbox-1 §9.4.15: a single-line container with a definite
+    // cross size has that as its line's cross size). Read from style alone a
+    // percentage is not definite, so the line fell back to content.height,
+    // the block pre-pass's stack of the items: chrome.html's
+    // `html, body { height: 100% } body { display: flex }` stretched its
+    // `height: 100%` sidebar and its main column to 1105px in an 800px
+    // viewport (Chromium 143: 800 and 800).
+    let used_inner_cross_height = used_inner_height
+        .or(resolved_percent_inner_height.filter(|_| container.style.flex_direction.is_row()));
     let style_min_inner_main = min_inner_main_size(container);
 
     let style = &container.style;
@@ -501,7 +511,7 @@ fn layout_flex_container_at(
             // definite, a wrapping row stretched its lines over the height
             // the block pre-pass had stacked its items to: linkedin's topic
             // pills were 570 tall each.
-            used_inner_height.is_some()
+            used_inner_cross_height.is_some()
                 || !matches!(container.style.height, Length::Auto | Length::FitContent)
         }
         // A block-level flex container with `width: auto` still has a
@@ -524,7 +534,7 @@ fn layout_flex_container_at(
     // children-stacked height in content.height (logo 38.4 + nav 25.6 = 64
     // inside a height:60px header), which would center every item 2px low.
     // Px lengths resolve here; anything else falls back to the passed size.
-    let definite_inner_cross = if let (Axis::Vertical, Some(h)) = (cross_axis, used_inner_height) {
+    let definite_inner_cross = if let (Axis::Vertical, Some(h)) = (cross_axis, used_inner_cross_height) {
         Some(h)
     } else if has_definite_cross_size {
         let (spec, pb) = match cross_axis {
