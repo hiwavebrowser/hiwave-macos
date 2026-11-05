@@ -2156,7 +2156,16 @@ pub fn layout_grid_container(
                 let area_height = child.dimensions.content.height;
                 let mut margins = crate::MarginCollapseContext::new();
                 let mut floats = crate::FloatContext::new();
-                child.layout_block_children_with_collapse(&mut margins, &mut floats, None);
+                // An item with a height of its own (px, or a percentage of
+                // its area, which is sized by now) is the definite base of
+                // its children's percentages: Phase 8 gave it that height.
+                // With no base they fell back to the viewport, so google's
+                // doodle spacer (`calc(100% - 400px)` beside an `<a>` in a
+                // 230px item, 0 in Chromium) was 400 tall and pushed the
+                // image below the fold (S9); a `height: 50%` block was 400.
+                let percent_base =
+                    (!matches!(child.style.height, Length::Auto)).then_some(area_height);
+                child.layout_block_children_with_collapse(&mut margins, &mut floats, percent_base);
                 let cap = match definite_len(child, &child.style.max_height) {
                     Some(max_h) if child.style.box_sizing == BoxSizing::BorderBox => {
                         let pb = child.dimensions.padding.top
@@ -3900,12 +3909,25 @@ pub(crate) fn estimate_max_content_width(layout_box: &LayoutBox) -> f32 {
 /// contribution rule NOT applied to the box itself. See
 /// `own_min_content_width` for why the split exists.
 pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
+    // A known percent base is this box's alone: every nested measurement
+    // starts from none, and the block walk below hands one on per child.
+    match PERCENT_HEIGHT_BASE.with(Cell::get) {
+        None => own_max_content_width_in(layout_box, None),
+        base => with_percent_height_base(None, || own_max_content_width_in(layout_box, base)),
+    }
+}
+
+/// `own_max_content_width` with the box's percent base (`PERCENT_HEIGHT_BASE`).
+fn own_max_content_width_in(layout_box: &LayoutBox, base: Option<f32>) -> f32 {
     let style = &layout_box.style;
     if style.display == Display::None {
         return 0.0;
     }
     if let BoxType::Text(text) = &layout_box.box_type {
         return text_max_content_width(text, style);
+    }
+    if let Some(w) = base.and_then(|b| replaced_max_content_width_with_base(layout_box, b)) {
+        return w;
     }
     if style.display.is_table() {
         return crate::table::table_intrinsic_widths(layout_box).1;
@@ -4011,6 +4033,8 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         return content + padding_border;
     }
 
+    // What this box's children measure against: its own definite height.
+    let children_base = base.and_then(|b| percent_base_for_children(layout_box, Some(b)));
     let mut max_contribution = 0.0f32;
     let mut inline_run = 0.0f32;
     for child in &layout_box.children {
@@ -4025,7 +4049,10 @@ pub(crate) fn own_max_content_width(layout_box: &LayoutBox) -> f32 {
         }
         let inline_level =
             child.style.display.is_inline_level() || matches!(child.box_type, BoxType::Text(_));
-        let outer = estimate_max_content_width(child) + horizontal_margins(&child.style);
+        let outer = match base {
+            None => estimate_max_content_width(child),
+            _ => with_percent_height_base(children_base, || estimate_max_content_width(child)),
+        } + horizontal_margins(&child.style);
         if inline_level {
             inline_run += outer;
         } else {
@@ -4755,14 +4782,19 @@ fn place_item_in_area(child: &mut LayoutBox, rect: &Rect, container_style: &Comp
     child.dimensions.margin.top = margin_top;
     child.dimensions.margin.bottom = margin_bottom;
 
-    // Apply alignment - returns border-box dimensions
-    let (x, border_box_width) = apply_justify_self(
-        &child.style.justify_self,
-        &container_style.justify_items,
-        area.x,
-        area.width,
-        child,
-    );
+    // Apply alignment - returns border-box dimensions. The rows are sized by
+    // now, so an auto-width item's max-content measure knows its area's
+    // height: a percentage height inside it resolves (S9, google's doodle
+    // item `height:100%; max-height:230px` holding a `max-height:100%` image).
+    let (x, border_box_width) = with_percent_height_base(Some(area.height), || {
+        apply_justify_self(
+            &child.style.justify_self,
+            &container_style.justify_items,
+            area.x,
+            area.width,
+            child,
+        )
+    });
 
     let (y, border_box_height) = apply_align_self(
         &child.style.align_self,
@@ -4959,6 +4991,89 @@ thread_local! {
     /// zero. On only while grid track sizing asks for an item's min-content
     /// (`with_compressible_replaced_min(true, ..)`), off again inside a table.
     static COMPRESSIBLE_REPLACED_MIN: Cell<bool> = const { Cell::new(false) };
+
+    /// The definite content height of the containing block of the box
+    /// `own_max_content_width` is measuring, where the caller knows it.
+    /// `None` everywhere except under `with_percent_height_base`, so every
+    /// other measurement is unchanged. See `percent_base_for_children`.
+    static PERCENT_HEIGHT_BASE: Cell<Option<f32>> = const { Cell::new(None) };
+}
+
+/// Run `f` with `PERCENT_HEIGHT_BASE` set, restoring the previous value
+/// afterwards (also on unwind).
+fn with_percent_height_base<T>(base: Option<f32>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<f32>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PERCENT_HEIGHT_BASE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(PERCENT_HEIGHT_BASE.with(|c| c.replace(base)));
+    f()
+}
+
+/// The percent base the children of `parent` measure against, given the
+/// base `parent` itself measures against. An inline box is not a containing
+/// block (CSS 2.1 §10.1): its children keep the base. A block is the
+/// containing block of its children, so they get its definite content
+/// height: a px height, or a percentage of a known base, bounded by a px or
+/// resolvable `max-height`. Anything else has no definite height.
+fn percent_base_for_children(parent: &LayoutBox, base: Option<f32>) -> Option<f32> {
+    if matches!(parent.box_type, BoxType::Inline | BoxType::Text(_)) {
+        return base;
+    }
+    let style = &parent.style;
+    let resolve = |l: &Length| match l {
+        Length::Px(px) => Some(*px),
+        Length::Percent(p) => base.map(|b| p / 100.0 * b),
+        _ => None,
+    };
+    let mut height = resolve(&style.height)?;
+    if let Some(max) = resolve(&style.max_height) {
+        height = height.min(max);
+    }
+    if let Some(min) = resolve(&style.min_height) {
+        height = height.max(min);
+    }
+    if style.box_sizing == BoxSizing::BorderBox {
+        let px = |l: &Length| match l {
+            Length::Px(px) => *px,
+            _ => 0.0,
+        };
+        height -= px(&style.padding_top)
+            + px(&style.padding_bottom)
+            + px(&style.border_top_width)
+            + px(&style.border_bottom_width);
+    }
+    Some(height.max(0.0))
+}
+
+/// The max-content width (border box) of an image measured against a known
+/// percent base: the size `layout_image_in` gives it with no width limit, so
+/// a percentage `max-width` is `none` and `max-height: 100%` caps the height
+/// and, across the ratio, the width. S9: google's doodle (`<img width=1000
+/// height=400 style="max-height:100%; width:auto">` in a 230px item) is 575
+/// wide in Chromium; read as its 1000px width attribute it filled the cell.
+fn replaced_max_content_width_with_base(layout_box: &LayoutBox, base: f32) -> Option<f32> {
+    let BoxType::Image {
+        natural_width,
+        natural_height,
+        ..
+    } = layout_box.box_type
+    else {
+        return None;
+    };
+    // A percentage minimum would read the unbounded width below.
+    if length_has_percent(&layout_box.style.min_width) {
+        return None;
+    }
+    let mut probe = layout_box.clone();
+    let cb = crate::Dimensions {
+        content: crate::Rect::new(0.0, 0.0, f32::MAX / 4.0, 0.0),
+        ..Default::default()
+    };
+    probe.layout_image_in(natural_width, natural_height, &cb, Some(base));
+    Some(probe.dimensions.border_box().width)
 }
 
 /// Run `f` with the compressible-replaced min-content rule on or off,
