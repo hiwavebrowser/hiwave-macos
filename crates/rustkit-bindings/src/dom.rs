@@ -1548,6 +1548,32 @@ pub(crate) fn install(
                 descendant_elements(&scope, &mut all);
                 return id_list(all.into_iter().filter(|n| matcher(n, arg, &host.checked) == Some(true)));
             }
+            // HTML §7.2.2.3 named access on the Window object: the elements
+            // whose id is `arg`, or whose name is `arg` on an embed, form,
+            // img or object, in tree order. "frame" when none is but an
+            // iframe/frame is named `arg` (a browsing-context name, which
+            // is not supported).
+            if string_arg(args, 2) == Some("windowNamed") {
+                if arg.is_empty() {
+                    return JsValue::String(String::new());
+                }
+                let (mut all, mut frame) = (Vec::new(), false);
+                document.traverse(|n| {
+                    let Some(tag) = n.tag_name() else { return };
+                    let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
+                    if n.get_attribute("id") == Some(arg)
+                        || (n.get_attribute("name") == Some(arg) && is(&["embed", "form", "img", "object"]))
+                    {
+                        all.push(n.clone());
+                    } else if n.get_attribute("name") == Some(arg) && is(&["iframe", "frame"]) {
+                        frame = true;
+                    }
+                });
+                if all.is_empty() && frame {
+                    return JsValue::String("frame".into());
+                }
+                return id_list(all.into_iter().filter(|n| is_connected(n, document)));
+            }
             let found = match string_arg(args, 2) {
                 Some("tag") if arg == "*" => {
                     let mut all = Vec::new();
@@ -3779,6 +3805,20 @@ const WRAPPERS_JS: &str = r#"
         for (; node && node.nodeType === 1; node = node.parentElement) out.push(node);
         return out;
     };
+    // Named access on the Window object (web_named_access.js): the element
+    // the id or name picks out, an HTMLCollection when several do, else
+    // undefined. Looked up each time, so ids added or removed are seen.
+    HOOKS.windowNamed = function (name) {
+        var d = g.document;
+        if (!d || typeof name !== 'string' || name === '') return undefined;
+        var ids = collect(d, 'windowNamed', name);
+        if (!ids) return undefined;
+        if (ids === 'frame') return HOOKS.windowNamed.FRAME;
+        var c = list(HTMLCollection.prototype, ids, true);
+        return c.length === 0 ? undefined : c.length === 1 ? c[0] : c;
+    };
+    // Answered for a name only an iframe/frame carries (unsupported).
+    Object.defineProperty(HOOKS.windowNamed, 'FRAME', { value: Object.freeze({}) });
     Document.prototype.getElementById = function (id) {
         var s = slotOf(this);
         if (this !== g.document) return findById(this, id);

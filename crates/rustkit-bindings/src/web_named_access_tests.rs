@@ -118,3 +118,22 @@ fn builtins_and_missing_names_are_unchanged() {
     assert_eq!(ev(&b, "typeof window.addEventListener"), "function");
     assert_eq!(ev(&b, "Object.getPrototypeOf(window) === Window.prototype"), "true");
 }
+
+/// A browsing-context name (an iframe's `name`) is not a named property
+/// here; reading one stays unresolved and is reported as unsupported.
+#[test]
+fn an_iframe_name_is_reported_unsupported() {
+    let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+    b.set_document(Rc::new(
+        Document::parse_html("<!DOCTYPE html><html><body><iframe name=child></iframe><iframe id=byid></iframe></body></html>").unwrap(),
+    ))
+    .unwrap();
+    assert!(b.take_unsupported_apis().is_empty());
+    assert_eq!(ev(&b, "typeof nothingHere"), "undefined");
+    assert!(b.take_unsupported_apis().is_empty(), "a plain miss is not reported");
+    assert_eq!(ev(&b, "typeof child"), "undefined");
+    let apis = b.take_unsupported_apis();
+    assert_eq!((apis[0].0.as_str(), apis[0].1.as_str()), ("Window", "named access (iframe name)"));
+    // An iframe's id is an id like any other (the element, not its WindowProxy).
+    assert_eq!(ev(&b, "byid.localName"), "iframe");
+}
