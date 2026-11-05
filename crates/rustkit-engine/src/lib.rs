@@ -496,6 +496,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod text_control_select_tests;
+#[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
