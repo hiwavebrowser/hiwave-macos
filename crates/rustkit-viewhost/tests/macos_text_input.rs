@@ -175,6 +175,30 @@ fn main() {
                 .collect::<Vec<_>>()
         );
 
+        // Chromium's reserved chords go to the menu, never the page
+        // (Chrome 143 on this seat: no keydown for Cmd+T or Cmd+N, and the
+        // tab opens though the page cancels; Cmd+L, Cmd+D, Cmd+K reach it).
+        use rustkit_viewhost::is_reserved_chord;
+        for (code, shift, alt, reserved, what) in [
+            (17, false, false, true, "Cmd+T"),
+            (45, false, false, true, "Cmd+N"),
+            (13, false, false, true, "Cmd+W"),
+            (12, false, false, true, "Cmd+Q"),
+            (17, true, false, true, "Cmd+Shift+T"),
+            (33, true, false, true, "Cmd+Shift+["),
+            (124, false, true, true, "Cmd+Option+Right"),
+            (37, false, false, false, "Cmd+L"),
+            (2, false, false, false, "Cmd+D"),
+            (40, false, false, false, "Cmd+K"),
+            (3, false, false, false, "Cmd+F"),
+            (9, false, false, false, "Cmd+V"),
+            (33, false, false, false, "Cmd+[ (Back)"),
+            (124, false, false, false, "Cmd+Right"),
+        ] {
+            assert_eq!(is_reserved_chord(code, true, shift, alt), reserved, "{what}");
+        }
+        assert!(!is_reserved_chord(17, false, false, false), "T without Cmd");
+
         println!("ok: the content view is a text input client and answers the Edit menu");
     }
 }
