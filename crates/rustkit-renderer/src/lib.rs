@@ -2786,6 +2786,7 @@ impl Renderer {
                 font_weight,
                 padding,
                 kind,
+                selection,
             } => {
                 self.draw_text_input(
                     *rect,
@@ -2803,6 +2804,7 @@ impl Renderer {
                     *font_weight,
                     *padding,
                     *kind,
+                    *selection,
                 );
             }
 
@@ -5332,6 +5334,7 @@ impl Renderer {
         font_weight: u16,
         padding: [f32; 4],
         kind: rustkit_layout::TextControlKind,
+        selection: Option<(usize, usize)>,
     ) {
         let menu_list = kind == rustkit_layout::TextControlKind::MenuList;
 
@@ -5378,6 +5381,24 @@ impl Renderer {
 
         if menu_list {
             self.draw_menu_list_arrow(rect, text_color);
+        }
+
+        // The selected part of the value, behind the text, measured as the
+        // caret is so the highlight ends at it.
+        if let (true, Some((start, end))) = (focused && !value.is_empty(), selection) {
+            let measure = |t: &str| Self::measure_run_width(t, font_family, font_size);
+            let rects = rustkit_layout::forms::calculate_selection_rects(
+                value,
+                start,
+                end,
+                text_x,
+                text_top,
+                ascent + descent,
+                &measure,
+            );
+            for r in rects {
+                self.draw_solid_rect(r, rustkit_layout::SELECTION_COLOR);
+            }
         }
 
         if !display_text.is_empty() {
