@@ -23570,6 +23570,8 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     // wikipedia's `minmax(0,1fr)` and `12.25rem` columns never parsed. `rem`
     // assumes the 16px root, as `fit-content()` and `flex-basis` do.
     match parse_length(value)? {
+        // A bare `0` parses to `Px(0.0)` (CH2.B14); `Zero` kept for safety.
+        rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
         rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
         _ => None,
@@ -27912,7 +27914,8 @@ mod tests {
 
     #[test]
     fn test_parse_length() {
-        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Zero));
+        // An authored `0` is `0px`; `Length::Zero` is the unset default (CH2.B14).
+        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Px(0.0)));
         assert_eq!(parse_length("auto"), Some(rustkit_css::Length::Auto));
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));

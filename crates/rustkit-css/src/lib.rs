@@ -3932,8 +3932,13 @@ pub fn parse_length(value: &str) -> Option<Length> {
     if value == "fit-content" {
         return Some(Length::FitContent);
     }
+    // An authored unitless `0` is a definite zero length, exactly `0px`
+    // (css-values-4 §6.1.1), NOT `Length::Zero`: `Zero` is the `#[default]`,
+    // the value an unset property holds, and code that tells "not set" from
+    // "set to zero" by that variant (multicol's `column-gap: normal` = 1em,
+    // the getComputedStyle gap read) read a bare `0` as unset (CH2.B14).
     if value == "0" {
-        return Some(Length::Zero);
+        return Some(Length::Px(0.0));
     }
 
     // Handle min(), max(), clamp() CSS math functions
@@ -4836,10 +4841,11 @@ mod tests {
             parse_border_spacing("10px 4px"),
             Some((Length::Px(10.0), Length::Px(4.0)))
         );
-        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        // A bare `0` is `0px` (CH2.B14).
+        assert_eq!(parse_border_spacing("0"), Some((Length::Px(0.0), Length::Px(0.0))));
         assert_eq!(
             parse_border_spacing(" 0.2em 0 "),
-            Some((Length::Em(0.2), Length::Zero))
+            Some((Length::Em(0.2), Length::Px(0.0)))
         );
         // Negative lengths, percentages, keywords and three values are invalid.
         for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {
