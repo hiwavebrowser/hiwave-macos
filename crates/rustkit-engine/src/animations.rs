@@ -32,7 +32,8 @@
 //! pseudo-element transitions, and `transition-behavior: allow-discrete`.
 
 use rustkit_css::{
-    Color, ComputedStyle, Length, TimingFunction, TransformList, TransformOp, TransitionItem,
+    Color, ComputedStyle, Display, Length, TimingFunction, TransformList, TransformOp,
+    TransitionItem,
 };
 use std::collections::HashMap;
 
@@ -437,6 +438,13 @@ pub(crate) struct Animations {
     base: HashMap<usize, Vec<(usize, AnimValue)>>,
     transitions: Vec<Transition>,
     events: Vec<AnimationEvent>,
+    /// The full build in progress (or the last one), and the build each
+    /// element was last handed to `on_style` in. An element a full build
+    /// did not visit (under a `display: none` ancestor, or gone) has no
+    /// computed style any more: its transitions are cancelled at the end
+    /// of that build and its base dropped.
+    build_serial: u64,
+    seen: HashMap<usize, u64>,
     /// Property names a `transition` named that the engine cannot run,
     /// once each per document, for the Inspector's unsupported APIs.
     reported: std::collections::BTreeSet<String>,
@@ -496,6 +504,52 @@ impl Animations {
     /// Cancel the transitions of elements that `alive` no longer finds in
     /// the document (css-transitions-1 §3: an element removed from the
     /// document ends its transitions with `transitioncancel`).
+    /// A full build of the view starts: what it visits is noted.
+    pub(crate) fn begin_build(&mut self) {
+        self.build_serial += 1;
+    }
+
+    /// The full build is over: elements it did not visit have no computed
+    /// style (css-transitions-1 §3: a transition on an element that no
+    /// longer has one is cancelled).
+    pub(crate) fn end_build(&mut self) {
+        let serial = self.build_serial;
+        let seen = |node: usize, seen: &HashMap<usize, u64>| seen.get(&node) == Some(&serial);
+        let mut gone = Vec::new();
+        self.transitions.retain(|t| {
+            if seen(t.node, &self.seen) {
+                true
+            } else {
+                gone.push(t.clone());
+                false
+            }
+        });
+        let now = self.clock_ms;
+        for t in gone {
+            self.push_event(&t, "transitioncancel", t.elapsed_at(now));
+        }
+        self.base.retain(|node, _| seen(*node, &self.seen));
+        self.seen.retain(|_, s| *s == serial);
+    }
+
+    /// Cancel this element's transitions (it lost its computed style).
+    fn cancel_node(&mut self, node: usize) {
+        let now = self.clock_ms;
+        let mut gone = Vec::new();
+        self.transitions.retain(|t| {
+            if t.node == node {
+                gone.push(t.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for t in gone {
+            self.push_event(&t, "transitioncancel", t.elapsed_at(now));
+        }
+        self.base.remove(&node);
+    }
+
     pub(crate) fn prune(&mut self, alive: impl Fn(usize) -> bool) {
         let now = self.clock_ms;
         let mut gone = Vec::new();
@@ -517,6 +571,13 @@ impl Animations {
     /// changed values call for and overlay the running ones on `style`.
     pub(crate) fn on_style(&mut self, node: usize, style: &mut ComputedStyle) {
         let now = self.clock_ms;
+        self.seen.insert(node, self.build_serial);
+        // `display: none`: no computed style to transition (its subtree is
+        // not visited at all), and nothing to transition from when shown.
+        if style.display == Display::None {
+            self.cancel_node(node);
+            return;
+        }
         let has_running = self.transitions.iter().any(|t| t.node == node);
         if style.transitions.is_empty() && !has_running {
             self.base.remove(&node);

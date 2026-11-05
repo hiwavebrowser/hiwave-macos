@@ -313,14 +313,20 @@ fn a_hidden_ancestor_cancels_the_transitions_under_it() {
         "nothing runs under a hidden ancestor"
     );
     pump(&mut engine, view, 200, 16);
-    assert_eq!(log(&mut engine, view), "cancel:opacity", "no end after the cancel");
+    assert_eq!(
+        log(&mut engine, view),
+        "cancel:opacity",
+        "no end after the cancel"
+    );
 }
 
 /// `display: none` to `block` with an opacity change shows the new value
 /// at once: there is no transition from a hidden start (Chrome).
 #[test]
 fn display_none_to_block_does_not_transition() {
-    let page = PAGE.replace("#h{width", "#h{display:none;width").replace("#h.on{opacity:1}", "#h.on{display:block;opacity:1}");
+    let page = PAGE
+        .replace("#h{width", "#h{display:none;width")
+        .replace("#h.on{opacity:1}", "#h.on{display:block;opacity:1}");
     let (mut engine, view, _server) = load(&page);
     run(&mut engine, view, "h.classList.add('on')");
     pump(&mut engine, view, 16, 16);
@@ -346,7 +352,11 @@ fn a_nested_span_inherits_the_transitioning_colour() {
         .trim_start_matches("rgb(")
         .trim_end_matches(')')
         .split(',')
-        .map(|c| c.trim().parse().unwrap_or_else(|_| panic!("colour {mid:?}")))
+        .map(|c| {
+            c.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("colour {mid:?}"))
+        })
         .collect();
     assert!(
         (channels[0] - 128.0).abs() <= 30.0 && (channels[2] - 128.0).abs() <= 30.0,
