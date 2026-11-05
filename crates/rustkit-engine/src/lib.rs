@@ -290,6 +290,8 @@ mod relayout_cause;
 mod selection;
 #[cfg(test)]
 mod selection_tests;
+#[cfg(test)]
+mod text_transform_layout_tests;
 mod drag_drop;
 mod select_popup;
 mod select_popup_engine;
