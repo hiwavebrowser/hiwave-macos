@@ -121,8 +121,8 @@ def _append(shown, *answers):
 def _stop(id, repeat, first, last, doc=1):
     return {
         "id": id, "doc": doc, "level": "error", "kind": "script_error",
-        "message": "Uncaught Error (message hidden, 26 chars) [event:pointermove]",
-        "stack": [], "repeat": repeat, "firstMs": first, "lastMs": last,
+        "message": "Uncaught Error: stopped at the script budget [event:pointermove]",
+        "stack": [], "repeat": repeat, "firstMs": first, "lastMs": last, "budgetStop": True,
     }
 
 
@@ -142,6 +142,15 @@ def test_a_different_line_or_document_ends_the_run():
     other = {"id": 50, "doc": 1, "level": "log", "kind": "console", "message": "<string len=4>", "stack": []}
     rows = _append([], [_stop(1, 1, 1.0, 1.0), other, _stop(51, 1, 5.0, 5.0)], [_stop(52, 1, 6.0, 6.0, doc=2)])
     assert rows == [(1, 1, 1.0, 1.0), (50, 1, None, None), (51, 1, 5.0, 5.0), (52, 1, 6.0, 6.0)]
+
+
+def test_identical_page_lines_never_fold():
+    # Shape-only: console.log('a'), ('b'), ('c') all read <string len=1>;
+    # only budget stops fold, so the page's three calls stay three rows.
+    log = {"doc": 1, "level": "log", "kind": "console", "message": "<string len=1>", "stack": [],
+           "repeat": 1, "firstMs": 1.0, "lastMs": 1.0, "budgetStop": False}
+    rows = _append([], [dict(log, id=1), dict(log, id=2)], [dict(log, id=3)])
+    assert [r[0] for r in rows] == [1, 2, 3]
 
 
 def test_console_input_lines_never_fold():

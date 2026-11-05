@@ -399,7 +399,7 @@ fn payloads_serialize_in_the_panels_field_names() {
     assert_eq!(c["pageChanged"], false);
     assert_eq!(
         c["entries"][0],
-        serde_json::json!({"id": 9, "doc": 0, "level": "log", "kind": "console", "message": "m …", "stack": [], "repeat": 1, "firstMs": 0.0, "lastMs": 0.0})
+        serde_json::json!({"id": 9, "doc": 0, "level": "log", "kind": "console", "message": "m …", "stack": [], "repeat": 1, "firstMs": 0.0, "lastMs": 0.0, "budgetStop": false})
     );
 }
 
@@ -414,13 +414,13 @@ fn identical_lines_in_a_row_are_one_entry_with_a_count() {
         t_ms,
         event: InspectorEvent::ScriptError {
             name: "Error".into(),
-            message: None,
+            message: Some(crate::inspector_glue::BUDGET_STOP_MESSAGE.into()),
             location: None,
             stack: None,
             unhandled_rejection: false,
             script: "event:pointermove".into(),
             value: "error".into(),
-            message_len: Some(26),
+            message_len: None,
             inserted_by: None,
         },
     };
@@ -445,6 +445,40 @@ fn identical_lines_in_a_row_are_one_entry_with_a_count() {
             (102, "script_error", 1, 1_020.0, 1_020.0),
         ]
     );
+    assert!(c.entries.iter().filter(|e| e.kind == "script_error").all(|e| e.budget_stop));
+}
+
+#[test]
+fn only_budget_stops_fold() {
+    // Shape-only: console.log('a'), ('b'), ('c') all read `<string len=1>`,
+    // and a page error with its text hidden reads the same each time. Those
+    // are the page's own calls; only the engine's budget-stop line folds.
+    let log = |seq: u64| InspectorRecord {
+        seq,
+        doc: 1,
+        t_ms: seq as f64,
+        event: InspectorEvent::Console { level: ConsoleLevel::Log, message: "<string len=1>".into(), truncated: false, location: None, stack: None, error_stack: None },
+    };
+    let hidden = |seq: u64| InspectorRecord {
+        seq,
+        doc: 1,
+        t_ms: seq as f64,
+        event: InspectorEvent::ScriptError {
+            name: "Error".into(),
+            message: None,
+            location: None,
+            stack: None,
+            unhandled_rejection: false,
+            script: "event:click".into(),
+            value: "error".into(),
+            message_len: Some(26),
+            inserted_by: None,
+        },
+    };
+    let records = vec![log(0), log(1), log(2), hidden(3), hidden(4)];
+    let c = devtools_console_entries(&InspectorSnapshot { records, next_seq: 5, dropped: 0 });
+    let rows: Vec<(u64, u32, bool)> = c.entries.iter().map(|e| (e.id, e.repeat, e.budget_stop)).collect();
+    assert_eq!(rows, [(0, 1, false), (1, 1, false), (2, 1, false), (3, 1, false), (4, 1, false)]);
 }
 
 #[test]

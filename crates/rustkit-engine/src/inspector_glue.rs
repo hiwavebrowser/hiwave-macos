@@ -236,12 +236,18 @@ pub(crate) fn drain_quiet(bindings: &DomBindings, inspector: &Inspector, source:
 thread_local! {
     /// The source whose turn the script budget just stopped, until that
     /// turn's errors are drained or the next turn is armed (T20).
-    static STOP_PENDING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// With it, the stop's place among the reports the next drain takes.
+    static STOP_PENDING: std::cell::RefCell<Option<(String, usize)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The budget stopped `source`'s turn: its last error report is the stop.
-pub(crate) fn stop_pending(source: &str) {
-    STOP_PENDING.with(|slot| *slot.borrow_mut() = Some(source.to_string()));
+/// The budget stopped `source`'s turn: the last exception queued when the
+/// turn ended is the stop. Read now, before the stop note runs: the note is
+/// page script too (`console.warn` may be the page's own), and an error of
+/// its own lands after the stop's, so "the drain's last report" would be
+/// the note's. No exception queued (reports off): nothing to replace.
+pub(crate) fn stop_pending(bindings: &DomBindings, source: &str) {
+    let at = bindings.queued_exception_reports().checked_sub(1);
+    STOP_PENDING.with(|slot| *slot.borrow_mut() = at.map(|at| (source.to_string(), at)));
 }
 
 /// A new turn is armed: a stop not drained by now has no report.
@@ -249,14 +255,15 @@ pub(crate) fn clear_stop_pending() {
     STOP_PENDING.with(|slot| *slot.borrow_mut() = None);
 }
 
-fn take_stop_pending(source: &str) -> bool {
+/// The stop's place in this drain of `source`'s reports, if it has one.
+fn take_stop_pending(source: &str) -> Option<usize> {
     STOP_PENDING.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let hit = slot.as_deref() == Some(source);
-        if hit {
+        let at = slot.as_ref().filter(|(pending, _)| pending == source).map(|&(_, at)| at);
+        if at.is_some() {
             *slot = None;
         }
-        hit
+        at
     })
 }
 
@@ -287,11 +294,13 @@ pub(crate) fn drain_errors(bindings: &DomBindings, inspector: &Inspector, source
         return;
     }
     let reports = bindings.take_error_reports();
-    // The stop the budget made in this turn reports as the turn's last
-    // error, in one of two texts (the watchdog's interrupt, or the host
-    // call refused past the deadline). Both are the one engine line, so a
-    // listener stopped again and again is one row with a count (T20).
-    let stop = take_stop_pending(source).then(|| reports.len().checked_sub(1)).flatten();
+    // The stop the budget made in this turn reports as the last exception
+    // queued when the turn ended, in one of two texts (the watchdog's
+    // interrupt, or the host call refused past the deadline). Both are the
+    // one engine line, so a listener stopped again and again is one row
+    // with a count (T20). Exceptions come first in `reports`, so the place
+    // read then still holds (unless the report cap dropped older ones).
+    let stop = take_stop_pending(source).filter(|&at| at < reports.len());
     for (i, report) in reports.into_iter().enumerate() {
         if mirror {
             let window = report.frames.first().and_then(|frame| {

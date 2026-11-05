@@ -708,6 +708,22 @@ impl JsRuntime {
         self.sources.get(path)
     }
 
+    /// How many exceptions the next [`take_error_reports`](Self::take_error_reports)
+    /// starts with (they come first, oldest first); 0 with reports off.
+    /// Lets the embedder name one of them by position, such as the error
+    /// a turn ended with, before more script runs.
+    pub fn queued_exception_reports(&self) -> usize {
+        #[cfg(feature = "boa")]
+        {
+            if !self.diag.on.get() {
+                return 0;
+            }
+            self.diag.queued()
+        }
+        #[cfg(not(feature = "boa"))]
+        0
+    }
+
     /// The page errors since the last call (with reports on), oldest first:
     /// exceptions, then modules that threw after a top-level `await`, then
     /// promises still rejected with no handler. Runs none of the page's

@@ -1865,6 +1865,12 @@ impl DomBindings {
         self.runtime.borrow_mut().take_error_reports()
     }
 
+    /// How many exceptions the next [`take_error_reports`](Self::take_error_reports)
+    /// starts with ([`rustkit_js::JsRuntime::queued_exception_reports`]).
+    pub fn queued_exception_reports(&self) -> usize {
+        self.runtime.borrow().queued_exception_reports()
+    }
+
     /// Unimplemented Web API members page script reached since the last
     /// call: `(interface, member, times, first caller's position)`. Only
     /// [`UNSUPPORTED_MEMBERS`] are ever returned.

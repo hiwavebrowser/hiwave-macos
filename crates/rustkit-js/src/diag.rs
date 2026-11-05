@@ -416,6 +416,11 @@ impl Diagnostics {
         reports.push_back(report);
     }
 
+    /// How many exceptions are queued for the next [`take`](Self::take).
+    pub(crate) fn queued(&self) -> usize {
+        self.reports.borrow().len()
+    }
+
     pub(crate) fn take(&self) -> Vec<ErrorReport> {
         self.reports.borrow_mut().drain(..).collect()
     }

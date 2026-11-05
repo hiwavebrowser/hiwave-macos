@@ -1070,13 +1070,16 @@
                 return rows;
             }
 
-            // The engine folds identical lines in a row into one with a
-            // `repeat` count (T20); a run that spans two answers is folded
-            // here, so 100 budget stops from one listener stay one row.
+            // The engine folds a run of identical budget stops into one
+            // line with a `repeat` count (T20); a run that spans two answers
+            // is folded here, so 100 stops from one listener stay one row.
+            // Only stops fold: shape-only page logs often read the same
+            // (`<string len=1>`) though the page logged different values.
             // Same rule as the engine's `same_line`. Pure; tested by
             // scripts/tests/test_inspector_console_groups.py.
             function sameConsoleLine(a, b) {
-                return a.doc === b.doc && a.level === b.level && a.kind === b.kind
+                return a.budgetStop === true && b.budgetStop === true
+                    && a.doc === b.doc && a.level === b.level && a.kind === b.kind
                     && a.message === b.message
                     && JSON.stringify(a.stack || []) === JSON.stringify(b.stack || []);
             }

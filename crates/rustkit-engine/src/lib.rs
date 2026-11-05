@@ -1742,8 +1742,9 @@ fn end_live_turn(
         return None;
     }
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    // The turn's errors are drained after this; its last is the stop.
-    inspector_glue::stop_pending(source);
+    // The turn's errors are drained after this; the last one queued now,
+    // before the stop note runs, is the stop.
+    inspector_glue::stop_pending(bindings, source);
     Some(record_stopped_script(
         config, bindings, source, elapsed_ms, late,
     ))

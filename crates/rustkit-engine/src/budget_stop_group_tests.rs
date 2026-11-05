@@ -57,26 +57,35 @@ document.addEventListener('pointermove', function () { for (;;) { document.body.
     assert_eq!(stops, 100, "every stop is still recorded");
 
     let console = engine.devtools_console(view, since).unwrap();
-    let rows: Vec<(&str, &str, u32)> = console.entries.iter().map(|e| (e.kind, e.level, e.repeat)).collect();
-    let errors: Vec<_> = console.entries.iter().filter(|e| e.kind == "script_error").collect();
-    let notes = console.entries.iter().filter(|e| e.kind == "console").count();
+    let rows: Vec<(&str, &str, u32)> = console.entries.iter().map(|e| (e.kind, e.message.as_str(), e.repeat)).collect();
+    let fixed = "Uncaught Error: stopped at the script budget [event:pointermove]";
+    let errors: Vec<_> = console.entries.iter().filter(|e| e.kind == "script_error" && e.message.ends_with("[event:pointermove]")).collect();
+    // "Script stopped: it ran past 5 ms (event:pointermove)", as a shape.
+    let notes = console.entries.iter().filter(|e| e.kind == "console" && e.message == "<string len=52>").count();
+    // The 5 ms budget is the page's own: on a loaded machine the engine's
+    // dispatch of `mousemove` or `pointerover` (no listener) can pass it
+    // too. Those are real stops of other sources; each ends the pointermove
+    // run in the console, as any other line does.
+    let foreign = console.entries.iter().any(|e| e.kind == "script_error" && !e.message.ends_with("[event:pointermove]"));
     // A quiet machine runs the 100 stops well inside one 5 s window: one
     // note, then one row x100. A loaded one may take longer, and then each
     // new window's note starts a new row; the stops still add up to 100.
     let windows = (elapsed.as_secs() / STOP_LINE_EVERY.as_secs()) as usize + 1;
     assert!((1..=windows).contains(&notes), "one stop note per 5 s window: {rows:?} in {elapsed:?}");
-    assert_eq!(errors.len(), notes, "one row per window: {rows:?}");
     assert_eq!(errors.iter().map(|e| e.repeat).sum::<u32>(), 100, "{rows:?}");
-    assert_eq!(console.entries.len(), 2 * notes, "{rows:?}");
     for e in &errors {
         // One engine line whichever way each stop came (the watchdog's
         // interrupt or the host call refused past the deadline): before
         // T20 the two texts split the run into rows.
-        assert_eq!(e.message, "Uncaught Error: stopped at the script budget [event:pointermove]");
+        assert_eq!(e.message, fixed, "{rows:?}");
         assert!(e.first_ms <= e.last_ms);
     }
-    if elapsed < STOP_LINE_EVERY {
-        assert_eq!(rows, [("console", "warn", 1), ("script_error", "error", 100)]);
+    if !foreign {
+        assert_eq!(errors.len(), notes, "one row per window: {rows:?}");
+        assert_eq!(console.entries.len(), 2 * notes, "{rows:?}");
+        if elapsed < STOP_LINE_EVERY {
+            assert_eq!(rows, [("console", "<string len=52>", 1), ("script_error", fixed, 100)]);
+        }
     }
 }
 
@@ -113,9 +122,13 @@ document.addEventListener('pointermove', function () { for (;;) { document.body.
     let console = engine.devtools_console(view, since).unwrap();
     let rows: Vec<(&str, &str, u32)> = console.entries.iter().map(|e| (e.kind, e.message.as_str(), e.repeat)).collect();
     let fixed = "Uncaught Error: stopped at the script budget [event:pointermove]";
-    let stops: u32 = console.entries.iter().filter(|e| e.message == fixed).map(|e| e.repeat).sum();
+    // Only pointermove's rows: on a loaded machine the engine's dispatch of
+    // `pointerover` and the rest (no listener) can pass the 5 ms budget too,
+    // each a real stop of its own source with a note of its own.
+    let mine: Vec<_> = console.entries.iter().filter(|e| e.message.ends_with("[event:pointermove]")).collect();
+    let stops: u32 = mine.iter().filter(|e| e.message == fixed).map(|e| e.repeat).sum();
     assert_eq!(stops, 3, "each stop is the fixed line once: {rows:?}");
-    let others: Vec<_> = console.entries.iter().filter(|e| e.kind == "script_error" && e.message != fixed).collect();
+    let others: Vec<_> = mine.iter().filter(|e| e.kind == "script_error" && e.message != fixed).collect();
     assert_eq!(others.len(), 1, "the note's own error, once: {rows:?}");
     assert!(others[0].message.contains("TypeError"), "{rows:?}");
 }

@@ -164,13 +164,23 @@ pub struct DevtoolsConsoleEntry {
     pub first_ms: f64,
     #[serde(rename = "lastMs")]
     pub last_ms: f64,
+    /// The engine's one line for a script the budget stopped
+    /// ([`crate::inspector_glue::BUDGET_STOP_MESSAGE`]). Only these fold:
+    /// in shape-only mode three different `console.log` strings of one
+    /// character all read `<string len=1>`, and folding them would hide
+    /// that the page made three calls.
+    #[serde(rename = "budgetStop")]
+    pub budget_stop: bool,
 }
 
 impl DevtoolsConsoleEntry {
-    /// Whether `other` is the same line again: same document, level, kind,
-    /// text and place. The panel's `sameConsoleLine` is the same rule.
+    /// Whether `other` is the same budget stop again: both stops, same
+    /// document, level, kind, text and place. The panel's
+    /// `sameConsoleLine` is the same rule.
     fn same_line(&self, other: &Self) -> bool {
-        self.doc == other.doc
+        self.budget_stop
+            && other.budget_stop
+            && self.doc == other.doc
             && self.level == other.level
             && self.kind == other.kind
             && self.message == other.message
@@ -525,6 +535,7 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
         repeat: 1,
         first_ms: record.t_ms,
         last_ms: record.t_ms,
+        budget_stop: false,
     };
     Some(match &record.event {
         InspectorEvent::Console { level, message, truncated, location, .. } => {
@@ -547,7 +558,9 @@ fn console_entry(record: &InspectorRecord) -> Option<DevtoolsConsoleEntry> {
                 (None, None) => {}
             }
             text.push_str(&format!(" [{script}]"));
-            entry("error", text, frame(location))
+            let budget_stop = location.is_none()
+                && message.as_deref() == Some(crate::inspector_glue::BUDGET_STOP_MESSAGE);
+            DevtoolsConsoleEntry { budget_stop, ..entry("error", text, frame(location)) }
         }
         InspectorEvent::UnsupportedApi { interface, member, location } => {
             entry("warn", format!("Not supported by RustKit: {interface}.{member}"), frame(location))
