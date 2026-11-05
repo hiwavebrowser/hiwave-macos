@@ -5,6 +5,11 @@
 //! pages. Expected numbers are Chrome for Testing 153.0.8010.12 (Linux,
 //! classic scrollbars) on the same pages:
 //! `tools/parity_oracle/scrollbar_geometry_log.mjs`.
+//!
+//! These tests need styled bars shown: `RUSTKIT_HIDE_SCROLLBARS=1` (or a
+//! `rustkit_layout::scroll::set_scrollbars_hidden(true)` anywhere in the
+//! test binary) hides them process-wide, as parity-capture does, and every
+//! test here then fails on a missing bar.
 
 use super::*;
 use rustkit_css::Color;
@@ -232,4 +237,111 @@ fn the_root_scrollbar_paints_at_the_viewport_edge() {
     let got = thumb_in(&engine);
     assert_eq!(got.len(), 1, "{got:?}");
     assert_rect(got[0], (794.0, 150.0, 6.0, 150.0));
+}
+
+#[test]
+fn the_box_geometry_script_reads_counts_the_bar_where_chrome_does() {
+    // Chrome, with `border: 2px; padding: 4px`: the bar is neither border
+    // nor padding to the page. `width` is the used content width.
+    let (mut engine, view) = loaded(&page("#s{border:2px solid black;padding:4px}"));
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), getComputedStyle($s).borderRightWidth, \
+         getComputedStyle($s).width, $s.clientLeft, $s.clientTop, $s.clientWidth, $s.clientHeight, \
+         $s.offsetWidth, $s.offsetHeight, $s.getBoundingClientRect().x, $s.getBoundingClientRect().y, \
+         $s.getBoundingClientRect().width, $s.getBoundingClientRect().height, $s.scrollWidth, \
+         document.getElementById('c').getBoundingClientRect().width].slice(1).join(' ')",
+    );
+    assert_eq!(got, "2px 294px 2 2 302 208 312 212 10 20 312 212 302 294");
+}
+
+#[test]
+fn a_flex_item_scroller_takes_its_bar_from_its_content_box() {
+    // Chrome: a `flex: 1` scroller beside a 100px item in a 500px row.
+    let html = "<!doctype html><style>body{margin:0}#f{display:flex;height:200px;width:500px}\
+                #a{width:100px}#s{flex:1;overflow:auto}#s::-webkit-scrollbar{width:6px}\
+                #s::-webkit-scrollbar-thumb{background:#888}#c{height:600px}</style>\
+                <div id=f><div id=a></div><div id=s><div id=c></div></div></div>";
+    let (mut engine, view) = loaded(html);
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), $s.clientWidth, $s.offsetWidth, \
+         document.getElementById('c').getBoundingClientRect().width].slice(1).join(' ')",
+    );
+    assert_eq!(got, "394 400 394");
+    assert_rect(one(&engine, view, THUMB), (494.0, 0.0, 6.0, 67.0));
+}
+
+#[test]
+fn a_column_flex_item_scroller_takes_its_bar_too() {
+    // Chrome: the chrome's sidebar shape, a header over a `flex: 1;
+    // min-height: 0` list in a 300px column.
+    let html = "<!doctype html><style>body{margin:0}#f{display:flex;flex-direction:column;\
+                height:300px;width:400px}#h{height:50px}#s{flex:1;min-height:0;overflow:auto}\
+                #s::-webkit-scrollbar{width:6px}#s::-webkit-scrollbar-thumb{background:#888}\
+                #c{height:600px}</style><div id=f><div id=h></div><div id=s><div id=c></div></div></div>";
+    let (mut engine, view) = loaded(html);
+    let got = read(
+        &mut engine,
+        view,
+        "[$s = document.getElementById('s'), $s.clientWidth, $s.clientHeight, $s.offsetWidth, \
+         document.getElementById('c').getBoundingClientRect().width].slice(1).join(' ')",
+    );
+    assert_eq!(got, "394 250 400 394");
+}
+
+const EVENT_LOG: &str = "<script>window.log=[];['pointerdown','mousedown','pointerup','mouseup','click']\
+     .forEach(function(t){document.addEventListener(t,function(e){log.push(t+':'+(e.target.id||e.target.tagName))},true)})</script>";
+
+#[test]
+fn a_press_on_a_bar_is_the_scrollers_and_fires_no_click() {
+    // Chrome: down and up at the scroller, no `click`, for a thumb drag
+    // and for a track press alike.
+    for (x, y) in [(307.0, 30.0), (307.0, 170.0)] {
+        let (mut engine, view) = loaded(&format!("{}{EVENT_LOG}", page("")));
+        engine.mouse_down_at_point(view, x, y);
+        engine.mouse_move_at_point(view, x, y + 20.0);
+        engine.click_at_point(view, x, y + 20.0);
+        assert_eq!(
+            read(&mut engine, view, "log.join(' ')"),
+            "pointerdown:s mousedown:s pointerup:s mouseup:s",
+            "press at {x},{y}"
+        );
+    }
+}
+
+#[test]
+fn a_press_on_the_viewports_bar_is_the_root_elements() {
+    // Chrome: a fixed `100vw` box under the bar does not hear it.
+    let html = format!(
+        "<!doctype html><style>body{{margin:0}}::-webkit-scrollbar{{width:6px}}\
+         ::-webkit-scrollbar-thumb{{background:#888}}#big{{height:2400px}}\
+         #fx{{position:fixed;top:0;left:0;width:100vw;height:600px}}</style>\
+         <div id=big></div><div id=fx></div>{EVENT_LOG}"
+    );
+    let (mut engine, view) = loaded(&html);
+    engine.mouse_down_at_point(view, 797.0, 30.0);
+    engine.mouse_move_at_point(view, 797.0, 50.0);
+    engine.click_at_point(view, 797.0, 50.0);
+    assert_eq!(
+        read(&mut engine, view, "log.join(' ')"),
+        "pointerdown:HTML mousedown:HTML pointerup:HTML mouseup:HTML"
+    );
+    // The thumb (150 tall) went 20px: 20 * 1800 / 450 = 80.
+    assert_eq!(read(&mut engine, view, "window.scrollY"), "80");
+}
+
+#[test]
+fn a_relayout_keeps_the_bar_while_it_overflows_and_drops_it_after() {
+    let (mut engine, view) = loaded(&page(""));
+    let width = "document.getElementById('s').clientWidth";
+    read(&mut engine, view, "document.getElementById('c').style.height = '700px'");
+    assert_eq!(read(&mut engine, view, width), "294");
+    read(&mut engine, view, "document.getElementById('c').style.height = '50px'");
+    assert_eq!(read(&mut engine, view, width), "300");
+    assert!(fills(&engine, view, TRACK).is_empty());
+    read(&mut engine, view, "document.getElementById('c').style.height = '600px'");
+    assert_eq!(read(&mut engine, view, width), "294");
 }

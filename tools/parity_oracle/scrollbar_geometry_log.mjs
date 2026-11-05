@@ -60,4 +60,31 @@ for (const steps of [1, 10]) {
 await page.setContent(CASES.webkit6);
 await page.mouse.move(297, 150); await page.mouse.down(); await page.waitForTimeout(60); await page.mouse.up(); await page.waitForTimeout(800);
 console.log('track-click scrollTop', await page.evaluate(() => document.getElementById('s').scrollTop));
+// R1 on #900: what script reads of a scroller with a bar, flex items, the
+// events a bar press fires, and the shortest thumb.
+const SB = '#s::-webkit-scrollbar{width:6px}#s::-webkit-scrollbar-thumb{background:rgb(255,0,0)}';
+await page.setContent(`<style>body{margin:0}#s{position:absolute;left:10px;top:20px;width:300px;height:200px;overflow:auto;border:2px solid black;padding:4px}${SB}#c{height:600px}</style><div id=s><div id=c></div></div>`);
+console.log('geometry', await page.evaluate(() => { const s = document.getElementById('s'); const r = s.getBoundingClientRect(); const cs = getComputedStyle(s);
+  return [cs.borderRightWidth, cs.width, s.clientLeft, s.clientTop, s.clientWidth, s.clientHeight, s.offsetWidth, s.offsetHeight, r.x, r.y, r.width, r.height, s.scrollWidth, document.getElementById('c').getBoundingClientRect().width].join(' '); }));
+await page.setContent(`<style>body{margin:0}#f{display:flex;height:200px;width:500px}#a{width:100px}#s{flex:1;overflow:auto}${SB}#c{height:600px}</style><div id=f><div id=a></div><div id=s><div id=c></div></div></div>`);
+console.log('flex-row', await page.evaluate(() => { const s = document.getElementById('s'); return [s.clientWidth, s.offsetWidth, document.getElementById('c').getBoundingClientRect().width].join(' '); }));
+await page.setContent(`<style>body{margin:0}#f{display:flex;flex-direction:column;height:300px;width:400px}#h{height:50px}#s{flex:1;min-height:0;overflow:auto}${SB}#c{height:600px}</style><div id=f><div id=h></div><div id=s><div id=c></div></div></div>`);
+console.log('flex-column', await page.evaluate(() => { const s = document.getElementById('s'); return [s.clientWidth, s.clientHeight, s.offsetWidth, document.getElementById('c').getBoundingClientRect().width].join(' '); }));
+const LOG = `<script>window.log=[];for(const t of ['pointerdown','mousedown','pointerup','mouseup','click'])document.addEventListener(t,e=>log.push(t+':'+(e.target.id||e.target.tagName)),true)</script>`;
+for (const [name, html, x, y] of [
+  ['events-element-thumb', CASES.webkit6 + LOG, 297, 10],
+  ['events-element-track', CASES.webkit6 + LOG, 297, 150],
+  ['events-viewport-thumb', CASES.root + '<div style="position:fixed;top:0;left:0;width:100vw;height:600px"></div>' + LOG, 797, 30],
+]) {
+  await page.setContent(html);
+  await page.mouse.move(x, y); await page.mouse.down(); await page.mouse.move(x, y + 20, { steps: 2 }); await page.mouse.up(); await page.waitForTimeout(100);
+  console.log(name, await page.evaluate(() => log.join(' ')), 'scrollY', await page.evaluate(() => window.scrollY));
+}
+// long_doc: the shortest thumb (17px at every width and track length tried).
+await page.setContent(`<style>body{margin:0}#s{width:300px;height:200px;overflow:auto}${SB}#c{height:100000px}</style><div id=s><div id=c></div></div>`);
+{
+  const png = PNG.sync.read(await page.screenshot()); let n = 0;
+  for (let y = 0; y < 200; y++) { const i = (y * png.width + 297) * 4; if (png.data[i] > 200 && png.data[i + 1] < 60) n++; }
+  console.log('long_doc thumb', n);
+}
 await browser.close();

@@ -913,6 +913,11 @@ fn thumb_position(scroll: f32, max: f32, track: f32, thumb: f32) -> f32 {
     }
 }
 
+/// The shortest thumb: Chrome 153 draws a 100000px document's custom thumb
+/// 17px long whatever the bar's width or the track's length
+/// (`tools/parity_oracle/scrollbar_geometry_log.mjs`, `long_doc`).
+pub const MIN_THUMB_PX: f32 = 17.0;
+
 /// Chrome's page step for a track press: 7/8 of what is visible.
 pub fn page_step(visible: f32) -> f32 {
     (visible * 0.875).max(1.0)
@@ -931,11 +936,11 @@ pub fn bar_geometry(
     let pb = padding_box;
     if vertical > 0.0 {
         let track = Rect { x: pb.x + pb.width, y: pb.y, width: vertical, height: pb.height };
-        bars.push(axis_bar(ScrollbarOrientation::Vertical, track, pb.height, max_scroll.1, scroll.1, vertical));
+        bars.push(axis_bar(ScrollbarOrientation::Vertical, track, pb.height, max_scroll.1, scroll.1));
     }
     if horizontal > 0.0 {
         let track = Rect { x: pb.x, y: pb.y + pb.height, width: pb.width, height: horizontal };
-        bars.push(axis_bar(ScrollbarOrientation::Horizontal, track, pb.width, max_scroll.0, scroll.0, horizontal));
+        bars.push(axis_bar(ScrollbarOrientation::Horizontal, track, pb.width, max_scroll.0, scroll.0));
     }
     bars
 }
@@ -946,13 +951,10 @@ fn axis_bar(
     visible: f32,
     max: f32,
     scroll: f32,
-    thickness: f32,
 ) -> BarGeometry {
     let vertical = orientation == ScrollbarOrientation::Vertical;
     let track_len = if vertical { track.height } else { track.width };
-    // Chrome gives a custom thumb no length of its own; a square keeps a
-    // long document's thumb on screen.
-    let length = thumb_length(visible, visible + max, track_len, thickness.min(track_len));
+    let length = thumb_length(visible, visible + max, track_len, MIN_THUMB_PX.min(track_len));
     let pos = thumb_position(scroll, max, track_len, length);
     let thumb = (max > 0.0 && length > 0.0).then(|| {
         if vertical {
@@ -1005,29 +1007,36 @@ impl LayoutBox {
 
     /// The overflow pass, after a layout: mark each `auto` scroller with a
     /// styled scrollbar that overflows on an axis whose bar it has not
-    /// reserved yet. True when one was marked, and the layout must run
-    /// again for the bar's space. Marks only ever turn on, so the passes
-    /// end (Chrome likewise keeps a bar a relayout would drop).
-    pub fn mark_overflowing_scrollbars(&self) -> bool {
-        let mut marked = false;
+    /// reserved yet. With `unmark`, also clear a bar (one a previous layout
+    /// left, `apply_scrollbar_marks`) whose box no longer overflows even
+    /// with it. True when a mark changed and the layout must run again.
+    /// Only the first pass unmarks, so the passes end.
+    pub fn mark_overflowing_scrollbars(&self, unmark: bool) -> bool {
+        let mut changed = false;
         if self.scrollbar_look().is_some() {
             let (rule_v, rule_h) = bar_rules(&self.style);
             let (max_x, max_y) = self.element_scroll_max();
             let (mut over_v, mut over_h) = self.scrollbar_overflows.get();
-            if rule_v == BarRule::WhenOverflowing && !over_v && max_y > 0.5 {
-                over_v = true;
-                marked = true;
-            }
-            if rule_h == BarRule::WhenOverflowing && !over_h && max_x > 0.5 {
-                over_h = true;
-                marked = true;
-            }
+            let mut settle = |rule: BarRule, over: &mut bool, overflows: bool| {
+                if rule != BarRule::WhenOverflowing {
+                    return;
+                }
+                if !*over && overflows {
+                    *over = true;
+                    changed = true;
+                } else if *over && !overflows && unmark {
+                    *over = false;
+                    changed = true;
+                }
+            };
+            settle(rule_v, &mut over_v, max_y > 0.5);
+            settle(rule_h, &mut over_h, max_x > 0.5);
             self.scrollbar_overflows.set((over_v, over_h));
         }
         for child in &self.children {
-            marked |= child.mark_overflowing_scrollbars();
+            changed |= child.mark_overflowing_scrollbars(unmark);
         }
-        marked
+        changed
     }
 
     /// Whether any box in this tree may grow an `auto` styled scrollbar,
@@ -1052,17 +1061,25 @@ impl LayoutBox {
         }
     }
 
-    /// Set the marks `collect_scrollbar_marks` gathered on this tree.
+    /// Set the marks `collect_scrollbar_marks` gathered on this tree; a box
+    /// missing from them is unmarked.
     pub fn apply_scrollbar_marks(&self, marks: &std::collections::HashMap<usize, (bool, bool)>) {
-        if marks.is_empty() {
-            return;
-        }
-        if let Some(mark) = self.node_id.and_then(|node| marks.get(&node)) {
-            self.scrollbar_overflows.set(*mark);
-        }
+        let mark = self.node_id.and_then(|node| marks.get(&node)).copied();
+        self.scrollbar_overflows.set(mark.unwrap_or((false, false)));
         for child in &self.children {
             child.apply_scrollbar_marks(marks);
         }
+    }
+
+    /// This box's dimensions as CSS reports them: the styled scrollbars'
+    /// space, which layout keeps in the right and bottom borders, taken
+    /// back out (`getComputedStyle` border widths).
+    pub fn css_dimensions(&self) -> crate::Dimensions {
+        let mut d = self.dimensions.clone();
+        let (v, h) = self.scrollbar_reserve();
+        d.border.right -= v;
+        d.border.bottom -= h;
+        d
     }
 
     /// This scroller's bars as laid out and scrolled now, in its own
@@ -1205,6 +1222,13 @@ mod styled_scrollbar_tests {
         assert_eq!(bars[0].thumb.unwrap().y, 66.0);
         // A drag of 50px scrolls 50 * 400 / 133.
         assert!((bars[0].scroll_per_px * 50.0 - 150.375).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_long_documents_thumb_is_chromes_seventeen_pixels() {
+        let pb = Rect { x: 0.0, y: 0.0, width: 294.0, height: 200.0 };
+        let bars = bar_geometry(pb, (6.0, 0.0), (0.0, 99_800.0), (0.0, 0.0));
+        assert_eq!(bars[0].thumb.unwrap().height, MIN_THUMB_PX);
     }
 
     #[test]
