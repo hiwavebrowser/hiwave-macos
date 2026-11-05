@@ -402,7 +402,10 @@ struct DocumentSink {
     /// Attributes from a second `<html>`/`<body>` start tag (HTML
     /// §13.2.6.4.7), applied once the parse is done: a node's data is not
     /// interior-mutable, and swapping the node mid-parse would orphan the
-    /// parser's references to the open element.
+    /// parser's references to the open element. Sound only while no script
+    /// runs during `Document::parse_html` (scripts run after it). Streaming
+    /// or `document.write` parsing would need the merge applied at once,
+    /// i.e. interior-mutable attributes.
     attr_merges: Vec<(NodeId, Vec<(String, String)>)>,
 }
 

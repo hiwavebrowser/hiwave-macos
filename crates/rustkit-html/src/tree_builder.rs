@@ -2269,6 +2269,10 @@ impl<S: TreeSink> TreeBuilder<S> {
 
     fn handle_in_head_noscript(&mut self, token: Token) -> ParseResult<()> {
         match &token {
+            // §13.2.6.4.5: start tag "html" is processed using "in body".
+            Token::StartTag { name, .. } if name == "html" => {
+                self.handle_in_body(token)?;
+            }
             Token::Comment(data) => {
                 self.sink.comment(data.clone());
             }
@@ -2566,6 +2570,19 @@ mod tests {
             let events = events_of(html);
             assert_eq!(count(&events, "start:html"), 1, "{}: {:?}", html, events);
             assert_eq!(count(&events, "start:body"), 1, "{}: {:?}", html, events);
+        }
+    }
+
+    /// "in frameset" and "after frameset" already route a start tag `html`
+    /// to "in body": it merges and creates nothing there either.
+    #[test]
+    fn a_second_html_start_tag_in_a_frameset_document_creates_no_element() {
+        for html in [
+            "<html><frameset><html lang=en><frame></frameset></html>",
+            "<html><frameset></frameset><html lang=en></html>",
+        ] {
+            let events = events_of(html);
+            assert_eq!(count(&events, "start:html"), 1, "{}: {:?}", html, events);
         }
     }
 
