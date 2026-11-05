@@ -290,3 +290,70 @@ fn only_the_named_property_transitions() {
     pump(&mut engine, view, 200, 16);
     assert_eq!(log(&mut engine, view), "");
 }
+
+/// An ancestor going `display: none` midway cancels the transitions under
+/// it (`transitioncancel`, no `transitionend`), and nothing keeps the view
+/// laying out afterwards.
+#[test]
+fn a_hidden_ancestor_cancels_the_transitions_under_it() {
+    let page = "<!doctype html><style>body{margin:0}#p.hide{display:none}\
+#h{width:100px;height:100px;background:rgb(0,0,255);opacity:0;transition:opacity 100ms linear}#h.on{opacity:1}</style>\
+<div id=p><div id=h></div></div>\
+<script>var p=document.getElementById('p'),h=document.getElementById('h');window.log=[];\
+['transitionend','transitioncancel'].forEach(function(t){h.addEventListener(t,function(e){log.push(e.type.slice(10)+':'+e.propertyName)})});</script>";
+    let (mut engine, view, _server) = load(page);
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 48, 16);
+    assert!(opacity(&mut engine, view) > 0.0);
+    run(&mut engine, view, "p.classList.add('hide')");
+    pump(&mut engine, view, 32, 16);
+    assert_eq!(log(&mut engine, view), "cancel:opacity");
+    assert!(
+        !engine.views[&view].lay.animations.borrow().active(),
+        "nothing runs under a hidden ancestor"
+    );
+    pump(&mut engine, view, 200, 16);
+    assert_eq!(log(&mut engine, view), "cancel:opacity", "no end after the cancel");
+}
+
+/// `display: none` to `block` with an opacity change shows the new value
+/// at once: there is no transition from a hidden start (Chrome).
+#[test]
+fn display_none_to_block_does_not_transition() {
+    let page = PAGE.replace("#h{width", "#h{display:none;width").replace("#h.on{opacity:1}", "#h.on{display:block;opacity:1}");
+    let (mut engine, view, _server) = load(&page);
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0, "shown at the end value");
+    pump(&mut engine, view, 200, 16);
+    assert_eq!(log(&mut engine, view), "", "no transition events");
+}
+
+/// A child inherits the transitioning colour frame by frame, and the end
+/// value after it: the style memo must not replay the start frame.
+#[test]
+fn a_nested_span_inherits_the_transitioning_colour() {
+    let page = "<!doctype html><style>body{margin:0}\
+#h{color:rgb(0,0,255);transition:color 100ms linear;font:16px sans-serif}#h.on{color:rgb(255,0,0)}</style>\
+<div id=h><span id=s>text</span></div>\
+<script>var h=document.getElementById('h'),s=document.getElementById('s');</script>";
+    let (mut engine, view, _server) = load(page);
+    let span = |engine: &mut Engine, view| read(engine, view, "getComputedStyle(s).color");
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 50, 10);
+    let mid = span(&mut engine, view);
+    let channels: Vec<f64> = mid
+        .trim_start_matches("rgb(")
+        .trim_end_matches(')')
+        .split(',')
+        .map(|c| c.trim().parse().unwrap_or_else(|_| panic!("colour {mid:?}")))
+        .collect();
+    assert!(
+        (channels[0] - 128.0).abs() <= 30.0 && (channels[2] - 128.0).abs() <= 30.0,
+        "the span's colour midway: {mid}"
+    );
+    pump(&mut engine, view, 100, 10);
+    assert_eq!(span(&mut engine, view), "rgb(255, 0, 0)");
+    pump(&mut engine, view, 100, 16);
+    assert_eq!(span(&mut engine, view), "rgb(255, 0, 0)", "and after");
+}
