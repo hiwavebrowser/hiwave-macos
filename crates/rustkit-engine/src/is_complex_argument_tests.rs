@@ -225,3 +225,94 @@ fn query_selector_sees_complex_members_too() {
         .expect("script");
     assert_eq!(got, "String(\"1 1 true true\")");
 }
+
+/// The R1 routine's case list, one rule per case. Selectors 4 §4.2 (`:is`),
+/// §4.3 (`:not`), §4.4 (`:where`): the argument is a <complex-real-selector-list>
+/// whose members are matched with the element as their subject, so a
+/// combinator inside the argument reaches the element's real ancestors and
+/// earlier siblings. Chromium agrees (the expected text below is the set of
+/// navs Chrome shows for this page).
+const R1_CASES: &str = r#"<!doctype html>
+<html><head><style>
+nav { display: none; }
+.t1:is(.dark *) { display: block; }
+.t2:where(.a > .b) { display: block; }
+.t3:not(.a .b) { display: block; }
+.t4:is(.a + .b) { display: block; }
+.t5:is(.a ~ .b) { display: block; }
+.t6:is(:not(.a .b)) { display: block; }
+</style></head><body>
+<div class="dark"><nav class="t1">t1-dark</nav></div>
+<div class="light"><nav class="t1">t1-light</nav></div>
+<div class="a"><nav class="b t2">t2-child</nav><div><nav class="b t2">t2-grandchild</nav></div></div>
+<div class="a"><div><nav class="b t3">t3-in</nav></div></div>
+<div><nav class="b t3">t3-out</nav><nav class="t3">t3-not-b</nav></div>
+<div><nav class="a"></nav><nav class="b t4">t4-adjacent</nav><nav class="b t4">t4-second</nav></div>
+<div><nav class="a"></nav><p></p><nav class="b t5">t5-later</nav></div>
+<div><nav class="b t5">t5-before</nav><nav class="a"></nav></div>
+<div class="a"><nav class="b t6">t6-in</nav></div>
+<div><nav class="b t6">t6-out</nav></div>
+</body></html>"#;
+
+#[test]
+fn r1_is_where_not_complex_members_match_like_chromium() {
+    // t1: `.dark *` holds only under `.dark`.
+    // t2: `.a > .b` needs `.a` as the parent, not a grandparent.
+    // t3: `:not(.a .b)` excludes only a `.b` inside `.a`.
+    // t4: `.a + .b` only right after `.a`; t5: `.a ~ .b` anywhere after it,
+    //     never before it.
+    // t6: `:is(:not(.a .b))` is `:not(.a .b)`.
+    assert_eq!(
+        shown(R1_CASES).join(" "),
+        "t1-dark t2-child t3-out t3-not-b t4-adjacent t5-later t6-out"
+    );
+}
+
+#[test]
+fn r1_specificity_of_complex_members() {
+    let s = |sel: &str| SelectorMatcher.selector_specificity(sel);
+    // §17: `:is()`/`:not()` take their most specific argument, `:where()` zero.
+    assert_eq!(s(":is(.dark *)"), (0, 1, 0));
+    assert_eq!(s(":where(.a > .b)"), (0, 0, 0));
+    assert_eq!(s("p:where(.a > .b)"), (0, 0, 1));
+    assert_eq!(s(":not(.a .b)"), (0, 2, 0));
+    assert_eq!(s(":is(.a + .b)"), (0, 2, 0));
+    assert_eq!(s(":is(.a ~ .b, #c d)"), (1, 0, 1));
+    assert_eq!(s(":is(:not(.a .b))"), (0, 2, 0));
+    // Tailwind v4's dark variant: one escaped class plus `:is(.dark *)`.
+    assert_eq!(s(r".dark\:bg-black:is(.dark *)"), (0, 2, 0));
+    assert_eq!(s(r".md\:hover\:x:is(.dark *)"), (0, 2, 0));
+}
+
+#[test]
+fn r1_where_complex_member_adds_no_specificity_in_the_cascade() {
+    // `.w:where(.a > .b)` is (0,1,0), so the later `.w` (0,1,0) wins on
+    // source order; `.i:is(.a > .b)` is (0,3,0) and beats the later `.i.i`
+    // (0,2,0).
+    let page = r#"<!doctype html><html><head><style>
+nav { display: none; }
+.w:where(.a > .b) { display: block; }
+.w { display: none; }
+.i:is(.a > .b) { display: block; }
+.i.i { display: none; }
+</style></head><body><div class="a"><nav class="b w">w</nav><nav class="b i">i</nav></div></body></html>"#;
+    assert_eq!(shown(page).join(" "), "i");
+}
+
+#[test]
+fn r1_tailwind_dark_variant_beats_its_base_utility() {
+    // `.bg-white` (0,1,0) then `.dark\:hidden:is(.dark *)` (0,2,0): under
+    // `.dark` the variant wins whatever the order, as Tailwind relies on.
+    let page = r#"<!doctype html><html class="dark"><head><style>
+nav { display: none; }
+.dark\:block:is(.dark *) { display: block; }
+.shown { display: block; }
+.dark\:hidden:is(.dark *) { display: none; }
+.late { display: block; }
+</style></head><body>
+<nav class="dark:block">dusk</nav>
+<nav class="shown dark:hidden">day</nav>
+<nav class="dark:hidden late">late</nav>
+</body></html>"#;
+    assert_eq!(shown(page).join(" "), "dusk");
+}
