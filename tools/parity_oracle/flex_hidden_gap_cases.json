@@ -24,6 +24,11 @@
    "name": "chrome-right-sidebar-downloads-panel",
    "html": "<!doctype html><html><head><style>body{margin:0}html,body{height:100%}body{display:flex;overflow:hidden}#m{flex:1}#r{width:220px;display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}#t{height:155px;flex-shrink:0}#c{flex:1;display:flex;flex-direction:column;padding:12px;gap:8px;overflow-y:auto}.p{display:none;flex-direction:column;height:100%;overflow:hidden}.p.on{display:flex}#hd{height:36px}#l{flex:1;overflow-y:auto}</style></head><body><div id=m></div><aside id=r><div id=t></div><div id=c><div class='p on' id=p><div id=hd></div><div id=l></div></div><div class=p></div><div class=p></div></div></aside></body></html>",
    "chrome_boxes": "m:0:0:1060:800 r:1060:0:220:800 t:1060:0:220:155 c:1060:155:220:645 p:1072:167:196:621 hd:1072:167:196:36 l:1072:203:196:585"
+  },
+  {
+   "name": "grid-auto-placement-skips-display-none-items",
+   "html": "<!doctype html><html><head><style>body{margin:0}#g{display:grid;grid-template-columns:100px 100px 100px;gap:10px;width:320px}#g>div{height:40px}.h{display:none}</style></head><body><div id=g><div id=a></div><div class=h></div><div id=b></div><div class=h></div><div id=c></div><div id=d></div></div></body></html>",
+   "chrome_boxes": "g:0:0:320:90 a:0:0:100:40 b:110:0:100:40 c:220:0:100:40 d:0:50:100:40"
   }
  ],
  "chrome": "143.0.7499.4"

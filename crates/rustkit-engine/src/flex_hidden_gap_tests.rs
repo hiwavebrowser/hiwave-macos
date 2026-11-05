@@ -3,7 +3,8 @@
 //! 1280x800). `.right-sidebar-content` is a flex column with `gap: 8px` whose
 //! three panels are all `display: none` but the active one; the gap was
 //! counted for the hidden panels too (two extra gaps = 16px), and the
-//! `height: 100%` panel shrank to make room for them.
+//! `height: 100%` panel shrank to make room for them. The same empty box was
+//! a grid item: a hidden child took an auto-placed cell.
 //!
 //! `tools/parity_oracle/flex_hidden_gap_cases.json` holds the reduced pages
 //! and what Chromium 143.0.7499.4 reports for every element with an id
@@ -21,7 +22,7 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
     }).join(' ')";
 
 #[test]
-fn flex_gaps_skip_display_none_items_as_in_chrome() {
+fn display_none_children_are_no_flex_or_grid_items_as_in_chrome() {
     let data: serde_json::Value =
         serde_json::from_str(include_str!("../../../tools/parity_oracle/flex_hidden_gap_cases.json"))
             .expect("case file");
