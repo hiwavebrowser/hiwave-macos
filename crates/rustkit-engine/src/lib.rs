@@ -459,6 +459,8 @@ mod scroll_paints_first_tests;
 mod scroll_after_yielded_load_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_reveal_trigger_tests;
+#[cfg(all(test, feature = "headless"))]
+mod web_animations_tests;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
@@ -5739,6 +5741,16 @@ impl Engine {
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
+        // The module map keys the fetch, not just the evaluation: tags that
+        // name one module URL share one request and its answer, as in
+        // Chromium. A store page names one component module from each of
+        // its instances (S12: 220 tags, 31 URLs); fetching each tag's copy
+        // queued the duplicates behind the window below and held the first
+        // script back by seconds.
+        type SharedModuleFetch = futures::future::Shared<
+            futures::future::LocalBoxFuture<'static, Result<(String, String), ScriptOutcome>>,
+        >;
+        let mut module_fetches: HashMap<Url, SharedModuleFetch> = HashMap::new();
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
@@ -5746,6 +5758,44 @@ impl Engine {
                 let policy = policy.clone();
                 let base = base.clone();
                 let inspector = inspector.clone();
+                let shared_module = match &entry {
+                    Ok((_, Body::External(url))) if is_module => {
+                        let shared = module_fetches.entry(url.clone()).or_insert_with(|| {
+                            let (policy, loader, base, inspector, url) =
+                                (policy.clone(), loader.clone(), base.clone(), inspector.clone(), url.clone());
+                            async move {
+                                let Some(policy) = policy else {
+                                    return Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "no network policy for this page".into(),
+                                    )));
+                                };
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
+                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
+                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                                inspector::answer_module(guard, &fetched);
+                                match fetched {
+                                    Ok(Ok(module)) => Ok((module.final_url.to_string(), module.source)),
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
+                                        rustkit_net::policy::Denial::BadStatus(status) => FetchFailure::Status(status),
+                                        denial => FetchFailure::Transport(format!("{denial}")),
+                                    })),
+                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "timed out".into(),
+                                    ))),
+                                }
+                            }
+                            .boxed_local()
+                            .shared()
+                        });
+                        Some(shared.clone())
+                    }
+                    _ => None,
+                };
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -5757,36 +5807,13 @@ impl Engine {
                         // module entry point (script destination, CORS,
                         // JavaScript MIME, 2xx, shield, budgets); its
                         // identity is the URL it ends up at.
-                        Ok((timing, Body::External(url))) if is_module => match &policy {
-                            None => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                "no network policy for this page".into(),
-                            ))),
-                            Some(policy) => {
-                                let guard = inspector
-                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
-                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
-                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
-                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
-                                let guard = guard.map(|g| g.deadline(deadline));
-                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
-                                inspector::answer_module(guard, &fetched);
-                                match fetched {
-                                    Ok(Ok(module)) => {
-                                        label = module.final_url.to_string();
-                                        Ok((timing, module.source))
-                                    }
-                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
-                                        rustkit_net::policy::Denial::BadStatus(status) => {
-                                            FetchFailure::Status(status)
-                                        }
-                                        denial => FetchFailure::Transport(format!("{denial}")),
-                                    })),
-                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        "timed out".into(),
-                                    ))),
-                                }
-                            }
+                        // One fetch per module URL (see `module_fetches`).
+                        Ok((timing, Body::External(_))) if is_module => match shared_module {
+                            Some(shared) => shared.await.map(|(final_url, source)| {
+                                label = final_url;
+                                (timing, source)
+                            }),
+                            None => Err(ScriptOutcome::Skipped("module fetch not started")),
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
@@ -45455,7 +45482,13 @@ mod clip_path_pins {
                 r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
             ))
         };
-        let cases: [(&str, &str, &str, Option<&str>); 9] = [
+        let cases: [(&str, &str, &str, Option<&str>); 12] = [
+            // polygon(): an axis-aligned rectangle is exact; any other shape clips to
+            // its bounding box (the triangle's is the whole border box); a polygon
+            // with no area (eBay's visually-hidden `polygon(0 0,0 0)`) clips everything.
+            ("clip-path:polygon(20px 20px, 120px 20px, 120px 120px, 20px 120px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 0 100%)", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:polygon(0 0, 0 0)", "PushClip(", "x: 0.0, y: 0.0, width: 0.0, height: 0.0", None),
             ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
             ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
             ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
@@ -45515,8 +45548,8 @@ mod clip_path_pins {
             .unwrap_or_else(|| panic!("no child paint:\n{all}"));
         assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
 
-        // `none`, and shapes that are not a rounded rect, paint as before.
-        for style in ["clip-path:none", "clip-path:polygon(0 0, 100% 0, 0 100%)", ""] {
+        // `none`, and shapes this does not read (`path()`), paint as before.
+        for style in ["clip-path:none", "clip-path:path('M0 0H10V10Z')", ""] {
             let lines = page(style, "");
             assert!(
                 !lines.iter().any(|c| c.starts_with("PushClip")),

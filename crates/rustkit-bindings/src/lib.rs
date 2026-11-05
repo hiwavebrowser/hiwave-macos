@@ -452,7 +452,12 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 6] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
+    ("Element", "animate(composite)"),
+    ("Element", "animate(pseudoElement)"),
+    ("Animation", "playbackRate"),
+    ("Animation", "reverse"),
+    ("Animation", "updatePlaybackRate"),
     ("XMLHttpRequest", "open(async=false)"),
     ("XMLHttpRequest", "responseXML"),
     ("CustomElementRegistry", "define(extends)"),
@@ -985,6 +990,9 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
         // Script elements script inserts are prepared and run (web_scripts.js).
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
+        // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
+        // over the animation-frame clock; the values go into the inline style (web_animations.js).
+        runtime.evaluate_with_host(include_str!("web_animations.js"))?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -2968,6 +2976,7 @@ mod tests {
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
             include_str!("web_named_access.js"),
+            include_str!("web_animations.js"),
             dom::WRAPPERS_JS_FOR_TESTS,
         ]
         .concat();
