@@ -29,7 +29,7 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls};
+pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, set_view_cursor, set_view_tooltip};
 pub use input_queue::{
     drain_input, drain_input_view, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
     PendingScroll, PointerInput,

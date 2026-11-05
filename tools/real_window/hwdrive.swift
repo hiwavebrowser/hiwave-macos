@@ -14,6 +14,12 @@
 //   hwdrive click    <pid> <x> <y>
 //   hwdrive press    <pid> <x> <y>          (button down, no release)
 //   hwdrive release  <pid> <x> <y>
+//   hwdrive dblclick <pid> <x> <y>          (two clicks, click counts 1 and 2)
+//   hwdrive rightclick   <pid> <x> <y>      (secondary button down and up)
+//   hwdrive rightpress   <pid> <x> <y>      (secondary button down only)
+//   hwdrive drag     <pid> <x0> <y0> <x1> <y1> (press, dragged moves, release)
+//   hwdrive menus    <pid>                  (the process's on-screen windows above layer 0)
+//   hwdrive cursor                          (which AppKit cursor is showing)
 //   hwdrive scroll   <pid> <x> <y> <dx> <dy> (pixels; dy < 0 moves the page down)
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
 //   hwdrive type     <pid> <text>
@@ -107,12 +113,22 @@ func post(_ e: CGEvent?) {
     usleep(30_000)
 }
 
-func mouse(_ type: CGEventType, _ p: CGPoint) {
-    let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
-    if type == .leftMouseDown || type == .leftMouseUp {
-        e?.setIntegerValueField(.mouseEventClickState, value: 1)
+func mouse(_ type: CGEventType, _ p: CGPoint, clicks: Int64 = 1) {
+    let right = type == .rightMouseDown || type == .rightMouseUp || type == .rightMouseDragged
+    let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p,
+                    mouseButton: right ? .right : .left)
+    if [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp].contains(type) {
+        e?.setIntegerValueField(.mouseEventClickState, value: clicks)
     }
     post(e)
+}
+
+/// The system cursors a page's `cursor` maps to (CH2.E4), by name.
+func knownCursors() -> [(String, NSCursor)] {
+    return [("arrow", .arrow), ("pointingHand", .pointingHand), ("IBeam", .iBeam),
+            ("resizeLeftRight", .resizeLeftRight), ("resizeUpDown", .resizeUpDown),
+            ("operationNotAllowed", .operationNotAllowed), ("openHand", .openHand),
+            ("closedHand", .closedHand), ("crosshair", .crosshair)]
 }
 
 func num(_ s: String) -> Double {
@@ -124,6 +140,22 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let cmd = args.first else { emit(["error": "usage: hwdrive <command> ..."], code: 2) }
 
 if cmd == "preflight" { emit(preflight()) }
+
+// The cursor on screen, matched against the system cursors by image and
+// hot spot. Needs no grant.
+if cmd == "cursor" {
+    // The arrow and the I-beam have no image until AppKit is set up.
+    _ = NSApplication.shared
+    guard let now = NSCursor.currentSystem else { emit(["error": "no current system cursor"], code: 2) }
+    let tiff = now.image.tiffRepresentation
+    var name = "unknown"
+    for (n, c) in knownCursors() where c.hotSpot == now.hotSpot && c.image.tiffRepresentation == tiff {
+        name = n
+        break
+    }
+    emit(["cursor": name, "hot_spot": [now.hotSpot.x, now.hotSpot.y],
+          "size": [now.image.size.width, now.image.size.height]])
+}
 
 // Asks macOS for the three grants. The system shows its own prompts and adds
 // the program that started this tool to the lists in System Settings, which
@@ -170,6 +202,46 @@ case "click", "press", "release":
     if cmd != "release" { mouse(.leftMouseDown, p) }
     if cmd != "press" { mouse(.leftMouseUp, p) }
     emit([cmd: [p.x, p.y]])
+
+case "dblclick":
+    requireInput()
+    let p = point(2)
+    mouse(.mouseMoved, p)
+    for n in [Int64(1), 2] {
+        mouse(.leftMouseDown, p, clicks: n)
+        mouse(.leftMouseUp, p, clicks: n)
+    }
+    emit([cmd: [p.x, p.y]])
+
+case "rightclick", "rightpress":
+    requireInput()
+    let p = point(2)
+    mouse(.mouseMoved, p)
+    mouse(.rightMouseDown, p)
+    if cmd == "rightclick" { mouse(.rightMouseUp, p) }
+    emit([cmd: [p.x, p.y]])
+
+case "drag":
+    requireInput()
+    guard args.count >= 6 else { emit(["error": "drag needs x0 y0 x1 y1"], code: 2) }
+    let a = point(2), b = point(4)
+    mouse(.mouseMoved, a)
+    mouse(.leftMouseDown, a)
+    for i in 1...8 {
+        let t = Double(i) / 8
+        mouse(.leftMouseDragged, CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t))
+    }
+    mouse(.leftMouseUp, b)
+    emit([cmd: [[a.x, a.y], [b.x, b.y]]])
+
+case "menus":
+    let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    var layers: [Int] = []
+    for w in all where (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) == pid {
+        let layer = w[kCGWindowLayer as String] as? Int ?? 0
+        if layer != 0 { layers.append(layer) }
+    }
+    emit(["count": layers.count, "layers": layers])
 
 case "scroll":
     requireInput()

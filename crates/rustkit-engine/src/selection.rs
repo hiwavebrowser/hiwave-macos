@@ -287,7 +287,7 @@ impl Engine {
 
     /// The focused text control (raw id), when it is an `<input>` or
     /// `<textarea>` with an edit state.
-    fn focused_text_control(&self, id: EngineViewId) -> Option<usize> {
+    pub(crate) fn focused_text_control(&self, id: EngineViewId) -> Option<usize> {
         let view = self.views.get(&id)?;
         let raw = view.lay.focused_node.get()?.raw();
         view.lay.edit_states.borrow().contains_key(&raw).then_some(raw)

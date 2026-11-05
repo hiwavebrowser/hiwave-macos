@@ -7,8 +7,26 @@
 /// (`help`, `wait`, `progress`, `cell`, the diagonal resizes, `zoom-in`,
 /// `zoom-out`, `none`): they show the arrow.
 pub fn ns_cursor_selector(css: &str) -> &'static str {
-    let _ = css;
-    "arrowCursor"
+    match css {
+        "pointer" => "pointingHandCursor",
+        "text" => "IBeamCursor",
+        "vertical-text" => "IBeamCursorForVerticalLayout",
+        "ew-resize" | "col-resize" => "resizeLeftRightCursor",
+        "ns-resize" | "row-resize" => "resizeUpDownCursor",
+        "e-resize" => "resizeRightCursor",
+        "w-resize" => "resizeLeftCursor",
+        "n-resize" => "resizeUpCursor",
+        "s-resize" => "resizeDownCursor",
+        "not-allowed" | "no-drop" => "operationNotAllowedCursor",
+        // AppKit has no public four-way move cursor.
+        "grab" | "move" | "all-scroll" => "openHandCursor",
+        "grabbing" => "closedHandCursor",
+        "crosshair" => "crosshairCursor",
+        "copy" => "dragCopyCursor",
+        "alias" => "dragLinkCursor",
+        "context-menu" => "contextualMenuCursor",
+        _ => "arrowCursor",
+    }
 }
 
 #[cfg(test)]

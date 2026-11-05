@@ -135,6 +135,10 @@ pub struct RustKitView {
     host_view: isize,
     /// Set once Close has been asked. Later commands are dropped.
     closed: Cell<bool>,
+    /// Where the page let a right press through (CH2.E4,
+    /// `PageEvent::ContextMenu`): the browser's menu goes there. Taken by
+    /// [`RustKitView::take_context_menu`].
+    context_menu: Cell<Option<(f32, f32)>>,
     /// The load in progress, polled a slice at a time by the event loop
     /// ([`RustKitView::step_load`]).
     pending_load: RefCell<Option<PendingLoad>>,
@@ -391,6 +395,7 @@ impl RustKitView {
                 .ok(),
             host_view,
             closed: Cell::new(false),
+            context_menu: Cell::new(None),
             pending_load: RefCell::new(None),
             pending_bounds: Cell::new(None),
             pending_attach: Cell::new(None),
@@ -437,6 +442,9 @@ impl RustKitView {
     fn drop_events(&self) {
         let Some(handle) = self.handle.as_ref() else { return };
         let events = handle.drain_events();
+        for event in &events {
+            self.pointer_event(event);
+        }
         #[cfg(test)]
         self.seen_events.borrow_mut().extend(events);
         #[cfg(not(test))]
@@ -755,7 +763,25 @@ impl RustKitView {
     /// Deliver a mouse press at viewport coordinates to the page
     /// (`mousedown`).
     pub fn mouse_down_at_point(&self, x: f32, y: f32) {
-        self.submit(PageCmd::Input(PageInput::MouseDown { x, y, clicks: 1, shift: false }));
+        self.mouse_down_with(x, y, 1, false);
+    }
+
+    /// A press that is the `clicks`-th of a multi-click (AppKit's
+    /// `clickCount`: 2 selects a word and fires `dblclick` on release),
+    /// with Shift held or not (CH2.E4).
+    pub fn mouse_down_with(&self, x: f32, y: f32, clicks: u32, shift: bool) {
+        self.submit(PageCmd::Input(PageInput::MouseDown { x, y, clicks, shift }));
+    }
+
+    /// A secondary-button press: the page's `contextmenu`. A press the page
+    /// lets through comes back from [`Self::take_context_menu`] (CH2.E4).
+    pub fn secondary_down(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryDown { x, y }));
+    }
+
+    /// The secondary button's release (the menu did not take it).
+    pub fn secondary_up(&self, x: f32, y: f32) {
+        self.submit(PageCmd::Input(PageInput::SecondaryUp { x, y }));
     }
 
     /// Deliver a pointer move to viewport coordinates to the page (the
@@ -1300,13 +1326,37 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
-                PageEvent::Cursor(_)
-                | PageEvent::Tooltip(_)
-                | PageEvent::ContextMenu { .. }
-                | PageEvent::Unresponsive
-                | PageEvent::Closed => {}
+                PageEvent::Cursor(_) | PageEvent::Tooltip(_) | PageEvent::ContextMenu { .. } => {
+                    self.pointer_event(&event)
+                }
+                PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
+    }
+
+    /// What the pointer is over (CH2.E4): the cursor and the tooltip go to
+    /// the content view at once; a context menu waits for the event loop.
+    fn pointer_event(&self, event: &PageEvent) {
+        match event {
+            #[cfg(target_os = "macos")]
+            PageEvent::Cursor(css) => rustkit_viewhost::set_view_cursor(self.host_view, css),
+            #[cfg(target_os = "macos")]
+            PageEvent::Tooltip(title) => rustkit_viewhost::set_view_tooltip(self.host_view, title.as_deref()),
+            PageEvent::ContextMenu { x, y } => self.context_menu.set(Some((*x, *y))),
+            _ => {}
+        }
+    }
+
+    /// Where the page let a right press through since the last call: the
+    /// browser shows its context menu there (CH2.E4).
+    pub fn take_context_menu(&self) -> Option<(f32, f32)> {
+        self.harvest();
+        self.context_menu.take()
+    }
+
+    /// The content `NSView`, for a native menu shown over it.
+    pub fn host_view(&self) -> isize {
+        self.host_view
     }
 
     fn present_latest(&self) {

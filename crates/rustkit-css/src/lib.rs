@@ -2017,6 +2017,120 @@ pub enum PointerEvents {
     None,
 }
 
+/// `cursor` (CSS UI 4 §7.1.1): the keyword the pointer shows over the box.
+/// Inherited. A `url()` image is not drawn: the keyword it falls back to
+/// is the value (`url(a.png), pointer` is `Pointer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cursor {
+    #[default]
+    Auto,
+    Default,
+    None,
+    ContextMenu,
+    Help,
+    Pointer,
+    Progress,
+    Wait,
+    Cell,
+    Crosshair,
+    Text,
+    VerticalText,
+    Alias,
+    Copy,
+    Move,
+    NoDrop,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    AllScroll,
+    ColResize,
+    RowResize,
+    NResize,
+    EResize,
+    SResize,
+    WResize,
+    NeResize,
+    NwResize,
+    SeResize,
+    SwResize,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+    ZoomIn,
+    ZoomOut,
+}
+
+impl Cursor {
+    const ALL: [(Cursor, &'static str); 36] = [
+        (Cursor::Auto, "auto"),
+        (Cursor::Default, "default"),
+        (Cursor::None, "none"),
+        (Cursor::ContextMenu, "context-menu"),
+        (Cursor::Help, "help"),
+        (Cursor::Pointer, "pointer"),
+        (Cursor::Progress, "progress"),
+        (Cursor::Wait, "wait"),
+        (Cursor::Cell, "cell"),
+        (Cursor::Crosshair, "crosshair"),
+        (Cursor::Text, "text"),
+        (Cursor::VerticalText, "vertical-text"),
+        (Cursor::Alias, "alias"),
+        (Cursor::Copy, "copy"),
+        (Cursor::Move, "move"),
+        (Cursor::NoDrop, "no-drop"),
+        (Cursor::NotAllowed, "not-allowed"),
+        (Cursor::Grab, "grab"),
+        (Cursor::Grabbing, "grabbing"),
+        (Cursor::AllScroll, "all-scroll"),
+        (Cursor::ColResize, "col-resize"),
+        (Cursor::RowResize, "row-resize"),
+        (Cursor::NResize, "n-resize"),
+        (Cursor::EResize, "e-resize"),
+        (Cursor::SResize, "s-resize"),
+        (Cursor::WResize, "w-resize"),
+        (Cursor::NeResize, "ne-resize"),
+        (Cursor::NwResize, "nw-resize"),
+        (Cursor::SeResize, "se-resize"),
+        (Cursor::SwResize, "sw-resize"),
+        (Cursor::EwResize, "ew-resize"),
+        (Cursor::NsResize, "ns-resize"),
+        (Cursor::NeswResize, "nesw-resize"),
+        (Cursor::NwseResize, "nwse-resize"),
+        (Cursor::ZoomIn, "zoom-in"),
+        (Cursor::ZoomOut, "zoom-out"),
+    ];
+
+    /// The CSS keyword.
+    pub fn as_str(self) -> &'static str {
+        Self::ALL.iter().find(|(c, _)| *c == self).map_or("auto", |(_, k)| k)
+    }
+
+    /// A keyword (any case, `-webkit-grab` and `-webkit-grabbing` too).
+    pub fn from_keyword(keyword: &str) -> Option<Cursor> {
+        let k = keyword.trim().to_ascii_lowercase();
+        let k = k.strip_prefix("-webkit-").unwrap_or(&k);
+        Self::ALL.iter().find(|(_, name)| *name == k).map(|(c, _)| *c)
+    }
+
+    /// A declared value: `[<url> [<x> <y>]?,]* <keyword>`. The keyword
+    /// after the last comma decides; `None` when it is not one (the
+    /// declaration is invalid and ignored).
+    pub fn parse(value: &str) -> Option<Cursor> {
+        let mut depth = 0usize;
+        let mut last = 0;
+        for (i, ch) in value.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => last = i + 1,
+                _ => {}
+            }
+        }
+        Self::from_keyword(&value[last..])
+    }
+}
+
 /// Overflow behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
@@ -3092,6 +3206,7 @@ pub struct ComputedStyle {
     pub clip: Option<ClipRect>,
     pub visibility: Visibility,
     pub pointer_events: PointerEvents,
+    pub cursor: Cursor,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// css-overflow-3 §5.1; only meaningful when the overflow above clips.
@@ -3349,6 +3464,7 @@ impl ComputedStyle {
             writing_mode: parent.writing_mode,
             visibility: parent.visibility,
             pointer_events: parent.pointer_events,
+            cursor: parent.cursor,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
 

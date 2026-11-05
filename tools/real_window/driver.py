@@ -1038,9 +1038,171 @@ class Driver:
             return self.not_run(c, "the window shows the typed page's green", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the typed page's green", frame[GREEN] > 100000, str(frame))
 
+    # ── CH2.E4: the mouse surface ─────────────────────────────────────────
+
+    E4_LOG = {"RUST_LOG": "info,rustkit_viewhost=debug"}
+
+    def e4_open(self, c, query, env=None):
+        """e4_mouse.html with `query`, the input grant, and the page's ready beacon."""
+        env = dict(self.E4_LOG, **(env or {}))
+        if not self.open_page(c, "e4_mouse.html?" + query, env=env):
+            return None
+        self.expect(c, "the page's script ran", self.fixture.wait("beacon?e4-ready", 10, self.since))
+        if not self.can_input:
+            self.not_run(c, "real input", self.why_not("Accessibility"))
+            return None
+        time.sleep(0.5)
+        return self.centre()
+
+    def menus(self):
+        code, out = self.hw("menus", self.app.proc.pid)
+        return out.get("count", 0) if code == 0 else -1
+
+    def e4_contextmenu(self):
+        """CH2.E4: a right press reaches the page as contextmenu (button 2) and, not cancelled, opens the native menu."""
+        c = "e4_contextmenu"
+        at = self.e4_open(c, "words")
+        if at is None:
+            return
+        pid, log_from, mark = self.app.proc.pid, len(self.app.log_text()), self.fixture.mark()
+        before = self.menus()
+        self.hw("rightpress", pid, at[0], at[1])
+        self.expect(c, "the page heard contextmenu with button 2, not cancelled",
+                    self.fixture.wait("beacon?e4-contextmenu-button-2-prevented-0", 5, mark))
+        shown = self.app.wait_log(r"page context menu shown", 5, log_from)
+        self.expect(c, "the app showed its context menu", bool(shown))
+        time.sleep(0.8)
+        after = self.menus()
+        self.expect(c, "a menu window is on screen", after > before, "menu windows %d -> %d" % (before, after))
+        self.hw("key", pid, 53)
+        time.sleep(0.8)
+        self.expect(c, "Escape closed it", self.menus() == before, "menu windows now %d" % self.menus())
+        self.hw("release", pid, at[0], at[1])
+        self.expect(c, "the app is still running", self.app.alive())
+
+    def e4_contextmenu_prevented(self):
+        """CH2.E4: a contextmenu the page cancels opens no menu, and the release reaches the page as auxclick."""
+        c = "e4_contextmenu_prevented"
+        at = self.e4_open(c, "words&prevent")
+        if at is None:
+            return
+        pid, log_from, mark = self.app.proc.pid, len(self.app.log_text()), self.fixture.mark()
+        before = self.menus()
+        self.hw("rightclick", pid, at[0], at[1])
+        self.expect(c, "the page heard contextmenu with button 2 and cancelled it",
+                    self.fixture.wait("beacon?e4-contextmenu-button-2-prevented-1", 5, mark))
+        self.expect(c, "the page heard auxclick with button 2",
+                    self.fixture.wait("beacon?e4-auxclick-button-2", 5, mark))
+        time.sleep(0.8)
+        self.expect(c, "no menu was shown", self.menus() == before and
+                    not re.search(r"page context menu shown", self.app.log_text()[log_from:]),
+                    "menu windows %d" % self.menus())
+
+    def e4_dblclick_selects_word(self):
+        """CH2.E4: a double click fires dblclick with detail 2 and selects the word under it."""
+        c = "e4_dblclick_selects_word"
+        at = self.e4_open(c, "words")
+        if at is None:
+            return
+        mark = self.fixture.mark()
+        self.hw("dblclick", self.app.proc.pid, at[0], at[1])
+        self.expect(c, "the second click had detail 2", self.fixture.wait("beacon?e4-click-detail-2", 5, mark))
+        got = self.fixture.wait("beacon?e4-dblclick-detail-2-selection-bravo", 5, mark)
+        self.expect(c, "dblclick (detail 2) found 'bravo' selected", got,
+                    str(self.fixture.seen("beacon?e4-dblclick", mark)))
+
+    def e4_drag(self):
+        """CH2.E4: a move with the button held reaches the page with buttons 1."""
+        c = "e4_drag"
+        at = self.e4_open(c, "words")
+        if at is None:
+            return
+        mark = self.fixture.mark()
+        self.hw("drag", self.app.proc.pid, at[0] - 120, at[1], at[0] + 120, at[1])
+        self.expect(c, "pointermove with buttons 1 during the drag",
+                    self.fixture.wait("beacon?e4-dragmove-buttons-1", 5, mark))
+
+    def cursor_now(self):
+        code, out = self.hw("cursor")
+        return out.get("cursor", "?") if code == 0 else "?"
+
+    def e4_cursor_hand(self):
+        """CH2.E4: the CSS cursor under the pointer is the window's: a link's hand, ew-resize's arrows, the arrow again outside."""
+        c = "e4_cursor_hand"
+        at = self.e4_open(c, "")
+        if at is None:
+            return
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("move", pid, at[0], at[1] - 100)
+        set_hand = self.app.wait_log(r'content view cursor set css="?pointer', 5, log_from)
+        self.expect(c, "the app set the link's cursor", bool(set_hand))
+        time.sleep(0.4)
+        now = self.cursor_now()
+        self.expect(c, "over the link the cursor is the pointing hand", now == "pointingHand", now)
+        self.hw("move", pid, at[0], at[1] + 150)
+        time.sleep(0.6)
+        now = self.cursor_now()
+        self.expect(c, "over cursor:ew-resize it is the left-right resize cursor", now == "resizeLeftRight", now)
+        self.hw("move", pid, at[0], 12)
+        time.sleep(0.6)
+        now = self.cursor_now()
+        self.expect(c, "in the title bar it is the arrow again", now == "arrow", now)
+
+    def e4_tooltip(self):
+        """CH2.E4: the `title` under the pointer becomes the content view's tooltip and AppKit shows it."""
+        c = "e4_tooltip"
+        at = self.e4_open(c, "")
+        if at is None:
+            return
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        before = self.menus()
+        self.hw("move", pid, at[0] - 3, at[1] - 100)
+        self.hw("move", pid, at[0], at[1] - 100)
+        tip = self.app.wait_log(r'content view tooltip set tooltip=Some\("the E4 tooltip"\)', 5, log_from)
+        self.expect(c, "the app set the link's title as the tooltip", bool(tip))
+        time.sleep(3.0)
+        after = self.menus()
+        self.expect(c, "a tooltip window is on screen after a rest", after > before, "windows %d -> %d" % (before, after))
+        self.hw("move", pid, at[0], at[1] + 150)
+        cleared = self.app.wait_log(r"content view tooltip set tooltip=None", 5, log_from)
+        self.expect(c, "off the link the tooltip is cleared", bool(cleared))
+
+    # The RustKit chrome's first tab: the tab strip right of the 220 px
+    # sidebar, under the 32 px title bar (see a2_chrome_typed_url).
+    E4_TAB = (440, 56)
+
+    def e4_chrome_tab(self):
+        """CH2.E4, flag on: over a tab of the RustKit chrome the cursor is the hand; a right press there reaches the chrome's contextmenu handler (no native menu)."""
+        c = "e4_chrome_tab"
+        env = dict(self.E4_LOG, HIWAVE_RUSTKIT_CHROME="1")
+        if not self.open_page(c, "e4_mouse.html", env=env):
+            return
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.5)
+        if not self.can_input:
+            return self.not_run(c, "hover and right press on a tab", self.why_not("Accessibility"))
+        pid, log_from = self.app.proc.pid, len(self.app.log_text())
+        self.hw("move", pid, self.E4_TAB[0] - 4, self.E4_TAB[1])
+        self.hw("move", pid, *self.E4_TAB)
+        time.sleep(0.6)
+        now = self.cursor_now()
+        self.expect(c, "over a tab the cursor is the pointing hand", now == "pointingHand", now)
+        before = self.menus()
+        self.hw("rightclick", pid, *self.E4_TAB)
+        time.sleep(1.0)
+        self.expect(c, "the chrome took the right press (no native menu, app alive)",
+                    self.app.alive() and self.menus() == before and
+                    not re.search(r"page context menu shown", self.app.log_text()[log_from:]),
+                    "menu windows %d -> %d" % (before, self.menus()))
+        if self.can_capture:
+            path = self.out / ("%s.after.png" % c)
+            code, win = self.hw("window", pid)
+            subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(win.get("id", 0)), str(path)])
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
-              "a2_chrome_navigate", "a2_chrome_typed_url"]
+              "a2_chrome_navigate", "a2_chrome_typed_url", "e4_contextmenu", "e4_contextmenu_prevented",
+              "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip", "e4_chrome_tab"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

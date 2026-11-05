@@ -232,6 +232,9 @@ pub struct MouseEventBindingData {
     /// The element the pointer came from or went to (raw NodeId), for the
     /// over/out/enter/leave events.
     pub related_target: Option<usize>,
+    /// `UIEvent.detail` (the click count). `None`: 1 for a press, a
+    /// release or a `click`, else 0.
+    pub detail: Option<u32>,
 }
 
 /// Keyboard event data for JavaScript binding.
@@ -2089,7 +2092,7 @@ impl DomBindings {
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
-             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {} }})",
+             altKey: {}, shiftKey: {}, metaKey: {}, movementX: {}, movementY: {}, related: {}, detail: {} }})",
             data.client_x,
             data.client_y,
             data.screen_x,
@@ -2105,6 +2108,7 @@ impl DomBindings {
             data.movement_x,
             data.movement_y,
             data.related_target.map_or("null".to_string(), |n| n.to_string()),
+            data.detail.map_or("null".to_string(), |n| n.to_string()),
         ))?;
         Ok(!matches!(result, JsValue::Boolean(false)))
     }

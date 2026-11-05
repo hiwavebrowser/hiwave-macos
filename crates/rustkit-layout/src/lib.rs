@@ -8058,6 +8058,7 @@ impl LayoutBox {
             is_scrollable,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            cursor: self.style.cursor,
             viewport_fixed: false,
             scrollers: if self.is_element_scroller() { self.node_id.into_iter().collect() } else { Vec::new() },
             scroller_gap: ScrollerGap::None,
@@ -8135,6 +8136,7 @@ impl LayoutBox {
             is_scrollable: false,
             link_href: self.link_href.clone(),
             node_id: self.node_id,
+            cursor: self.style.cursor,
             viewport_fixed: false,
             scrollers: Vec::new(),
             scroller_gap: ScrollerGap::None,
@@ -8213,6 +8215,9 @@ pub struct HitTestResult {
     /// `link_href` this is NOT inherited from ancestors: the caller wants
     /// the element actually under the cursor.
     pub node_id: Option<usize>,
+    /// The hit box's computed `cursor` (CH2.E4; a text run's is its
+    /// element's).
+    pub cursor: rustkit_css::Cursor,
     /// The hit is in a `position: fixed` box the page's scroll does not
     /// move (`LayoutBox::hit_test_scrolled`): its boxes are where the
     /// window shows them, with no scroll to add.

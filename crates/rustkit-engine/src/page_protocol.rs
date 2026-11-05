@@ -634,6 +634,19 @@ impl PageEndpoint {
 
     fn apply_input(&mut self, input: PageInput) {
         let view = self.view;
+        // What the pointer is over may change: the window is told its
+        // cursor and tooltip after these (CH2.E4).
+        let pointer = matches!(
+            input,
+            PageInput::MouseDown { .. }
+                | PageInput::MouseMove { .. }
+                | PageInput::MouseLeave
+                | PageInput::Click { .. }
+                | PageInput::SecondaryDown { .. }
+                | PageInput::SecondaryUp { .. }
+                | PageInput::Scroll { .. }
+                | PageInput::ScrollAt { .. }
+        );
         match input {
             PageInput::TextKey {
                 key_code,
@@ -677,7 +690,9 @@ impl PageEndpoint {
                 self.engine.mouse_down_with(view, x, y, clicks.max(1), shift);
             }
             PageInput::SecondaryDown { x, y } => {
-                self.engine.context_menu_at_point(view, x, y);
+                if self.engine.context_menu_at_point(view, x, y) {
+                    self.emit(PageEvent::ContextMenu { x, y });
+                }
             }
             PageInput::SecondaryUp { x, y } => self.engine.context_menu_release(view, x, y),
             PageInput::MouseMove { x, y } => self.engine.mouse_move_at_point(view, x, y),
@@ -758,6 +773,9 @@ impl PageEndpoint {
         }
         self.publish_commit();
         self.report_focus();
+        if pointer {
+            self.report_hover();
+        }
         // A listener's `location.href =` or `link.click()` is not the
         // click's own default action. The content thread reports it; the
         // same-thread window still pulls with TakeNavigation.
@@ -939,6 +957,21 @@ impl PageEndpoint {
             return;
         }
         self.emit_focus();
+    }
+
+    /// Tell the window the cursor and tooltip under the pointer when they
+    /// changed (CH2.E4). A pointer that left the view gets `default` and
+    /// no tooltip.
+    fn report_hover(&mut self) {
+        let Some(now) = self.engine.take_hover_change(self.view) else {
+            return;
+        };
+        let (cursor, title) = match now {
+            Some(f) => (f.cursor, f.title),
+            None => ("default", None),
+        };
+        self.emit(PageEvent::Cursor(cursor.to_string()));
+        self.emit(PageEvent::Tooltip(title));
     }
 
     /// (anything focused, a text field focused) in the page now.

@@ -653,6 +653,11 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     };
     let len = |l: &Length| length(l, font_px).unwrap_or_default();
 
+    // CH2.E4: the keyword; a `url()` image is not kept.
+    if s.cursor != css::Cursor::Auto {
+        row("cursor", s.cursor.as_str());
+    }
+
     // Transforms.
     // `display: none` has no transform in Chromium: it reads `none`. A viewport
     // unit has no viewport here: say nothing rather than resolve it to 0.
