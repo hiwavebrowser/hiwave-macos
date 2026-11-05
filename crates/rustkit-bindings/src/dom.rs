@@ -136,6 +136,10 @@ pub struct AnimatedStyles {
 /// One of the engine's CSS animations or transitions, for script.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CssAnimationInfo {
+    /// The engine's id for this one animation or transition, unique in the
+    /// view: script's `CSSAnimation`/`CSSTransition` object is keyed on it,
+    /// so a restart or a same-name replacement is a new object.
+    pub id: u64,
     pub node: usize,
     /// `animation` or `transition`.
     pub kind: &'static str,
@@ -161,9 +165,10 @@ pub struct CssAnimationInfo {
 /// Script's control of one of the engine's CSS animations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CssAnimationControl {
+    /// The animation's `CssAnimationInfo::id`.
+    pub id: u64,
     pub node: usize,
     pub kind: String,
-    pub index: usize,
     /// `pause`, `play`, `cancel` or `finish`.
     pub op: String,
 }
@@ -1851,8 +1856,9 @@ pub(crate) fn install(
                 .iter()
                 .map(|a| {
                     format!(
-                        "{{\"node\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
+                        "{{\"id\":{},\"node\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
                          \"duration\":{},\"iterations\":{},\"direction\":{:?},\"fill\":{:?},\"easing\":{},\"ended\":{}}}",
+                        a.id,
                         a.node,
                         a.kind,
                         a.index,
@@ -1898,8 +1904,9 @@ pub(crate) fn install(
             JsValue::Boolean(by_script || by_css)
         }),
     )?;
-    // cssControl(gen, id, kind, index, op): script's pause/play/cancel/
-    // finish of one of them; the engine applies it at its next layout.
+    // cssControl(gen, id, kind, animationId, op): script's pause/play/
+    // cancel/finish of one of them, by the engine's animation id; the
+    // engine applies it at its next build.
     let (h, d) = (host.clone(), dirty.clone());
     runtime.register_host_function(
         "__rustkit_dom_css_control",
@@ -1909,15 +1916,15 @@ pub(crate) fn install(
             let Some(node) = host.node(args) else {
                 return JsValue::Undefined;
             };
-            let (Some(JsValue::String(kind)), Some(index), Some(JsValue::String(op))) =
+            let (Some(JsValue::String(kind)), Some(id), Some(JsValue::String(op))) =
                 (args.get(2), number_arg(args, 3), args.get(4))
             else {
                 return JsValue::Undefined;
             };
             host.animated.borrow_mut().controls.push(CssAnimationControl {
+                id: id.max(0.0) as u64,
                 node: node.id.raw(),
                 kind: kind.clone(),
-                index: index.max(0.0) as usize,
                 op: op.clone(),
             });
             d.mark(crate::DomDirty::Layout);
@@ -3148,7 +3155,7 @@ const WRAPPERS_JS: &str = r#"
             N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
         },
         css: function () { return JSON.parse(N.cssAnimations()); },
-        control: function (el, kind, index, op) { var s = slotOf(el); N.cssControl(s.gen, s.id, kind, index, op); },
+        control: function (el, kind, id, op) { var s = slotOf(el); N.cssControl(s.gen, s.id, kind, id, op); },
         byId: function (id) { return wrap(id); }
     };
     function scrollOffset(axis) {

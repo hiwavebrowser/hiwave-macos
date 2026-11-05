@@ -20,9 +20,11 @@
 // function list or `none`, rgb()/rgba()/#hex colours); anything else flips
 // at the midpoint. The underlying value of an implicit 0%/100% keyframe is
 // the computed value read before this animation's first write (the
-// computed `matrix()` form for a transform). Reported unsupported:
-// `pseudoElement`; a `CSSAnimation`'s `currentTime`/`playbackRate` writes
-// and a `CSSTransition`'s `pause()`.
+// computed `matrix()` form for a transform). Composite `add`/`accumulate`
+// of lengths in different units (px + %, px + em) is not a `calc()` as in
+// Chrome: the engine takes the new value, which is `replace` for that
+// property. Reported unsupported: `pseudoElement`; a `CSSAnimation`'s
+// `currentTime`/`playbackRate` writes and a `CSSTransition`'s `pause()`.
 (function (g) {
     var document = g.document;
     if (!document || !g.Element) return;
@@ -778,9 +780,11 @@
     AnimationPlaybackEvent.prototype.stopImmediatePropagation = function () {};
 
     // --------------------------------------- the engine's CSS animations
-    // `CSSAnimation`/`CSSTransition`: one object per engine record, kept
-    // while the record lives, its state refreshed from the engine on each
-    // frame and each `getAnimations()`.
+    // `CSSAnimation`/`CSSTransition`: one object per engine record, keyed
+    // on the record's id (never its `animation-name` slot: a replaced,
+    // restarted or same-name-again animation is a new record and a new
+    // object, as in Chrome), kept while the record lives, its state
+    // refreshed from the engine on each frame and each `getAnimations()`.
     function CSSAnimation() { throw new TypeError('Illegal constructor'); }
     CSSAnimation.prototype = Object.create(Animation.prototype);
     CSSAnimation.prototype.constructor = CSSAnimation;
@@ -788,7 +792,7 @@
     CSSTransition.prototype = Object.create(Animation.prototype);
     CSSTransition.prototype.constructor = CSSTransition;
     var cssWrappers = {};
-    function cssKey(info) { return info.node + ':' + info.kind + ':' + info.index; }
+    function cssKey(info) { return String(info.id); }
     function cssTiming(info) {
         return { duration: info.duration, delay: info.delay, iterations: info.iterations == null ? Infinity : info.iterations,
                  direction: info.direction, fill: info.fill, easing: info.easing };
@@ -871,7 +875,7 @@
         Object.defineProperty(proto, 'effect', { get: function () { return this._effect; }, set: function () {} });
         function control(w, op) {
             if (w._gone) return;
-            layer.control(cssTarget(w), w._css.kind, w._css.index, op);
+            layer.control(cssTarget(w), w._css.kind, w._css.id, op);
             queueFrame();
         }
         proto.play = function () { control(this, 'play'); };

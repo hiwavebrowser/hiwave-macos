@@ -109,7 +109,17 @@ macro_rules! color_prop {
 
 /// The properties a transition can run on, by their CSS names.
 const PROPS: &[Prop] = &[
-    num_prop!("opacity", opacity),
+    // Its range is [0, 1]: a `composite: add` past it (`.75 + .5`) clamps,
+    // as Chrome's computed value does.
+    Prop {
+        name: "opacity",
+        get: |s| AnimValue::Number(s.opacity),
+        set: |s, v| {
+            if let AnimValue::Number(n) = v {
+                s.opacity = n.clamp(0.0, 1.0);
+            }
+        },
+    },
     Prop {
         name: "transform",
         get: |s| AnimValue::Transform(s.transform.clone()),
@@ -373,6 +383,8 @@ fn interpolate(a: &AnimValue, b: &AnimValue, t: f32) -> Option<AnimValue> {
 /// One running transition (css-transitions-1 §3).
 #[derive(Clone, Debug)]
 struct Transition {
+    /// Its identity for script (`CSSTransition`), unique in the view.
+    id: u64,
     node: usize,
     prop: usize,
     from: AnimValue,
@@ -457,15 +469,27 @@ pub(crate) struct Animations {
     /// The running `@keyframes` animations, one per element and
     /// `animation` list index.
     css: Vec<CssAnimation>,
+    /// The last id handed to a transition or animation (one sequence
+    /// for both, so an id names one record of either kind).
+    last_id: u64,
 }
 
 impl Animations {
     /// A new document: nothing of the old one's transitions carries over.
+    /// Ids keep counting: a wrapper of the old document never names a
+    /// record of the new one.
     pub(crate) fn reset(&mut self) {
         *self = Animations {
             disabled: self.disabled,
+            last_id: self.last_id,
             ..Animations::default()
         };
+    }
+
+    /// A fresh id for a transition or animation.
+    fn next_id(&mut self) -> u64 {
+        self.last_id += 1;
+        self.last_id
     }
 
     /// The transition property names reported since the last call
@@ -752,7 +776,9 @@ impl Animations {
                 } else {
                     delay_ms
                 };
+                let id = self.next_id();
                 let t = Transition {
+                    id,
                     node,
                     prop: *i,
                     from,
@@ -961,6 +987,9 @@ pub(crate) fn prop_value(style: &ComputedStyle, index: usize) -> AnimValue {
 /// for the timing).
 #[derive(Clone, Debug)]
 struct CssAnimation {
+    /// Its identity for script (`CSSAnimation`), unique in the view: a
+    /// restart or a same-name replacement is a new animation.
+    id: u64,
     node: usize,
     /// Its position in the element's `animation` list.
     index: usize,
@@ -1200,7 +1229,9 @@ impl Animations {
                     let Some(frames) = resolve(name, style) else {
                         continue;
                     };
+                    let id = self.next_id();
                     self.css.push(CssAnimation {
+                        id,
                         node,
                         index,
                         name: name.to_string(),
@@ -1468,6 +1499,7 @@ impl Animations {
         let mut out = Vec::new();
         for t in &self.transitions {
             out.push(CssAnimationInfo {
+                id: t.id,
                 node: t.node,
                 kind: "transition",
                 index: t.prop,
@@ -1485,6 +1517,7 @@ impl Animations {
         }
         for a in self.css.iter().filter(|a| !a.cancelled) {
             out.push(CssAnimationInfo {
+                id: a.id,
                 node: a.node,
                 kind: "animation",
                 index: a.index,
@@ -1531,15 +1564,14 @@ impl Animations {
         out
     }
 
-    /// Script's `pause()`/`play()`/`cancel()`/`finish()` on one of them.
+    /// Script's `pause()`/`play()`/`cancel()`/`finish()` on one of them,
+    /// by id: a control for a record that is gone (cancelled, ended and
+    /// dropped, replaced by a same-name restart) does nothing, and never
+    /// reaches the record that took its place.
     pub(crate) fn control(&mut self, c: &CssAnimationControl) {
         let now = self.clock_ms;
         if c.kind == "transition" {
-            let Some(at) = self
-                .transitions
-                .iter()
-                .position(|t| t.node == c.node && t.prop == c.index)
-            else {
+            let Some(at) = self.transitions.iter().position(|t| t.id == c.id) else {
                 return;
             };
             match c.op.as_str() {
@@ -1555,11 +1587,7 @@ impl Animations {
             }
             return;
         }
-        let Some(at) = self
-            .css
-            .iter()
-            .position(|a| a.node == c.node && a.index == c.index)
-        else {
+        let Some(at) = self.css.iter().position(|a| a.id == c.id) else {
             return;
         };
         match c.op.as_str() {

@@ -8079,17 +8079,9 @@ impl Engine {
         relayout_cause::set_last_build_reused_tree(false);
         relayout_cause::take_stage_ms();
 
-        // Script's pause/play/cancel/finish of CSS animations, before the
-        // build reads them.
-        if let Some(view) = self.views.get(&id) {
-            let controls = std::mem::take(&mut view.lay.animated.borrow_mut().controls);
-            if !controls.is_empty() {
-                let mut anims = view.lay.animations.borrow_mut();
-                for control in &controls {
-                    anims.control(control);
-                }
-            }
-        }
+        // Script's pause/play/cancel/finish of CSS animations are taken by
+        // the build itself (`LayoutCtx::with_building`), so a forced
+        // layout sees them too.
 
         let layout_skipped = self.relayout_uncounted(id)?;
 
