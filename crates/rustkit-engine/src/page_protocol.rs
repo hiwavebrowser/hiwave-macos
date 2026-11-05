@@ -264,6 +264,12 @@ pub enum PageInput {
     HasFocus {
         reply: oneshot::Sender<bool>,
     },
+    /// Whether the focused element is a text field (a text input, a
+    /// textarea, editable content): the editing chords go to the page
+    /// only then.
+    HasTextFocus {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// What the page tells the window.
@@ -295,6 +301,8 @@ pub enum PageEvent {
         from_user: bool,
     },
     Focused(bool),
+    /// Whether the focused element is a text field, sent with `Focused`.
+    TextFocused(bool),
     /// A message the page posted with `window.ipc.postMessage` (CH2.E9),
     /// pushed to the window as it arrives; nothing polls the page for it.
     Ipc {
@@ -346,7 +354,8 @@ pub struct PageEndpoint {
     /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
     /// autofocus or a new document moves focus without any input from the
     /// window, and the window answers its keys from this report.
-    last_focused: Option<bool>,
+    /// The last focus report: (anything focused, a text field focused).
+    last_focused: Option<(bool, bool)>,
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
@@ -670,8 +679,7 @@ impl PageEndpoint {
             }
             PageInput::FocusAt { x, y, reply } => {
                 let tag = self.engine.focus_at_point(view, x, y);
-                self.last_focused = Some(tag.is_some());
-                self.emit(PageEvent::Focused(tag.is_some()));
+                self.emit_focus();
                 let _ = reply.send(tag);
             }
             PageInput::LinkAt { x, y, reply } => {
@@ -722,10 +730,12 @@ impl PageEndpoint {
                 let _ = reply.send(taken);
             }
             PageInput::HasFocus { reply } => {
-                let focused = self.engine.focused_node(view).is_some();
-                self.last_focused = Some(focused);
-                self.emit(PageEvent::Focused(focused));
+                let (focused, _) = self.emit_focus();
                 let _ = reply.send(focused);
+            }
+            PageInput::HasTextFocus { reply } => {
+                let (_, text) = self.emit_focus();
+                let _ = reply.send(text);
             }
         }
         self.publish_commit();
@@ -907,12 +917,27 @@ impl PageEndpoint {
         if !self.wake_window {
             return;
         }
-        let focused = self.engine.focused_node(self.view).is_some();
-        if self.last_focused == Some(focused) {
+        if self.last_focused == Some(self.focus_state()) {
             return;
         }
-        self.last_focused = Some(focused);
-        self.emit(PageEvent::Focused(focused));
+        self.emit_focus();
+    }
+
+    /// (anything focused, a text field focused) in the page now.
+    fn focus_state(&self) -> (bool, bool) {
+        (
+            self.engine.focused_node(self.view).is_some(),
+            self.engine.focused_is_text_control(self.view),
+        )
+    }
+
+    /// Report the page's focus to the window (`Focused`, `TextFocused`).
+    fn emit_focus(&mut self) -> (bool, bool) {
+        let state = self.focus_state();
+        self.last_focused = Some(state);
+        self.emit(PageEvent::Focused(state.0));
+        self.emit(PageEvent::TextFocused(state.1));
+        state
     }
 
     /// A navigation the page's script asked for (`location.href`,

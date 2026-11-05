@@ -1210,6 +1210,37 @@ mod tests {
         );
     }
 
+    /// The newest `TextFocused` report among the events seen within `budget`.
+    fn last_text_focused(page: &ContentThread, budget: Duration) -> Option<bool> {
+        let deadline = Instant::now() + budget;
+        let mut last = None;
+        while Instant::now() < deadline {
+            for event in page.poll() {
+                if let PageEvent::TextFocused(text) = event {
+                    last = Some(text);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn the_window_hears_whether_the_focused_element_is_a_text_field() {
+        // CH2.E1 R1: the window sends Cmd+A/C/V/X/Z and Cmd+arrows to the
+        // page only for a focused text field, not a focused <select>.
+        let page = page();
+        let mut loaded = page.load_html("<input id=\"i\"><select id=\"s\"><option>a</option></select>");
+        assert!(wait_recv(&mut loaded, Duration::from_secs(10)).unwrap().is_ok());
+        let _ = page.poll();
+        let mut focused = page.eval("document.getElementById('i').focus(); 1");
+        assert!(wait_recv(&mut focused, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(true), "input");
+        let mut select = page.eval("document.getElementById('s').focus(); 1");
+        assert!(wait_recv(&mut select, Duration::from_secs(5)).is_some());
+        assert_eq!(last_text_focused(&page, Duration::from_millis(300)), Some(false), "select");
+    }
+
     /// The `Ipc` payloads seen within `budget`.
     fn ipc_payloads(page: &ContentThread, budget: Duration) -> Vec<String> {
         let deadline = Instant::now() + budget;
