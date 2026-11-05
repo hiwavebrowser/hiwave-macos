@@ -19,6 +19,7 @@
 mod traits;
 
 pub mod input_queue;
+pub mod region;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -33,6 +34,7 @@ pub use input_queue::{
     drain_input, drain_input_view, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
     PendingScroll, PointerInput,
 };
+pub use region::{compose_region, region_contains, RegionRect};
 
 // Screenshot capture (Windows: GPU readback of a hosted view)
 #[cfg(windows)]
