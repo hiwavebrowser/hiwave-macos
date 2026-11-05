@@ -693,13 +693,11 @@ impl Document {
     /// extraction) silently depend on document order — CSS rule order breaks
     /// ties, so random sheet order made identical renders differ run-to-run.
     pub fn get_elements_by_tag_name(&self, tag_name: &str) -> Vec<Rc<Node>> {
-        let tag_name_lower = tag_name.to_lowercase();
         let mut result = Vec::new();
+        // Compared in place: lowercasing every element's tag allocated once
+        // per node, on every build's walk for `<style>` elements.
         self.traverse(|n| {
-            if n.tag_name()
-                .map(|t| t.to_lowercase() == tag_name_lower)
-                .unwrap_or(false)
-            {
+            if n.tag_name().is_some_and(|t| t.eq_ignore_ascii_case(tag_name)) {
                 result.push(n.clone());
             }
         });
@@ -889,8 +887,13 @@ impl Document {
         F: FnMut(&Rc<Node>),
     {
         callback(node);
-        for child in node.children() {
+        // By index with a short borrow each: `children()` cloned the
+        // vector at every node of the walk, and a callback may still edit
+        // the tree without hitting a held borrow.
+        let mut i = 0;
+        while let Some(child) = node.children.borrow().get(i).cloned() {
             self.traverse_node(&child, callback);
+            i += 1;
         }
     }
 }
