@@ -477,6 +477,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod leaving_input_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
@@ -3101,34 +3103,41 @@ impl Engine {
         }
 
         if let Some(view) = self.views.get_mut(&id) {
+            // As `fire_mouse`: a document being left hears no `resize`;
+            // `innerWidth`/`innerHeight` are kept current all the same.
+            let leaving = view.control.stops_all();
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                let fired = sized.and_then(|()| {
-                    bindings.fire_lifecycle_event(
-                        rustkit_bindings::LifecycleTarget::Window,
-                        "resize",
-                    )
-                });
-                // Then the media query lists whose answer flipped hear
-                // `change` (after `resize`, as in the rendering update).
-                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
-                let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
-                // A stopped listener's error is the stop itself, which has
-                // its own record.
-                let fired = if stopped.is_some() { Ok(()) } else { fired };
-                view.script_log.extend(stopped);
-                if let Err(e) = fired {
-                    let record = ScriptRecord {
-                        source: "event:resize".into(),
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(e.to_string()),
-                    };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                if leaving {
+                    debug!(?id, "Resize event not dispatched: the document is being left");
+                } else {
+                    let _turn = rustkit_js::DiagTurn::enter("live");
+                    let armed = arm_live_turn(&self.config, bindings);
+                    let fired = sized.and_then(|()| {
+                        bindings.fire_lifecycle_event(
+                            rustkit_bindings::LifecycleTarget::Window,
+                            "resize",
+                        )
+                    });
+                    // Then the media query lists whose answer flipped hear
+                    // `change` (after `resize`, as in the rendering update).
+                    let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
+                    let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
+                    // A stopped listener's error is the stop itself, which has
+                    // its own record.
+                    let fired = if stopped.is_some() { Ok(()) } else { fired };
+                    view.script_log.extend(stopped);
+                    if let Err(e) = fired {
+                        let record = ScriptRecord {
+                            source: "event:resize".into(),
+                            bytes: 0,
+                            elapsed_ms: 0,
+                            outcome: ScriptOutcome::Threw(e.to_string()),
+                        };
+                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    }
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
                 }
-                inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
         }
 
@@ -4262,6 +4271,19 @@ impl Engine {
         let Some(bindings) = view.bindings.as_ref() else {
             return true;
         };
+        // The window has asked to leave this document (`navigate`,
+        // `load_html`, a reload's cancel): its interrupt word is ALL until
+        // the next document commits, and a listener run now is refused at
+        // its first opcode. Not dispatched at all: until S2's reopening
+        // each refusal was a "stopped at the script budget" line, an
+        // over-budget record in the Inspector and a stop note of its own
+        // (959 lines in one hand test, all for the page being left). A
+        // navigation that ends without a commit lifts the word, and the
+        // document hears input again.
+        if view.control.stops_all() {
+            debug!(?id, event_type, target, "Mouse event not dispatched: the document is being left");
+            return true;
+        }
         let source = format!("event:{event_type}");
         let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
@@ -5172,15 +5194,22 @@ impl Engine {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
-            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.sync_control_value(focused.raw(), value);
-                let typed = (!key.is_empty() && !ctrl).then_some(key);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
-                    debug!(?id, error = %e, "input listener threw");
+            if let Some(view) = self.views.get(&id) {
+                if let Some(bindings) = view.bindings.as_ref() {
+                    bindings.sync_control_value(focused.raw(), value);
+                    // As `fire_mouse`: a document being left hears no
+                    // `input`; its control's value is kept current all the
+                    // same.
+                    if !view.control.stops_all() {
+                        let typed = (!key.is_empty() && !ctrl).then_some(key);
+                        let _turn = rustkit_js::DiagTurn::enter("live");
+                        let armed = arm_live_turn(&self.config, bindings);
+                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                            debug!(?id, error = %e, "input listener threw");
+                        }
+                        stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+                    }
                 }
-                stopped = end_live_turn(&self.config, armed, bindings, "event:input");
             }
             if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
                 view.script_log.push(stopped);
@@ -5322,9 +5351,17 @@ impl Engine {
             0x2E => "Delete",
             _ => text,
         };
-        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+        let Some(view) = self.views.get(&id) else {
             return true;
         };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
+        // As `fire_mouse`: a document being left hears no key.
+        if view.control.stops_all() {
+            debug!(?id, event_type, "Key event not dispatched: the document is being left");
+            return true;
+        }
         let data = rustkit_bindings::KeyboardEventBindingData {
             key: key.to_string(),
             // A named key's code is its name; a character's physical key
@@ -5765,6 +5802,16 @@ impl Engine {
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
+        // The module map keys the fetch, not just the evaluation: tags that
+        // name one module URL share one request and its answer, as in
+        // Chromium. A store page names one component module from each of
+        // its instances (S12: 220 tags, 31 URLs); fetching each tag's copy
+        // queued the duplicates behind the window below and held the first
+        // script back by seconds.
+        type SharedModuleFetch = futures::future::Shared<
+            futures::future::LocalBoxFuture<'static, Result<(String, String), ScriptOutcome>>,
+        >;
+        let mut module_fetches: HashMap<Url, SharedModuleFetch> = HashMap::new();
         Some(
             futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
@@ -5772,6 +5819,44 @@ impl Engine {
                 let policy = policy.clone();
                 let base = base.clone();
                 let inspector = inspector.clone();
+                let shared_module = match &entry {
+                    Ok((_, Body::External(url))) if is_module => {
+                        let shared = module_fetches.entry(url.clone()).or_insert_with(|| {
+                            let (policy, loader, base, inspector, url) =
+                                (policy.clone(), loader.clone(), base.clone(), inspector.clone(), url.clone());
+                            async move {
+                                let Some(policy) = policy else {
+                                    return Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "no network policy for this page".into(),
+                                    )));
+                                };
+                                let guard = inspector
+                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
+                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
+                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
+                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
+                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
+                                let guard = guard.map(|g| g.deadline(deadline));
+                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
+                                inspector::answer_module(guard, &fetched);
+                                match fetched {
+                                    Ok(Ok(module)) => Ok((module.final_url.to_string(), module.source)),
+                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
+                                        rustkit_net::policy::Denial::BadStatus(status) => FetchFailure::Status(status),
+                                        denial => FetchFailure::Transport(format!("{denial}")),
+                                    })),
+                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
+                                        "timed out".into(),
+                                    ))),
+                                }
+                            }
+                            .boxed_local()
+                            .shared()
+                        });
+                        Some(shared.clone())
+                    }
+                    _ => None,
+                };
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -5783,36 +5868,13 @@ impl Engine {
                         // module entry point (script destination, CORS,
                         // JavaScript MIME, 2xx, shield, budgets); its
                         // identity is the URL it ends up at.
-                        Ok((timing, Body::External(url))) if is_module => match &policy {
-                            None => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                "no network policy for this page".into(),
-                            ))),
-                            Some(policy) => {
-                                let guard = inspector
-                                    .begin_request(&url, "GET", ResourceType::Module, Some("parser"))
-                                    .map(|g| g.waits_on(&rustkit_net::policy::SlotWait::new()));
-                                let wait = guard.as_ref().and_then(|g| g.slot()).cloned();
-                                let fetch = policy.fetch_module_waited(&loader, &url, &base, wait.as_ref());
-                                let deadline = tokio::time::Instant::now() + SCRIPT_NETWORK_CAP;
-                                let guard = guard.map(|g| g.deadline(deadline));
-                                let fetched = tokio::time::timeout_at(deadline, fetch).await;
-                                inspector::answer_module(guard, &fetched);
-                                match fetched {
-                                    Ok(Ok(module)) => {
-                                        label = module.final_url.to_string();
-                                        Ok((timing, module.source))
-                                    }
-                                    Ok(Err(denial)) => Err(ScriptOutcome::FetchFailed(match denial {
-                                        rustkit_net::policy::Denial::BadStatus(status) => {
-                                            FetchFailure::Status(status)
-                                        }
-                                        denial => FetchFailure::Transport(format!("{denial}")),
-                                    })),
-                                    Err(_) => Err(ScriptOutcome::FetchFailed(FetchFailure::Transport(
-                                        "timed out".into(),
-                                    ))),
-                                }
-                            }
+                        // One fetch per module URL (see `module_fetches`).
+                        Ok((timing, Body::External(_))) if is_module => match shared_module {
+                            Some(shared) => shared.await.map(|(final_url, source)| {
+                                label = final_url;
+                                (timing, source)
+                            }),
+                            None => Err(ScriptOutcome::Skipped("module fetch not started")),
                         },
                         Ok((timing, Body::External(url))) => {
                             let fetch = async {
@@ -18089,6 +18151,41 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
+        // The end of the identifier starting at `i` (CSS Syntax §4.3.11),
+        // escapes included: Tailwind's `.dark\:bg-black:is(.dark *)` is one
+        // class then `:is()`, (0,2,0) in Chrome, not a class, a `:bg-black`
+        // pseudo-class and `:is()`. An escape is `\` and either 1-6 hex
+        // digits plus one optional whitespace, or any other character.
+        fn skip_css_ident(chars: &[char], mut i: usize) -> usize {
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' {
+                    // `\` then a newline (or the end) is not an escape
+                    // (§4.3.8): the identifier ends before the backslash.
+                    if chars.get(i + 1).is_none_or(|&n| matches!(n, '\n' | '\r' | '\u{c}')) {
+                        break;
+                    }
+                    i += 1;
+                    if chars[i].is_ascii_hexdigit() {
+                        let start = i;
+                        while i < chars.len() && i - start < 6 && chars[i].is_ascii_hexdigit() {
+                            i += 1;
+                        }
+                        if i < chars.len() && chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else if c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            i
+        }
+
         // A selector list takes the specificity of its most specific member.
         // Split on top-level commas only: `:is( a, b)` is one member, and a
         // plain `split(',')` cut it into `:is( a` and `b)`. Then the
@@ -18123,24 +18220,12 @@ impl SelectorMatcher {
                     '#' => {
                         // ID selector
                         ids += 1;
-                        i += 1;
-                        // Skip the ID name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '.' => {
                         // Class selector
                         classes += 1;
-                        i += 1;
-                        // Skip the class name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '[' => {
                         // Attribute selector
@@ -18253,13 +18338,7 @@ impl SelectorMatcher {
                     _ if chars[i].is_alphabetic() || chars[i] == '_' => {
                         // Type selector (element name)
                         tags += 1;
-                        i += 1;
-                        // Skip the element name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     _ => {
                         i += 1;
@@ -45502,7 +45581,13 @@ mod clip_path_pins {
                 r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}">{inner}</div></body></html>"#
             ))
         };
-        let cases: [(&str, &str, &str, Option<&str>); 9] = [
+        let cases: [(&str, &str, &str, Option<&str>); 12] = [
+            // polygon(): an axis-aligned rectangle is exact; any other shape clips to
+            // its bounding box (the triangle's is the whole border box); a polygon
+            // with no area (eBay's visually-hidden `polygon(0 0,0 0)`) clips everything.
+            ("clip-path:polygon(20px 20px, 120px 20px, 120px 120px, 20px 120px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 0 100%)", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:polygon(0 0, 0 0)", "PushClip(", "x: 0.0, y: 0.0, width: 0.0, height: 0.0", None),
             ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
             ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
             ("clip-path:ellipse(50px 30px at 50% 50%)", "PushClipRounded", "x: 20.0, y: 40.0, width: 100.0, height: 60.0", Some("CornerRadius { h: 50.0, v: 30.0 }")),
@@ -45562,8 +45647,8 @@ mod clip_path_pins {
             .unwrap_or_else(|| panic!("no child paint:\n{all}"));
         assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
 
-        // `none`, and shapes that are not a rounded rect, paint as before.
-        for style in ["clip-path:none", "clip-path:polygon(0 0, 100% 0, 0 100%)", ""] {
+        // `none`, and shapes this does not read (`path()`), paint as before.
+        for style in ["clip-path:none", "clip-path:path('M0 0H10V10Z')", ""] {
             let lines = page(style, "");
             assert!(
                 !lines.iter().any(|c| c.starts_with("PushClip")),

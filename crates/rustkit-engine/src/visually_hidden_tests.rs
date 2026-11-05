@@ -85,3 +85,51 @@ fn visually_hidden_boxes_paint_as_chromium() {
         wrong.join("\n")
     );
 }
+
+/// eBay's header (Z row S5, reopened): the "Expand Cart / Watch List / My
+/// eBay / Sell" buttons and the "Skip to main content" link hide with
+/// `clip-path: polygon(0 0,0 0)`, a polygon with no area, shown only on
+/// `:focus`. Same ink metric; Chromium 143.0.7499.4 rows from the S5b
+/// Playwright probe (the clip_probe.mjs method, polygon cases).
+const POLYGON_CASES: &[(&str, &str, usize)] = &[
+    ("ebay a11y button: polygon(0 0,0 0)", r##"<div style="position:relative;height:60px"><a href="#" style="display:inline-block;width:20px;height:20px"></a><button style="background:red;color:red;font:20px/20px Arial;border-radius:8px;clip-path:polygon(0 0,0 0);display:block;left:0;padding:4px;position:absolute;white-space:nowrap;z-index:-1;border:0">Expand Cart</button></div>"##, 0),
+    ("ebay a11y button without z-index", r##"<div style="position:relative;height:60px"><button style="background:red;color:red;font:20px/20px Arial;border-radius:8px;clip-path:polygon(0 0,0 0);display:block;left:0;top:10px;padding:4px;position:absolute;white-space:nowrap;border:0">Expand Cart</button></div>"##, 0),
+    ("ebay skip link: static link in 1x1 visible wrapper", r##"<div style="display:block;height:1px;overflow:visible;position:absolute;width:1px;top:20px;left:20px"><a href="#main" style="background:red;color:red;font:20px/20px Arial;border-radius:8px;clip-path:polygon(0 0,0 0);display:block;padding:4px;position:static;text-decoration:none;white-space:nowrap;z-index:-1">Skip to main content</a></div>"##, 0),
+    ("span polygon(0 0,0 0)", r##"<span style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(0 0,0 0)">expand Cart</span>"##, 0),
+    ("polygon one point", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(50% 50%)"></div>"##, 0),
+    ("polygon collinear line", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(0 0,100% 100%,50% 50%)"></div>"##, 0),
+    ("polygon evenodd degenerate", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(evenodd,0 0,0 0)"></div>"##, 0),
+    ("polygon full box", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(0 0,100% 0,100% 100%,0 100%)"></div>"##, 1600),
+    ("polygon inner rect px", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(10px 10px,30px 10px,30px 30px,10px 30px)"></div>"##, 400),
+    ("polygon inner rect pct, reverse winding", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(25% 25%,25% 75%,75% 75%,75% 25%)"></div>"##, 400),
+    ("polygon rect with child overflowing", r##"<div style="position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(0 0,20px 0,20px 20px,0 20px)"><div style="width:80px;height:80px;background:red"></div></div>"##, 400),
+    ("polygon padding-box keyword", r##"<div style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;border:5px solid red;clip-path:polygon(0 0,100% 0,100% 100%,0 100%) padding-box"></div>"##, 900),
+    ("input polygon(0 0,0 0)", r##"<input value="expand Cart" style="background:red;color:red;font:20px/20px Arial;position:absolute;top:50px;left:50px;width:40px;height:40px;clip-path:polygon(0 0,0 0)">"##, 0),
+];
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn clip_path_polygon_hides_as_chromium() {
+    let mut wrong = Vec::new();
+    for (name, body, want) in POLYGON_CASES {
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine
+            .create_headless_view(Bounds::new(0, 0, WIDTH, HEIGHT))
+            .expect("headless view");
+        let html = format!(
+            "<!doctype html><style>html,body{{margin:0;background:#fff}}div{{box-sizing:border-box}}</style>{body}"
+        );
+        engine.load_html(view, &html).expect("load_html");
+        let got = ink(&mut engine, view);
+        if got != *want {
+            wrong.push(format!("{name}: ink {got}, Chromium {want}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} wrong:\n{}",
+        wrong.len(),
+        POLYGON_CASES.len(),
+        wrong.join("\n")
+    );
+}

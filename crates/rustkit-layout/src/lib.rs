@@ -10416,11 +10416,12 @@ impl DisplayList {
     /// The clip a `clip-path` basic shape puts on the box and everything it
     /// paints, as the rounded rect the painter already clips to (CSS Masking
     /// 1 §5.1). `inset()` (with `round`), `circle()` and `ellipse()` are all
-    /// exactly a rounded rect; the reference box is the border box unless a
+    /// exactly a rounded rect; `polygon()` is its bounding box, or nothing
+    /// when it has no area. The reference box is the border box unless a
     /// `padding-box`, `content-box` or `margin-box` keyword names another.
     ///
     /// `None` (paint unclipped, as before) for `none`, for shapes that are not
-    /// a rounded rect (`polygon()`, `path()`, `url()`), for a bare box keyword,
+    /// a rounded rect (`path()`, `url()`), for a bare box keyword,
     /// and for any value this does not read. A text run, an inline box or an
     /// anonymous block is never clipped on its own: a text run carries its
     /// parent's style, and the parent's clip already covers all three. A form
@@ -10653,6 +10654,45 @@ impl DisplayList {
                         bottom_left: corner,
                     },
                 )
+            }
+            "polygon" => {
+                // `polygon([<fill-rule>,]? <x> <y>#)`. A polygon with no area
+                // (one point, `0 0,0 0`, or collinear points) clips everything:
+                // eBay hides its header "Expand Cart" buttons and "Skip to
+                // main content" link with `polygon(0 0,0 0)` until `:focus`.
+                // Any other polygon clips to its bounding box: exact for an
+                // axis-aligned rectangle, and never more than Chromium paints
+                // for any other shape (the renderer clips to rects).
+                let list = shape
+                    .strip_prefix("nonzero")
+                    .or_else(|| shape.strip_prefix("evenodd"))
+                    .map_or(shape, |rest| rest.trim_start().trim_start_matches(',').trim());
+                let points = list
+                    .split(',')
+                    .map(|pair| match pair.split_whitespace().collect::<Vec<_>>().as_slice() {
+                        [x, y] => Some((px(x, w)?, px(y, h)?)),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<(f32, f32)>>>()?;
+                let twice_area: f32 = points
+                    .iter()
+                    .zip(points.iter().cycle().skip(1))
+                    .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
+                    .sum();
+                let rect = if twice_area.abs() < 1e-3 {
+                    Rect::new(reference.x, reference.y, 0.0, 0.0)
+                } else {
+                    let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+                    let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+                    for &(x, y) in &points {
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x);
+                        y1 = y1.max(y);
+                    }
+                    Rect::new(reference.x + x0, reference.y + y0, x1 - x0, y1 - y0)
+                };
+                (rect, BorderRadius::default())
             }
             _ => return None,
         };

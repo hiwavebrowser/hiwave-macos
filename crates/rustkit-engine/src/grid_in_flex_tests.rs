@@ -89,14 +89,13 @@ const BOXES: &str = "Array.prototype.map.call(document.querySelectorAll('[id]'),
 /// these pages has `engine_boxes` in the case file, the walk's answer, and
 /// the tests hold the engine to it until the estimate covers the shape.
 ///
-/// The last is a header wider than the main item, across `minmax(0, 1fr)`
-/// and an empty `auto` column: what the main item does not hold of the
-/// header is shared with the empty column (main 550 of 600; Chromium 600,
-/// css-grid-1 §12.5 step 4 grows only the flexible track). Pinned, as
-/// before this file existed. So is the header over two of three flexible
-/// columns in a 100px inline-block: with a spanning item over a flexible
-/// column the whole grid keeps the content floors (third column 60;
-/// Chromium 32).
+/// The last is the header over two of three flexible columns in a 100px
+/// inline-block: with a spanning item over a flexible column the whole
+/// grid keeps the content floors (third column 60; Chromium 32). (The wide
+/// header across `minmax(0, 1fr)` and an empty `auto` column left this list
+/// with hub S17: a spanning item over a flexible track grows only the
+/// flexible tracks with an intrinsic minimum, so main is 600 as in
+/// Chromium.)
 const GAPS: &[&str] = &[
     "percent-height-item-sharing-an-area-in-a-row",
     "bing-textarea-and-its-replica-in-a-row",
@@ -128,7 +127,6 @@ const GAPS: &[&str] = &[
     "quarter-fr-and-2fr-tracks-min-width-20px-items-in-a-wide-float",
     "quarter-fr-and-2fr-tracks-in-a-wide-float",
     "half-fr-and-quarter-fr-tracks-in-a-wide-float",
-    "wide-header-over-minmax-0-1fr-and-an-empty-auto-column",
     "header-over-two-of-three-flexible-columns-min-width-0-items-in-a-narrow-inline-block",
 ];
 
