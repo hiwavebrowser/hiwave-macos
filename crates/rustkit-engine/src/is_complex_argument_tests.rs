@@ -282,6 +282,14 @@ fn r1_specificity_of_complex_members() {
     // Tailwind v4's dark variant: one escaped class plus `:is(.dark *)`.
     assert_eq!(s(r".dark\:bg-black:is(.dark *)"), (0, 2, 0));
     assert_eq!(s(r".md\:hover\:x:is(.dark *)"), (0, 2, 0));
+    // A hex escape and the one whitespace that ends it: `.\31 0` is the
+    // class `10`, so `.\31 0:is(.a *)` is (0,2,0), and `.\31  p` is a
+    // class then a descendant `p`, (0,1,1).
+    assert_eq!(s(".\\31 0:is(.a *)"), (0, 2, 0));
+    assert_eq!(s(".\\31  p"), (0, 1, 1));
+    // `\` then a newline is not an escape (CSS Syntax §4.3.8): the class
+    // ends at the backslash and the `p` after it is a type selector.
+    assert_eq!(s(".a\\\np"), (0, 1, 1));
 }
 
 #[test]

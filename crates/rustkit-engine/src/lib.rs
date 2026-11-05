@@ -18051,10 +18051,12 @@ impl SelectorMatcher {
             while i < chars.len() {
                 let c = chars[i];
                 if c == '\\' {
-                    i += 1;
-                    if i >= chars.len() {
+                    // `\` then a newline (or the end) is not an escape
+                    // (§4.3.8): the identifier ends before the backslash.
+                    if chars.get(i + 1).is_none_or(|&n| matches!(n, '\n' | '\r' | '\u{c}')) {
                         break;
                     }
+                    i += 1;
                     if chars[i].is_ascii_hexdigit() {
                         let start = i;
                         while i < chars.len() && i - start < 6 && chars[i].is_ascii_hexdigit() {
