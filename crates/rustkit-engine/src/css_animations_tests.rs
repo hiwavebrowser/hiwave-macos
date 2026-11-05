@@ -322,3 +322,98 @@ fn with_animations_disabled_the_settled_frame_paints() {
         "settled on the end frame at load"
     );
 }
+
+/// A zero-duration animation: `animationend` reports an `elapsedTime` of
+/// 0 (Chrome), and one with `infinite` iterations removed during its
+/// delay cancels without a NaN anywhere.
+#[test]
+fn a_zero_duration_animation_ends_at_zero_and_cancels_cleanly() {
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 0s linear forwards}}{FADE}"
+    )));
+    pump(&mut engine, view, 32, 16);
+    assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0");
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{animation:fade 0s linear 1s infinite}}{FADE}"
+    )));
+    pump(&mut engine, view, 32, 16);
+    run(&mut engine, view, "h.remove()");
+    pump(&mut engine, view, 32, 16);
+    // Still in its delay: Chrome fires no animationcancel for it.
+    assert_eq!(log(&mut engine, view), "");
+    assert!(!engine.views[&view].lay.animations.borrow().active());
+}
+
+/// An ancestor going `display: none` cancels the animations under it;
+/// shown again, the animation starts over from its first frame.
+#[test]
+fn a_hidden_ancestor_cancels_and_showing_restarts() {
+    let page = "<!doctype html><style>body{margin:0;background:#fff}#p.hide{display:none}\
+#h{width:200px;height:100px;background:#123;opacity:0;animation:fade 1s linear forwards}\
+@keyframes fade{from{opacity:0}to{opacity:1}}</style>\
+<div id=p><div id=h>Placeholder</div></div>\
+<script>var p=document.getElementById('p'),h=document.getElementById('h');window.log=[];\
+['animationstart','animationend','animationcancel'].forEach(function(t){\
+h.addEventListener(t,function(e){log.push(e.type.slice(9)+':'+e.animationName+'@'+e.elapsedTime)})});</script>";
+    let (mut engine, view, _server) = load(page);
+    pump(&mut engine, view, 300, 50);
+    assert!(opacity(&mut engine, view) > 0.2);
+    run(&mut engine, view, "p.classList.add('hide')");
+    pump(&mut engine, view, 32, 16);
+    let logged = log(&mut engine, view);
+    assert!(
+        logged.starts_with("start:fade@0,cancel:fade@"),
+        "cancelled: {logged}"
+    );
+    assert!(
+        !engine.views[&view].lay.animations.borrow().active(),
+        "nothing runs under a hidden ancestor"
+    );
+    run(&mut engine, view, "p.classList.remove('hide')");
+    pump(&mut engine, view, 48, 16);
+    let restarted = opacity(&mut engine, view);
+    assert!(
+        restarted < 0.15,
+        "starts over from the first frame: {restarted}"
+    );
+    assert_eq!(
+        read(&mut engine, view, "log.length+':'+log[2]"),
+        "3:start:fade@0"
+    );
+}
+
+/// An element that is `display: none` itself is cancelled, and starts
+/// over when shown.
+#[test]
+fn an_element_hidden_itself_cancels_and_restarts() {
+    let page = "<!doctype html><style>body{margin:0;background:#fff}#h.hide{display:none}\
+#h{width:200px;height:100px;background:#123;opacity:0;animation:fade 1s linear forwards}\
+@keyframes fade{from{opacity:0}to{opacity:1}}</style>\
+<div id=h>Placeholder</div>\
+<script>var h=document.getElementById('h');window.log=[];\
+['animationstart','animationend','animationcancel'].forEach(function(t){\
+h.addEventListener(t,function(e){log.push(e.type.slice(9)+':'+e.animationName)})});</script>";
+    let (mut engine, view, _server) = load(page);
+    pump(&mut engine, view, 300, 50);
+    run(&mut engine, view, "h.classList.add('hide')");
+    pump(&mut engine, view, 32, 16);
+    assert_eq!(log(&mut engine, view), "start:fade,cancel:fade");
+    assert!(!engine.views[&view].lay.animations.borrow().active());
+    run(&mut engine, view, "h.classList.remove('hide')");
+    pump(&mut engine, view, 48, 16);
+    assert!(opacity(&mut engine, view) < 0.15, "starts over");
+    assert_eq!(log(&mut engine, view), "start:fade,cancel:fade,start:fade");
+}
+
+/// An `animation-name` with no `@keyframes` of that name runs nothing: no
+/// events, nothing kept moving.
+#[test]
+fn an_unknown_keyframes_name_runs_nothing() {
+    let (mut engine, view, _server) =
+        load(&page("#h{opacity:.5;animation:nosuch 1s linear infinite}"));
+    pump(&mut engine, view, 100, 20);
+    assert_eq!(log(&mut engine, view), "");
+    assert!(!engine.views[&view].lay.animations.borrow().active());
+    assert_eq!(opacity(&mut engine, view), 0.5);
+}

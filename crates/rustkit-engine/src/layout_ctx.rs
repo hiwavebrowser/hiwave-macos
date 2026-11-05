@@ -108,15 +108,27 @@ impl LayoutCtx {
         }
         // A selector walk that reads an ancestor's earlier siblings from the
         // DOM reads their checkedness from here (`crate::WalkCheckedScope`).
-        let checked = view.lay.as_ref().map(|lay| lay.checked_states.borrow().clone()).unwrap_or_default();
+        let checked = view
+            .lay
+            .as_ref()
+            .map(|lay| lay.checked_states.borrow().clone())
+            .unwrap_or_default();
         let _walk_checked = crate::WalkCheckedScope::enter(Some(checked));
-        if let Some(lay) = view.lay.as_ref() {
+        let lay = view.lay.clone();
+        if let Some(lay) = lay.as_ref() {
             let mut anims = lay.animations.borrow_mut();
             anims.last_build_clock = Some(anims.clock_ms);
+            anims.begin_build();
         }
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
-        build()
+        let built = build();
+        // What the build did not visit has no computed style: its
+        // transitions end here.
+        if let Some(lay) = lay.as_ref() {
+            lay.animations.borrow_mut().end_build();
+        }
+        built
     }
 
     /// The transitions' and animations' hand-off for one element of the
@@ -130,49 +142,51 @@ impl LayoutCtx {
         style: &mut crate::ComputedStyle,
         stylesheets: &[rustkit_css::Stylesheet],
     ) {
-        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone());
+        let lay = self
+            .building
+            .borrow()
+            .as_ref()
+            .and_then(|view| view.lay.clone());
         let Some(lay) = lay else {
             return;
         };
-        let resolve = |name: &str, base: &crate::ComputedStyle| -> Vec<crate::animations::Frame> {
-            let Some(rule) = stylesheets
-                .iter()
-                .rev()
-                .flat_map(|sheet| sheet.keyframes.iter().rev())
-                .find(|rule| rule.name == name)
-            else {
-                return Vec::new();
-            };
-            let mut frames = Vec::new();
-            for block in &rule.frames {
-                let mut probe = base.clone();
-                let mut timing = None;
-                let mut props = Vec::new();
-                for declaration in &block.declarations {
-                    let property = declaration.property.to_ascii_lowercase();
-                    if property == "animation-timing-function" {
-                        timing = Some(crate::parse_timing_function(&declaration.value));
-                        continue;
-                    }
-                    self.apply_style_property(&mut probe, &property, &declaration.value);
-                    props.extend(crate::animations::prop_indices(&property));
-                }
-                props.sort_unstable();
-                props.dedup();
-                let values: Vec<(usize, crate::animations::AnimValue)> = props
+        let resolve =
+            |name: &str, base: &crate::ComputedStyle| -> Option<Vec<crate::animations::Frame>> {
+                let rule = stylesheets
                     .iter()
-                    .map(|&i| (i, crate::animations::prop_value(&probe, i)))
-                    .collect();
-                for &offset in &block.offsets {
-                    frames.push(crate::animations::Frame {
-                        offset,
-                        values: values.clone(),
-                        timing: timing.clone(),
-                    });
+                    .rev()
+                    .flat_map(|sheet| sheet.keyframes.iter().rev())
+                    .find(|rule| rule.name == name)?;
+                let mut frames = Vec::new();
+                for block in &rule.frames {
+                    let mut probe = base.clone();
+                    let mut timing = None;
+                    let mut props = Vec::new();
+                    for declaration in &block.declarations {
+                        let property = declaration.property.to_ascii_lowercase();
+                        if property == "animation-timing-function" {
+                            timing = Some(crate::parse_timing_function(&declaration.value));
+                            continue;
+                        }
+                        self.apply_style_property(&mut probe, &property, &declaration.value);
+                        props.extend(crate::animations::prop_indices(&property));
+                    }
+                    props.sort_unstable();
+                    props.dedup();
+                    let values: Vec<(usize, crate::animations::AnimValue)> = props
+                        .iter()
+                        .map(|&i| (i, crate::animations::prop_value(&probe, i)))
+                        .collect();
+                    for &offset in &block.offsets {
+                        frames.push(crate::animations::Frame {
+                            offset,
+                            values: values.clone(),
+                            timing: timing.clone(),
+                        });
+                    }
                 }
-            }
-            frames
-        };
+                Some(frames)
+            };
         lay.animations.borrow_mut().on_style(node, style, &resolve);
     }
 
@@ -181,20 +195,34 @@ impl LayoutCtx {
     /// engine code that called the script now reading geometry.
     pub(crate) fn busy_for_forced_layout(&self, lay: &ViewLayout) -> Option<&'static str> {
         let free = [
-            ("building", self.building.try_borrow().is_ok_and(|b| b.is_none())),
+            (
+                "building",
+                self.building.try_borrow().is_ok_and(|b| b.is_none()),
+            ),
             ("svg_cache", self.svg_cache.try_borrow_mut().is_ok()),
-            ("svg_paint_styles", self.svg_paint_styles.try_borrow_mut().is_ok()),
+            (
+                "svg_paint_styles",
+                self.svg_paint_styles.try_borrow_mut().is_ok(),
+            ),
             ("style_trace", self.style_trace.try_borrow_mut().is_ok()),
             ("hover_chain", lay.hover_chain.try_borrow_mut().is_ok()),
             ("active_chain", lay.active_chain.try_borrow_mut().is_ok()),
             ("edit_states", lay.edit_states.try_borrow_mut().is_ok()),
-            ("checked_states", lay.checked_states.try_borrow_mut().is_ok()),
+            (
+                "checked_states",
+                lay.checked_states.try_borrow_mut().is_ok(),
+            ),
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
-            ("boxless_styles", lay.boxless_styles.try_borrow_mut().is_ok()),
+            (
+                "boxless_styles",
+                lay.boxless_styles.try_borrow_mut().is_ok(),
+            ),
             ("pseudo_styles", lay.pseudo_styles.try_borrow_mut().is_ok()),
         ];
-        free.into_iter().find(|(_, free)| !free).map(|(name, _)| name)
+        free.into_iter()
+            .find(|(_, free)| !free)
+            .map(|(name, _)| name)
     }
 
     pub(crate) fn building_id(&self) -> Option<EngineViewId> {
@@ -337,7 +365,9 @@ mod tests {
         let outer = build_view(&lay);
         let outer_id = outer.id;
         ctx.with_building(outer, || {
-            ctx.with_building(build_view(&lay), || assert_ne!(ctx.building_id(), Some(outer_id)));
+            ctx.with_building(build_view(&lay), || {
+                assert_ne!(ctx.building_id(), Some(outer_id))
+            });
             assert_eq!(ctx.building_id(), Some(outer_id));
         });
         assert!(ctx.building.borrow().is_none());
