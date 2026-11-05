@@ -66,6 +66,20 @@ impl CanvasSource {
     pub fn snapshot(&self, node: usize) -> Option<CanvasSnapshot> {
         self.0.borrow().snapshot(node)
     }
+
+    /// The canvas element `node`'s recording generation
+    /// (`CanvasRenderingContext2D::generation`); `None` with no 2D context.
+    /// A reader that cached what it built from a snapshot rebuilds only
+    /// when this moves.
+    pub fn generation(&self, node: usize) -> Option<u64> {
+        self.0.borrow().contexts.get(&node).map(|c| c.generation())
+    }
+
+    /// An estimate of the heap the page's canvases hold, in bytes: their
+    /// recordings and anything kept for script beside them.
+    pub fn retained_bytes(&self) -> usize {
+        self.0.borrow().retained_bytes()
+    }
 }
 
 impl CanvasStore {
@@ -82,6 +96,16 @@ impl CanvasStore {
             height: ctx.height,
             commands: ctx.get_commands().to_vec(),
         })
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let recordings: usize = self.contexts.values().map(|c| c.recorded_bytes()).sum();
+        let gradients: usize = self
+            .gradients
+            .iter()
+            .map(|g| std::mem::size_of::<LinearGradient>() + g.stops.len() * std::mem::size_of::<rustkit_canvas::ColorStop>())
+            .sum();
+        recordings + gradients
     }
 
     pub(crate) fn take_painted(&mut self) -> bool {

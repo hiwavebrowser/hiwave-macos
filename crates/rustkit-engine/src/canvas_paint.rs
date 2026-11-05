@@ -79,6 +79,17 @@ fn initial_font() -> CanvasFont {
     CanvasFont::parse("10px sans-serif", 16.0).expect("initial canvas font")
 }
 
+thread_local! {
+    static PAINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread turned a recording into display commands
+/// (`paint_commands`): a test's window on the paint cache.
+#[cfg(test)]
+pub(crate) fn paints() -> usize {
+    PAINTS.with(|p| p.get())
+}
+
 /// The commands that paint `canvas` into a box whose fitted image rect is
 /// `dest` and whose content box is `content`: bitmap pixel (x, y) lands at
 /// `dest.x + x * dest.width / bitmap width`, and nothing paints outside the
@@ -88,6 +99,7 @@ pub(crate) fn paint_commands(
     dest: Rect,
     content: Rect,
 ) -> Vec<DisplayCommand> {
+    PAINTS.with(|p| p.set(p.get() + 1));
     let mut out = Vec::new();
     if canvas.commands.is_empty() || canvas.width == 0 || canvas.height == 0 {
         return out;

@@ -237,3 +237,126 @@ fn report_page_charts_paint_into_their_canvases() {
         .count();
     assert!(bars >= 3, "the three datasets' bars (and legend boxes) are filled: {bars}");
 }
+
+// ---- PR #905 R1 HOLD: partial clears paint, the paint is cached, and an
+// animation loop stays bounded.
+
+/// The area of `color` the list paints, each fill rect cut by the clips in
+/// force (the renderer intersects nested clips).
+fn visible_area(commands: &[DisplayCommand], color: rustkit_css::Color) -> f32 {
+    let mut clips: Vec<Rect> = Vec::new();
+    let mut area = 0.0;
+    for c in commands {
+        match c {
+            DisplayCommand::PushClip(r) => {
+                let r = match clips.last() {
+                    Some(top) => {
+                        let x0 = r.x.max(top.x);
+                        let y0 = r.y.max(top.y);
+                        let x1 = (r.x + r.width).min(top.x + top.width);
+                        let y1 = (r.y + r.height).min(top.y + top.height);
+                        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+                    }
+                    None => *r,
+                };
+                clips.push(r);
+            }
+            DisplayCommand::PopClip => {
+                clips.pop();
+            }
+            DisplayCommand::FillRect { rect, color: c } if *c == color => {
+                let top = clips.last().copied().unwrap_or(*rect);
+                let w = ((rect.x + rect.width).min(top.x + top.width) - rect.x.max(top.x)).max(0.0);
+                let h = ((rect.y + rect.height).min(top.y + top.height) - rect.y.max(top.y)).max(0.0);
+                area += w * h;
+            }
+            _ => {}
+        }
+    }
+    area
+}
+
+/// Chromium 143: fillRect(0, 0, 100, 50) red then clearRect(0, 0, 50, 50)
+/// leaves red only in the right half (2500 px of a 100x50 bitmap); a
+/// second clearRect(75, 0, 25, 25) takes a further 625 px out of it, and a
+/// blue fillRect drawn after the clears is not cut by them.
+#[test]
+fn a_partial_clear_rect_erases_what_it_covers() {
+    let (mut engine, id) = view(
+        "<!doctype html><body style='margin:0'><canvas id=c width=100 height=50 style='display:block'></canvas></body>",
+    );
+    engine
+        .execute_script(
+            id,
+            "var x = document.getElementById('c').getContext('2d'); x.fillStyle = '#ff0000'; x.fillRect(0, 0, 100, 50); \
+             x.clearRect(0, 0, 50, 50); x.clearRect(75, 0, 25, 25); x.fillStyle = '#0000ff'; x.fillRect(0, 40, 100, 10);",
+        )
+        .expect("script");
+    let commands = list(&engine, id);
+    let red = visible_area(&commands, rustkit_css::Color::from_rgb(255, 0, 0));
+    let blue = visible_area(&commands, rustkit_css::Color::from_rgb(0, 0, 255));
+    assert_eq!((red, blue), (2500.0 - 625.0, 1000.0), "{commands:?}");
+}
+
+/// Listing the page again with the canvas unchanged reuses the canvas's
+/// paint; a draw makes it paint once more.
+#[test]
+fn an_unchanged_canvas_is_painted_once() {
+    let (mut engine, id) = view(
+        "<!doctype html><body style='margin:0'><canvas id=c width=100 height=50></canvas>\
+         <script>document.getElementById('c').getContext('2d').fillRect(0, 0, 10, 10);</script></body>",
+    );
+    let root = engine.views[&id].layout.clone().expect("laid out");
+    engine.display_list_for(id, &root);
+    let before = canvas_paint::paints();
+    for _ in 0..5 {
+        engine.display_list_for(id, &root);
+    }
+    assert_eq!(canvas_paint::paints(), before, "five lists, the canvas unchanged");
+    engine.execute_script(id, "document.getElementById('c').getContext('2d').fillRect(20, 0, 10, 10);").expect("script");
+    let root = engine.views[&id].layout.clone().expect("laid out");
+    let mid = canvas_paint::paints();
+    engine.display_list_for(id, &root);
+    engine.display_list_for(id, &root);
+    assert!(canvas_paint::paints() <= mid + 1, "one paint for the change");
+}
+
+/// 10k frames of a Chart.js-style animation (whole-bitmap clear, a fresh
+/// gradient, clipped bars, labels; and a second canvas that clears only
+/// its plot area) keep each recording to one frame and the display list
+/// the same length.
+#[test]
+fn ten_thousand_animation_frames_stay_bounded() {
+    let (mut engine, id) = view(
+        "<!doctype html><body style='margin:0'><canvas id=a width=300 height=150></canvas><canvas id=b width=300 height=150></canvas>\
+         <script>var A = document.getElementById('a').getContext('2d'), B = document.getElementById('b').getContext('2d'); var f = 0; \
+         B.beginPath(); B.moveTo(0, 140); B.lineTo(300, 140); B.stroke(); B.fillText('axis', 0, 150); \
+         function frame() { f++; A.clearRect(0, 0, 300, 150); var g = A.createLinearGradient(0, 0, 0, 150); \
+           g.addColorStop(0, 'rgba(54,162,235,0.5)'); g.addColorStop(1, '#fff'); \
+           A.save(); A.beginPath(); A.rect(0, 0, 300, 130); A.clip(); \
+           for (var i = 0; i < 3; i++) { A.fillStyle = i ? '#36a2eb' : g; A.fillRect(20 + i * 90, 130 - (20 + (f + i * 13) % 100), 60, 20 + (f + i * 13) % 100); } \
+           A.restore(); A.fillStyle = '#666'; A.font = '12px Arial'; A.fillText('Trackers', 20, 145); \
+           B.save(); B.beginPath(); B.rect(0, 0, 300, 130); B.clip(); B.clearRect(0, 0, 300, 130); \
+           for (var j = 0; j < 3; j++) { B.fillStyle = 'rgba(255,99,132,0.5)'; B.fillRect(20 + j * 90, 30 + (f + j) % 50, 60, 100 - (f + j) % 50); } \
+           B.restore(); } \
+         function frames(n) { for (var k = 0; k < n; k++) frame(); }</script></body>",
+    );
+    let source = engine.views[&id].canvases.clone().expect("canvases");
+    let mut lengths = Vec::new();
+    for _ in 0..10 {
+        engine.execute_script(id, "frames(1000)").expect("script");
+        lengths.push(list(&engine, id).len());
+        for node in [source_node(&mut engine, id, "a"), source_node(&mut engine, id, "b")] {
+            let n = source.snapshot(node).expect("a context").commands.len();
+            assert!(n <= 16, "recording of {n} commands after {} frames", lengths.len() * 1000);
+        }
+        assert!(source.retained_bytes() <= 64 * 1024, "{} bytes", source.retained_bytes());
+    }
+    assert!(lengths.windows(2).all(|w| w[0] == w[1]), "display list lengths {lengths:?}");
+}
+
+fn source_node(engine: &mut Engine, id: EngineViewId, element: &str) -> usize {
+    let view = &engine.views[&id];
+    let doc = view.document.as_ref().expect("document");
+    doc.get_element_by_id(element).expect("element").id.raw()
+}

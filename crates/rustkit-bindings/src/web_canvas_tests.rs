@@ -146,3 +146,33 @@ fn draws_are_recorded_for_the_engine() {
     let snap = b.canvas_snapshot(node).unwrap();
     assert_eq!((snap.width, snap.commands.len()), (10, 0));
 }
+
+/// PR #905 R1 HOLD: a Chart.js-style loop that makes a gradient every
+/// frame and clears the whole bitmap holds no more after 10k frames than a
+/// frame's worth: no gradient is kept beside the recording. A gradient made
+/// before a full clear still paints after it.
+#[test]
+fn ten_thousand_frames_of_gradients_hold_one_frame() {
+    let document = Rc::new(Document::parse_html(PAGE).unwrap());
+    let b = bound_with(document.clone());
+    b.evaluate(
+        "var x = document.getElementById('c').getContext('2d'); var kept = x.createLinearGradient(0, 0, 0, 150); \
+         kept.addColorStop(0, 'red'); kept.addColorStop(1, 'blue'); \
+         for (var f = 0; f < 10000; f++) { x.clearRect(0, 0, 300, 150); \
+           var g = x.createLinearGradient(0, 0, 300, 0); g.addColorStop(0, 'rgba(0,0,255,0.5)'); g.addColorStop(1, '#fff'); \
+           x.fillStyle = g; x.fillRect(10, 10, 50 + f % 100, 100); }",
+    )
+    .unwrap();
+    let node = document.get_element_by_id("c").unwrap().id.raw();
+    let source = b.canvas_source();
+    assert_eq!(b.canvas_snapshot(node).unwrap().commands.len(), 1);
+    assert!(source.retained_bytes() <= 4096, "{} bytes after 10k frames", source.retained_bytes());
+    b.evaluate("x.clearRect(0, 0, 300, 150); x.fillStyle = kept; x.fillRect(0, 0, 10, 10);").unwrap();
+    let snap = b.canvas_snapshot(node).unwrap();
+    match &snap.commands[..] {
+        [crate::canvas::DrawCommand::FillRect { style: crate::canvas::CanvasStyle::LinearGradient(g), .. }] => {
+            assert_eq!((g.y1, g.stops.len()), (150.0, 2), "{g:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

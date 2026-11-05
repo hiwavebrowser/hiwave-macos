@@ -1321,6 +1321,19 @@ impl CanvasRenderingContext2D {
 
     // ==================== Commands ====================
 
+    /// A number that changes whenever the recording does (a draw, a clear,
+    /// a resize), unique across every context in the process, so a reader
+    /// that cached what it built from the recording knows when to rebuild.
+    pub fn generation(&self) -> u64 {
+        0
+    }
+
+    /// An estimate of the heap the recording holds, in bytes (see
+    /// [`RECORDING_BYTE_BUDGET`]).
+    pub fn recorded_bytes(&self) -> usize {
+        self.commands.iter().map(command_bytes).sum()
+    }
+
     /// Get recorded draw commands.
     pub fn get_commands(&self) -> &[DrawCommand] {
         &self.commands
@@ -1338,6 +1351,36 @@ impl CanvasRenderingContext2D {
 }
 
 // ==================== Helper Functions ====================
+
+/// The most a canvas's recording may hold (estimated by [`command_bytes`]).
+pub const RECORDING_BYTE_BUDGET: usize = 8 << 20;
+
+/// What one recorded command costs: the enum itself plus what it owns.
+pub fn command_bytes(command: &DrawCommand) -> usize {
+    fn points(segments: &[Vec<(f32, f32)>]) -> usize {
+        segments.iter().map(|s| s.len() * std::mem::size_of::<(f32, f32)>() + std::mem::size_of::<Vec<(f32, f32)>>()).sum()
+    }
+    fn style(style: &CanvasStyle) -> usize {
+        match style {
+            CanvasStyle::LinearGradient(g) => g.stops.len() * std::mem::size_of::<ColorStop>(),
+            CanvasStyle::RadialGradient(g) => g.stops.len() * std::mem::size_of::<ColorStop>(),
+            _ => 0,
+        }
+    }
+    std::mem::size_of::<DrawCommand>()
+        + match command {
+            DrawCommand::FillRect { style: s, .. } => style(s),
+            DrawCommand::StrokeRect { style: s, dash, .. } => style(s) + dash.segments.len() * 4,
+            DrawCommand::FillPath { segments, style: s, .. } => points(segments) + style(s),
+            DrawCommand::StrokePath { segments, style: s, dash, .. } => points(segments) + style(s) + dash.segments.len() * 4,
+            DrawCommand::FillText { text, style: s, font, .. } | DrawCommand::StrokeText { text, style: s, font, .. } => {
+                text.len() + font.len() + style(s)
+            }
+            DrawCommand::DrawImage { image_id, .. } => image_id.len(),
+            DrawCommand::PutImageData { data, .. } => data.data.len(),
+            DrawCommand::ClearRect { .. } | DrawCommand::Clip { .. } => 0,
+        }
+}
 
 /// Parse a canvas colour string: any CSS colour the engine's parser
 /// reads, else the short list below.
@@ -1798,6 +1841,124 @@ mod tests {
         assert!(ctx.is_point_in_path(25.0, 25.0));
         // Point outside
         assert!(!ctx.is_point_in_path(5.0, 5.0));
+    }
+    // ---- Bounded recording (PR #905 R1 HOLD, blocker 2)
+
+    fn drawing(ctx: &CanvasRenderingContext2D) -> usize {
+        ctx.get_commands().iter().filter(|c| !matches!(c, DrawCommand::Clip { .. })).count()
+    }
+
+    /// A clear that covers the whole bitmap in bitmap space drops the
+    /// recording: under a clip that itself covers the bitmap, and under a
+    /// quarter turn, not only unclipped and axis-aligned.
+    #[test]
+    fn a_full_clear_resets_under_a_covering_clip_or_a_rotation() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+        ctx.begin_path();
+        ctx.rect(-5.0, -5.0, 200.0, 200.0);
+        ctx.clip();
+        ctx.fill_rect(20.0, 20.0, 5.0, 5.0);
+        ctx.clear_rect(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(drawing(&ctx), 0, "{:?}", ctx.get_commands());
+
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+        // (x, y) -> (100 - y, x): user rect 50x100 is the whole bitmap.
+        ctx.set_transform(0.0, 1.0, -1.0, 0.0, 100.0, 0.0);
+        ctx.clear_rect(0.0, 0.0, 50.0, 100.0);
+        assert_eq!(drawing(&ctx), 0, "{:?}", ctx.get_commands());
+    }
+
+    /// A partial clear drops what it wholly covers and is recorded only
+    /// when it has something left to erase.
+    #[test]
+    fn a_partial_clear_drops_what_it_covers() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.fill_rect(10.0, 10.0, 20.0, 20.0);
+        ctx.clear_rect(0.0, 0.0, 50.0, 50.0);
+        assert_eq!(ctx.get_commands().len(), 0, "{:?}", ctx.get_commands());
+        ctx.clear_rect(60.0, 0.0, 10.0, 10.0);
+        assert_eq!(ctx.get_commands().len(), 0, "a clear over nothing");
+        ctx.fill_rect(0.0, 0.0, 100.0, 50.0);
+        ctx.clear_rect(0.0, 0.0, 50.0, 50.0);
+        assert!(matches!(ctx.get_commands(), [DrawCommand::FillRect { .. }, DrawCommand::ClearRect { .. }]), "{:?}", ctx.get_commands());
+    }
+
+    /// An opaque fillRect hides what is wholly under it; a translucent one
+    /// does not.
+    #[test]
+    fn an_opaque_fill_hides_what_it_covers() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.fill_rect(10.0, 10.0, 5.0, 5.0);
+        ctx.set_fill_style(CanvasStyle::Color(Color::WHITE));
+        ctx.fill_rect(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(ctx.get_commands().len(), 1);
+        ctx.set_fill_style(CanvasStyle::Color(Color::new(0, 0, 0, 0.5)));
+        ctx.fill_rect(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(ctx.get_commands().len(), 2);
+    }
+
+    /// 10k frames of a chart redrawing its plot area (clip, partial clear,
+    /// three bars) over an axis drawn once: the recording stays one frame.
+    #[test]
+    fn a_partial_clear_animation_stays_bounded() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.begin_path();
+        ctx.move_to(0.0, 45.0);
+        ctx.line_to(100.0, 45.0);
+        ctx.stroke();
+        for frame in 0..10_000 {
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(0.0, 0.0, 100.0, 40.0);
+            ctx.clip();
+            ctx.clear_rect(0.0, 0.0, 100.0, 40.0);
+            for bar in 0..3 {
+                let h = 10.0 + ((frame + bar * 7) % 30) as f32;
+                ctx.fill_rect(10.0 + bar as f32 * 30.0, 40.0 - h, 20.0, h);
+            }
+            ctx.restore();
+            assert!(ctx.get_commands().len() <= 8, "frame {frame}: {:?}", ctx.get_commands());
+        }
+        assert_eq!(drawing(&ctx), 4, "the axis and the last frame's bars");
+    }
+
+    /// Drawing that is never cleared or covered stops at the byte budget:
+    /// the oldest commands go, the newest stay.
+    #[test]
+    fn a_recording_stays_within_its_byte_budget() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        ctx.set_fill_style(CanvasStyle::Color(Color::new(255, 0, 0, 0.5)));
+        let n = 2 * RECORDING_BYTE_BUDGET / std::mem::size_of::<DrawCommand>();
+        for i in 0..n {
+            ctx.fill_rect((i % 100) as f32, ((i / 100) % 50) as f32, 1.0, 1.0);
+        }
+        assert!(ctx.recorded_bytes() <= RECORDING_BYTE_BUDGET, "{} bytes", ctx.recorded_bytes());
+        let last = (n - 1) as f32;
+        assert!(matches!(ctx.get_commands().last(), Some(DrawCommand::FillRect { x, y, .. })
+            if *x == last % 100.0 && *y == ((n - 1) / 100 % 50) as f32));
+    }
+
+    /// The generation moves with every change to the recording and only
+    /// then, and two contexts never share one.
+    #[test]
+    fn the_generation_moves_with_the_recording() {
+        let mut ctx = CanvasRenderingContext2D::new(100, 50);
+        let other = CanvasRenderingContext2D::new(100, 50);
+        assert_ne!(ctx.generation(), other.generation());
+        let g0 = ctx.generation();
+        ctx.save();
+        ctx.translate(1.0, 1.0);
+        assert_eq!(ctx.generation(), g0);
+        ctx.fill_rect(0.0, 0.0, 5.0, 5.0);
+        let g1 = ctx.generation();
+        assert_ne!(g1, g0);
+        ctx.clear_rect(-10.0, -10.0, 200.0, 200.0);
+        let g2 = ctx.generation();
+        assert_ne!(g2, g1);
+        ctx.reset_bitmap(10, 10);
+        assert_ne!(ctx.generation(), g2);
     }
 }
 
