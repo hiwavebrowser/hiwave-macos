@@ -24484,23 +24484,34 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
     // fills the window; html is not. With `height: auto` it is as tall as
     // what it holds (body's margin box), shorter than the viewport on a
     // short page. Only an explicit html height keeps the box's own.
-    let floor = match &root.root_element_height {
-        None | Some(rustkit_css::Length::Auto) => bb.y,
-        Some(_) => bb.y + bb.height,
-    };
-    let bottom = root
+    let content_bottom = root
         .children
         .iter()
         .map(|c| {
             let m = c.dimensions.margin_box();
             m.y + m.height
         })
-        .fold(floor, f32::max);
+        .fold(bb.y, f32::max);
+    // An explicit html height is the rect's height, resolved against the
+    // initial containing block; body's margin box overflows it rather than
+    // growing it, and the root box itself is stretched to the viewport, so
+    // neither can stand in for it (CH2.B8: `html, body { height: 100% }`
+    // with body's 8px margin read 216, Chromium 200; `html { height: 50px }`
+    // read the viewport's 200).
+    let (vw, vh) = root.viewport;
+    let edges = root.dimensions.padding.vertical() + root.dimensions.border.vertical();
+    let height = match &root.root_element_height {
+        None | Some(rustkit_css::Length::Auto) | Some(rustkit_css::Length::FitContent) => {
+            content_bottom - bb.y
+        }
+        Some(l) => l.to_px_with_viewport(16.0, 16.0, vh, vw, vh).max(0.0) + edges,
+    };
+    let bottom = content_bottom;
     rustkit_bindings::BoxGeometry {
         x: bb.x,
         y: bb.y,
         width: bb.width,
-        height: bottom - bb.y,
+        height,
         border_left: root.dimensions.border.left,
         border_top: root.dimensions.border.top,
         client_width: pb.width,
