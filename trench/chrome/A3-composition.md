@@ -93,3 +93,16 @@ window and the page at its rect on every resize; it now also recomputes the
 hole and re-applies the region (the mask's frame follows the layer's
 bounds, set with implicit animations off so the mask does not lag the
 frame).
+
+## Found while gating (2026-11-05)
+
+* The downloads and history panels are `position: absolute; top: calc(100%
+  + 6px)` with no positioned ancestor, so their containing block is the
+  initial one and they open below the viewport (measured in the RustKit
+  chrome: top 1116 in an 800 px window). That is chrome.html's CSS, shared
+  with the WebKit chrome, so it is left alone here; with the panel moved
+  into a positioned toolbar box it would be drawn over the page like the
+  context menu. The real-window gate uses the page context menu instead
+  (`a3_dropdown_over_page`).
+* The `.toolbar-action-panel` the reporter lists does not exist in the
+  document (the menu button toggles the right sidebar); harmless.
