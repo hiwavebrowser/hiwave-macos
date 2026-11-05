@@ -145,9 +145,19 @@ transparent, and the region above becomes its **hit region only**.
    (the box's bounds), not the page; a click on the find modal's dimming
    layer over the page goes to the page (the layer is a backdrop, as with
    the WebKit chrome, where the page view received it).
-5. **Still not covered**: a popup the engine draws that is not in the
-   chrome's display list (a `<select>`'s native drop-down, CH2.E6) is
-   neither painted by the chrome's frame nor in its hit region.
+5. **A `<select>`'s drop-down (CH2.E6, CH2.E6b).** It is not native: the
+   engine draws it as the last item of the chrome frame's display list (a
+   stacking context at `i32::MAX`, outside every clip of the page, placed
+   in view coordinates within the whole window), so it paints over the page
+   column and its box is in the region like any chrome popup (pinned by
+   `select_popup_overlay_tests`). What CH2.E6b changed: while it is open the
+   frame says so (`FrameCommit::modal_popup`) and, on the alpha route, the
+   chrome's hit region is the whole view, so a press on the page column
+   reaches the chrome's engine, which closes the drop-down and drops the
+   press (#899's outside-press rule; the macOS menu takes that press too).
+   The page does not get it. With `HIWAVE_RUSTKIT_CHROME_ALPHA=0` the region
+   is also the mask, so the whole-view region is not applied there: a page
+   press with a drop-down open still reaches the page and leaves it open.
 
 Cost: the chrome's layer is now composited over the whole window by the
 window server (it was masked to its region); see the PR for the measured
