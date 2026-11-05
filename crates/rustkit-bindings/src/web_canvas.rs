@@ -81,10 +81,13 @@ impl CanvasSource {
 }
 
 impl CanvasStore {
-    /// A new document: its canvases start with no context.
+    /// A new document: its canvases start with no context. Not a paint:
+    /// the new document gets a full layout and display list of its own, and
+    /// a mark left here would list and present that same frame again at the
+    /// next settle (#905 batch 22: an extra frame after every load).
     pub(crate) fn clear(&mut self) {
         self.contexts.clear();
-        self.painted = true;
+        self.painted = false;
     }
 
     pub(crate) fn snapshot(&self, node: usize) -> Option<CanvasSnapshot> {
