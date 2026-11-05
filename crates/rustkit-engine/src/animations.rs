@@ -1307,7 +1307,7 @@ pub(crate) fn parse_animation_shorthand(
                     out.play_state = state;
                 } else if !lower.is_empty() {
                     // Case matters in a `@keyframes` name.
-                    out.name = token.to_string();
+                    out.name = unquoted(token).to_string();
                 }
             }
             out
@@ -1369,10 +1369,16 @@ pub(crate) fn set_animation_names(style: &mut ComputedStyle, value: &str) {
             } else {
                 old[i % old.len()].clone()
             };
-            item.name = name.to_string();
+            item.name = unquoted(name).to_string();
             item
         })
         .collect();
+}
+
+/// An animation name without its quotes: `"fade"` names the same
+/// `@keyframes` as `fade` (the parser strips them from the at-rule too).
+fn unquoted(name: &str) -> &str {
+    name.trim().trim_matches(|c| c == '"' || c == '\'')
 }
 
 /// An `animation-*` longhand list over the items there are (`none` items
