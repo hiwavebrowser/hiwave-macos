@@ -437,6 +437,8 @@ mod computed_read_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
+mod flex_hidden_gap_tests;
+#[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
@@ -9251,7 +9253,7 @@ impl Engine {
         let nonzero = |len: &Length| !matches!(len, Length::Zero | Length::Auto | Length::Px(0.0));
         // Elements only: an anonymous block around collapsed white space is
         // no box at all (and no flex item) in Chrome.
-        if !matches!(child.box_type, BoxType::Block) {
+        if !matches!(child.box_type, BoxType::Block) || child.style.display == rustkit_css::Display::None {
             return false;
         }
         let s = &child.style;
@@ -10797,7 +10799,13 @@ impl layout_ctx::LayoutCtx {
                     let mut styled = LayoutBox::new(BoxType::Block, style);
                     styled.node_id = Some(node.id.raw());
                     self.note_boxless_style(&styled, parent_style);
-                    return LayoutBox::new(BoxType::Block, ComputedStyle::new());
+                    // The empty box handed back says `none`, so the parent
+                    // drops it even where an empty block is kept (a flex or
+                    // grid item): CH2.B10, chrome.html's hidden panels were
+                    // flex items and took a `gap` each.
+                    let mut none = ComputedStyle::new();
+                    none.display = rustkit_css::Display::None;
+                    return LayoutBox::new(BoxType::Block, none);
                 }
 
                 // CSS Display 3 §2.7 / CSS 2.1 §9.7: flex and grid items,
