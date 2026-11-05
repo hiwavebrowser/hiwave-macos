@@ -399,6 +399,11 @@ struct DocumentSink {
     saw_declarative_shadow: bool,
     /// A fragment whose context element holds SVG content.
     svg_fragment: bool,
+    /// Attributes from a second `<html>`/`<body>` start tag (HTML
+    /// §13.2.6.4.7), applied once the parse is done: a node's data is not
+    /// interior-mutable, and swapping the node mid-parse would orphan the
+    /// parser's references to the open element.
+    attr_merges: Vec<(NodeId, Vec<(String, String)>)>,
 }
 
 impl DocumentSink {
@@ -408,6 +413,34 @@ impl DocumentSink {
             open_elements: vec![],
             saw_declarative_shadow: false,
             svg_fragment: false,
+            attr_merges: Vec::new(),
+        }
+    }
+
+    /// Apply `attr_merges`: each attribute the element lacks is added, so
+    /// the first value of a name wins.
+    fn apply_attr_merges(&mut self) {
+        for (id, attrs) in std::mem::take(&mut self.attr_merges) {
+            let Some(node) = self.doc.get_node(id) else { continue };
+            let NodeType::Element { tag_name, namespace, attributes } = &node.node_type else {
+                continue;
+            };
+            let mut merged = attributes.clone();
+            let mut changed = false;
+            for (name, value) in attrs {
+                if !merged.contains_key(&name) {
+                    merged.insert(name, value);
+                    changed = true;
+                }
+            }
+            if changed {
+                let data = NodeType::Element {
+                    tag_name: tag_name.clone(),
+                    namespace: namespace.clone(),
+                    attributes: merged,
+                };
+                self.doc.replace_node_data(id, data);
+            }
         }
     }
 
@@ -524,6 +557,10 @@ impl rustkit_html::TreeSink for DocumentSink {
         self.open_elements.last().cloned()
     }
 
+    fn add_attrs_if_missing(&mut self, target: Self::NodeId, attrs: Vec<(String, String)>) {
+        self.attr_merges.push((target.id, attrs));
+    }
+
     fn in_scope(&self, tag_name: &str) -> bool {
         for node in self.open_elements.iter().rev() {
             if node.tag_name() == Some(tag_name) {
@@ -627,7 +664,8 @@ impl Document {
         debug!(len = html.len(), "Parsing HTML (rustkit-html)");
 
         let sink = DocumentSink::new();
-        let sink = rustkit_html::parse(html, sink).map_err(|e| DomError::ParseError(e.to_string()))?;
+        let mut sink = rustkit_html::parse(html, sink).map_err(|e| DomError::ParseError(e.to_string()))?;
+        sink.apply_attr_merges();
 
         debug!(node_count = sink.doc.nodes.borrow().len(), "HTML parsed");
         // Declarative shadow DOM is a document-parser feature: the fragment

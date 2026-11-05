@@ -167,6 +167,12 @@ pub struct TreeBuilder<S: TreeSink> {
     fragment_context: Option<FragmentContext>,
     /// Head element pointer (for implicit head handling)
     head_element: Option<S::NodeId>,
+    /// The html element, target of a later `<html>` start tag's attributes
+    /// (HTML §13.2.6.4.7). Kept here because `</html>` may pop it.
+    html_element: Option<S::NodeId>,
+    /// The body element, target of a later `<body>` start tag's attributes
+    /// (HTML §13.2.6.4.7). Kept here because `</body>` pops it.
+    body_element: Option<S::NodeId>,
     /// Form element pointer (for form owner tracking).
     /// Required for spec-compliant form association (HTML5 § 4.10.18.3).
     /// Currently unused but needed when form control elements track their owner form.
@@ -191,6 +197,8 @@ impl<S: TreeSink> TreeBuilder<S> {
             quirks_mode: QuirksMode::NoQuirks,
             fragment_context: None,
             head_element: None,
+            html_element: None,
+            body_element: None,
             form_element: None,
         }
     }
@@ -239,6 +247,8 @@ impl<S: TreeSink> TreeBuilder<S> {
             quirks_mode: QuirksMode::NoQuirks,
             fragment_context: Some(context),
             head_element: None,
+            html_element: None,
+            body_element: None,
             form_element: None,
         }
     }
@@ -876,6 +886,7 @@ impl<S: TreeSink> TreeBuilder<S> {
                 name, attrs, self_closing: _
             } if name == "html" => {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.html_element = Some(node_id.clone());
                 self.open_elements.push((name, node_id));
                 self.mode = InsertionMode::BeforeHead;
             }
@@ -888,6 +899,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             _ => {
                 // Implied html start tag
                 let node_id = self.sink.start_element("html".to_string(), vec![], false);
+                self.html_element = Some(node_id.clone());
                 self.open_elements.push(("html".to_string(), node_id));
                 self.mode = InsertionMode::BeforeHead;
                 self.process_token(token)?;
@@ -898,6 +910,10 @@ impl<S: TreeSink> TreeBuilder<S> {
 
     fn handle_before_head(&mut self, token: Token) -> ParseResult<()> {
         match token {
+            // §13.2.6.4.3: start tag "html" is processed using "in body".
+            Token::StartTag { ref name, .. } if name == "html" => {
+                self.handle_in_body(token)?;
+            }
             Token::StartTag {
                 name, attrs, self_closing: _
             } if name == "head" => {
@@ -924,6 +940,11 @@ impl<S: TreeSink> TreeBuilder<S> {
 
     fn handle_in_head(&mut self, token: Token) -> ParseResult<()> {
         match token {
+            // §13.2.6.4.4: start tag "html" is processed using "in body".
+            Token::StartTag { ref name, .. } if name == "html" => {
+                self.flush_text();
+                self.handle_in_body(token)?;
+            }
             Token::Character(ch) => {
                 // Add all characters to the text buffer (whitespace and non-whitespace)
                 self.text_buffer.push(ch);
@@ -995,8 +1016,13 @@ impl<S: TreeSink> TreeBuilder<S> {
                 name, attrs, self_closing: _
             } if name == "body" => {
                 let node_id = self.sink.start_element(name.clone(), attrs.into_iter().collect(), false);
+                self.body_element = Some(node_id.clone());
                 self.open_elements.push((name, node_id));
                 self.mode = InsertionMode::InBody;
+            }
+            // §13.2.6.4.6: start tag "html" is processed using "in body".
+            Token::StartTag { ref name, .. } if name == "html" => {
+                self.handle_in_body(token)?;
             }
             // HTML §13.2.6.4.6, start tag "frameset": insert the element and
             // switch to "in frameset". No body is implied: the frameset is
@@ -1011,6 +1037,7 @@ impl<S: TreeSink> TreeBuilder<S> {
             _ => {
                 // Implied body start tag
                 let node_id = self.sink.start_element("body".to_string(), vec![], false);
+                self.body_element = Some(node_id.clone());
                 self.open_elements.push(("body".to_string(), node_id));
                 self.mode = InsertionMode::InBody;
                 self.process_token(token)?;
@@ -1053,6 +1080,15 @@ impl<S: TreeSink> TreeBuilder<S> {
             } => {
                 // Flush any pending text before starting a new element
                 self.flush_text();
+
+                // §13.2.6.4.7, start tags "html" and "body" once that
+                // element exists: a parse error. The attributes the element
+                // lacks are added to it and no element is created. Nesting a
+                // second body kept its UA `margin: 8px` (S11, gmail).
+                if name == "html" || name == "body" {
+                    self.merge_into_existing(&name, attrs);
+                    return Ok(());
+                }
 
                 // Handle table specially - switch to InTable mode
                 if name == "table" {
@@ -1180,6 +1216,29 @@ impl<S: TreeSink> TreeBuilder<S> {
             _ => {}
         }
         Ok(())
+    }
+
+    /// The "in body" start tag `html` / `body` steps (HTML §13.2.6.4.7):
+    /// ignored inside a template and in fragment parsing (where the html
+    /// element is the fragment's own root and the stack's second element is
+    /// not a body); otherwise each attribute not already present is added
+    /// to the existing element. A frameset document has no body to add to.
+    fn merge_into_existing(&mut self, name: &str, attrs: impl IntoIterator<Item = (String, String)>) {
+        self.sink.parse_error(&format!("unexpected <{}> start tag in body", name));
+        if self.fragment_context.is_some() || self.open_elements.iter().any(|(n, _)| n == "template") {
+            return;
+        }
+        let target = if name == "html" {
+            self.html_element.clone()
+        } else {
+            self.body_element.clone()
+        };
+        if let Some(target) = target {
+            let attrs: Vec<(String, String)> = attrs.into_iter().collect();
+            if !attrs.is_empty() {
+                self.sink.add_attrs_if_missing(target, attrs);
+            }
+        }
     }
 
     // ==================== TABLE MODE HANDLERS ====================
