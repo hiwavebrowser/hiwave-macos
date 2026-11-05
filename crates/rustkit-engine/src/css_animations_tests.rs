@@ -417,3 +417,83 @@ fn an_unknown_keyframes_name_runs_nothing() {
     assert!(!engine.views[&view].lay.animations.borrow().active());
     assert_eq!(opacity(&mut engine, view), 0.5);
 }
+
+/// Two relayouts inside one armed memo span: the first records the box
+/// tree and the second takes it instead of walking the DOM (the images
+/// relayout after the sheets relayout). Whether the second one took it.
+fn reused_tree_relayout(engine: &mut Engine, view: EngineViewId) -> bool {
+    let _scope =
+        StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+    engine.relayout(view).expect("recording relayout");
+    engine.relayout(view).expect("second relayout");
+    relayout_cause::last_build_reused_tree()
+}
+
+/// An animation running while the images relayout takes the kept box
+/// tree keeps running from where it was: no `animationcancel`, no second
+/// `animationstart`, no restart from the first frame, and the frame after
+/// it is a fresh one.
+#[test]
+fn a_reused_box_tree_keeps_a_running_animation() {
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}"
+    )));
+    pump(&mut engine, view, 100, 10);
+    let before = opacity(&mut engine, view);
+    assert!(before > 0.2 && before < 0.8, "midway opacity {before}");
+    assert!(
+        !reused_tree_relayout(&mut engine, view),
+        "an animation runs: the tree is walked (its frame is due), not taken"
+    );
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        log(&mut engine, view),
+        "start:fade@0",
+        "no cancel, no restart"
+    );
+    let after = opacity(&mut engine, view);
+    assert!(
+        after > before && after < 1.0,
+        "fresh frame: {before} -> {after}"
+    );
+    pump(&mut engine, view, 200, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.2");
+}
+
+/// An animation in its after phase (`forwards`, `animationend` fired)
+/// taken away fires no `animationcancel`: Chrome cancels only from the
+/// before or active phase (css-animations-2 event dispatch).
+#[test]
+fn no_cancel_after_the_end() {
+    let (mut engine, view, _server) = load(&page(&format!(
+        "#h{{opacity:0;animation:fade 100ms linear forwards}}{FADE}"
+    )));
+    pump(&mut engine, view, 200, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.1");
+    run(&mut engine, view, "h.style.animation='none'");
+    pump(&mut engine, view, 64, 16);
+    assert_eq!(opacity(&mut engine, view), 0.0, "the box's own value again");
+    assert_eq!(
+        log(&mut engine, view),
+        "start:fade@0,end:fade@0.1",
+        "no cancel after the end"
+    );
+}
+
+/// A quoted name: `@keyframes "fade"` and `animation: "fade" …` (and the
+/// `animation-name` longhand) name the same animation.
+#[test]
+fn a_quoted_name_runs() {
+    for css in [
+        "#h{opacity:0;animation:\"fade\" 100ms linear forwards}@keyframes \"fade\"{from{opacity:0}to{opacity:1}}",
+        "#h{opacity:0;animation:'fade' 100ms linear forwards}@keyframes fade{from{opacity:0}to{opacity:1}}",
+        "#h{opacity:0;animation:fade 100ms linear forwards;animation-name:\"fade\"}@keyframes fade{from{opacity:0}to{opacity:1}}",
+    ] {
+        let (mut engine, view, _server) = load(&page(css));
+        pump(&mut engine, view, 200, 16);
+        assert_eq!(opacity(&mut engine, view), 1.0, "{css}");
+        assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.1", "{css}");
+    }
+}

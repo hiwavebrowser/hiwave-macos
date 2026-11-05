@@ -512,9 +512,13 @@ impl Animations {
         });
     }
 
-    /// Cancel the transitions of elements that `alive` no longer finds in
-    /// the document (css-transitions-1 §3: an element removed from the
-    /// document ends its transitions with `transitioncancel`).
+    /// Whether a transition or an animation is moving: a build must then
+    /// walk the DOM, since a kept box tree would carry the overlaid value
+    /// of one frame. (A paused or filled animation holds its value.)
+    pub(crate) fn running(&self) -> bool {
+        !self.transitions.is_empty() || self.css.iter().any(CssAnimation::moving)
+    }
+
     /// A full build of the view starts: what it visits is noted.
     pub(crate) fn begin_build(&mut self) {
         self.build_serial += 1;
@@ -522,8 +526,14 @@ impl Animations {
 
     /// The full build is over: elements it did not visit have no computed
     /// style (css-transitions-1 §3: a transition on an element that no
-    /// longer has one is cancelled).
-    pub(crate) fn end_build(&mut self) {
+    /// longer has one is cancelled). A build that took the kept box tree
+    /// (`reused_tree`) visited no element at all, but they are all still
+    /// there with their styles: nothing is cancelled and the before-change
+    /// values stay for the next change.
+    pub(crate) fn end_build(&mut self, reused_tree: bool) {
+        if reused_tree {
+            return;
+        }
         let serial = self.build_serial;
         let seen = |node: usize, seen: &HashMap<usize, u64>| seen.get(&node) == Some(&serial);
         let mut gone = Vec::new();
@@ -585,15 +595,19 @@ impl Animations {
         }
     }
 
-    /// `animationcancel` for an animation taken away, once its active
-    /// phase had begun (Chrome fires none for one still in its delay).
+    /// `animationcancel` for an animation taken away while in its active
+    /// phase: none for one still in its delay, none after its
+    /// `animationend` (css-animations-2 event dispatch; Chrome).
     fn cancel_animation_event(&mut self, a: &CssAnimation) {
-        if a.started {
+        if a.started && !a.ended {
             let elapsed = a.elapsed_at(self.clock_ms);
             self.push_animation_event(a, "animationcancel", elapsed);
         }
     }
 
+    /// Cancel the transitions of elements that `alive` no longer finds in
+    /// the document (css-transitions-1 §3: an element removed from the
+    /// document ends its transitions with `transitioncancel`).
     pub(crate) fn prune(&mut self, alive: impl Fn(usize) -> bool) {
         let now = self.clock_ms;
         let mut gone = Vec::new();
@@ -1316,7 +1330,7 @@ pub(crate) fn parse_animation_shorthand(
                     out.play_state = state;
                 } else if !lower.is_empty() {
                     // Case matters in a `@keyframes` name.
-                    out.name = token.to_string();
+                    out.name = unquoted(token).to_string();
                 }
             }
             out
@@ -1378,10 +1392,16 @@ pub(crate) fn set_animation_names(style: &mut ComputedStyle, value: &str) {
             } else {
                 old[i % old.len()].clone()
             };
-            item.name = name.to_string();
+            item.name = unquoted(name).to_string();
             item
         })
         .collect();
+}
+
+/// An animation name without its quotes: `"fade"` names the same
+/// `@keyframes` as `fade` (the parser strips them from the at-rule too).
+fn unquoted(name: &str) -> &str {
+    name.trim().trim_matches(|c| c == '"' || c == '\'')
 }
 
 /// An `animation-*` longhand list over the items there are (`none` items

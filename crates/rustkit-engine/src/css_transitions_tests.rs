@@ -388,3 +388,72 @@ fn a_nested_span_inherits_the_transitioning_colour() {
     pump(&mut engine, view, 100, 16);
     assert_eq!(span(&mut engine, view), "rgb(255, 0, 0)", "and after");
 }
+
+/// Two relayouts inside one armed memo span: the first records the box
+/// tree and the second takes it instead of walking the DOM (the images
+/// relayout after the sheets relayout). `reuse` is whether the second
+/// one took the tree.
+fn reused_tree_relayout(engine: &mut Engine, view: EngineViewId) -> bool {
+    let _scope =
+        StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+    engine.relayout(view).expect("recording relayout");
+    engine.relayout(view).expect("second relayout");
+    relayout_cause::last_build_reused_tree()
+}
+
+/// A transition running while the images relayout takes the kept box
+/// tree keeps running: no `transitioncancel`, the end still fires, and
+/// the frame after it shows a fresh value, not the kept tree's.
+#[test]
+fn a_reused_box_tree_keeps_a_running_transition() {
+    let (mut engine, view, _server) = load(PAGE);
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 48, 16);
+    let before = opacity(&mut engine, view);
+    assert!(before > 0.05 && before < 0.95, "midway opacity {before}");
+    assert!(
+        !reused_tree_relayout(&mut engine, view),
+        "a transition runs: the tree is walked (its frame is due), not taken"
+    );
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity",
+        "no cancel"
+    );
+    let after = opacity(&mut engine, view);
+    assert!(
+        after > before && after < 1.0,
+        "fresh frame: {before} -> {after}"
+    );
+    pump(&mut engine, view, 160, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
+}
+
+/// A reused box tree visits no element, but the elements are still
+/// there: the before-change values survive it, so the next change still
+/// transitions from them.
+#[test]
+fn a_reused_box_tree_keeps_the_before_change_values() {
+    let (mut engine, view, _server) = load(PAGE);
+    assert!(
+        reused_tree_relayout(&mut engine, view),
+        "nothing runs, so the second relayout takes the tree"
+    );
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 48, 16);
+    let mid = opacity(&mut engine, view);
+    assert!(
+        mid > 0.05 && mid < 0.95,
+        "transitions from the kept base: {mid}"
+    );
+    pump(&mut engine, view, 160, 16);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
+}
