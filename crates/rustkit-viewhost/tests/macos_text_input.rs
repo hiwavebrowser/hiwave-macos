@@ -266,6 +266,29 @@ fn main() {
         let context: id = msg_send![page, inputContext];
         assert!(context != nil, "a focused text field has an input context");
 
+        // A press mid-composition finishes it first (R1 HOLD nit 3): the
+        // input method forgets its marked text and the page keeps it
+        // (unmark), before the press can move the focus.
+        take();
+        let _: () = msg_send![page, setMarkedText: string("n") selectedRange: NSRange::new(1, 0) replacementRange: none];
+        take();
+        let press_event: id = msg_send![class!(NSEvent),
+            mouseEventWithType: 1u64 // NSEventTypeLeftMouseDown
+            location: NSPoint::new(10.0, 700.0)
+            modifierFlags: 0u64
+            timestamp: 0.0f64
+            windowNumber: 0isize
+            context: nil
+            eventNumber: 0isize
+            clickCount: 1isize
+            pressure: 1.0f32];
+        let _: () = msg_send![page, mouseDown: press_event];
+        let got = take();
+        assert_eq!(got.first(), Some(&InputKind::Ime(ImeInput::Unmark)), "unmark before the press: {got:?}");
+        assert!(matches!(got.get(1), Some(InputKind::Pointer(_))), "then the press: {got:?}");
+        let marked: BOOL = msg_send![page, hasMarkedText];
+        assert_eq!(marked, NO, "nothing marked after the press");
+
         println!("ok: the content view is a text input client and answers the Edit menu");
     }
 }
