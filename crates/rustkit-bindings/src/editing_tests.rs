@@ -266,3 +266,105 @@ fn edits_run_on_the_shared_edit_state_the_engine_paints() {
     assert_eq!(ev(&p.b, "document.execCommand('paste')"), "true");
     assert_eq!(states.borrow()[&t].value(), "a1\n2");
 }
+
+// ---- CH2.E1 R1 HOLD: clipboard permissions ----
+
+/// A key press the user made (trusted `keydown` at the active element).
+fn press_key(b: &DomBindings) {
+    let data = KeyboardEventBindingData {
+        key: "k".to_string(),
+        ..Default::default()
+    };
+    b.fire_key_event(None, "keydown", &data).unwrap();
+}
+
+#[test]
+fn read_text_rejects_by_default() {
+    let p = web_page();
+    p.cb.write_text("copied in another tab");
+    p.b.evaluate(
+        "window.got = []; navigator.clipboard.readText().then(function (t) { got.push('r:' + t); }, \
+         function (e) { got.push(e.name + ':' + (e instanceof DOMException)); });",
+    )
+    .unwrap();
+    p.b.run_jobs().unwrap();
+    assert_eq!(ev(&p.b, "got.join()"), "NotAllowedError:true");
+}
+
+#[test]
+fn read_text_resolves_when_the_embedder_grants_clipboard_read() {
+    let p = web_page();
+    p.cb.write_text("chrome page text");
+    p.b.set_clipboard_read_allowed(true);
+    p.b.evaluate(
+        "window.got = []; navigator.clipboard.readText().then(function (t) { got.push('r:' + t); }, \
+         function (e) { got.push(e.name); });",
+    )
+    .unwrap();
+    p.b.run_jobs().unwrap();
+    assert_eq!(ev(&p.b, "got.join()"), "r:chrome page text");
+    // Revoking the grant denies the next read.
+    p.b.set_clipboard_read_allowed(false);
+    p.b.evaluate(
+        "window.got = []; navigator.clipboard.readText().then(function (t) { got.push('r:' + t); }, \
+         function (e) { got.push(e.name); });",
+    )
+    .unwrap();
+    p.b.run_jobs().unwrap();
+    assert_eq!(ev(&p.b, "got.join()"), "NotAllowedError");
+}
+
+#[test]
+fn exec_command_paste_from_script_is_false_by_default_and_true_with_the_grant() {
+    let p = web_page();
+    p.cb.write_text("X");
+    assert_eq!(
+        ev(&p.b, "$('q').focus(); $('q').setSelectionRange(5, 5); document.execCommand('paste')"),
+        "false"
+    );
+    assert_eq!(ev(&p.b, "$('q').value + '|' + log.length"), "hello|0");
+    p.b.set_clipboard_read_allowed(true);
+    assert_eq!(ev(&p.b, "document.execCommand('paste')"), "true");
+    assert_eq!(ev(&p.b, "$('q').value"), "helloX");
+}
+
+#[test]
+fn write_text_without_user_activation_rejects() {
+    let p = web_page();
+    p.cb.write_text("keep");
+    p.b.evaluate(
+        "window.got = []; navigator.clipboard.writeText('overwrite').then(function () { got.push('ok'); }, \
+         function (e) { got.push(e.name + ':' + (e instanceof DOMException)); });",
+    )
+    .unwrap();
+    p.b.run_jobs().unwrap();
+    assert_eq!(ev(&p.b, "got.join()"), "NotAllowedError:true");
+    assert_eq!(p.cb.read_text().as_deref(), Some("keep"));
+}
+
+#[test]
+fn write_text_with_user_activation_resolves() {
+    let p = web_page();
+    p.cb.write_text("keep");
+    // A copy button: the page writes from its key handler.
+    p.b.evaluate(
+        "window.got = []; document.addEventListener('keydown', function () { \
+         navigator.clipboard.writeText('from a key').then(function () { got.push('ok'); }, \
+         function (e) { got.push(e.name); }); });",
+    )
+    .unwrap();
+    press_key(&p.b);
+    p.b.run_jobs().unwrap();
+    assert_eq!(ev(&p.b, "got.join()"), "ok");
+    assert_eq!(p.cb.read_text().as_deref(), Some("from a key"));
+}
+
+#[test]
+fn script_writes_to_a_control_value_need_no_activation() {
+    let p = web_page();
+    assert_eq!(ev(&p.b, "$('q').value = 'set by script'; $('q').value"), "set by script");
+    assert_eq!(
+        ev(&p.b, "$('q').focus(); document.execCommand('insertText', false, '!'); $('q').value"),
+        "set by script!"
+    );
+}

@@ -238,3 +238,82 @@ fn a_web_page_cannot_read_the_clipboard_from_script() {
     assert!(chord(&mut engine, id, "v", false));
     assert_eq!(value_of(&mut engine, id, "e"), "copied in another tab");
 }
+
+// ---- CH2.E1 R1 HOLD: clipboard permissions ----
+
+/// Drain the page's promise jobs (execute_script does not).
+fn run_jobs(engine: &Engine, id: EngineViewId) {
+    engine.views[&id]
+        .bindings
+        .as_ref()
+        .unwrap()
+        .run_jobs()
+        .unwrap();
+}
+
+const READ: &str = "window.got = ''; navigator.clipboard.readText().then(function (t) { got = 'read:' + t; }, \
+     function (e) { got = e.name; }); 0";
+
+#[test]
+fn read_text_rejects_by_default_and_resolves_with_the_embedder_grant() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("copied in another tab");
+    js(&mut engine, id, READ);
+    run_jobs(&engine, id);
+    assert_eq!(js(&mut engine, id, "got"), "NotAllowedError");
+    engine.set_script_clipboard_read_allowed(id, true);
+    js(&mut engine, id, READ);
+    run_jobs(&engine, id);
+    assert_eq!(js(&mut engine, id, "got"), "read:copied in another tab");
+}
+
+#[test]
+fn exec_command_paste_from_script_is_false_by_default_and_true_with_the_grant() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("P");
+    focus(&mut engine, id, "e");
+    assert_eq!(js(&mut engine, id, "document.execCommand('paste')"), "false");
+    assert_eq!(value_of(&mut engine, id, "e"), "");
+    engine.set_script_clipboard_read_allowed(id, true);
+    assert_eq!(js(&mut engine, id, "document.execCommand('paste')"), "true");
+    assert_eq!(value_of(&mut engine, id, "e"), "P");
+}
+
+#[test]
+fn cmd_v_pastes_into_an_input_without_the_grant() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("user paste");
+    focus(&mut engine, id, "e");
+    assert!(chord(&mut engine, id, "v", false));
+    assert_eq!(value_of(&mut engine, id, "e"), "user paste");
+    assert_eq!(js(&mut engine, id, "log.join()"), "beforeinput:insertFromPaste:user paste,input:insertFromPaste:user paste");
+}
+
+const WRITE: &str = "window.got = ''; navigator.clipboard.writeText('page wrote').then(function () { got = 'ok'; }, \
+     function (e) { got = e.name; }); 0";
+
+#[test]
+fn write_text_without_activation_rejects() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("keep");
+    js(&mut engine, id, WRITE);
+    run_jobs(&engine, id);
+    assert_eq!(js(&mut engine, id, "got"), "NotAllowedError");
+    assert_eq!(engine.clipboard().read_text().as_deref(), Some("keep"));
+}
+
+#[test]
+fn write_text_with_activation_resolves() {
+    let (mut engine, id) = page();
+    engine.clipboard().write_text("keep");
+    // A copy-on-keypress handler: the user's key press activates the page.
+    js(
+        &mut engine,
+        id,
+        &format!("document.addEventListener('keydown', function () {{ {WRITE} }}); 0"),
+    );
+    engine.handle_text_key(id, 0, "k", false, false, false);
+    run_jobs(&engine, id);
+    assert_eq!(js(&mut engine, id, "got"), "ok");
+    assert_eq!(engine.clipboard().read_text().as_deref(), Some("page wrote"));
+}
