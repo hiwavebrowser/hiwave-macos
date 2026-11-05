@@ -1720,6 +1720,40 @@ mod tests {
     }
 
     #[test]
+    fn system_font_weights_between_the_named_faces_measure_like_chrome() {
+        // CH2.B6c. A kCTFontWeightTrait descriptor snaps the system font to
+        // its nearest NAMED instance (Light, Medium, Semibold, Heavy); Chrome
+        // sets the variable font's `wght` axis to the CSS weight. Widths are
+        // Chromium 143's for this run at 13px (Reduce, 11-05); develop gave
+        // 132.84 / 137.42 / 139.51 / 146.56.
+        // Measured as layout measures a run: kerned (a CTLine), ligatures off.
+        use core_foundation::attributed_string::CFMutableAttributedString;
+        use core_foundation::base::CFRange;
+        use core_foundation::number::CFNumber;
+        use core_foundation::string::CFString;
+        use core_text::line::CTLine;
+        use core_text::string_attributes::{kCTFontAttributeName, kCTLigatureAttributeName};
+
+        const RUN: &str = "Downloads and Tabs 1";
+        for (weight, chrome) in [(300u16, 133.19f64), (500, 137.17), (600, 139.78), (800, 144.98)] {
+            let font = create_system_font_with_weight(13.0, weight);
+            let mut astr = CFMutableAttributedString::new();
+            astr.replace_str(&CFString::new(RUN), CFRange::init(0, 0));
+            let range = CFRange::init(0, astr.char_len());
+            unsafe {
+                astr.set_attribute(range, kCTFontAttributeName, &font);
+                astr.set_attribute(range, kCTLigatureAttributeName, &CFNumber::from(0i32));
+            }
+            let width =
+                CTLine::new_with_attributed_string(astr.as_concrete_TypeRef()).get_typographic_bounds().width;
+            assert!(
+                (width - chrome).abs() <= 0.05,
+                "font-weight:{weight} at 13px: {width:.2} px, Chrome {chrome}"
+            );
+        }
+    }
+
+    #[test]
     fn test_ct_weight_trait_table_matches_skia_anchors() {
         // Apple's kCTFontWeight* constants, which is what Skia's table encodes.
         assert_eq!(ct_weight_trait(100), -0.80);
