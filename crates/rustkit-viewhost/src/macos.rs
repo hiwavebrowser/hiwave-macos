@@ -251,6 +251,26 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // Cmd-shortcuts still work: the menu system sees key equivalents
             // before the responder chain does.
         }
+        // Edit > Select All (muda's predefined item, Cmd+A) is a key
+        // equivalent: AppKit hands Cmd+A to the menu before any keyDown:,
+        // and the menu sends `selectAll:` down the responder chain, so the
+        // chord never reached the page (CH2.E12). Answer the action as the
+        // chord itself, a Cmd+A key press; the window decides whether a
+        // focused text field takes it.
+        extern "C" fn select_all(this: &Object, _sel: Sel, _sender: id) {
+            for up in [false, true] {
+                let key = PendingKey {
+                    text: "a".to_string(),
+                    mac_keycode: 0, // kVK_ANSI_A
+                    up,
+                    ctrl: false,
+                    cmd: true,
+                    shift: false,
+                    alt: false,
+                };
+                push_input(view_id_of(this), InputKind::Key(key));
+            }
+        }
         extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
             record_key(this, event, true);
         }
@@ -271,6 +291,7 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             );
             decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(selectAll:), select_all as extern "C" fn(&Object, Sel, id));
             decl.add_method(
                 sel!(mouseDown:),
                 mouse_down as extern "C" fn(&Object, Sel, id),
