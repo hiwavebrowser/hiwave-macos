@@ -73,7 +73,8 @@ struct Args {
     #[arg(long)]
     dump_layout: Option<String>,
 
-    /// JSON string or path to JSON file defining interaction sequence (wait/click/key/resize/capture)
+    /// JSON string or path to JSON file defining interaction sequence
+    /// (wait/click/hover/key/resize/capture; `key` takes `modifiers`)
     #[arg(long)]
     actions: Option<String>,
 
@@ -301,6 +302,10 @@ struct ActionItem {
     label: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// `key` only: modifier names held while the key is pressed, as
+    /// Playwright spells them (`Control`, `Shift`, `Alt`, `Meta`).
+    #[serde(default)]
+    modifiers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1142,7 +1147,62 @@ fn execute_actions(
                     a_res.error = Some("click action requires selector or (x, y)".to_string());
                 }
             }
+            "hover" => {
+                // A pointer move to the element's centre and nothing else: the
+                // page sees mousemove/mouseover and `:hover` applies, no press.
+                let point = match (a.selector.as_ref(), a.x, a.y) {
+                    (Some(sel), _, _) => {
+                        let sel_json = serde_json::to_string(sel).unwrap_or_default();
+                        let query_js = format!(
+                            r#"(function() {{
+                                var el = document.querySelector({0});
+                                if (!el || typeof el.getBoundingClientRect !== 'function') return 'missing';
+                                var r = el.getBoundingClientRect();
+                                if (!r || !(r.width > 0 && r.height > 0)) return 'missing';
+                                return 'point:' + (r.left + r.width / 2.0) + ':' + (r.top + r.height / 2.0);
+                            }})()"#,
+                            sel_json
+                        );
+                        let found = engine
+                            .execute_script(view_id, &query_js)
+                            .ok()
+                            .and_then(|res| parse_point(&res));
+                        if found.is_some() {
+                            a_res.selector_used = Some(sel.clone());
+                        }
+                        found
+                    }
+                    (None, Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                };
+                match point {
+                    Some((cx, cy)) => {
+                        engine.mouse_move_at_point(view_id, cx, cy);
+                        let _ = engine.relayout(view_id);
+                        a_res.method = Some(format!("engine_point({:.1}, {:.1})", cx, cy));
+                    }
+                    None if a.selector.is_some() => {
+                        a_res.status = "selector_not_found".to_string();
+                        a_res.error = Some(format!(
+                            "no matching element found for selector {}",
+                            a.selector.as_deref().unwrap_or("")
+                        ));
+                    }
+                    None => {
+                        a_res.status = "error".to_string();
+                        a_res.error = Some("hover action requires selector or (x, y)".to_string());
+                    }
+                }
+            }
             "key" => {
+                let held = |name: &str| {
+                    a.modifiers
+                        .as_ref()
+                        .map(|m| m.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                        .unwrap_or(false)
+                };
+                let (ctrl, shift, alt, meta) =
+                    (held("Control"), held("Shift"), held("Alt"), held("Meta"));
                 if let Some(ref sel) = a.selector {
                     let sel_json = serde_json::to_string(sel).unwrap_or_default();
                     let focus_js = format!(
@@ -1174,17 +1234,19 @@ fn execute_actions(
                         "Tab" => 9,
                         _ => 0,
                     };
-                    let _ = engine.handle_text_key(view_id, key_code, key, false, false, false);
+                    let _ = engine.handle_text_key(view_id, key_code, key, ctrl, shift, alt);
                     let key_json = serde_json::to_string(key).unwrap_or_default();
                     let event_js = format!(
                         r#"(function() {{
                             var el = document.activeElement || document.body;
                             if (el) {{
-                                el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {0}, bubbles: true }}));
-                                el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {0}, bubbles: true }}));
+                                var init = {{ key: {0}, bubbles: true, cancelable: true,
+                                              ctrlKey: {1}, shiftKey: {2}, altKey: {3}, metaKey: {4} }};
+                                el.dispatchEvent(new KeyboardEvent('keydown', init));
+                                el.dispatchEvent(new KeyboardEvent('keyup', init));
                             }}
                         }})()"#,
-                        key_json
+                        key_json, ctrl, shift, alt, meta
                     );
                     let _ = engine.execute_script(view_id, &event_js);
                     let _ = engine.relayout(view_id);
