@@ -98,6 +98,60 @@ class TestChromeBoard(unittest.TestCase):
             report = [r for r in rows if r.page == "report"][0].html_path.read_text(encoding="utf-8")
             self.assertNotIn("<!-- Chart.js is injected by Rust before page load -->", report)
 
+    # #898 R1 (Prometheus): the board is committed, so a row's notes carry
+    # shapes (arm, step, status, error class, length), never error text — a
+    # page error or a stderr tail can quote a value.
+    def test_row_notes_carry_shapes_not_error_text(self):
+        from scripts import chrome_board
+
+        row = chrome_board.Row(page="chrome", state="default", width=10, height=10,
+                               html_path=Path("x.html"), actions_path=Path("a.json"), out_dir=Path("o"))
+        result = {
+            "status": "chromium_failed",
+            "chromium": {"status": "error", "error": "Error: token=abc123 at file.mjs:5",
+                         "page_errors": ["TypeError: Cannot read properties of undefined (reading 'secretField')"],
+                         "fixture_errors": ["get_shelf: ReferenceError: hidden-value is not defined"],
+                         "action_results": [{"step": 0, "type": "click", "status": "error", "error": "selector #urlInput?q=abc"}]},
+            "rustkit": {"status": "error", "error": "Inline script failed: value=xyz"},
+        }
+        entry = chrome_board.summarize(row, result)
+        blob = json.dumps(entry)
+        for leaked in ("abc123", "secretField", "hidden-value", "q=abc", "value=xyz"):
+            self.assertNotIn(leaked, blob, f"error text leaked into committed notes: {leaked}")
+        self.assertTrue(any("chromium" in n and "error" in n for n in entry["notes"]), entry["notes"])
+        self.assertTrue(any("pageerror" in n and "TypeError" in n for n in entry["notes"]), entry["notes"])
+        self.assertTrue(any("fixture" in n and "get_shelf" in n for n in entry["notes"]), entry["notes"])
+
+    def test_board_header_names_the_head_and_its_develop_base(self):
+        from scripts import chrome_board
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            chrome_board.write_board(out, {
+                "run": {"at": "now", "sha": "feedface", "base": "0badf00d", "chromium": "143", "parity_capture": "pc", "gate_pct": 0.5},
+                "sizes": [], "states": {}, "rows": [], "census": {},
+            })
+            header = (out / "BOARD.md").read_text(encoding="utf-8").splitlines()[2]
+            self.assertIn("head `feedface`", header)
+            self.assertIn("develop `0badf00d`", header)
+            self.assertNotIn("develop `feedface`", header)
+
+    def test_census_source_names_a_committed_report_not_a_build_dir_file(self):
+        from scripts import chrome_board
+
+        board = chrome_board.load_board(BOARD_PATH)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "target" / "chrome_board" / "census"
+            work.mkdir(parents=True)
+            census = work / "CSS_PROPERTY_CENSUS_2026-11-05.json"
+            census.write_text(json.dumps({"meta": {"date": "2026-11-05", "oracle": "143"}, "red": ["display"],
+                                          "properties": [{"name": "display", "class": "effect", "sites": 1}]}),
+                              encoding="utf-8")
+            info = chrome_board.census_red_lists(board, REPO, census)
+            self.assertNotIn("target/", info["source"])
+            self.assertEqual(info["report"], "trench/chrome/census/CSS_PROPERTY_CENSUS_2026-11-05.md")
+            self.assertEqual([h["property"] for h in info["pages"]["chrome"]["red"]], ["display"])
+
 
 if __name__ == "__main__":
     unittest.main()
