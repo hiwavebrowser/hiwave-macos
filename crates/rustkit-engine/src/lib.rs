@@ -11821,6 +11821,23 @@ impl layout_ctx::LayoutCtx {
                         s
                     };
                     let len = content.chars().count();
+                    // CH2.B6: text-transform changes the text that is laid
+                    // out, not only the text that is painted. Paint applied
+                    // it alone, so an uppercase title measured its lowercase
+                    // width (chrome.html section titles ~15px narrow at 12px;
+                    // the next sibling started inside the painted glyphs).
+                    // Kept raw when the transform changes the character count
+                    // (ß → SS): `text_sources` maps run characters 1:1 to the
+                    // DOM text, and paint still transforms such a run.
+                    let content = {
+                        let transformed =
+                            rustkit_layout::apply_text_transform(&content, style.text_transform);
+                        if transformed.chars().count() == len {
+                            transformed
+                        } else {
+                            content
+                        }
+                    };
                     let mut run = LayoutBox::new(BoxType::Text(content), style);
                     // Where the run's characters came from: mouse
                     // selection and selection paint map through it.
