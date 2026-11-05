@@ -473,6 +473,8 @@ mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
+mod leaving_input_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
@@ -3104,34 +3106,41 @@ impl Engine {
         }
 
         if let Some(view) = self.views.get_mut(&id) {
+            // As `fire_mouse`: a document being left hears no `resize`;
+            // `innerWidth`/`innerHeight` are kept current all the same.
+            let leaving = view.control.stops_all();
             if let Some(bindings) = view.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                let fired = sized.and_then(|()| {
-                    bindings.fire_lifecycle_event(
-                        rustkit_bindings::LifecycleTarget::Window,
-                        "resize",
-                    )
-                });
-                // Then the media query lists whose answer flipped hear
-                // `change` (after `resize`, as in the rendering update).
-                let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
-                let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
-                // A stopped listener's error is the stop itself, which has
-                // its own record.
-                let fired = if stopped.is_some() { Ok(()) } else { fired };
-                view.script_log.extend(stopped);
-                if let Err(e) = fired {
-                    let record = ScriptRecord {
-                        source: "event:resize".into(),
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        outcome: ScriptOutcome::Threw(e.to_string()),
-                    };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                if leaving {
+                    debug!(?id, "Resize event not dispatched: the document is being left");
+                } else {
+                    let _turn = rustkit_js::DiagTurn::enter("live");
+                    let armed = arm_live_turn(&self.config, bindings);
+                    let fired = sized.and_then(|()| {
+                        bindings.fire_lifecycle_event(
+                            rustkit_bindings::LifecycleTarget::Window,
+                            "resize",
+                        )
+                    });
+                    // Then the media query lists whose answer flipped hear
+                    // `change` (after `resize`, as in the rendering update).
+                    let fired = fired.and_then(|()| bindings.fire_media_query_changes().map(|_| ()));
+                    let stopped = end_live_turn(&self.config, armed, bindings, "event:resize");
+                    // A stopped listener's error is the stop itself, which has
+                    // its own record.
+                    let fired = if stopped.is_some() { Ok(()) } else { fired };
+                    view.script_log.extend(stopped);
+                    if let Err(e) = fired {
+                        let record = ScriptRecord {
+                            source: "event:resize".into(),
+                            bytes: 0,
+                            elapsed_ms: 0,
+                            outcome: ScriptOutcome::Threw(e.to_string()),
+                        };
+                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    }
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
                 }
-                inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize");
             }
         }
 
@@ -4278,18 +4287,21 @@ impl Engine {
         event_type: &str,
         data: &rustkit_bindings::MouseEventBindingData,
     ) -> bool {
-        let not_cancelled =
-            self.run_listeners(id, event_type, true, |bindings| bindings.fire_mouse_event(target, event_type, data));
+        let not_cancelled = self.run_listeners(id, target, event_type, true, |bindings| {
+            bindings.fire_mouse_event(target, event_type, data)
+        });
         debug!(?id, event_type, target, not_cancelled, "Mouse event dispatched");
         not_cancelled
     }
 
     /// Run the listeners of one input event `fire` dispatches, in a live
     /// turn, and file what they threw. `fallback` is the answer when there
-    /// is no page or a listener threw.
+    /// is no page, a listener threw, or the document is being left.
+    /// `target` (a raw NodeId) is for the log only.
     fn run_listeners<T>(
         &mut self,
         id: EngineViewId,
+        target: usize,
         event_type: &str,
         fallback: T,
         fire: impl FnOnce(&DomBindings) -> Result<T, rustkit_bindings::BindingError>,
@@ -4300,6 +4312,19 @@ impl Engine {
         let Some(bindings) = view.bindings.as_ref() else {
             return fallback;
         };
+        // The window has asked to leave this document (`navigate`,
+        // `load_html`, a reload's cancel): its interrupt word is ALL until
+        // the next document commits, and a listener run now is refused at
+        // its first opcode. Not dispatched at all: until S2's reopening
+        // each refusal was a "stopped at the script budget" line, an
+        // over-budget record in the Inspector and a stop note of its own
+        // (959 lines in one hand test, all for the page being left). A
+        // navigation that ends without a commit lifts the word, and the
+        // document hears input again.
+        if view.control.stops_all() {
+            debug!(?id, event_type, target, "Input event not dispatched: the document is being left");
+            return fallback;
+        }
         let source = format!("event:{event_type}");
         let _turn = rustkit_js::DiagTurn::enter("live");
         let armed = arm_live_turn(&self.config, bindings);
@@ -5192,15 +5217,22 @@ impl Engine {
             // Script reads `value` from the bindings; keep it current,
             // then tell the page.
             let mut stopped = None;
-            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
-                bindings.sync_control_value(focused.raw(), value);
-                let typed = (!key.is_empty() && !ctrl).then_some(key);
-                let _turn = rustkit_js::DiagTurn::enter("live");
-                let armed = arm_live_turn(&self.config, bindings);
-                if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
-                    debug!(?id, error = %e, "input listener threw");
+            if let Some(view) = self.views.get(&id) {
+                if let Some(bindings) = view.bindings.as_ref() {
+                    bindings.sync_control_value(focused.raw(), value);
+                    // As `fire_mouse`: a document being left hears no
+                    // `input`; its control's value is kept current all the
+                    // same.
+                    if !view.control.stops_all() {
+                        let typed = (!key.is_empty() && !ctrl).then_some(key);
+                        let _turn = rustkit_js::DiagTurn::enter("live");
+                        let armed = arm_live_turn(&self.config, bindings);
+                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                            debug!(?id, error = %e, "input listener threw");
+                        }
+                        stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+                    }
                 }
-                stopped = end_live_turn(&self.config, armed, bindings, "event:input");
             }
             if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
                 view.script_log.push(stopped);
@@ -5342,9 +5374,17 @@ impl Engine {
             0x2E => "Delete",
             _ => text,
         };
-        let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) else {
+        let Some(view) = self.views.get(&id) else {
             return true;
         };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return true;
+        };
+        // As `fire_mouse`: a document being left hears no key.
+        if view.control.stops_all() {
+            debug!(?id, event_type, "Key event not dispatched: the document is being left");
+            return true;
+        }
         let data = rustkit_bindings::KeyboardEventBindingData {
             key: key.to_string(),
             // A named key's code is its name; a character's physical key
@@ -18113,6 +18153,41 @@ impl SelectorMatcher {
         let mut classes = 0; // (b)
         let mut tags = 0; // (c)
 
+        // The end of the identifier starting at `i` (CSS Syntax §4.3.11),
+        // escapes included: Tailwind's `.dark\:bg-black:is(.dark *)` is one
+        // class then `:is()`, (0,2,0) in Chrome, not a class, a `:bg-black`
+        // pseudo-class and `:is()`. An escape is `\` and either 1-6 hex
+        // digits plus one optional whitespace, or any other character.
+        fn skip_css_ident(chars: &[char], mut i: usize) -> usize {
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '\\' {
+                    // `\` then a newline (or the end) is not an escape
+                    // (§4.3.8): the identifier ends before the backslash.
+                    if chars.get(i + 1).is_none_or(|&n| matches!(n, '\n' | '\r' | '\u{c}')) {
+                        break;
+                    }
+                    i += 1;
+                    if chars[i].is_ascii_hexdigit() {
+                        let start = i;
+                        while i < chars.len() && i - start < 6 && chars[i].is_ascii_hexdigit() {
+                            i += 1;
+                        }
+                        if i < chars.len() && chars[i].is_whitespace() {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else if c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            i
+        }
+
         // A selector list takes the specificity of its most specific member.
         // Split on top-level commas only: `:is( a, b)` is one member, and a
         // plain `split(',')` cut it into `:is( a` and `b)`. Then the
@@ -18147,24 +18222,12 @@ impl SelectorMatcher {
                     '#' => {
                         // ID selector
                         ids += 1;
-                        i += 1;
-                        // Skip the ID name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '.' => {
                         // Class selector
                         classes += 1;
-                        i += 1;
-                        // Skip the class name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     '[' => {
                         // Attribute selector
@@ -18277,13 +18340,7 @@ impl SelectorMatcher {
                     _ if chars[i].is_alphabetic() || chars[i] == '_' => {
                         // Type selector (element name)
                         tags += 1;
-                        i += 1;
-                        // Skip the element name
-                        while i < chars.len()
-                            && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
-                        {
-                            i += 1;
-                        }
+                        i = skip_css_ident(&chars, i + 1);
                     }
                     _ => {
                         i += 1;

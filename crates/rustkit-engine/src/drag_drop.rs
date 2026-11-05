@@ -377,8 +377,12 @@ impl Engine {
             related_target,
             ..Default::default()
         };
-        self.run_listeners(id, event_type, (true, "none".to_string()), |bindings| {
-            bindings.fire_drag_event(target, event_type, &data, operation)
-        })
+        self.run_listeners(
+            id,
+            target,
+            event_type,
+            (true, "none".to_string()),
+            |bindings| bindings.fire_drag_event(target, event_type, &data, operation),
+        )
     }
 }
