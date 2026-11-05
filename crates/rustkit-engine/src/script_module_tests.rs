@@ -529,3 +529,32 @@ fn a_slow_prefetched_import_does_not_hold_the_classic_scripts() {
         classic_ms - dep_ms
     );
 }
+
+/// R1 B1: a module whose text ends inside a string on a backslash (a body
+/// cut off at the network cap, say) is network input the prefetch lexer
+/// reads unchecked. It must not panic the load: the module is a syntax
+/// error for its own element (logged, `error`), and the page's other
+/// scripts run.
+#[test]
+fn a_module_cut_off_inside_a_string_is_a_module_error_not_a_panic() {
+    let (mut engine, view, _server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<script id="cut" type="module" src="/cut.js"></script>
+<script>document.getElementById('cut').addEventListener('error', function () { log.push('error:cut'); });
+log.push('classic');</script>"#,
+            ),
+        ),
+        ("/cut.js", JS, "log.push('cut ran'); import \"a\\".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,error:cut");
+    let records = outcomes(&engine, view);
+    assert!(
+        records
+            .iter()
+            .any(|(src, o)| src.ends_with("/cut.js") && matches!(o, ScriptOutcome::Threw(_))),
+        "{records:#?}"
+    );
+}

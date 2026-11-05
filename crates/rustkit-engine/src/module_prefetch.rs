@@ -520,6 +520,17 @@ const ratio = a / b; import './real.js';
         assert!(specs(r#"import "a\"#).is_empty());
     }
 
+    /// A string the source ends in, even one whose last bytes are an
+    /// escaped quote, never closed: it is the module's syntax error at run
+    /// time, not a specifier to fetch.
+    #[test]
+    fn a_string_that_never_closes_is_not_a_specifier() {
+        for src in [r#"import "a\""#, r#"import 'a\'"#, r#"import x from "a\""#, r#"export * from 'b\'"#] {
+            assert!(specs(src).is_empty(), "{src:?}: {:?}", specs(src));
+        }
+        assert_eq!(specs(r#"import "a\"b";"#), vec![r#"a"b"#]);
+    }
+
     #[test]
     fn minified_imports_are_found() {
         assert_eq!(
