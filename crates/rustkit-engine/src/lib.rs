@@ -433,6 +433,8 @@ mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
+mod flex_percent_cross_tests;
+#[cfg(test)]
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
