@@ -341,3 +341,139 @@ import('bare-specifier').then(function () { log.push('RESOLVED'); }, function (e
         "{got}"
     );
 }
+
+// S15 (microsoft.com: 87 static imports in 43 waves, ~8 s of idle network
+// inside the script task, `load` at 55.7 s). A module's static import graph
+// was walked only when that module's turn to run came, one level at a time.
+// Chromium fetches the whole static graph as soon as the module script is
+// discovered, then evaluates in order. Each page below also carries a
+// classic script the server holds for 300 ms (`/held...`): the page's
+// scripts are still arriving while it is out, and nothing has run yet.
+
+/// The request log's one entry for `path`.
+fn served_once(server: &crate::script_net_tests::Server, path: &str) -> crate::script_net_tests::ServedRequest {
+    let hits = server.served(path);
+    assert_eq!(hits.len(), 1, "{path} requested {} times: {:#?}", hits.len(), server.requests.lock().unwrap());
+    hits.into_iter().next().unwrap()
+}
+
+/// A three-deep chain: every module of it is requested while the held
+/// classic script is still out, so before any script ran and before `a`
+/// evaluates; each once; and evaluation order is c, b, a after the classic.
+#[test]
+fn a_module_graph_is_fetched_on_discovery_not_when_it_runs() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(r#"<script type="module" src="/a.js"></script><script src="/held-classic.js"></script>"#),
+        ),
+        ("/held-classic.js", JS, "log.push('classic');".into()),
+        ("/a.js", JS, "import { b } from './lib/b.js'; log.push('a:' + b);".into()),
+        ("/lib/b.js", JS, "import { c } from './c.js';\nexport const b = 'B' + c; log.push('b');".into()),
+        ("/lib/c.js", JS, "export const c = 'C'; log.push('c');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,c,b,a:BC");
+    let held = served_once(&server, "/held-classic.js");
+    let held_answered = held.answered.expect("held script answered");
+    for path in ["/a.js", "/lib/b.js", "/lib/c.js"] {
+        let hit = served_once(&server, path);
+        assert!(
+            hit.arrived < held_answered,
+            "{path} was requested {:?} after the page's held script was answered: the graph waited for its turn to run",
+            hit.arrived - held_answered
+        );
+    }
+}
+
+/// `import()` stays lazy, and an `import` in a comment, a string or a
+/// template is not an import.
+#[test]
+fn a_prefetched_graph_leaves_dynamic_imports_lazy() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(r#"<script type="module" src="/a.js"></script><script src="/held-classic.js"></script>"#),
+        ),
+        ("/held-classic.js", JS, "log.push('classic');".into()),
+        (
+            "/a.js",
+            JS,
+            r#"import './b.js';
+// import './in-comment.js';
+/* import x from './in-block-comment.js'; */
+const s = "import './in-string.js'";
+const t = `export * from './in-template.js'`;
+window.later = function () { return import('./lazy.js'); };
+log.push('a');"#
+                .into(),
+        ),
+        ("/b.js", JS, "log.push('b');".into()),
+        ("/lazy.js", JS, "log.push('lazy');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,b,a");
+    let held_answered = served_once(&server, "/held-classic.js").answered.unwrap();
+    assert!(served_once(&server, "/b.js").arrived < held_answered);
+    for path in ["/lazy.js", "/in-comment.js", "/in-block-comment.js", "/in-string.js", "/in-template.js"] {
+        assert!(server.served(path).is_empty(), "{path} was fetched");
+    }
+}
+
+/// A cycle is walked once and does not hang; each module is requested once.
+#[test]
+fn a_cyclic_graph_is_prefetched_once_and_runs() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(r#"<script type="module" src="/a.js"></script><script src="/held-classic.js"></script>"#),
+        ),
+        ("/held-classic.js", JS, "log.push('classic');".into()),
+        ("/a.js", JS, "import { b } from './b.js'; export const a = 'A'; log.push('a:' + b);".into()),
+        ("/b.js", JS, "import { a } from './a.js'; export const b = 'B'; log.push('b');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,b,a:B");
+    let held_answered = served_once(&server, "/held-classic.js").answered.unwrap();
+    assert!(served_once(&server, "/a.js").arrived < held_answered);
+    assert!(served_once(&server, "/b.js").arrived < held_answered);
+}
+
+/// A 404 inside one graph fails that module's evaluation only, logged as
+/// before ("module graph failed"), and its element hears `error`; the other
+/// module's graph runs.
+#[test]
+fn a_missing_module_in_a_prefetched_graph_fails_only_its_own_module() {
+    let (mut engine, view, server) = load(vec![
+        (
+            "/",
+            "text/html",
+            page(
+                r#"<script id="broken" type="module" src="/m1.js"></script>
+<script id="fine" type="module" src="/m2.js"></script>
+<script src="/held-classic.js"></script>
+<script>['broken', 'fine'].forEach(function (id) {
+    document.getElementById(id).addEventListener('error', function () { log.push('error:' + id); });
+    document.getElementById(id).addEventListener('load', function () { log.push('load:' + id); });
+});</script>"#,
+            ),
+        ),
+        ("/held-classic.js", JS, "log.push('classic');".into()),
+        ("/m1.js", JS, "import './lib/x.js'; log.push('m1 ran');".into()),
+        ("/lib/x.js", JS, "import '/missing-dep.js'; log.push('x ran');".into()),
+        ("/m2.js", JS, "import './lib/ok.js'; log.push('m2');".into()),
+        ("/lib/ok.js", JS, "log.push('ok');".into()),
+    ]);
+    assert_eq!(log(&mut engine, view), "classic,error:broken,ok,m2,load:fine");
+    let held_answered = served_once(&server, "/held-classic.js").answered.unwrap();
+    assert!(served_once(&server, "/missing-dep.js").arrived < held_answered);
+    served_once(&server, "/lib/ok.js");
+    let records = outcomes(&engine, view);
+    assert!(
+        records
+            .iter()
+            .any(|(src, o)| src.ends_with("/m1.js")
+                && matches!(o, ScriptOutcome::Threw(m) if m.starts_with("module graph failed"))),
+        "{records:#?}"
+    );
+}
