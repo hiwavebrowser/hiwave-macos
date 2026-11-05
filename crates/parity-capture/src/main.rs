@@ -526,6 +526,13 @@ fn main() {
         });
     }
 
+    // The Chrome baselines are captured with `--hide-scrollbars`
+    // (Playwright's default): styled scrollbars take no space there, so
+    // they take none here (CH2.E7). RUSTKIT_SHOW_SCROLLBARS=1 keeps them.
+    if std::env::var("RUSTKIT_SHOW_SCROLLBARS").map_or(true, |v| v != "1") {
+        rustkit_layout::scroll::set_scrollbars_hidden(true);
+    }
+
     let started = Instant::now();
     let args_clone = args.clone();
     // Flag off: today's worker. Flag on: the page thread's name and stack,

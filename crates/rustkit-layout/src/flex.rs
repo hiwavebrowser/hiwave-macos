@@ -250,7 +250,7 @@ impl<'a> Default for FlexLine<'a> {
 /// the two places that need this arithmetic cannot drift apart.
 fn inner_main_from_spec(container: &LayoutBox, raw: f32) -> f32 {
     if container.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
-        let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
+        let pb = container.dimensions.padding.vertical() + container.dimensions.border_with_gutter().vertical();
         (raw - pb).max(0.0)
     } else {
         raw
@@ -530,12 +530,12 @@ fn layout_flex_container_at(
         let (spec, pb) = match cross_axis {
             Axis::Vertical => (
                 &container.style.height,
-                container.dimensions.padding.vertical() + container.dimensions.border.vertical(),
+                container.dimensions.padding.vertical() + container.dimensions.border_with_gutter().vertical(),
             ),
             Axis::Horizontal => (
                 &container.style.width,
                 container.dimensions.padding.horizontal()
-                    + container.dimensions.border.horizontal(),
+                    + container.dimensions.border_with_gutter().horizontal(),
             ),
         };
         // On the vertical axis a font-relative or viewport height is as
@@ -578,12 +578,12 @@ fn layout_flex_container_at(
                 let own_edges = match cross_axis {
                     Axis::Horizontal => {
                         container.dimensions.margin.horizontal()
-                            + container.dimensions.border.horizontal()
+                            + container.dimensions.border_with_gutter().horizontal()
                             + container.dimensions.padding.horizontal()
                     }
                     Axis::Vertical => {
                         container.dimensions.margin.vertical()
-                            + container.dimensions.border.vertical()
+                            + container.dimensions.border_with_gutter().vertical()
                             + container.dimensions.padding.vertical()
                     }
                 };
@@ -1484,7 +1484,7 @@ fn layout_flex_container_at(
                 Some(h) => {
                     // Specified heights are border-box under border-box sizing.
                     let pb = container.dimensions.padding.vertical()
-                        + container.dimensions.border.vertical();
+                        + container.dimensions.border_with_gutter().vertical();
                     let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
                     container.dimensions.content.height = if is_bb { (h - pb).max(0.0) } else { h };
                 }
@@ -1530,7 +1530,7 @@ fn layout_flex_container_at(
         } else if let Some(used) = used_inner_height {
             used
         } else {
-            let pb = container.dimensions.padding.vertical() + container.dimensions.border.vertical();
+            let pb = container.dimensions.padding.vertical() + container.dimensions.border_with_gutter().vertical();
             let is_bb = container.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
             let inner_from_spec = |raw: f32| if is_bb { (raw - pb).max(0.0) } else { raw };
             match definite_height_px(container, &container.style.height) {
@@ -1746,15 +1746,15 @@ fn create_flex_item<'a>(
         match main_axis {
             Axis::Horizontal => (
                 d.padding.left + d.border.left,
-                d.padding.right + d.border.right,
+                d.padding.right + d.border_with_gutter().right,
                 d.padding.top + d.border.top,
-                d.padding.bottom + d.border.bottom,
+                d.padding.bottom + d.border_with_gutter().bottom,
             ),
             Axis::Vertical => (
                 d.padding.top + d.border.top,
-                d.padding.bottom + d.border.bottom,
+                d.padding.bottom + d.border_with_gutter().bottom,
                 d.padding.left + d.border.left,
-                d.padding.right + d.border.right,
+                d.padding.right + d.border_with_gutter().right,
             ),
         }
     };
@@ -2956,9 +2956,9 @@ fn apply_positions(
             // (resolved onto dimensions by the block pre-pass).
             let d = &item.layout_box.dimensions;
             let pb_left = d.padding.left + d.border.left;
-            let pb_right = d.padding.right + d.border.right;
+            let pb_right = d.padding.right + d.border_with_gutter().right;
             let pb_top = d.padding.top + d.border.top;
-            let pb_bottom = d.padding.bottom + d.border.bottom;
+            let pb_bottom = d.padding.bottom + d.border_with_gutter().bottom;
 
             // Update layout box dimensions with absolute positions
             item.layout_box.dimensions.content = Rect {
@@ -3003,7 +3003,7 @@ fn spec_height_to_border_box(b: &LayoutBox, h: f32) -> f32 {
     if b.style.box_sizing == rustkit_css::BoxSizing::BorderBox {
         h
     } else {
-        h + b.dimensions.padding.vertical() + b.dimensions.border.vertical()
+        h + b.dimensions.padding.vertical() + b.dimensions.border_with_gutter().vertical()
     }
 }
 
@@ -3031,7 +3031,7 @@ fn spec_height_to_border_box(b: &LayoutBox, h: f32) -> f32 {
 /// 1011, pushing its footer out of the first viewport.
 fn content_border_height(b: &LayoutBox) -> f32 {
     let d = &b.dimensions;
-    let pb = d.padding.vertical() + d.border.vertical();
+    let pb = d.padding.vertical() + d.border_with_gutter().vertical();
     let pct_height = match b.style.height {
         Length::Px(h) => return spec_height_to_border_box(b, h),
         // `fit-content` is content-sized like `auto`. On the `_` arm it read

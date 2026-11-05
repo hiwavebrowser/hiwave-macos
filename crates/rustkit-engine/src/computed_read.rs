@@ -639,6 +639,9 @@ fn font_shorthand(s: &css::ComputedStyle, font_px: f32, line_height: &str) -> St
 pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
     let s = &*b.style;
     let d = &b.dimensions;
+    // The border widths as CSS reports them. A styled scrollbar's space
+    // is its own gutter (`Dimensions::scrollbar`), not border (CH2.E7).
+    let css_border = d.border;
     let bx = d.border_box();
     let black = css::Color::BLACK;
     let mut out = String::new();
@@ -1111,10 +1114,10 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         }
     };
     let (style_t, style_r, style_b, style_l) = (
-        shown(s.border_top_style, d.border.top),
-        shown(s.border_right_style, d.border.right),
-        shown(s.border_bottom_style, d.border.bottom),
-        shown(s.border_left_style, d.border.left),
+        shown(s.border_top_style, css_border.top),
+        shown(s.border_right_style, css_border.right),
+        shown(s.border_bottom_style, css_border.bottom),
+        shown(s.border_left_style, css_border.left),
     );
     // The engine stores an unset or `currentcolor` border colour as black (its
     // initial); Chromium's initial is currentcolor. Black is read as the text
@@ -1126,10 +1129,10 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         current(s.border_bottom_color),
         current(s.border_left_color),
     );
-    let top = border_side(d.border.top, style_t, ct);
-    let right = border_side(d.border.right, style_r, cr);
-    let bottom = border_side(d.border.bottom, style_b, cb);
-    let left = border_side(d.border.left, style_l, cl);
+    let top = border_side(css_border.top, style_t, ct);
+    let right = border_side(css_border.right, style_r, cr);
+    let bottom = border_side(css_border.bottom, style_b, cb);
+    let left = border_side(css_border.left, style_l, cl);
     const UNSET: &str = "0px none rgb(0, 0, 0)";
     let mut border_named = |prefix: &str, value: &str| {
         if value != UNSET {
@@ -1172,7 +1175,7 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         row("border-bottom-color", &bt);
         row("border-left-color", &l);
     }
-    if (d.border.top, d.border.right, d.border.bottom, d.border.left) != (0.0, 0.0, 0.0, 0.0) {
+    if (css_border.top, css_border.right, css_border.bottom, css_border.left) != (0.0, 0.0, 0.0, 0.0) {
         let (t, r, bt, l) = edge4(&d.border);
         row("border-width", &sides(&t, &r, &bt, &l));
     }
