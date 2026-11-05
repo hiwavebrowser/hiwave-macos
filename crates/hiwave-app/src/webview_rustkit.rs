@@ -92,6 +92,8 @@ pub struct RustKitView {
     current_url: RefCell<Option<String>>,
     /// Current title (cached).
     current_title: RefCell<Option<String>>,
+    /// What the chrome has not been told yet (CH2.E9).
+    chrome_updates: RefCell<ChromeUpdates>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -363,6 +365,7 @@ impl RustKitView {
             view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
+            chrome_updates: RefCell::new(ChromeUpdates::default()),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
@@ -652,8 +655,13 @@ impl RustKitView {
     /// The URL, and whether the user activated the navigation (a click or
     /// a form submit) rather than the page's script.
     /// What the chrome must be told since the last call (CH2.E9).
+    /// Filled from the content thread's events, so only with the page on
+    /// its own thread (the default); flag off the events are dropped.
     pub fn take_chrome_updates(&self) -> ChromeUpdates {
-        ChromeUpdates::default()
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.chrome_updates.borrow_mut())
     }
 
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
@@ -1212,12 +1220,31 @@ impl RustKitView {
                     *self.latest_commit.borrow_mut() = Some(commit);
                 }
                 PageEvent::Title { text, .. } => {
+                    self.chrome_updates.borrow_mut().title = Some(text.clone());
                     *self.current_title.borrow_mut() = Some(text);
                 }
                 PageEvent::Url { url, .. } => {
+                    if shown_in_address_bar(&url) {
+                        self.chrome_updates.borrow_mut().url = Some(url.to_string());
+                    }
                     *self.current_url.borrow_mut() = Some(url.to_string());
                 }
                 PageEvent::LoadState { state, .. } => {
+                    let mut updates = self.chrome_updates.borrow_mut();
+                    match &state {
+                        LoadState::Started => {
+                            updates.started = true;
+                            updates.loading = Some(true);
+                        }
+                        LoadState::Complete => {
+                            updates.loading = Some(false);
+                            let url = self.current_url.borrow().clone();
+                            if let Some(url) = url.filter(|u| Url::parse(u).is_ok_and(|u| shown_in_address_bar(&u))) {
+                                updates.finished = Some(url);
+                            }
+                        }
+                        LoadState::Failed { .. } => updates.loading = Some(false),
+                    }
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
                 PageEvent::NavigateRequested {
@@ -1251,6 +1278,13 @@ impl RustKitView {
             warn!(%error, "content frame was not presented");
         }
     }
+}
+
+/// A URL the address bar and the tab model take from the page. Documents
+/// the app loads itself (New Tab, about, report) commit as `about:` or
+/// `data:` URLs, and their tab keeps the address the app gave it.
+fn shown_in_address_bar(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
 }
 
 fn stale(accepted: u64, event: &PageEvent) -> bool {
