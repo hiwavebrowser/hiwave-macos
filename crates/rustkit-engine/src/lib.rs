@@ -284,6 +284,9 @@ pub mod inspector;
 mod inspector_glue;
 mod console_log;
 mod relayout_cause;
+mod selection;
+#[cfg(test)]
+mod selection_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
@@ -1009,6 +1012,13 @@ struct ViewState {
     primary_button_down: bool,
     /// The element the press in progress landed on (raw NodeId).
     press_target: Option<usize>,
+    /// The document selection as the engine paints it (`selection.rs`),
+    /// and the drag that is moving it.
+    doc_selection: Option<selection::DocSelection>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
     /// The press in progress has had its say on the focus (it moved it, or
     /// a listener cancelled the press): the release leaves the focus alone.
     press_settled_focus: bool,
@@ -1163,6 +1173,8 @@ impl ViewState {
         self.primary_button_down = false;
         self.press_target = None;
         self.press_settled_focus = false;
+        self.doc_selection = None;
+        self.select_drag = None;
         self.compat_mouse_suppressed = false;
         self.script_log.clear();
         self.script_policy = None;
@@ -2715,6 +2727,9 @@ impl Engine {
             primary_button_down: false,
             press_target: None,
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2815,6 +2830,9 @@ impl Engine {
             primary_button_down: false,
             press_target: None,
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -2932,6 +2950,9 @@ impl Engine {
             primary_button_down: false,
             press_target: None,
             press_settled_focus: false,
+            press_clicks: 1,
+            doc_selection: None,
+            select_drag: None,
             view_focused: false,
             scroll_offset: (0.0, 0.0),
             max_scroll_offset: (0.0, 0.0),
@@ -3410,7 +3431,8 @@ impl Engine {
                 let view = self.views.get(&id)?;
                 let doc = view.document.as_ref()?;
                 let node = doc.get_node(rustkit_dom::NodeId::new(raw))?;
-                let control = Self::form_control(&node);
+                // A contenteditable host takes the focus like a control.
+                let control = Self::form_control(&node).or_else(|| Self::editing_host_of(&node));
                 // A click on a label is a click for the control it labels.
                 let labeled = match control {
                     Some(_) => None,
@@ -3518,7 +3540,11 @@ impl Engine {
             match &node.node_type {
                 NodeType::Element { tag_name, .. } => {
                     let tag = tag_name.to_lowercase();
-                    matches!(tag.as_str(), "input" | "textarea" | "select").then_some((raw, tag))
+                    if matches!(tag.as_str(), "input" | "textarea" | "select") {
+                        Some((raw, tag))
+                    } else {
+                        Self::editing_host_of(&node).filter(|(host, _)| *host == raw)
+                    }
                 }
                 _ => None,
             }
@@ -3586,7 +3612,25 @@ impl Engine {
     /// listener that cancels either event keeps the focus where it is.
     /// Returns false when a listener cancelled the `mousedown`.
     pub fn mouse_down_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> bool {
+        self.mouse_down_with(id, viewport_x, viewport_y, 1, false)
+    }
+
+    /// [`Self::mouse_down_at_point`] for the `clicks`-th press of a
+    /// multi-click (2 selects a word, 3 a paragraph) and with Shift held
+    /// (the selection extends to the point). The press's default action
+    /// moves the selection after the focus (`selection.rs`).
+    pub fn mouse_down_with(
+        &mut self,
+        id: EngineViewId,
+        viewport_x: f32,
+        viewport_y: f32,
+        clicks: u32,
+        shift: bool,
+    ) -> bool {
         let _hold = wgate::hold("press");
+        if let Some(view) = self.views.get_mut(&id) {
+            view.press_clicks = clicks;
+        }
         let target = self.element_at_point(id, viewport_x, viewport_y);
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = true;
@@ -3610,6 +3654,7 @@ impl Engine {
             || self.dispatch_mouse_at_point(id, "mousedown", viewport_x, viewport_y);
         if !suppressed && not_cancelled {
             self.focus_point(id, viewport_x, viewport_y, PointFocus::Press);
+            self.press_selects(id, viewport_x, viewport_y, clicks, shift);
         }
         if let Some(view) = self.views.get_mut(&id) {
             view.press_settled_focus = true;
@@ -3629,6 +3674,8 @@ impl Engine {
     pub fn mouse_move_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
         let _hold = wgate::hold("move");
         self.pointer_moved(id, viewport_x, viewport_y, true);
+        // With the button held, the selection the press started follows.
+        self.drag_selects(id, viewport_x, viewport_y);
     }
 
     /// The pointer left the view: the page hears the out and leave events
@@ -3940,8 +3987,11 @@ impl Engine {
     /// returns.
     pub fn click_at_point(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> ClickOutcome {
         let _hold = wgate::hold("click");
+        let mut clicks = 1;
         if let Some(view) = self.views.get_mut(&id) {
             view.primary_button_down = false;
+            view.select_drag = None;
+            clicks = std::mem::replace(&mut view.press_clicks, 1);
             let changed = std::mem::take(&mut *view.lay.active_chain.borrow_mut());
             view.pointer_restyle |= Self::chain_change_restyles(view, |reads| &reads.active, &changed);
         }
@@ -3993,6 +4043,10 @@ impl Engine {
                     && self.click_element(id, target, viewport_x, viewport_y)
             }
         };
+        // The second click of a double-click: `dblclick` after `click`.
+        if clicks == 2 && elsewhere.is_none() && !self.disabled_control_at_point(id, viewport_x, viewport_y) {
+            self.dispatch_mouse_at_point(id, "dblclick", viewport_x, viewport_y);
+        }
         // The click submitted a form (a submit button's activation, or a
         // listener's `requestSubmit()`) and no `submit` listener cancelled.
         let submitted = self.take_submit_request(id).and_then(|(form, submitter)| {
@@ -5164,6 +5218,10 @@ impl Engine {
         {
             return false;
         }
+        // A contenteditable host: the page's DOM is what is edited.
+        if self.is_editing_host(id, focused.raw()) {
+            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
@@ -5482,6 +5540,22 @@ impl Engine {
 }
 
 impl layout_ctx::LayoutCtx {
+    /// The selected characters `[start, end)` of a text control in the view
+    /// being laid out, when its selection is not collapsed. The edit state
+    /// counts bytes; the painter counts characters.
+    fn edit_selection(&self, node_raw: usize) -> Option<(usize, usize)> {
+        self.with_building_lay(|lay| {
+            let states = lay.edit_states.borrow();
+            let state = states.get(&node_raw)?;
+            let sel = state.selection().normalize();
+            let value = state.value();
+            (!sel.is_collapsed()).then(|| {
+                (selection::char_of_byte(&value, sel.start), selection::char_of_byte(&value, sel.end))
+            })
+        })
+        .flatten()
+    }
+
     /// Current value of a control's live edit state, if it has one.
     ///
     /// Layout reads through this so an edited field renders its typed text
@@ -8275,7 +8349,29 @@ impl Engine {
     fn display_list_for(&mut self, id: EngineViewId, root_box: &LayoutBox) -> DisplayList {
         let _display_list_span = tracing::info_span!("build_display_list").entered();
         let _display_list_time = time_stage(Stage::DisplayList);
-        let mut dl = DisplayList::build(root_box);
+        let selected = self.selection_paint(id, root_box);
+        let caret = self.caret_paint(id, root_box);
+        let text_caret = match caret {
+            Some(selection::CaretPaint::Text(node, offset)) => Some((node, offset)),
+            _ => None,
+        };
+        let mut dl = DisplayList::build_with_selection(root_box, selected, text_caret);
+        // A host with no text where the caret is: the caret at the start of
+        // its content box.
+        if let Some(selection::CaretPaint::Box(host)) = caret {
+            if let Some(b) = box_of_node(root_box, host) {
+                let size = match b.style.font_size {
+                    rustkit_css::Length::Px(px) => px,
+                    _ => 16.0,
+                };
+                dl.commands.push(rustkit_layout::DisplayCommand::Caret {
+                    x: b.dimensions.content.x,
+                    y: b.dimensions.content.y,
+                    height: size * 1.2,
+                    color: b.style.color,
+                });
+            }
+        }
         // Splice cached SVG documents in place of their Image commands.
         // Done once per layout (not per frame): the renderer only speaks
         // raster textures, so vector images become their own command
@@ -10339,6 +10435,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10432,6 +10529,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10510,6 +10608,7 @@ impl layout_ctx::LayoutCtx {
                     b.node_id = Some(node.id.raw());
                     if self.building_focus() == Some(node.id) {
                         b.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                        b.focused_selection = self.edit_selection(node.id.raw());
                     }
                     return b;
                 }
@@ -10585,6 +10684,7 @@ impl layout_ctx::LayoutCtx {
                 // focus ring without reaching back into engine state.
                 if self.building_focus() == Some(node.id) {
                     layout_box.focused_caret = self.edit_value(node.id.raw()).map(|(_, c)| c);
+                    layout_box.focused_selection = self.edit_selection(node.id.raw());
                 }
 
                 // Links carry their RAW href so a hit test can navigate
@@ -11005,10 +11105,15 @@ impl layout_ctx::LayoutCtx {
                         joined.push(child);
                         continue;
                     }
+                    let next_sources = child.text_sources;
                     let BoxType::Text(next) = child.box_type else {
                         unreachable!("joins_previous requires a text box");
                     };
                     let last = joined.last_mut().expect("joins_previous requires a previous box");
+                    let at = match &last.box_type {
+                        BoxType::Text(run) => run.chars().count(),
+                        _ => 0,
+                    };
                     let collapsible = !matches!(
                         last.style.white_space,
                         rustkit_css::WhiteSpace::Pre
@@ -11016,13 +11121,16 @@ impl layout_ctx::LayoutCtx {
                             | rustkit_css::WhiteSpace::PreLine
                             | rustkit_css::WhiteSpace::BreakSpaces
                     );
+                    let mut dropped = 0;
                     if let BoxType::Text(ref mut run) = last.box_type {
                         if collapsible && run.ends_with(' ') && next.starts_with(' ') {
                             run.push_str(&next[1..]);
+                            dropped = 1;
                         } else {
                             run.push_str(&next);
                         }
                     }
+                    last.append_text_sources(&next_sources, at, next.chars().count(), dropped);
                 }
                 layout_box.children = joined;
 
@@ -11054,14 +11162,23 @@ impl layout_ctx::LayoutCtx {
                     if preserved {
                         continue;
                     }
-                    if let BoxType::Text(ref mut t) = layout_box.children[i].box_type {
+                    let child = &mut layout_box.children[i];
+                    if let BoxType::Text(ref mut t) = child.box_type {
                         // Strip the collapsed SPACE only: `trim_start()` also
                         // eats a following nbsp, which is content.
+                        let before = t.chars().count();
+                        let mut from = 0;
                         if !prev_inline && t.starts_with(' ') {
-                            *t = t.trim_start_matches(' ').to_string();
+                            let kept = t.trim_start_matches(' ').to_string();
+                            from = before - kept.chars().count();
+                            *t = kept;
                         }
                         if !next_inline && t.ends_with(' ') {
                             *t = t.trim_end_matches(' ').to_string();
+                        }
+                        if t.chars().count() != before {
+                            let len = t.chars().count();
+                            child.keep_text_sources(from, len);
                         }
                     }
                 }
@@ -11166,7 +11283,18 @@ impl layout_ctx::LayoutCtx {
                         s.color = rustkit_css::Color::BLACK;
                         s
                     };
-                    LayoutBox::new(BoxType::Text(content), style)
+                    let len = content.chars().count();
+                    let mut run = LayoutBox::new(BoxType::Text(content), style);
+                    // Where the run's characters came from: mouse
+                    // selection and selection paint map through it.
+                    run.text_sources = vec![rustkit_layout::TextSource {
+                        node: node.id.raw(),
+                        at: 0,
+                        skip: 0,
+                        len,
+                        collapsible,
+                    }];
+                    run
                 }
             }
             NodeType::Comment(_) => {
@@ -19342,6 +19470,10 @@ impl Engine {
         if self.follow_script_focus(id) {
             self.relayout_for(id, RelayoutCause::HoverOrFocus)?;
             laid = true;
+        }
+        // A selection script moved is painted again over the same boxes.
+        if self.follow_script_selection(id) {
+            self.repaint_selection(id);
         }
         Ok(laid)
     }
@@ -39237,6 +39369,8 @@ fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
         && a.identity == b.identity
         && a.link_href == b.link_href
         && a.focused_caret == b.focused_caret
+        && a.focused_selection == b.focused_selection
+        && a.text_sources == b.text_sources
         && rest(a) == rest(b)
 }
 
@@ -39308,6 +39442,7 @@ fn count_tree_differences(kept: &LayoutBox, fresh: &LayoutBox, differences: &mut
                 (&b.box_type, &b.dimensions, &b.position, &b.offsets, &b.float, &b.clear),
                 (b.z_index, &b.stacking_context, &b.viewport, &b.sticky_state, &b.element_id),
                 (&b.identity, &b.link_href, &b.focused_caret, &b.node_id, &b.text_lines),
+                (&b.focused_selection, &b.text_sources),
                 (&b.text_flow_first_offset, &b.root_element_height, b.children.len()),
             )
         )
