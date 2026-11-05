@@ -552,6 +552,8 @@ mod nested_layout_matrix_tests;
 #[cfg(test)]
 mod zero_font_size_tests;
 #[cfg(test)]
+mod zero_size_overflow_clip_tests;
+#[cfg(test)]
 mod table_engine_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ws_beside_block_replaced_tests;
