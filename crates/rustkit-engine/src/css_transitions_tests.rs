@@ -373,7 +373,8 @@ fn a_nested_span_inherits_the_transitioning_colour() {
 /// relayout after the sheets relayout). `reuse` is whether the second
 /// one took the tree.
 fn reused_tree_relayout(engine: &mut Engine, view: EngineViewId) -> bool {
-    let _scope = StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
+    let _scope =
+        StyleMemoScope::arm_with_tree(RestyleMode::Reuse, TreeReuse::Reuse).expect("armed");
     engine.relayout(view).expect("recording relayout");
     engine.relayout(view).expect("second relayout");
     relayout_cause::last_build_reused_tree()
@@ -391,12 +392,22 @@ fn a_reused_box_tree_keeps_a_running_transition() {
     assert!(before > 0.05 && before < 0.95, "midway opacity {before}");
     reused_tree_relayout(&mut engine, view);
     pump(&mut engine, view, 16, 16);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity", "no cancel");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity",
+        "no cancel"
+    );
     let after = opacity(&mut engine, view);
-    assert!(after > before && after < 1.0, "fresh frame: {before} -> {after}");
+    assert!(
+        after > before && after < 1.0,
+        "fresh frame: {before} -> {after}"
+    );
     pump(&mut engine, view, 160, 16);
     assert_eq!(opacity(&mut engine, view), 1.0);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,end:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
 }
 
 /// A reused box tree visits no element, but the elements are still
@@ -412,7 +423,13 @@ fn a_reused_box_tree_keeps_the_before_change_values() {
     run(&mut engine, view, "h.classList.add('on')");
     pump(&mut engine, view, 48, 16);
     let mid = opacity(&mut engine, view);
-    assert!(mid > 0.05 && mid < 0.95, "transitions from the kept base: {mid}");
+    assert!(
+        mid > 0.05 && mid < 0.95,
+        "transitions from the kept base: {mid}"
+    );
     pump(&mut engine, view, 160, 16);
-    assert_eq!(log(&mut engine, view), "run:opacity,start:opacity,end:opacity");
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
 }
