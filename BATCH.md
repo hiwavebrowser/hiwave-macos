@@ -4,7 +4,7 @@ Test data for the Linux gate runner. Not for landing: the batch lands as its ind
 
 - batch: 19
 - develop: 366fdd48567470d0596ed103138713f6d4697ae1
-- PR #895: 950703e528d04bdccfc8e7484330144c4f9a8eba
+- PR #895: 1937cda9f2e07e7c42f40a99ca13e44b06a1e7fa (first merged at 950703e528d04bdccfc8e7484330144c4f9a8eba; re-merged at 1937cda9, a one-test-file fix, after the headless gate)
 - PR #896: 35c523a3501cb807e17906c9c09f4e2902c45fa3
 - PR #897: 58de2707b4fef9c8c7b8d898057b1edce5353413
 - PR #899: 72260bb14e20163710678554cb8578337bb315e4
@@ -14,5 +14,7 @@ Test data for the Linux gate runner. Not for landing: the batch lands as its ind
 - PR #898: 1187a313637da4763f1fc4883c9e8d34b9f52aa8
 - merged tree (develop + #895 + #896 + #897 + #899 + #900 + #891 + #901 + #898, `--no-ff` in that order, before this file): 28b1b5a2abd2821b5a1001d6209ec2c492ea6ee2
 - merged commit (before this file): 0da8d5a5ec56aebcea6c96daa30f1aa2b33a4106
+- first gated tree (all gates): 28b1b5a2abd2821b5a1001d6209ec2c492ea6ee2 at 0da8d5a5
+- final tree (land-ready; + #895 at 1937cda9, delta hover_restyle_tests.rs only; gate 0 + hover_restyle_tests rerun): 5960f77d44504548355e5860413f92721554fcce at 6b1f8947fb29e9a238495cf5662c470cb5b4ba85
 - drops: none (gate 0 green: `cargo check -p rustkit-engine --features headless`, `cargo check -p hiwave-app --features rustkit`)
 - conflicts resolved (all additive, both sides kept): #896 lib.rs x3; #899 lib.rs x6; #900 lib.rs x2; #901 page_protocol.rs, webview_rustkit.rs, content_thread.rs tests x2
