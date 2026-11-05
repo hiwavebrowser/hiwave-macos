@@ -10987,6 +10987,19 @@ impl layout_ctx::LayoutCtx {
 
                     if !has_element_children {
                         let text = node.text_content();
+                        // CSS Text §4.1.1: under a collapsing white-space
+                        // (a button's UA `normal`), runs collapse to one
+                        // space and the line's leading/trailing spaces go.
+                        // The raw text kept template indentation: chrome.html's
+                        // expander measured ~113px for "▾" (Chromium 15.7).
+                        let text = match style.white_space {
+                            rustkit_css::WhiteSpace::Normal
+                            | rustkit_css::WhiteSpace::Nowrap
+                            | rustkit_css::WhiteSpace::PreLine => {
+                                text.split_whitespace().collect::<Vec<_>>().join(" ")
+                            }
+                            _ => text,
+                        };
                         let label = if text.trim().is_empty() {
                             // No text, no children: an empty button renders
                             // empty, not a placeholder word.
@@ -12551,12 +12564,23 @@ impl layout_ctx::LayoutCtx {
                 // unreachable from the day it landed. The compiler said so on
                 // every build ("unreachable pattern"); nobody read it until
                 // Pete asked what the warnings meant.
-                if tag_name != "button" {
-                    // input/select/textarea get Chrome's white field; buttons
-                    // are ButtonFace-themed, not white — leave them to the
-                    // themed paint path.
-                    style.background_color = rustkit_css::Color::WHITE;
-                }
+                // Buttons (and input type=button/submit/reset, which lay out
+                // as buttons) get ButtonFace, Chrome's rgb(239, 239, 239);
+                // input/select/textarea get the white field. Both live here
+                // so an author `background: transparent` overrides them
+                // (CH2.B3: the painter used to put ButtonFace back under
+                // every alpha-0 button, so chrome.html's transparent
+                // expanders and lock buttons painted as white blocks).
+                let button_like = tag_name == "button"
+                    || (tag_name == "input"
+                        && attributes.get("type").is_some_and(|t| {
+                            matches!(t.to_ascii_lowercase().as_str(), "button" | "submit" | "reset")
+                        }));
+                style.background_color = if button_like {
+                    rustkit_css::Color::new(239, 239, 239, 1.0)
+                } else {
+                    rustkit_css::Color::WHITE
+                };
                 if tag_name == "textarea" {
                     style.font_family = "monospace".to_string();
                 }

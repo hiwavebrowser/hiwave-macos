@@ -12180,11 +12180,9 @@ impl DisplayList {
                     } else {
                         Color::BLACK
                     },
-                    background_color: if bg_color.a > 0.0 {
-                        bg_color
-                    } else {
-                        Color::new(239, 239, 239, 1.0)
-                    },
+                    // ButtonFace comes from the UA style (engine), so an
+                    // authored `transparent` survives here (CH2.B3).
+                    background_color: bg_color,
                     border_color: if border_color.a > 0.0 {
                         border_color
                     } else {
