@@ -457,3 +457,84 @@ fn a_reused_box_tree_keeps_the_before_change_values() {
         "run:opacity,start:opacity,end:opacity"
     );
 }
+
+/// `PAGE` with a second box under the hero whose `:hover` rule changes
+/// paint only: the pointer crossing it takes the restyle short path, which
+/// builds `#b` and nothing else of the page.
+const HOVER_PAGE: &str = "<!doctype html><style>body{margin:0}\
+#h{width:100px;height:100px;background:rgb(0,0,255);opacity:0;transition:opacity 100ms linear}\
+#h.on{opacity:1}\
+#b{width:100px;height:50px;color:black}#b:hover{color:red}</style><div id=h></div><div id=b>hover</div>\
+<script>var h=document.getElementById('h');window.log=[];\
+['transitionrun','transitionstart','transitionend','transitioncancel'].forEach(function(t){\
+h.addEventListener(t,function(e){log.push(e.type.slice(10)+':'+e.propertyName)})});</script>";
+
+/// Over `#b`.
+const OVER_B: (f32, f32) = (50.0, 125.0);
+
+/// Moves the pointer over `#b` and checks the restyle took the short path
+/// (a partial build of `#b` alone), so what follows tests that path.
+fn hover_b_on_the_short_path(engine: &mut Engine, view: EngineViewId) {
+    use crate::hover_restyle_tests::{hover, last_miss, skipped};
+    let before = skipped(engine, view);
+    hover(engine, view, OVER_B);
+    assert_eq!(
+        skipped(engine, view),
+        before + 1,
+        "the hover takes the short path (miss: {:?})",
+        last_miss()
+    );
+}
+
+/// A transition mid-run on `#h` survives a pointer restyle of `#b`: the
+/// two partial builds never visit `#h`, but it is still there with its
+/// style. No `transitioncancel`; the next frame is between the values;
+/// the end still fires.
+#[test]
+fn a_hover_restyle_elsewhere_keeps_a_running_transition() {
+    let (mut engine, view, _server) = load(HOVER_PAGE);
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 48, 16);
+    let before = opacity(&mut engine, view);
+    assert!(before > 0.05 && before < 0.95, "midway opacity {before}");
+    hover_b_on_the_short_path(&mut engine, view);
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity",
+        "no cancel from the hover"
+    );
+    let after = opacity(&mut engine, view);
+    assert!(
+        after > before && after < 1.0,
+        "still interpolating: {before} -> {after}"
+    );
+    pump(&mut engine, view, 160, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
+}
+
+/// A pointer restyle of `#b` keeps the before-change values of what it
+/// did not visit: a class toggle on `#h` after it still transitions from
+/// the old value instead of jumping.
+#[test]
+fn a_hover_restyle_elsewhere_keeps_the_before_change_values() {
+    let (mut engine, view, _server) = load(HOVER_PAGE);
+    pump(&mut engine, view, 32, 16);
+    hover_b_on_the_short_path(&mut engine, view);
+    run(&mut engine, view, "h.classList.add('on')");
+    pump(&mut engine, view, 48, 16);
+    let mid = opacity(&mut engine, view);
+    assert!(
+        mid > 0.05 && mid < 0.95,
+        "transitions from the kept base: {mid}"
+    );
+    pump(&mut engine, view, 160, 16);
+    assert_eq!(
+        log(&mut engine, view),
+        "run:opacity,start:opacity,end:opacity"
+    );
+}

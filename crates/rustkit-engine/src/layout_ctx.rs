@@ -99,8 +99,11 @@ impl LayoutCtx {
     ///
     /// `build` must be a complete build of the view: the transitions of
     /// every element it did not reach are cancelled when it returns, so a
-    /// build cut short would cancel what it never got to (a build that
-    /// took the kept box tree is the one known exception).
+    /// build cut short would cancel what it never got to. Two builds are
+    /// known not to be complete and are not swept: one that took the kept
+    /// box tree, and a pointer restyle's partial build
+    /// (`crate::restyle_build_active`), which skips everything that is not
+    /// under a changed element.
     pub(crate) fn with_building<R>(&self, view: BuildView, build: impl FnOnce() -> R) -> R {
         struct Restore<'a> {
             ctx: &'a LayoutCtx,
@@ -134,15 +137,20 @@ impl LayoutCtx {
             anims.last_build_clock = Some(anims.clock_ms);
             anims.begin_build();
         }
+        // A pointer restyle sets this before its builds and takes it
+        // after them: read before `build`, while it is certainly set.
+        let partial_build = crate::restyle_build_active();
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         let built = build();
         // What the build did not visit has no computed style: its
         // transitions end here. Not after a build that took the kept box
-        // tree: it visited nothing, and every element is still there.
+        // tree (it visited nothing) or a partial restyle build (it skipped
+        // what is not under a changed element): every element is still
+        // there with its style.
         if let Some(lay) = lay.as_ref() {
             let reused_tree = crate::relayout_cause::last_build_reused_tree();
-            lay.animations.borrow_mut().end_build(reused_tree);
+            lay.animations.borrow_mut().end_build(reused_tree, partial_build);
         }
         built
     }
@@ -324,13 +332,33 @@ pub(crate) struct ViewLayout {
     /// content attribute: `getAttribute("value")` is the authored default,
     /// this is the live value. Mutating the DOM instead would conflate the
     /// two and break form-reset semantics.
-    pub(crate) edit_states: RefCell<HashMap<usize, rustkit_dom::forms::TextEditState>>,
+    ///
+    /// Shared with the page's bindings (`DomBindings::share_edit_states`):
+    /// `execCommand` and the user's edit commands run on these states, so
+    /// script's undo undoes the user's typing.
+    pub(crate) edit_states: rustkit_bindings::SharedEditStates,
     /// Checkedness of the checkboxes and radio buttons a click or script
     /// has set, keyed by raw NodeId: the other half of the same side table.
     /// A control missing here is checked when it has the `checked`
     /// attribute. Script owns the state (`input.checked`); style
     /// (`:checked`), paint and form submission read it here.
     pub(crate) checked_states: RefCell<HashMap<usize, bool>>,
+    /// The `<select>` drop-down open in this view, if one is
+    /// (`select_popup`). Its commands follow the page's in the display list.
+    pub(crate) select_popup: RefCell<Option<crate::select_popup::SelectPopup>>,
+    /// The press that closed a drop-down: its release is the popup's too,
+    /// and goes nowhere on the page.
+    pub(crate) select_popup_release: Cell<bool>,
+    /// The press that opened the drop-down is still down: its release on
+    /// an option picks it (press, drag, release), anywhere else it is the
+    /// page's and the popup stays open.
+    pub(crate) select_popup_opening_press: Cell<bool>,
+    /// How many commands at the end of the view's display list are the
+    /// popup's (0 when none).
+    pub(crate) select_popup_painted: Cell<usize>,
+    /// Type-to-select on a focused, closed drop-down: the select (raw
+    /// NodeId) and what has been typed at it.
+    pub(crate) select_typeahead: RefCell<(usize, crate::select_popup::TypeAhead)>,
     /// Where script scrolled this view's elements (shared with the bindings).
     pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.
@@ -364,6 +392,18 @@ pub(crate) struct ViewLayout {
     /// with the bindings), overlaid above the CSS animations, and the
     /// engine's CSS animations as script sees them.
     pub(crate) animated: rustkit_bindings::SharedAnimatedStyles,
+    /// CH2.E7: the `overflow: auto` scrollers the last layout gave a styled
+    /// bar (raw NodeId → vertical, horizontal), and whether the viewport
+    /// had one. The next layout starts from them, so a relayout does not
+    /// pay the overflow pass again, and a bar stays once shown, as in
+    /// Chrome. Cleared with the document.
+    pub(crate) scrollbar_marks: RefCell<HashMap<usize, (bool, bool)>>,
+    pub(crate) root_scrollbar: Cell<bool>,
+    /// How many layout passes this view's builds have run in all (one per
+    /// build, or more while styled bars appear or go), and how many builds
+    /// ran them. Read by tests to pin that a relayout takes one pass.
+    pub(crate) layout_passes: Cell<u32>,
+    pub(crate) layout_builds: Cell<u32>,
 }
 
 /// What `getComputedStyle` reads for an element with no layout box

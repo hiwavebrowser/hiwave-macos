@@ -497,3 +497,97 @@ fn a_quoted_name_runs() {
         assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.1", "{css}");
     }
 }
+
+/// A box under the hero whose `:hover` rule changes paint only: the
+/// pointer crossing it takes the restyle short path, which builds `#b`
+/// and nothing else of the page.
+const HOVER_B_CSS: &str = "#b{width:100px;height:50px;color:black}#b:hover{color:red}";
+const HOVER_B_HTML: &str = "<div id=b>hover</div>";
+
+/// Over `#b` (under the 100px hero).
+const OVER_B: (f32, f32) = (50.0, 125.0);
+
+/// Moves the pointer over `#b` and checks the restyle took the short path
+/// (a partial build of `#b` alone), so what follows tests that path.
+fn hover_b_on_the_short_path(engine: &mut Engine, view: EngineViewId) {
+    use crate::hover_restyle_tests::{hover, last_miss, skipped};
+    let before = skipped(engine, view);
+    hover(engine, view, OVER_B);
+    assert_eq!(
+        skipped(engine, view),
+        before + 1,
+        "the hover takes the short path (miss: {:?})",
+        last_miss()
+    );
+}
+
+/// The angle of a `matrix(a, b, ...)` rotation, in degrees within [0, 360).
+fn rotation_deg(matrix: &str) -> f64 {
+    assert!(matrix.starts_with("matrix("), "a matrix: {matrix}");
+    let m: Vec<f64> = matrix
+        .trim_start_matches("matrix(")
+        .trim_end_matches(')')
+        .split(',')
+        .map(|c| c.trim().parse().unwrap())
+        .collect();
+    m[1].atan2(m[0]).to_degrees().rem_euclid(360.0)
+}
+
+/// An infinite spinner elsewhere on the page keeps turning through a
+/// pointer restyle of `#b`: the two partial builds never visit `#h`, but
+/// it is still there with its style. No `animationcancel`, no second
+/// `animationstart`, no restart from the first frame: its elapsed time
+/// keeps growing and the first `animationiteration` comes at 1s.
+#[test]
+fn a_hover_restyle_elsewhere_keeps_a_spinner_turning() {
+    let (mut engine, view, _server) = load(&format!(
+        "{}{HOVER_B_HTML}",
+        page(&format!(
+            "#h{{animation:spin 1s linear infinite}}@keyframes spin{{to{{transform:rotate(360deg)}}}}{HOVER_B_CSS}"
+        ))
+    ));
+    pump(&mut engine, view, 250, 50);
+    let quarter = rotation_deg(&computed(&mut engine, view, "transform"));
+    assert!((quarter - 90.0).abs() < 5.0, "a quarter turn: {quarter}");
+    hover_b_on_the_short_path(&mut engine, view);
+    pump(&mut engine, view, 50, 50);
+    assert_eq!(log(&mut engine, view), "start:spin@0", "no cancel, no restart");
+    let after = rotation_deg(&computed(&mut engine, view, "transform"));
+    assert!(
+        (after - 108.0).abs() < 5.0,
+        "kept turning from the quarter: {quarter} -> {after}"
+    );
+    pump(&mut engine, view, 800, 50);
+    assert_eq!(
+        log(&mut engine, view),
+        "start:spin@0,iteration:spin@1",
+        "the first turn ends 1s after the start, not after the hover"
+    );
+}
+
+/// A finite `forwards` animation mid-run survives the same pointer
+/// restyle: no cancel, the next frame is a fresh one between the values,
+/// and the end still fires once.
+#[test]
+fn a_hover_restyle_elsewhere_keeps_a_running_animation() {
+    let (mut engine, view, _server) = load(&format!(
+        "{}{HOVER_B_HTML}",
+        page(&format!(
+            "#h{{opacity:0;animation:fade 200ms linear forwards}}{FADE}{HOVER_B_CSS}"
+        ))
+    ));
+    pump(&mut engine, view, 100, 10);
+    let before = opacity(&mut engine, view);
+    assert!(before > 0.2 && before < 0.8, "midway opacity {before}");
+    hover_b_on_the_short_path(&mut engine, view);
+    pump(&mut engine, view, 16, 16);
+    assert_eq!(log(&mut engine, view), "start:fade@0", "no cancel, no restart");
+    let after = opacity(&mut engine, view);
+    assert!(
+        after > before && after < 1.0,
+        "fresh frame: {before} -> {after}"
+    );
+    pump(&mut engine, view, 200, 16);
+    assert_eq!(opacity(&mut engine, view), 1.0);
+    assert_eq!(log(&mut engine, view), "start:fade@0,end:fade@0.2");
+}

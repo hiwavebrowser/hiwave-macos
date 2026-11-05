@@ -43,6 +43,25 @@ const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
 /// # Thread Safety
 ///
 /// This type is NOT Send or Sync. All operations must be performed on the main thread.
+/// What the browser chrome has not been told yet about the page on
+/// screen (CH2.E9): the committed URL (after any redirect), the title, and
+/// load start and end. Taken by [`RustKitView::take_chrome_updates`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ChromeUpdates {
+    /// The URL the page committed, when it changed. Only web and file
+    /// URLs: a document the app loads itself (New Tab, about) keeps the
+    /// address the app gave it.
+    pub url: Option<String>,
+    /// The document title, when it changed.
+    pub title: Option<String>,
+    /// A load started since the last take.
+    pub started: bool,
+    /// The load state now, when it changed: `Some(false)` once it ended.
+    pub loading: Option<bool>,
+    /// The URL of a load that completed since the last take (history).
+    pub finished: Option<String>,
+}
+
 pub struct RustKitView {
     /// Commands in, events out. Applied by [`Self::submit`] on this thread.
     /// `None` when the page runs on the content thread.
@@ -73,6 +92,10 @@ pub struct RustKitView {
     current_url: RefCell<Option<String>>,
     /// Current title (cached).
     current_title: RefCell<Option<String>>,
+    /// What the chrome has not been told yet (CH2.E9).
+    chrome_updates: RefCell<ChromeUpdates>,
+    /// What the page posted on `window.ipc`, in order (CH2.E9).
+    ipc_inbox: RefCell<Vec<String>>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -83,6 +106,10 @@ pub struct RustKitView {
     /// reported it (`PageEvent::Focused`). With the page on its own thread,
     /// the window cannot ask and wait for the answer.
     page_focused: std::cell::Cell<bool>,
+    /// Whether that focused element is a text field, from the page's last
+    /// `PageEvent::TextFocused` (the editing chords go to the page only
+    /// then).
+    page_text_focused: std::cell::Cell<bool>,
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
@@ -344,10 +371,13 @@ impl RustKitView {
             view_id,
             current_url: RefCell::new(None),
             current_title: RefCell::new(None),
+            chrome_updates: RefCell::new(ChromeUpdates::default()),
+            ipc_inbox: RefCell::new(Vec::new()),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
             page_focused: std::cell::Cell::new(false),
+            page_text_focused: std::cell::Cell::new(false),
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
@@ -632,6 +662,27 @@ impl RustKitView {
     /// current history entry when it is loaded, as in Chrome.
     /// The URL, and whether the user activated the navigation (a click or
     /// a form submit) rather than the page's script.
+    /// What the chrome must be told since the last call (CH2.E9).
+    /// Filled from the content thread's events, so only with the page on
+    /// its own thread (the default); flag off the events are dropped.
+    pub fn take_chrome_updates(&self) -> ChromeUpdates {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.chrome_updates.borrow_mut())
+    }
+
+    /// The messages the page posted with `window.ipc.postMessage` since
+    /// the last call, oldest first (CH2.E9). Content thread only. The app
+    /// must hand these to its command handler only for a view showing the
+    /// app's own documents (chrome, shelf): a web page can post here too.
+    pub fn take_ipc_messages(&self) -> Vec<String> {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.ipc_inbox.borrow_mut())
+    }
+
     pub fn take_script_navigation(&self) -> Option<(String, bool)> {
         if self.content.is_some() {
             self.harvest();
@@ -657,6 +708,21 @@ impl RustKitView {
             return self.page_focused.get();
         }
         self.ask(|reply| PageCmd::Input(PageInput::HasFocus { reply }))
+            .unwrap_or(false)
+    }
+
+    /// Whether the focused content element is a text field: a text
+    /// input, a textarea or editable content. Not a link, a button or a
+    /// `<select>`, whose Cmd chords stay menu shortcuts.
+    pub fn has_focused_text_control(&self) -> bool {
+        if self.content.is_some() {
+            // As has_focused_element: the page's last report, and ask again.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::HasTextFocus { reply }));
+            self.harvest();
+            return self.page_focused.get() && self.page_text_focused.get();
+        }
+        self.ask(|reply| PageCmd::Input(PageInput::HasTextFocus { reply }))
             .unwrap_or(false)
     }
 
@@ -768,6 +834,7 @@ impl RustKitView {
             self.accepted_nav.set(thread.last_nav_id());
             // The new document has nothing focused until it says otherwise.
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             self.live_clock.set(Instant::now());
             return Ok(());
         }
@@ -919,6 +986,7 @@ impl RustKitView {
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             *self.loading.borrow_mut() = true;
             self.live_clock.set(Instant::now());
             return;
@@ -1188,12 +1256,31 @@ impl RustKitView {
                     *self.latest_commit.borrow_mut() = Some(commit);
                 }
                 PageEvent::Title { text, .. } => {
+                    self.chrome_updates.borrow_mut().title = Some(text.clone());
                     *self.current_title.borrow_mut() = Some(text);
                 }
                 PageEvent::Url { url, .. } => {
+                    if shown_in_address_bar(&url) {
+                        self.chrome_updates.borrow_mut().url = Some(url.to_string());
+                    }
                     *self.current_url.borrow_mut() = Some(url.to_string());
                 }
                 PageEvent::LoadState { state, .. } => {
+                    let mut updates = self.chrome_updates.borrow_mut();
+                    match &state {
+                        LoadState::Started => {
+                            updates.started = true;
+                            updates.loading = Some(true);
+                        }
+                        LoadState::Complete => {
+                            updates.loading = Some(false);
+                            let url = self.current_url.borrow().clone();
+                            if let Some(url) = url.filter(|u| Url::parse(u).is_ok_and(|u| shown_in_address_bar(&u))) {
+                                updates.finished = Some(url);
+                            }
+                        }
+                        LoadState::Failed { .. } => updates.loading = Some(false),
+                    }
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
                 PageEvent::NavigateRequested {
@@ -1205,6 +1292,8 @@ impl RustKitView {
                     *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
+                PageEvent::TextFocused(text) => self.page_text_focused.set(text),
+                PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
                 PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
@@ -1229,14 +1318,23 @@ impl RustKitView {
     }
 }
 
+/// A URL the address bar and the tab model take from the page. Documents
+/// the app loads itself (New Tab, about, report) commit as `about:` or
+/// `data:` URLs, and their tab keeps the address the app gave it.
+fn shown_in_address_bar(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "file")
+}
+
 fn stale(accepted: u64, event: &PageEvent) -> bool {
     let nav_id = match event {
         PageEvent::Title { nav_id, .. }
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
-        | PageEvent::NavigateRequested { nav_id, .. } => *nav_id,
+        | PageEvent::NavigateRequested { nav_id, .. }
+        | PageEvent::Ipc { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
+        | PageEvent::TextFocused(_)
         | PageEvent::Cursor(_)
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
@@ -1756,6 +1854,108 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         assert!(started.elapsed() < Duration::from_secs(5));
         let title = view.execute_script_sync("document.title").unwrap_or_default();
         assert!(title.contains("new"), "document.title = {title:?}");
+    }
+
+    /// `/start` redirects (302) to `/final`, which has a title.
+    fn redirect_server() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    if path == "/start" {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        return;
+                    }
+                    let body = "<title>final</title><p>here</p>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// CH2.E9: on macOS nothing read the page's URL, title or load events,
+    /// so the address bar kept the typed URL after a redirect and the tab
+    /// never learned its title or that the load had ended.
+    #[test]
+    fn content_thread_the_chrome_is_told_the_committed_url_title_and_load_end() {
+        let view = content_view();
+        let base = redirect_server();
+        load_and_settle(&view, &format!("{base}start"));
+        let updates = view.take_chrome_updates();
+        let committed = format!("{base}final");
+        assert_eq!(updates.url.as_deref(), Some(committed.as_str()), "{updates:?}");
+        assert_eq!(updates.title.as_deref(), Some("final"), "{updates:?}");
+        assert!(updates.started, "{updates:?}");
+        assert_eq!(updates.loading, Some(false), "{updates:?}");
+        assert_eq!(updates.finished.as_deref(), Some(committed.as_str()), "{updates:?}");
+        assert_eq!(view.take_chrome_updates(), ChromeUpdates::default(), "reported twice");
+    }
+
+    /// CH2.E9: the chrome's `window.ipc.postMessage` reaches the window.
+    #[test]
+    fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
+        let view = content_view();
+        view.load_html_internal(
+            "<p>chrome</p><script>window.ipc.postMessage(JSON.stringify({cmd: 'navigate', url: 'https://example.com/'}));\
+             window.ipc.postMessage({cmd: 'get_version'});</script>",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < 2 {
+            assert!(Instant::now() < deadline, "the window got {got:?}");
+            wake(&view);
+            got.extend(view.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            got,
+            vec![
+                r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string(),
+                r#"{"cmd":"get_version"}"#.to_string(),
+            ]
+        );
+    }
+
+    /// A document the app loads itself keeps the address the app gave it.
+    #[test]
+    fn content_thread_an_app_document_reports_no_url() {
+        let view = content_view();
+        view.load_html_internal("<title>New Tab</title><p>x</p>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.latest_commit.borrow().is_none() {
+            assert!(Instant::now() < deadline, "the document never committed");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let updates = view.take_chrome_updates();
+        assert_eq!(updates.url, None, "{updates:?}");
+        assert_eq!(updates.title.as_deref(), Some("New Tab"), "{updates:?}");
     }
 
     /// Answers every request with `body` at once and logs its path and
