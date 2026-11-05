@@ -1,0 +1,468 @@
+//! The document selection and mouse selection (CH2.E2).
+//!
+//! One selection per view: an anchor and a focus, each a DOM node and an
+//! offset (UTF-16 code units in a text node, a child index in any other
+//! node), the same boundary points script sees through `getSelection()`.
+//! The page's `Selection` (rustkit-bindings, dom.rs) and the engine's copy
+//! here are kept in step: a drag moves both (`set_doc_selection`), and a
+//! script's change reaches the engine when script settles
+//! (`follow_script_selection`).
+//!
+//! Painting: `selection_paint` turns the selection into the selected
+//! characters of each text node, in the white-space-collapsed characters
+//! the layout's text runs are made of, and the display list paints them
+//! behind the glyphs (`DisplayList::build_with_selection`). A selection
+//! change builds the list again over the same boxes; nothing is laid out.
+//!
+//! Text controls keep their own selection in their edit state
+//! (`TextEditState`); a press or drag in a focused `<input>` or
+//! `<textarea>` moves that one instead.
+
+use super::*;
+use rustkit_layout::collapse_map;
+
+/// A boundary point: a node and an offset in it (DOM §5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocPoint {
+    pub node: usize,
+    pub offset: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocSelection {
+    pub anchor: DocPoint,
+    pub focus: DocPoint,
+}
+
+/// What a drag with the button held moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectDrag {
+    /// The document selection, from this anchor.
+    Text { anchor: DocPoint },
+    /// A text control's selection, from this character.
+    Control { node: usize, anchor: usize },
+}
+
+/// The UTF-16 offset of character `index` of `text`.
+fn utf16_of_char(text: &str, index: usize) -> usize {
+    text.chars().take(index).map(char::len_utf16).sum()
+}
+
+/// The character at UTF-16 offset `offset` of `text` (a split surrogate
+/// pair rounds down).
+fn char_of_utf16(text: &str, offset: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in text.chars().enumerate() {
+        if units + c.len_utf16() > offset {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    text.chars().count()
+}
+
+fn text_of(node: &Node) -> Option<&str> {
+    match &node.node_type {
+        NodeType::Text(t) => Some(t.as_str()),
+        _ => None,
+    }
+}
+
+/// Where a word starts and ends around character `index` of `text`: a run
+/// of word characters (letters, digits, `_`), a run of white space, or one
+/// other character.
+pub(crate) fn word_around(text: &str, index: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let at = index.min(chars.len() - 1);
+    let class = |c: char| -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let k = class(chars[at]);
+    if k == 2 {
+        return (at, at + 1);
+    }
+    let mut start = at;
+    while start > 0 && class(chars[start - 1]) == k {
+        start -= 1;
+    }
+    let mut end = at + 1;
+    while end < chars.len() && class(chars[end]) == k {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Elements whose box is inline in the UA sheet: a triple-click selects
+/// the nearest ancestor that is none of these.
+const INLINE_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "kbd", "label", "mark", "q",
+    "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var", "wbr",
+];
+
+/// Tree order of every node under `root`: its preorder number and the last
+/// preorder number in its subtree.
+fn tree_order(root: &Rc<Node>) -> HashMap<usize, (usize, usize)> {
+    fn walk(node: &Rc<Node>, next: &mut usize, out: &mut HashMap<usize, (usize, usize)>) {
+        let me = *next;
+        *next += 1;
+        for child in node.children() {
+            walk(&child, next, out);
+        }
+        out.insert(node.id.raw(), (me, *next - 1));
+    }
+    let mut out = HashMap::new();
+    walk(root, &mut 0, &mut out);
+    out
+}
+
+/// A boundary point as a key that sorts in tree order: the preorder number
+/// of the node it is in front of (or of the text node it is in) and a
+/// character offset in that text node.
+fn point_key(doc: &Document, order: &HashMap<usize, (usize, usize)>, p: DocPoint) -> Option<(usize, usize)> {
+    let node = doc.get_node(rustkit_dom::NodeId::new(p.node))?;
+    let &(me, last) = order.get(&p.node)?;
+    if let Some(text) = text_of(&node) {
+        return Some((me, char_of_utf16(text, p.offset)));
+    }
+    match node.children().get(p.offset) {
+        Some(child) => Some((order.get(&child.id.raw())?.0, 0)),
+        None => Some((last + 1, 0)),
+    }
+}
+
+/// The view's collapsible flag per text node, from the runs' sources.
+fn collapsible_by_node(tree: &LayoutBox, out: &mut HashMap<usize, bool>) {
+    for src in &tree.text_sources {
+        out.insert(src.node, src.collapsible);
+    }
+    for child in &tree.children {
+        collapsible_by_node(child, out);
+    }
+}
+
+impl Engine {
+    /// The view's document selection as `(anchor node, anchor offset, focus
+    /// node, focus offset)`, offsets as script sees them.
+    pub fn document_selection(&self, id: EngineViewId) -> Option<(usize, usize, usize, usize)> {
+        let sel = self.views.get(&id)?.doc_selection?;
+        Some((sel.anchor.node, sel.anchor.offset, sel.focus.node, sel.focus.offset))
+    }
+
+    /// The selected characters of each text node, as the display list
+    /// paints them (see the module comment). Empty without a selection.
+    pub(crate) fn selection_paint(&self, id: EngineViewId, root: &LayoutBox) -> HashMap<usize, (usize, usize)> {
+        let mut out = HashMap::new();
+        let Some(view) = self.views.get(&id) else {
+            return out;
+        };
+        let (Some(sel), Some(doc)) = (view.doc_selection, view.document.as_ref()) else {
+            return out;
+        };
+        if sel.anchor == sel.focus {
+            return out;
+        }
+        let order = tree_order(doc.root());
+        let (Some(a), Some(f)) = (point_key(doc, &order, sel.anchor), point_key(doc, &order, sel.focus)) else {
+            return out;
+        };
+        let (start, end) = if f < a { (f, a) } else { (a, f) };
+        let mut collapsible = HashMap::new();
+        collapsible_by_node(root, &mut collapsible);
+        for (node, flag) in collapsible {
+            let Some(&(me, _)) = order.get(&node) else {
+                continue;
+            };
+            if me < start.0 || me > end.0 {
+                continue;
+            }
+            let Some(dom) = doc.get_node(rustkit_dom::NodeId::new(node)) else {
+                continue;
+            };
+            let Some(text) = text_of(&dom) else {
+                continue;
+            };
+            let len = text.chars().count();
+            let from = if me == start.0 { start.1.min(len) } else { 0 };
+            let to = if me == end.0 { end.1.min(len) } else { len };
+            if from >= to {
+                continue;
+            }
+            let map = collapse_map(text, flag);
+            if map[from] < map[to] {
+                out.insert(node, (map[from], map[to]));
+            }
+        }
+        out
+    }
+
+    /// The text position under (or nearest to) a VIEWPORT point.
+    fn text_point_at(&self, id: EngineViewId, viewport_x: f32, viewport_y: f32) -> Option<DocPoint> {
+        let view = self.views.get(&id)?;
+        let layout = view.layout.as_ref()?;
+        let hit = layout.text_position_at(viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1)?;
+        let node = view.document.as_ref()?.get_node(rustkit_dom::NodeId::new(hit.node))?;
+        let text = text_of(&node)?;
+        // The first DOM character that collapses to the hit's position.
+        let map = collapse_map(text, hit.collapsible);
+        let index = map.iter().position(|&m| m >= hit.offset).unwrap_or(map.len() - 1);
+        Some(DocPoint { node: hit.node, offset: utf16_of_char(text, index) })
+    }
+
+    /// Move the document selection (`None` clears it): the page's
+    /// `getSelection()` follows and hears `selectionchange`, and the view
+    /// paints it.
+    pub(crate) fn set_doc_selection(&mut self, id: EngineViewId, sel: Option<DocSelection>) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        if view.doc_selection == sel {
+            return;
+        }
+        view.doc_selection = sel;
+        if let Some(bindings) = view.bindings.as_ref() {
+            let ends = sel.map(|s| (s.anchor.node, s.anchor.offset, s.focus.node, s.focus.offset));
+            if let Err(e) = bindings.set_selection(ends) {
+                debug!(?id, error = %e, "selectionchange listener threw");
+            }
+        }
+        self.repaint_selection(id);
+    }
+
+    /// Build the display list again over the same boxes, for a selection
+    /// that moved.
+    pub(crate) fn repaint_selection(&mut self, id: EngineViewId) {
+        if self.views.get(&id).is_some_and(|v| v.layout.is_some()) {
+            self.relist_after_element_scroll(id);
+            if let Err(e) = self.render(id) {
+                debug!(?id, error = %e, "render after a selection change failed");
+            }
+        }
+    }
+
+    /// Take a selection script moved since the engine last looked. Returns
+    /// true when it changed what is painted.
+    pub(crate) fn follow_script_selection(&mut self, id: EngineViewId) -> bool {
+        let Some(moved) = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .and_then(|b| b.take_selection_change())
+        else {
+            return false;
+        };
+        let sel = moved.map(|(a, ao, f, fo)| DocSelection {
+            anchor: DocPoint { node: a, offset: ao },
+            focus: DocPoint { node: f, offset: fo },
+        });
+        let Some(view) = self.views.get_mut(&id) else {
+            return false;
+        };
+        let changed = view.doc_selection != sel;
+        view.doc_selection = sel;
+        changed
+    }
+
+    /// The focused text control (raw id), when it is an `<input>` or
+    /// `<textarea>` with an edit state.
+    fn focused_text_control(&self, id: EngineViewId) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let raw = view.lay.focused_node.get()?.raw();
+        view.lay.edit_states.borrow().contains_key(&raw).then_some(raw)
+    }
+
+    /// The character of the focused text control's value nearest to a
+    /// VIEWPORT point: lines at `\n`, characters measured in the control's
+    /// font from the start of its content box.
+    fn control_char_at(&self, id: EngineViewId, raw: usize, viewport_x: f32, viewport_y: f32) -> Option<usize> {
+        let view = self.views.get(&id)?;
+        let tree = view.layout.as_ref()?;
+        let control = box_of_node(tree, raw)?;
+        let value = view.lay.edit_states.borrow().get(&raw)?.value();
+        let style = &control.style;
+        let font_size = match style.font_size {
+            rustkit_css::Length::Px(px) => px,
+            _ => 13.333,
+        };
+        let content = control.dimensions.content;
+        let (x, y) = (viewport_x + view.scroll_offset.0, viewport_y + view.scroll_offset.1);
+        let line_height = font_size * 1.2;
+        let lines: Vec<&str> = value.split('\n').collect();
+        let line = if lines.len() > 1 {
+            (((y - content.y) / line_height).floor().max(0.0) as usize).min(lines.len() - 1)
+        } else {
+            0
+        };
+        let before: usize = lines[..line].iter().map(|l| l.chars().count() + 1).sum();
+        let mut left = content.x;
+        let mut index = 0;
+        for c in lines[line].chars() {
+            let adv = rustkit_layout::measure_text_advanced(
+                &c.to_string(),
+                &style.font_family,
+                font_size,
+                style.font_weight,
+                style.font_style,
+            )
+            .width;
+            if x < left + adv / 2.0 {
+                break;
+            }
+            left += adv;
+            index += 1;
+        }
+        Some(before + index)
+    }
+
+    /// The press's default action for the selection (after the focus has
+    /// moved): in a focused text control, place the caret, select a word
+    /// (`clicks == 2`) or everything (3), or extend (`shift`); elsewhere
+    /// the same for the document selection, a triple-click selecting the
+    /// paragraph. A drag from here moves what the press set.
+    pub(crate) fn press_selects(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, clicks: u32, shift: bool) {
+        let hit = self.element_at_point(id, viewport_x, viewport_y);
+        if let Some(raw) = self.focused_text_control(id).filter(|raw| hit == Some(*raw)) {
+            let Some(at) = self.control_char_at(id, raw, viewport_x, viewport_y) else {
+                return;
+            };
+            let Some(view) = self.views.get_mut(&id) else {
+                return;
+            };
+            let (anchor, start, end) = {
+                let states = view.lay.edit_states.borrow();
+                let Some(state) = states.get(&raw) else {
+                    return;
+                };
+                let value = state.value();
+                let sel = state.selection();
+                let (anchor, start, end) = match clicks {
+                    2 => {
+                        let (s, e) = word_around(&value, at);
+                        (s, s, e)
+                    }
+                    n if n >= 3 => (0, 0, value.chars().count()),
+                    _ if shift => {
+                        let anchor = if at < sel.start { sel.end } else { sel.start };
+                        (anchor, anchor.min(at), anchor.max(at))
+                    }
+                    _ => (at, at, at),
+                };
+                state.set_selection(start, end);
+                (anchor, start, end)
+            };
+            let _ = (start, end);
+            view.select_drag = Some(SelectDrag::Control { node: raw, anchor });
+            view.doc_selection = None;
+            if let Some(bindings) = view.bindings.as_ref() {
+                let _ = bindings.set_selection(None);
+            }
+            if let Err(e) = self.relayout_for(id, RelayoutCause::HoverOrFocus) {
+                debug!(?id, error = %e, "relayout after a press in a text control failed");
+            }
+            return;
+        }
+        let Some(point) = self.text_point_at(id, viewport_x, viewport_y) else {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.select_drag = None;
+            }
+            self.set_doc_selection(id, None);
+            return;
+        };
+        let sel = match clicks {
+            2 => self.word_selection(id, point),
+            n if n >= 3 => self.paragraph_selection(id, point),
+            _ => {
+                let anchor = match self.views.get(&id).and_then(|v| v.doc_selection) {
+                    Some(old) if shift => old.anchor,
+                    _ => point,
+                };
+                Some(DocSelection { anchor, focus: point })
+            }
+        };
+        if let Some(view) = self.views.get_mut(&id) {
+            view.select_drag = sel.map(|s| SelectDrag::Text { anchor: s.anchor });
+        }
+        self.set_doc_selection(id, sel);
+    }
+
+    /// The word around a text position.
+    fn word_selection(&self, id: EngineViewId, point: DocPoint) -> Option<DocSelection> {
+        let node = self.node(id, point.node)?;
+        let text = text_of(&node)?;
+        let (s, e) = word_around(text, char_of_utf16(text, point.offset));
+        Some(DocSelection {
+            anchor: DocPoint { node: point.node, offset: utf16_of_char(text, s) },
+            focus: DocPoint { node: point.node, offset: utf16_of_char(text, e) },
+        })
+    }
+
+    /// All of the block a text position is in.
+    fn paragraph_selection(&self, id: EngineViewId, point: DocPoint) -> Option<DocSelection> {
+        let mut block = self.node(id, point.node)?.parent()?;
+        loop {
+            let inline = match &block.node_type {
+                NodeType::Element { tag_name, .. } => INLINE_TAGS.contains(&tag_name.to_ascii_lowercase().as_str()),
+                _ => false,
+            };
+            if !inline {
+                break;
+            }
+            match block.parent() {
+                Some(p) => block = p,
+                None => break,
+            }
+        }
+        let raw = block.id.raw();
+        Some(DocSelection {
+            anchor: DocPoint { node: raw, offset: 0 },
+            focus: DocPoint { node: raw, offset: block.children().len() },
+        })
+    }
+
+    /// The pointer moved with the button held: the selection the press
+    /// started follows it.
+    pub(crate) fn drag_selects(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        if !view.primary_button_down {
+            return;
+        }
+        match view.select_drag {
+            Some(SelectDrag::Text { anchor }) => {
+                if let Some(focus) = self.text_point_at(id, viewport_x, viewport_y) {
+                    self.set_doc_selection(id, Some(DocSelection { anchor, focus }));
+                }
+            }
+            Some(SelectDrag::Control { node, anchor }) => {
+                let Some(at) = self.control_char_at(id, node, viewport_x, viewport_y) else {
+                    return;
+                };
+                let moved = {
+                    let states = view.lay.edit_states.borrow();
+                    let Some(state) = states.get(&node) else {
+                        return;
+                    };
+                    let (s, e) = (anchor.min(at), anchor.max(at));
+                    let before = state.selection().normalize();
+                    state.set_selection(s, e);
+                    (before.start, before.end) != (s, e)
+                };
+                if moved {
+                    if let Err(e) = self.relayout_for(id, RelayoutCause::HoverOrFocus) {
+                        debug!(?id, error = %e, "relayout after a drag in a text control failed");
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+}
