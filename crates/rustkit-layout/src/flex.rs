@@ -2889,8 +2889,14 @@ fn align_cross_axis(line: &mut FlexLine, align_items: AlignItems) {
             continue;
         }
 
+        // Negative free space is kept: `flex-end` and `center` are unsafe
+        // unless the author writes `safe` (CSS Box Alignment 3 §4.4), so an
+        // item taller than its line overflows above it (end) or on both
+        // sides (center). Clamping at 0 pinned it to the start: a 40px item
+        // centred in a 20px row sat at 0, Chromium -10 (CH2.B9). `safe` is
+        // not parsed (`safe center` falls back to `stretch`).
         let outer_cross = item.cross_size + item.cross_margin_start + item.cross_margin_end;
-        let free_space = (line.cross_size - outer_cross).max(0.0);
+        let free_space = line.cross_size - outer_cross;
 
         item.cross_position = match align {
             AlignItems::FlexStart => item.cross_margin_start,
@@ -3408,6 +3414,12 @@ fn get_intrinsic_cross_size(layout_box: &crate::LayoutBox, main_axis: Axis) -> f
         // an empty `<div style="background:…">` in a row 18.4 tall, and its
         // auto-height row with it.
         _ if layout_box.children.is_empty() => 0.0,
+        // Nor has a flex or grid container: its items are blockified and it
+        // holds no line box, so there is no strut to floor it by. Its size
+        // is its items'. The floor made the chrome tab (a flex item holding
+        // a 12px title and a 16px close button) 30 tall against Chromium's
+        // 28, and centred the button 1px low (CH2.B9).
+        _ if layout_box.style.display.is_flex() || layout_box.style.display.is_grid() => 0.0,
         _ => {
             // For block/inline boxes, provide a minimum based on line height
             // This ensures flex items have non-zero cross size
