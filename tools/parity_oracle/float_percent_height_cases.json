@@ -38,12 +38,14 @@
   {
    "name": "float-in-max-height-parent",
    "html": "<!doctype html><html><head><style>body{margin:0}#p{height:200px;max-height:150px;width:300px}#f{float:left;width:50px;height:100%}</style></head><body><div id=p><div id=f></div></div></body></html>",
-   "chrome_boxes": "p:0:0:300:150 f:0:0:50:150"
+   "chrome_boxes": "p:0:0:300:150 f:0:0:50:150",
+   "known": "every box: a percentage base is the parent's specified height, not its max-height-clamped used height (200 vs 150) - not float-specific"
   },
   {
    "name": "float-min-height-pct",
    "html": "<!doctype html><html><head><style>body{margin:0}#p{height:200px;width:300px}#f{float:left;width:50px;min-height:25%}</style></head><body><div id=p><div id=f></div></div></body></html>",
-   "chrome_boxes": "p:0:0:300:200 f:0:0:50:50"
+   "chrome_boxes": "p:0:0:300:200 f:0:0:50:50",
+   "known": "every box: min-height % resolves against the viewport (calculate_block_height min-height arm), not the containing block - not float-specific"
   }
  ],
  "chrome": "143.0.7499.4"
