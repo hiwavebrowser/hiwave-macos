@@ -299,6 +299,8 @@ mod select_popup;
 mod select_popup_engine;
 #[cfg(test)]
 mod select_popup_engine_tests;
+#[cfg(test)]
+mod select_popup_overlay_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
@@ -20451,6 +20453,8 @@ impl Engine {
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
                 input: view.input_pending.take(),
                 canvas,
+                // Stub (red): not reported yet.
+                modal_popup: false,
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };

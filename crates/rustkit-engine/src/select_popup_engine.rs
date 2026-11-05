@@ -171,6 +171,8 @@ impl Engine {
             family: b.style.font_family.clone(),
             weight: b.style.font_weight.0,
             color: if b.style.color.a > 0.0 { b.style.color } else { rustkit_css::Color::BLACK },
+            // Stub (red): always white.
+            background: rustkit_css::Color::WHITE,
         };
         let (family, size, weight) = (font.family.clone(), font.size, b.style.font_weight);
         let measure = |s: &str| {

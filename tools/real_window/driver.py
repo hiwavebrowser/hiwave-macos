@@ -2268,11 +2268,104 @@ class Driver:
             self.expect(c, "%s: the band above the page column is the body colour %s" % (name, ref), not bad,
                         "y %d: %s" % (y, row))
 
+    # ── CH2.E6b: the Mode <select>'s drop-down over the page ───────────────
+
+    # 4 s after boot: open the left sidebar as its toggle does, give the
+    # Mode select's options long labels (values kept) so its drop-down is
+    # wider than the sidebar and reaches over the page column, and report
+    # the select's box and value (an IPC the driver reads from the log).
+    E6B_JS = ("setTimeout(function () { if (!sidebarOpen) toggleSidebar(); "
+              "var s = document.getElementById('modeSelector'); "
+              "Array.prototype.forEach.call(s.options, function (o) { "
+              "o.textContent = o.textContent + ' with a label long enough to reach over the page'; }); "
+              "setTimeout(function () { var r = s.getBoundingClientRect(); "
+              "sendIpc('e6b_select', { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), "
+              "h: Math.round(r.height), i: s.selectedIndex }); }, 1500); }, 4000);")
+    E6B_SELECT = (r'RustKit chrome IPC body=\{"cmd":"e6b_select","x":(-?\d+),"y":(-?\d+),"w":(\d+),"h":(\d+),"i":(\d+)')
+
+    def e6b_select_over_page(self):
+        """CH2.E6b: the RustKit chrome's Mode <select> drops down over the page column, a click on an option there picks it (set_mode), and a click on the page while it is open closes it without reaching the page."""
+        c = "e6b_select_over_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.E6B_JS}):
+            return
+        sel = self.app.wait_log(self.E6B_SELECT, 12)
+        self.expect(c, "the chrome reported the Mode select's box", bool(sel), sel.group(0) if sel else "no report")
+        if not sel:
+            return
+        sx, sy, sw, sh, shown = (int(sel.group(i)) for i in range(1, 6))
+        if not self.can_input:
+            return self.not_run(c, "open the Mode select", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        time.sleep(0.8)
+        before = self.capture(c, "before")
+        # Open it.
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, sx + sw // 2, self.TITLE_BAR + sy + sh // 2)
+        m = self.app.wait_log(self.OVERLAY, 5, log_from)
+        self.expect(c, "the open drop-down is in the chrome's region over the page column", bool(m),
+                    m.group(0) if m else "no overlay")
+        if not m:
+            return
+        x, y, w, h = (float(m.group(i)) for i in range(2, 6))
+        # The overlay is the popup cut to the page column: its top is the
+        # select's bottom, or the column's top when the popup starts above.
+        top = sy + sh
+        self.expect(c, "it hangs under the select and reaches past the sidebar",
+                    y >= top - 2 and x + w > sx + sw + 20, "box %s, select %s" % ([x, y, w, h], [sx, sy, sw, sh]))
+        time.sleep(0.5)
+        after = self.capture(c, "open")
+        if before is None or after is None:
+            self.not_run(c, "the drop-down paints over the page", self.why_not("Screen Recording"))
+        else:
+            px, py = x + min(w / 2, 60), self.TITLE_BAR + y + 4
+            self.expect(c, "before: the page is where the drop-down opens", self.green_at(before, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "open: the drop-down paints over the page there", not self.green_at(after, px, py),
+                        "at %d,%d: %s" % (px, py, after[0].getpixel((int(px * after[1]), int(py * after[1])))))
+            self.expect(c, "open: the page still shows beside it", self.green_at(after, x + w + 40, py))
+        # Pick another option on its row over the page column: rows are
+        # round(13 * 1.2 + 4) = 20 px under a 1 px border.
+        pick = 1 if shown != 1 else 0
+        value = ["essentials", "balanced", "zen"][pick]
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x + min(w / 2, 60)), int(self.TITLE_BAR + top + 1 + 20 * pick + 10))
+        ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"set_mode","mode":"(\w+)"', 3, log_from)
+        self.expect(c, "a click on an option over the page picks it (set_mode)", bool(ipc) and ipc.group(1) == value,
+                    ipc.group(0) if ipc else "no set_mode")
+        self.expect(c, "the pick closed the drop-down",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+        # Open it again, then click on the page away from it.
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, sx + sw // 2, self.TITLE_BAR + sy + sh // 2)
+        if not self.app.wait_log(self.OVERLAY, 5, log_from):
+            return self.expect(c, "the drop-down opened again", False)
+        time.sleep(0.3)
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        code, win = self.hw("window", pid)
+        self.hw("click", pid, int(win["w"] * 0.7), int(win["h"] * 0.75))
+        self.expect(c, "a click on the page while it is open closes it",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(1.0)
+        self.expect(c, "and the page does not get that click (Chromium: the press only dismisses the popup)",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark), str(self.page_clicks(mark)))
+        self.expect(c, "the mode did not change", not self.app.wait_log(r'"cmd":"set_mode"', 0.2, log_from))
+        # The next click on the page is the page's again.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(win["w"] * 0.7), int(win["h"] * 0.75))
+        self.expect(c, "once it is closed, a click on the page reaches the page",
+                    self.fixture.wait("beacon?a3-click-", 5, mark))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
               "a3c_shadow_over_page", "a3c_rounded_corner", "a3c_find_dims_page", "a3c_chrome_band",
+              "e6b_select_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
               "e4_chrome_tab",

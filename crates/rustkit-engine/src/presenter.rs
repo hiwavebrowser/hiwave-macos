@@ -80,6 +80,11 @@ pub struct FrameCommit {
     /// clear a surface that is larger than `laid_out_for`. Opaque; a
     /// transparent canvas is white.
     pub canvas: [f64; 4],
+    /// A `<select>` drop-down is open in this frame (CH2.E6b). Like the
+    /// platform popup it stands for, it takes every press while open: a
+    /// press outside it closes it and goes nowhere else, so a view with a
+    /// region (the RustKit chrome over the page) is hit everywhere.
+    pub modal_popup: bool,
 }
 
 /// The window thread's half of the engine: every NSView/HWND, every GPU
@@ -435,6 +440,7 @@ impl Presenter {
             laid_out_for: (0, 0),
             input: None,
             canvas: self.background_color,
+            modal_popup: false,
         });
         // A transparent view clears to nothing: what its document does not
         // paint shows the views below (CH3.A3c).
@@ -969,6 +975,7 @@ mod present_choice_tests {
             laid_out_for: if laid_out { (800, 600) } else { (0, 0) },
             input: None,
             canvas: [1.0, 1.0, 1.0, 1.0],
+            modal_popup: false,
         }
     }
 

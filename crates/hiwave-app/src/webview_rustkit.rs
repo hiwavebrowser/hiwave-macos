@@ -1439,7 +1439,7 @@ impl RustKitView {
         };
         let before = region.overlays().to_vec();
         let frame = commit.generation ^ (commit.nav_generation << 40);
-        let next = region.present(frame, |hole| {
+        let next = region.present(frame, false, |hole| {
             let Some(list) = commit.list.as_deref() else {
                 return Vec::new();
             };

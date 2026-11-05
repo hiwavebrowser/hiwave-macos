@@ -115,6 +115,7 @@ impl FrameRegion {
     pub fn present(
         &mut self,
         frame: u64,
+        modal: bool,
         overlays: impl FnOnce(RegionRect) -> Vec<RegionRect>,
     ) -> Option<Vec<RegionRect>> {
         let hole = self.hole?;
@@ -219,7 +220,7 @@ mod tests {
         let mut fr = FrameRegion::default();
         fr.lay_out(1280.0, 800.0, Some(HOLE));
         let menu = r(600.0, 104.0, 194.0, 100.0);
-        let region = fr.present(7, |hole| {
+        let region = fr.present(7, false, |hole| {
             assert_eq!(hole, HOLE, "the overlays are derived against the current hole");
             vec![menu]
         });
@@ -233,16 +234,16 @@ mod tests {
     fn the_frame_already_applied_is_not_derived_again() {
         let mut fr = FrameRegion::default();
         fr.lay_out(1280.0, 800.0, Some(HOLE));
-        assert!(fr.present(7, |_| vec![]).is_some());
-        assert!(fr.present(7, |_| panic!("derived twice")).is_none());
+        assert!(fr.present(7, false, |_| vec![]).is_some());
+        assert!(fr.present(7, false, |_| panic!("derived twice")).is_none());
     }
 
     #[test]
     fn a_frame_that_closes_the_menu_takes_it_out_of_the_region() {
         let mut fr = FrameRegion::default();
         fr.lay_out(1280.0, 800.0, Some(HOLE));
-        fr.present(7, |_| vec![r(600.0, 104.0, 194.0, 100.0)]);
-        let region = fr.present(8, |_| vec![]).expect("frame 8");
+        fr.present(7, false, |_| vec![r(600.0, 104.0, 194.0, 100.0)]);
+        let region = fr.present(8, false, |_| vec![]).expect("frame 8");
         assert!(!region_contains(&region, 650.0, 150.0));
         assert!(fr.overlays().is_empty());
     }
@@ -251,11 +252,11 @@ mod tests {
     fn a_new_layout_derives_the_frame_on_screen_again_against_the_new_hole() {
         let mut fr = FrameRegion::default();
         fr.lay_out(1280.0, 800.0, Some(HOLE));
-        fr.present(7, |_| vec![]);
+        fr.present(7, false, |_| vec![]);
         let narrower = r(220.0, 104.0, 760.0, 696.0);
         fr.lay_out(1280.0, 800.0, Some(narrower));
         assert_eq!(fr.hole(), Some(narrower));
-        let region = fr.present(7, |hole| {
+        let region = fr.present(7, false, |hole| {
             assert_eq!(hole, narrower);
             vec![]
         });
@@ -266,6 +267,23 @@ mod tests {
     #[test]
     fn no_region_before_the_first_layout() {
         let mut fr = FrameRegion::default();
-        assert!(fr.present(1, |_| panic!("no hole to derive against")).is_none());
+        assert!(fr.present(1, false, |_| panic!("no hole to derive against")).is_none());
+    }
+
+    // CH2.E6b: an open `<select>` drop-down takes every press, as the
+    // platform popup does: a press on the page column closes it and the
+    // page does not get it. The view is hit everywhere while it is open.
+    #[test]
+    fn a_frame_with_a_modal_popup_is_hit_over_the_whole_view() {
+        let mut fr = FrameRegion::default();
+        fr.lay_out(1280.0, 800.0, Some(HOLE));
+        let popup = r(220.0, 104.0, 164.0, 37.0);
+        let region = fr.present(7, true, |_| vec![popup]).expect("frame 7");
+        assert!(region_contains(&region, 600.0, 400.0), "the page column, away from the popup: {region:?}");
+        assert!(region_contains(&region, 1279.0, 799.0), "the far corner: {region:?}");
+        assert_eq!(fr.overlays(), &[popup], "the popup's paint over the page is still reported");
+        // Closed: the page column is the page's again.
+        let region = fr.present(8, false, |_| vec![]).expect("frame 8");
+        assert!(!region_contains(&region, 600.0, 400.0), "{region:?}");
     }
 }

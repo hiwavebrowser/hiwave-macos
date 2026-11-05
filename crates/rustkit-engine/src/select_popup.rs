@@ -213,6 +213,9 @@ pub(crate) struct PopupFont {
     pub family: String,
     pub weight: u16,
     pub color: Color,
+    /// The popup's background: the select's own `background-color` when it
+    /// has one, else white (CH2.E6b).
+    pub background: Color,
 }
 
 /// An open drop-down.
