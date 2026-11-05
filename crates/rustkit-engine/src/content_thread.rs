@@ -1444,13 +1444,13 @@ mod tests {
     /// listener calls were then cut by the navigation. Chromium dispatches
     /// one move per frame from the latest position (coalesced pointer
     /// events). A move replaces an earlier one when only input marks and
-    /// renders sit between; a press, key, click or navigation is never
-    /// passed.
+    /// renders sit between; a press, key or click is never passed. (A
+    /// navigation is not passed either; since S2's reopening the moves
+    /// ahead of one are dropped outright, the test below.)
     #[test]
     fn coalesce_keeps_only_the_latest_of_adjacent_moves() {
         let mv = |x: f32| PageCmd::Input(PageInput::MouseMove { x, y: 0.0 });
         let note = |seq| PageCmd::NoteInput { at: Instant::now(), seq };
-        let url = Url::parse("https://example.com/").unwrap();
         let batch = vec![
             note(1),
             mv(1.0),
@@ -1459,7 +1459,7 @@ mod tests {
             PageCmd::Render { every: false },
             note(3),
             mv(3.0),
-            PageCmd::Navigate { url, nav_id: 7 },
+            PageCmd::Input(PageInput::MouseDown { x: 3.0, y: 0.0 }),
         ];
         let out = coalesce(batch);
         let moves: Vec<f32> = out
@@ -1475,7 +1475,7 @@ mod tests {
             3,
             "every input mark is kept for the latency figure"
         );
-        assert!(matches!(out.last(), Some(PageCmd::Navigate { nav_id: 7, .. })), "the navigation stays last");
+        assert!(matches!(out.last(), Some(PageCmd::Input(PageInput::MouseDown { .. }))), "the press stays last");
 
         // A press between moves keeps both: the page hears where it went down.
         let batch = vec![mv(1.0), PageCmd::Input(PageInput::MouseDown { x: 1.0, y: 0.0 }), mv(2.0)];
