@@ -348,6 +348,7 @@ pub use inspector::{
 };
 pub use rustkit_bindings::MutationKind;
 mod script_net;
+mod module_prefetch;
 mod layout_ctx;
 #[cfg(test)]
 mod script_net_tests;
@@ -5686,7 +5687,7 @@ impl Engine {
         id: EngineViewId,
         base: &Url,
         policy: Option<Arc<FetchPolicy>>,
-    ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
+    ) -> Option<futures::future::LocalBoxFuture<'static, (Vec<FetchedScript>, module_prefetch::ModulePrefetch)>> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
         // Collect in document order.
@@ -5697,9 +5698,18 @@ impl Engine {
         let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool, &'static str)> =
             Vec::new();
         let mut index = 0usize;
+        // Inline import maps, for resolving the module graph prefetch.
+        let mut import_maps: Vec<String> = Vec::new();
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
                 return;
+            }
+            if node.get_attribute("src").is_none()
+                && node
+                    .get_attribute("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))
+            {
+                import_maps.push(node.text_content());
             }
             let Some(timing) = script_timing(node) else { return };
             index += 1;
@@ -5739,16 +5749,41 @@ impl Engine {
         let referrer = self.subresource_referrer(id);
         let base = base.clone();
         let inspector = self.views.get(&id).map(|v| v.inspector.clone())?;
-        Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
+        // S15: each module script's static import graph is fetched as soon
+        // as the script's source is in hand, all of it concurrently with
+        // the page's other script fetches (see `module_prefetch`). Boa
+        // takes the answers when it asks for those imports at run time.
+        let prefetch = module_prefetch::ModulePrefetch::default();
+        let (discovered, discoveries) = futures::channel::mpsc::unbounded::<module_prefetch::DiscoveredModule>();
+        let walker = match &policy {
+            Some(policy) if entries.iter().any(|(_, _, entry, is_module, _)| *is_module && entry.is_ok()) => {
+                Some(module_prefetch::walk(
+                    discoveries,
+                    prefetch.clone(),
+                    policy.clone(),
+                    loader.clone(),
+                    base.clone(),
+                    import_maps,
+                    tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                    inspector.clone(),
+                ))
+            }
+            _ => None,
+        };
+        let scripts = futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
                 let base = base.clone();
                 let inspector = inspector.clone();
+                let discovered = discovered.clone();
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
+                    let requested = match &entry {
+                        Ok((_, Body::External(url))) => Some(url.clone()),
+                        _ => None,
+                    };
                     let fetch_started = std::time::Instant::now();
                     let result = match entry {
                         Err(outcome) => Err(outcome),
@@ -5840,11 +5875,40 @@ impl Engine {
                         fetch: external.then(|| fetch_started.elapsed()),
                         arrived: external.then(std::time::Instant::now),
                     };
+                    // A module's source is in: its imports start now. An
+                    // external module's imports resolve against the URL it
+                    // was served from (its label), an inline one's against
+                    // the document.
+                    if let (true, Ok((_, text))) = (is_module, &result) {
+                        let base = match &requested {
+                            Some(_) => Url::parse(&label).ok(),
+                            None => Some(base.clone()),
+                        };
+                        if let Some(base) = base {
+                            let _ = discovered.unbounded_send(module_prefetch::DiscoveredModule {
+                                requested,
+                                base,
+                                source: text.clone(),
+                            });
+                        }
+                    }
                     (label, node_id, result, is_module, fetched)
                 }
             }))
-            .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
-            .collect::<Vec<_>>()
+            .buffered(MAX_CONCURRENT_SCRIPT_LOADS);
+        Some(
+            async move {
+                // The stream (and with it every sender) is gone once
+                // collected, which is what lets the walker finish.
+                let collect = async move { scripts.collect::<Vec<_>>().await };
+                let walk = async move {
+                    if let Some(walker) = walker {
+                        walker.await;
+                    }
+                };
+                let (scripts, ()) = futures::join!(collect, walk);
+                (scripts, prefetch)
+            }
             .boxed_local(),
         )
     }
@@ -5982,6 +6046,7 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
+        prefetch: module_prefetch::ModulePrefetch,
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
@@ -6010,6 +6075,7 @@ impl Engine {
         self.run_page_scripts_with(
             id,
             fetched,
+            &prefetch,
             budget,
             policy,
             &bindings,
@@ -6036,6 +6102,7 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
+        prefetch: &module_prefetch::ModulePrefetch,
         _budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         bindings: &DomBindings,
@@ -6285,6 +6352,7 @@ impl Engine {
                                         document,
                                         &mut count,
                                         &inspector,
+                                        Some(prefetch),
                                     ),
                                 )
                                 .await;
@@ -7390,11 +7458,12 @@ impl Engine {
         // The script budget is JavaScript time only. How long the fetches
         // took, including a fetch that outlasted the subresources, does
         // not spend it.
-        if let Some((fetched, _fetch_done)) = scripts {
+        if let Some(((fetched, prefetch), _fetch_done)) = scripts {
             let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
             self.run_page_scripts(
                 id,
                 fetched,
+                prefetch,
                 budget,
                 script_policy,
                 Some(watch),

@@ -773,6 +773,7 @@ pub(crate) async fn pump_modules(
     document: &Url,
     fetched: &mut usize,
     inspector: &Arc<Inspector>,
+    prefetched: Option<&crate::module_prefetch::ModulePrefetch>,
 ) -> Pump {
     let mut out = Pump::default();
     for _ in 0..MAX_MODULE_ROUNDS {
@@ -793,6 +794,11 @@ pub(crate) async fn pump_modules(
             if i >= room {
                 return Err(format!("too many modules (limit {MAX_MODULES_PER_PAGE})"));
             }
+            // Fetched when the module script was discovered (S15): the
+            // same fetch's answer, without another round trip.
+            if let Some(answer) = prefetched.and_then(|p| p.take(url)) {
+                return answer;
+            }
             fetch_module(policy, loader, url, document, deadline, inspector).await
         }))
         .await;
@@ -812,7 +818,7 @@ pub(crate) async fn pump_modules(
 
 /// One module through the policy's module entry point, as the page gets
 /// it: its source, or why there is none.
-async fn fetch_module(
+pub(crate) async fn fetch_module(
     policy: &FetchPolicy,
     loader: &ResourceLoader,
     url: &str,
@@ -909,7 +915,7 @@ pub(crate) async fn pump_all(
         };
         let modules = match document {
             Some(document) => {
-                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector).await
+                pump_modules(bindings, policy, loader, deadline, document, modules_fetched, inspector, None).await
             }
             None => Pump::default(),
         };
