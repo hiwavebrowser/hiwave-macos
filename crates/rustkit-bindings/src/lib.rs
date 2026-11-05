@@ -48,6 +48,7 @@ pub(crate) fn note_location(url: &str, replace: bool) {
     hook(url, replace);
 }
 mod net_bridge;
+pub use dom::editing::SharedEditStates;
 pub use net_bridge::{NetDelivery, NetRequest};
 pub use rustkit_js::{FetchedModule, ModuleHandle, ModuleState};
 #[cfg(test)]
@@ -108,6 +109,8 @@ mod event_target_ctor_tests;
 mod legacy_tests;
 #[cfg(test)]
 mod reflect_tests;
+#[cfg(test)]
+mod editing_tests;
 #[cfg(test)]
 mod traversal_tests;
 #[cfg(test)]
@@ -927,6 +930,8 @@ pub struct DomBindings {
     mutation_log: Rc<RefCell<MutationLog>>,
     /// The scroll offset script reads and writes (see `web_scroll`).
     scroll: web_scroll::SharedScroll,
+    /// The clipboard and edit states edit commands use (see `dom::editing`).
+    edit: Rc<dom::editing::EditContext>,
 }
 
 impl DomBindings {
@@ -980,6 +985,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_cssom.js"))?;
         // Checkedness, selectedness, form/button/label state, Image and Option (web_forms.js).
         runtime.evaluate_script(include_str!("web_forms.js"))?;
+        // execCommand, navigator.clipboard and the user's edit commands over
+        // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
+        let edit = Rc::new(dom::editing::EditContext::default());
+        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_script(include_str!("web_history.js"))?;
@@ -1011,6 +1020,7 @@ impl DomBindings {
             mutations,
             mutation_log,
             scroll,
+            edit,
         })
     }
 
@@ -1126,6 +1136,86 @@ impl DomBindings {
             })(globalThis);"#,
         )?;
         Ok(())
+    }
+
+    /// Use `clipboard` for this page's edit commands and
+    /// `navigator.clipboard` (the engine's platform clipboard).
+    pub fn set_clipboard(&self, clipboard: rustkit_dom::clipboard::SharedClipboard) {
+        *self.edit.clipboard.borrow_mut() = clipboard;
+    }
+
+    /// The clipboard this page's edit commands use.
+    pub fn clipboard(&self) -> rustkit_dom::clipboard::SharedClipboard {
+        self.edit.clipboard.borrow().clone()
+    }
+
+    /// Whether script may read the clipboard (`navigator.clipboard.readText`,
+    /// `execCommand('paste')`). Off by default, for web content: the
+    /// clipboard is shared across views, so reading it would leak what the
+    /// user copied elsewhere. Trusted pages (HiWave's chrome) opt in. The
+    /// user's own paste is always allowed.
+    pub fn set_clipboard_read_allowed(&self, allowed: bool) {
+        self.edit.script_read.set(allowed);
+    }
+
+    /// The user activated the page (a trusted key or mouse press): for
+    /// the next few seconds script may write the clipboard
+    /// (`navigator.clipboard.writeText`). [`Self::fire_key_event`] and
+    /// [`Self::fire_mouse_event`] call it for the events that activate.
+    pub fn notify_user_activation(&self) {
+        self.edit.activate();
+    }
+
+    /// Whether the page has transient user activation.
+    pub fn has_transient_activation(&self) -> bool {
+        self.edit.has_activation()
+    }
+
+    /// Run edit commands on `states` (the engine's edit states for this
+    /// view) instead of the bindings' own map.
+    pub fn share_edit_states(&self, states: SharedEditStates) {
+        *self.edit.states.borrow_mut() = states;
+    }
+
+    /// The user asked for `command` in the control `node` (a shortcut):
+    /// `beforeinput` (cancelable) for a command that edits, the edit on
+    /// the control's edit state, then `input`. What the command did, or
+    /// the default (nothing) when the control is not a text control or a
+    /// listener cancelled.
+    pub fn user_edit(
+        &self,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Result<rustkit_dom::forms::EditOutcome, BindingError> {
+        use rustkit_dom::forms::EditCommand as C;
+        let (name, value) = match command {
+            C::Copy => ("copy", None),
+            C::Cut => ("cut", None),
+            C::Paste => ("paste", None),
+            C::SelectAll => ("selectAll", None),
+            C::Undo => ("undo", None),
+            C::Redo => ("redo", None),
+            C::InsertText(t) => ("insertText", Some(t.as_str())),
+            C::DeleteWordBackward => ("deleteWordBackward", None),
+            C::DeleteWordForward => ("deleteWordForward", None),
+        };
+        let value = value.map_or("null".to_string(), |v| {
+            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
+        });
+        let script = format!("document.__rkUserEdit({node}, {name:?}, {value})");
+        let report = match self.runtime.borrow_mut().evaluate_script(&script)? {
+            JsValue::String(json) => json,
+            _ => return Ok(Default::default()),
+        };
+        let r: serde_json::Value = serde_json::from_str(&report).unwrap_or_default();
+        let changed = r["changed"].as_bool().unwrap_or(false);
+        Ok(rustkit_dom::forms::EditOutcome {
+            handled: r["handled"].as_bool().unwrap_or(false),
+            changed,
+            selection_changed: !changed && r["handled"].as_bool().unwrap_or(false),
+            input_type: command.input_type().filter(|_| changed),
+            data: r["data"].as_str().map(str::to_string),
+        })
     }
 
     /// Tell script what the user typed into a control, so its `value`
@@ -1975,6 +2065,10 @@ impl DomBindings {
         event_type: &str,
         data: &MouseEventBindingData,
     ) -> Result<bool, BindingError> {
+        // Activation-triggering input events (HTML §6.4.3).
+        if matches!(event_type, "mousedown" | "pointerdown" | "mouseup" | "pointerup") {
+            self.notify_user_activation();
+        }
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireMouse({node}, {event_type:?}, {{ clientX: {}, clientY: {}, \
              screenX: {}, screenY: {}, offsetX: {}, offsetY: {}, button: {}, buttons: {}, ctrlKey: {}, \
@@ -2052,6 +2146,10 @@ impl DomBindings {
         event_type: &str,
         data: &KeyboardEventBindingData,
     ) -> Result<bool, BindingError> {
+        // A keydown activates the page, except Escape (HTML §6.4.3).
+        if event_type == "keydown" && data.key != "Escape" {
+            self.notify_user_activation();
+        }
         let node = node.map_or("null".to_string(), |n| n.to_string());
         let result = self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireKey({node}, {event_type:?}, {{ key: {:?}, code: {:?}, repeat: {}, \

@@ -18,6 +18,9 @@ use std::sync::Arc;
 use rustkit_bindings::{DomBindings, DomDirty};
 // Re-export IpcMessage for external use
 pub use rustkit_bindings::IpcMessage;
+/// The clipboard edit commands use (CH2.E1); a platform one plugs in with
+/// [`Engine::set_clipboard`].
+pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -477,6 +480,8 @@ mod container_query_tests;
 mod nav_state_reset_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_turn_budget_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2381,6 +2386,11 @@ pub struct Engine {
     /// `Some` replaces Boa's host re-entry cap for runtimes this engine creates.
     /// `None` leaves the default (1024) alone.
     host_reentry_override: Option<usize>,
+    /// The clipboard every view's edit commands use (CH2.E1).
+    clipboard: SharedClipboard,
+    /// Views whose script may read the clipboard (HiWave's own chrome).
+    /// Web content may not: the clipboard is shared by every view.
+    clipboard_readers: std::collections::HashSet<EngineViewId>,
     loader: Arc<ResourceLoader>,
     views: HashMap<EngineViewId, ViewState>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
@@ -2637,6 +2647,8 @@ impl Engine {
             page_commits: HashMap::new(),
             nav_seq,
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
             event_tx,
@@ -3595,6 +3607,15 @@ impl Engine {
                     .unwrap_or_default();
                 let state = rustkit_dom::forms::TextEditState::with_value(seed);
                 state.move_to_end(false);
+                // Paste and copy rules (input type, maxlength, readonly).
+                if let Some(node) = self
+                    .views
+                    .get(&id)
+                    .and_then(|v| v.document.as_ref())
+                    .and_then(|d| d.get_node(rustkit_dom::NodeId::new(raw)))
+                {
+                    state.sync_attributes(&node);
+                }
                 if let Some(v) = self.views.get_mut(&id) {
                     v.lay.edit_states.borrow_mut().insert(raw, state);
                 }
@@ -5230,6 +5251,50 @@ impl Engine {
         out
     }
 
+    /// Use `clipboard` for every view's copy/cut/paste and
+    /// `navigator.clipboard`. The default is an in-memory clipboard
+    /// ([`MemoryClipboard`]); the macOS `NSPasteboard` one (CH2.E3) is
+    /// installed here by the app.
+    pub fn set_clipboard(&mut self, clipboard: SharedClipboard) {
+        for view in self.views.values() {
+            if let Some(bindings) = view.bindings.as_ref() {
+                bindings.set_clipboard(clipboard.clone());
+            }
+        }
+        self.clipboard = clipboard;
+    }
+
+    /// The clipboard this engine's views edit with.
+    pub fn clipboard(&self) -> SharedClipboard {
+        self.clipboard.clone()
+    }
+
+    /// Let script in view `id` read the clipboard
+    /// (`navigator.clipboard.readText`, `execCommand('paste')`), for this
+    /// and later documents. Off by default: a web page must not read what
+    /// the user copied in another tab. HiWave's own chrome views opt in.
+    /// The user's own paste works either way.
+    pub fn set_script_clipboard_read_allowed(&mut self, id: EngineViewId, allowed: bool) {
+        if allowed {
+            self.clipboard_readers.insert(id);
+        } else {
+            self.clipboard_readers.remove(&id);
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_clipboard_read_allowed(allowed);
+        }
+    }
+
+    /// A new page's bindings edit with this engine's clipboard and the
+    /// view's edit states (the ones layout paints).
+    fn attach_editing(&self, id: EngineViewId, bindings: &DomBindings) {
+        bindings.set_clipboard(self.clipboard.clone());
+        bindings.set_clipboard_read_allowed(self.clipboard_readers.contains(&id));
+        if let Some(view) = self.views.get(&id) {
+            bindings.share_edit_states(view.lay.edit_states.clone());
+        }
+    }
+
     /// Deliver a key to the focused form control.
     ///
     /// `key_code` uses the Win32 virtual-key numbering that
@@ -5272,6 +5337,13 @@ impl Engine {
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
             return false;
         };
+        // `ctrl` is the command modifier: the window passes Ctrl-or-Cmd.
+        let platform = rustkit_dom::forms::KeyPlatform::current();
+        if let Some(command) = keyboard::command_for_key(platform, key_code, key, ctrl, shift, alt) {
+            if let Some(changed) = self.user_edit_command(id, focused.raw(), &command) {
+                return changed;
+            }
+        }
         // The edit state is borrowed for the key only: the flush below
         // writes script's control values into the same map.
         let (result, value) = {
@@ -5279,7 +5351,9 @@ impl Engine {
             let Some(state) = edit_states.get(&focused.raw()) else {
                 return false;
             };
-            let result = keyboard::handle_input_key(state, key_code, key, ctrl, shift, alt);
+            let result = keyboard::handle_key(
+                state, None, &*self.clipboard, platform, key_code, key, ctrl, shift, alt,
+            );
             (result, state.value())
         };
         if matches!(result, KeyHandleResult::ValueChanged) {
@@ -5314,6 +5388,35 @@ impl Engine {
             result,
             KeyHandleResult::ValueChanged | KeyHandleResult::SelectionChanged
         )
+    }
+
+    /// An edit command (a clipboard, history or delete-word shortcut) in the
+    /// focused control `node`, through the page's bindings: `beforeinput`,
+    /// the edit on the shared edit state, `input`, then a layout of what
+    /// changed. Whether the value or selection changed; `None` when the
+    /// page has no bindings (the caller applies the key to the edit state
+    /// itself, without events).
+    fn user_edit_command(
+        &mut self,
+        id: EngineViewId,
+        node: usize,
+        command: &rustkit_dom::forms::EditCommand,
+    ) -> Option<bool> {
+        let bindings = self.views.get(&id)?.bindings.as_ref()?;
+        let _turn = rustkit_js::DiagTurn::enter("live");
+        let armed = arm_live_turn(&self.config, bindings);
+        let outcome = bindings.user_edit(node, command).unwrap_or_else(|e| {
+            debug!(?id, error = %e, "edit command listener threw");
+            Default::default()
+        });
+        let stopped = end_live_turn(&self.config, armed, bindings, "event:input");
+        if let (Some(stopped), Some(view)) = (stopped, self.views.get_mut(&id)) {
+            view.script_log.push(stopped);
+        }
+        if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::Input)) {
+            debug!(?id, error = %e, "relayout after edit command failed");
+        }
+        Some(outcome.changed || outcome.selection_changed)
     }
 
     /// The key was released: `keyup` at the focused element, or at the
@@ -5764,6 +5867,24 @@ impl Engine {
     /// The DOM node currently holding focus in a view, if any.
     pub fn focused_node(&self, id: EngineViewId) -> Option<rustkit_dom::NodeId> {
         self.views.get(&id).and_then(|v| v.lay.focused_node.get())
+    }
+
+    /// Whether the focused element is a text field: a text-like `<input>`
+    /// (number included), a `<textarea>`, or editable content
+    /// (`contenteditable`). The window sends the editing chords (Cmd+A/C/V/
+    /// X/Z, Cmd+arrows) to the page only then; with a link, button or
+    /// `<select>` focused they stay menu shortcuts (CH2.E1 R1).
+    pub fn focused_is_text_control(&self, id: EngineViewId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        let Some(doc) = view.document.as_ref() else {
+            return false;
+        };
+        let Some(node) = view.lay.focused_node.get().and_then(|n| doc.get_node(n)) else {
+            return false;
+        };
+        is_text_field(&node)
     }
 
     /// Get the current scroll offset of a view.
@@ -7437,6 +7558,7 @@ impl Engine {
                     .map_err(|e| EngineError::JsError(e.to_string()))?;
             }
             inspector_glue::attach(&bindings, &inspector);
+            self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -7860,6 +7982,7 @@ impl Engine {
                 .set_location(&url)
                 .map_err(|e| EngineError::JsError(e.to_string()))?;
             inspector_glue::attach(&bindings, &inspector);
+            self.attach_editing(id, &bindings);
 
             // `window.innerWidth/innerHeight` are this view's size, not the
             // bindings' 800x600 placeholder: pages pick layouts from them.
@@ -24534,6 +24657,35 @@ fn layout_box_body_to_json(
     json
 }
 
+/// A text-like `<input>`, a `<textarea>`, or an element in editable content
+/// (the nearest `contenteditable` attribute is "", "true" or
+/// "plaintext-only").
+fn is_text_field(node: &std::rc::Rc<rustkit_dom::Node>) -> bool {
+    use rustkit_dom::forms::InputType;
+    match node.tag_name().map(str::to_ascii_lowercase).as_deref() {
+        Some("textarea") => return true,
+        Some("input") => {
+            let ty = node.get_attribute("type").unwrap_or("").to_ascii_lowercase();
+            return InputType::from_str(&ty).is_text_input();
+        }
+        _ => {}
+    }
+    let mut cur = Some(node.clone());
+    while let Some(n) = cur {
+        if let Some(v) = n.get_attribute("contenteditable") {
+            let v = v.to_ascii_lowercase();
+            if v.is_empty() || v == "true" || v == "plaintext-only" {
+                return true;
+            }
+            if v == "false" {
+                return false;
+            }
+        }
+        cur = n.parent();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24686,6 +24838,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25426,6 +25580,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25495,6 +25651,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25581,6 +25739,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -25793,6 +25953,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25885,6 +26047,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -25997,6 +26161,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26073,6 +26239,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(
                 ResourceLoader::new(LoaderConfig::default()).expect("Failed to create loader"),
             ),
@@ -26143,6 +26311,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26227,6 +26397,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26327,6 +26499,8 @@ mod tests {
                 page_commits: HashMap::new(),
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
+                clipboard: MemoryClipboard::shared(),
+                clipboard_readers: Default::default(),
                 loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
                 event_tx,
                 event_rx: Some(event_rx),
@@ -26428,6 +26602,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26507,6 +26683,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26588,6 +26766,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26669,6 +26849,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26741,6 +26923,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26791,6 +26975,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -26981,6 +27167,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -27059,6 +27247,8 @@ mod tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),
@@ -29623,6 +29813,8 @@ mod web_font_tests {
             page_commits: HashMap::new(),
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
+            clipboard: MemoryClipboard::shared(),
+            clipboard_readers: Default::default(),
             loader: Arc::new(ResourceLoader::new(LoaderConfig::default()).expect("loader")),
             event_tx,
             event_rx: Some(event_rx),

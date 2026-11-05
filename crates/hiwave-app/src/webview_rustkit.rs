@@ -83,6 +83,10 @@ pub struct RustKitView {
     /// reported it (`PageEvent::Focused`). With the page on its own thread,
     /// the window cannot ask and wait for the answer.
     page_focused: std::cell::Cell<bool>,
+    /// Whether that focused element is a text field, from the page's last
+    /// `PageEvent::TextFocused` (the editing chords go to the page only
+    /// then).
+    page_text_focused: std::cell::Cell<bool>,
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
@@ -348,6 +352,7 @@ impl RustKitView {
             visible: RefCell::new(true),
             loading: RefCell::new(false),
             page_focused: std::cell::Cell::new(false),
+            page_text_focused: std::cell::Cell::new(false),
             blocked_counter: counter_clone,
             history: RefCell::new(Vec::new()),
             history_index: RefCell::new(0),
@@ -660,6 +665,21 @@ impl RustKitView {
             .unwrap_or(false)
     }
 
+    /// Whether the focused content element is a text field: a text
+    /// input, a textarea or editable content. Not a link, a button or a
+    /// `<select>`, whose Cmd chords stay menu shortcuts.
+    pub fn has_focused_text_control(&self) -> bool {
+        if self.content.is_some() {
+            // As has_focused_element: the page's last report, and ask again.
+            let (reply, _rx) = oneshot::channel();
+            self.submit(PageCmd::Input(PageInput::HasTextFocus { reply }));
+            self.harvest();
+            return self.page_focused.get() && self.page_text_focused.get();
+        }
+        self.ask(|reply| PageCmd::Input(PageInput::HasTextFocus { reply }))
+            .unwrap_or(false)
+    }
+
     /// Rebuild layout and repaint after an edit changed a control's value.
     pub fn relayout(&self) {
         self.submit(PageCmd::Relayout);
@@ -768,6 +788,7 @@ impl RustKitView {
             self.accepted_nav.set(thread.last_nav_id());
             // The new document has nothing focused until it says otherwise.
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             self.live_clock.set(Instant::now());
             return Ok(());
         }
@@ -919,6 +940,7 @@ impl RustKitView {
             let nav_id = thread.navigate(parsed);
             self.accepted_nav.set(nav_id);
             self.page_focused.set(false);
+            self.page_text_focused.set(false);
             *self.loading.borrow_mut() = true;
             self.live_clock.set(Instant::now());
             return;
@@ -1205,6 +1227,7 @@ impl RustKitView {
                     *self.script_nav.borrow_mut() = Some((url, replace, from_user));
                 }
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
+                PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Cursor(_) | PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
@@ -1237,6 +1260,7 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::NavigateRequested { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
+        | PageEvent::TextFocused(_)
         | PageEvent::Cursor(_)
         | PageEvent::Unresponsive
         | PageEvent::Closed => 0,
