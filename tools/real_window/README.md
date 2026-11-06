@@ -110,6 +110,7 @@ of a run (about a minute for all checks).
 | `e9_redirect_webkit` | CH2.E9, `HIWAVE_RUSTKIT_CHROME=0` | as `e9_redirect`, on the WebKit chrome (the escape hatch) | no |
 | `a7_no_bridge_in_content` | CH3.A7 | `a7_bridge.html`: the page sees no `window.ipc` / `window.hiwaveChrome`, with `HIWAVE_RUSTKIT_CHROME=0` and by default | no |
 | `e4_chrome_tab` | CH2.E4, RustKit chrome (the default) | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
+| `e19_icon_hover` | CH2.E19 | `e19_icon_hover.html`: an inline svg icon filled red, green by `#b:hover svg path`; the frame at rest, under the pointer, and off the button | yes |
 | `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks

@@ -53,6 +53,8 @@ mod flex_item_min_height_tests;
 #[cfg(test)]
 mod fit_content_width_tests;
 #[cfg(test)]
+mod element_scroll_extent_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
@@ -74,6 +76,12 @@ mod sizing_equivalence_tests;
 
 #[cfg(test)]
 mod table_layout_tests;
+
+#[cfg(test)]
+mod own_context_collapse_tests;
+
+#[cfg(test)]
+mod clip_rect_unit_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -1796,6 +1804,11 @@ pub struct LayoutBox {
     /// Whether the pointer is over this scroller's thumb
     /// (`::-webkit-scrollbar-thumb:hover`). Set by the engine.
     pub scrollbar_thumb_hovered: std::cell::Cell<bool>,
+    /// The engine's animation key of the `::before`/`::after` this box (or
+    /// the text run under it) was generated for, `None` for every other
+    /// box. A pseudo-element has no node of its own (`node_id` is `None`),
+    /// so a paint-only animation frame finds its boxes by this.
+    pub pseudo_animation_key: Option<usize>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -1851,6 +1864,7 @@ impl LayoutBox {
             sticky_paths: std::cell::RefCell::new(Vec::new()),
             scrollbar_overflows: std::cell::Cell::new((false, false)),
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
+            pseudo_animation_key: None,
         }
     }
 
@@ -4515,7 +4529,7 @@ impl LayoutBox {
     /// (an orthogonal flow), `hr` (`overflow: hidden` in Chromium's UA sheet),
     /// `fieldset`, `details` (its summary line), and replaced elements.
     /// Only collapse-through reads this; `establishes_bfc` is unchanged.
-    fn is_own_context_for_collapse(&self) -> bool {
+    pub(crate) fn is_own_context_for_collapse(&self) -> bool {
         let s = &self.style;
         s.display_modifier == rustkit_css::DisplayModifier::FlowRoot
             || s.contain_holds_fixed
@@ -10774,7 +10788,7 @@ impl DisplayList {
     /// A right side left of the left side (or bottom above top) clips all:
     /// `rect(0,0,0,0)` and `rect(1px,1px,1px,1px)` are the visually-hidden
     /// pattern on most large sites.
-    fn clip_rect_clip(&self, layout_box: &LayoutBox) -> Option<Rect> {
+    pub(crate) fn clip_rect_clip(&self, layout_box: &LayoutBox) -> Option<Rect> {
         let clip = layout_box.style.clip.as_ref()?;
         if !matches!(layout_box.position, Position::Absolute | Position::Fixed) {
             return None;

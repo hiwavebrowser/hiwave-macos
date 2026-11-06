@@ -379,6 +379,7 @@ pub use inspector::{
 };
 pub use rustkit_bindings::MutationKind;
 mod script_net;
+mod module_prefetch;
 mod layout_ctx;
 mod svg_prepass;
 #[cfg(test)]
@@ -434,6 +435,12 @@ mod color_shorthand_keep_tests;
 mod depth_perspective_refuse_tests;
 #[cfg(test)]
 mod outline_apply_tests;
+#[cfg(test)]
+mod computed_read_unit_tests;
+#[cfg(test)]
+mod redirect_url_tests;
+#[cfg(test)]
+mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -442,6 +449,8 @@ mod sheet_reuse_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
+#[cfg(all(test, feature = "headless"))]
+mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -479,6 +488,10 @@ mod percent_height_chain_tests;
 mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
+#[cfg(test)]
+mod transform_parse_pure_tests;
+#[cfg(test)]
+mod individual_translate_parse_tests;
 #[cfg(test)]
 mod author_svg_stroke_tests;
 #[cfg(test)]
@@ -523,6 +536,8 @@ mod css_transitions_tests;
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
+#[cfg(all(test, feature = "headless"))]
+mod pseudo_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
 mod animations;
@@ -576,6 +591,8 @@ mod fixed_under_scroll_tests;
 mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_paint_state_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1277,7 +1294,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1287,7 +1304,9 @@ impl ViewState {
             stats.total_ms,
             stats.layouts_skipped,
             stats.animation_frames_painted,
-            stats.animation_paint_ms
+            stats.animation_paint_ms,
+            stats.forced_layouts,
+            stats.forced_ms
         );
     }
 
@@ -5870,9 +5889,12 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             for (index, sheet) in late_sheets {
                 let Some(sheet) = sheet else { continue };
-                let at = view.external_sheet_slots.partition_point(|&slot| slot < index);
-                view.external_sheet_slots.insert(at, index);
-                Rc::make_mut(&mut view.external_stylesheets).insert(at, sheet);
+                insert_sheet_at_document_order(
+                    &mut view.external_sheet_slots,
+                    Rc::make_mut(&mut view.external_stylesheets),
+                    index,
+                    sheet,
+                );
                 sheets_arrived += 1;
             }
         }
@@ -6702,7 +6724,7 @@ impl Engine {
         id: EngineViewId,
         base: &Url,
         policy: Option<Arc<FetchPolicy>>,
-    ) -> Option<futures::future::LocalBoxFuture<'static, Vec<FetchedScript>>> {
+    ) -> Option<futures::future::LocalBoxFuture<'static, (Vec<FetchedScript>, module_prefetch::ModulePrefetch)>> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
 
         // Collect in document order.
@@ -6713,9 +6735,18 @@ impl Engine {
         let mut entries: Vec<(String, usize, Result<(ScriptTiming, Body), ScriptOutcome>, bool, &'static str)> =
             Vec::new();
         let mut index = 0usize;
+        // Inline import maps, for resolving the module graph prefetch.
+        let mut import_maps: Vec<String> = Vec::new();
         document.traverse(|node| {
             if node.tag_name().map(|t| t.eq_ignore_ascii_case("script")) != Some(true) {
                 return;
+            }
+            if node.get_attribute("src").is_none()
+                && node
+                    .get_attribute("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))
+            {
+                import_maps.push(node.text_content());
             }
             let Some(timing) = script_timing(node) else { return };
             index += 1;
@@ -6765,13 +6796,36 @@ impl Engine {
             futures::future::LocalBoxFuture<'static, Result<(String, String), ScriptOutcome>>,
         >;
         let mut module_fetches: HashMap<Url, SharedModuleFetch> = HashMap::new();
-        Some(
-            futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
+        // S15: each module script's static import graph is fetched as soon
+        // as the script's source is in hand, concurrently with the page's
+        // other script fetches (see `module_prefetch`). The walk stops when
+        // the scripts are all in; it never holds them. Boa takes the
+        // answers (or awaits the one still out) when it asks for those
+        // imports at run time.
+        let prefetch = module_prefetch::ModulePrefetch::default();
+        let (discovered, discoveries) = futures::channel::mpsc::unbounded::<module_prefetch::DiscoveredModule>();
+        let walker = match &policy {
+            Some(policy) if entries.iter().any(|(_, _, entry, is_module, _)| *is_module && entry.is_ok()) => {
+                Some(module_prefetch::walk(
+                    discoveries,
+                    prefetch.clone(),
+                    policy.clone(),
+                    loader.clone(),
+                    base.clone(),
+                    import_maps,
+                    tokio::time::Instant::now() + SCRIPT_NETWORK_CAP,
+                    inspector.clone(),
+                ))
+            }
+            _ => None,
+        };
+        let scripts = futures::stream::iter(entries.into_iter().map(move |(label, node_id, entry, is_module, kind)| {
                 let loader = loader.clone();
                 let referrer = referrer.clone();
                 let policy = policy.clone();
                 let base = base.clone();
                 let inspector = inspector.clone();
+                let discovered = discovered.clone();
                 let shared_module = match &entry {
                     Ok((_, Body::External(url))) if is_module => {
                         let shared = module_fetches.entry(url.clone()).or_insert_with(|| {
@@ -6813,6 +6867,10 @@ impl Engine {
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
+                    let requested = match &entry {
+                        Ok((_, Body::External(url))) => Some(url.clone()),
+                        _ => None,
+                    };
                     let fetch_started = std::time::Instant::now();
                     let result = match entry {
                         Err(outcome) => Err(outcome),
@@ -6881,11 +6939,40 @@ impl Engine {
                         fetch: external.then(|| fetch_started.elapsed()),
                         arrived: external.then(std::time::Instant::now),
                     };
+                    // A module's source is in: its imports start now. An
+                    // external module's imports resolve against the URL it
+                    // was served from (its label), an inline one's against
+                    // the document.
+                    if let (true, Ok((_, text))) = (is_module, &result) {
+                        let base = match &requested {
+                            Some(_) => Url::parse(&label).ok(),
+                            None => Some(base.clone()),
+                        };
+                        if let Some(base) = base {
+                            let _ = discovered.unbounded_send(module_prefetch::DiscoveredModule {
+                                requested,
+                                base,
+                                source: text.clone(),
+                            });
+                        }
+                    }
                     (label, node_id, result, is_module, fetched)
                 }
             }))
-            .buffered(MAX_CONCURRENT_SCRIPT_LOADS)
-            .collect::<Vec<_>>()
+            .buffered(MAX_CONCURRENT_SCRIPT_LOADS);
+        Some(
+            async move {
+                // The stream (and with it every sender) is gone once
+                // collected, which is what lets the walker finish.
+                let collect = async move { scripts.collect::<Vec<_>>().await };
+                let walk = async move {
+                    if let Some(walker) = walker {
+                        walker.await;
+                    }
+                };
+                let (scripts, ()) = futures::join!(collect, walk);
+                (scripts, prefetch)
+            }
             .boxed_local(),
         )
     }
@@ -7023,6 +7110,7 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
+        prefetch: module_prefetch::ModulePrefetch,
         budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         watch: Option<&NavWatch>,
@@ -7051,6 +7139,7 @@ impl Engine {
         self.run_page_scripts_with(
             id,
             fetched,
+            &prefetch,
             budget,
             policy,
             &bindings,
@@ -7077,6 +7166,7 @@ impl Engine {
         &mut self,
         id: EngineViewId,
         fetched: Vec<FetchedScript>,
+        prefetch: &module_prefetch::ModulePrefetch,
         _budget: std::time::Duration,
         policy: Option<Arc<FetchPolicy>>,
         bindings: &DomBindings,
@@ -7326,6 +7416,7 @@ impl Engine {
                                         document,
                                         &mut count,
                                         &inspector,
+                                        Some(prefetch),
                                     ),
                                 )
                                 .await;
@@ -8065,18 +8156,15 @@ impl Engine {
         // keeps the request's fragment when the last hop has none). Until
         // S1 the requested URL was committed, so every relative URL on
         // www.gmail.com's sign-in page was asked of www.gmail.com.
-        let url = if response.url != url && !response.redirect_chain.is_empty() {
-            let mut last = response.url.clone();
-            if last.fragment().is_none() {
-                last.set_fragment(url.fragment());
-            }
-            debug!(?id, from = %url, to = %last, "Navigation redirected");
-            if let Some(view) = self.views.get_mut(&id) {
-                view.navigation.redirected_to(last.clone());
+        let url = {
+            let last = url_after_redirects(&url, &response.url, !response.redirect_chain.is_empty());
+            if last != url {
+                debug!(?id, from = %url, to = %last, "Navigation redirected");
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.navigation.redirected_to(last.clone());
+                }
             }
             last
-        } else {
-            url
         };
 
         let status = response.status;
@@ -8437,11 +8525,12 @@ impl Engine {
         // The script budget is JavaScript time only. How long the fetches
         // took, including a fetch that outlasted the subresources, does
         // not spend it.
-        if let Some((fetched, _fetch_done)) = scripts {
+        if let Some(((fetched, prefetch), _fetch_done)) = scripts {
             let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
             self.run_page_scripts(
                 id,
                 fetched,
+                prefetch,
                 budget,
                 script_policy,
                 Some(watch),
@@ -9572,6 +9661,11 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 (*view.lay.hover_chain.borrow_mut(), *view.lay.active_chain.borrow_mut()) = chains;
             }
+            // CH2.E19: the inline svgs' author paint follows the chains
+            // (`button:hover svg path`): the map and the parsed icons of
+            // this build's chains, kept by the pre-pass when unchanged.
+            self.cache_svg_paint_styles(document, id, Some((size.0 as f32, size.1 as f32)));
+            self.lctx.cache_inline_svgs(document);
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
@@ -10129,10 +10223,12 @@ impl Engine {
             return Ok(laid);
         };
         for event in &events {
+            // A pseudo-element's events go to its element (CH2.E16).
+            let (node, pseudo) = animations::split_key(event.node);
             let fired = if event.kind.starts_with("animation") {
-                bindings.fire_animation_event(event.node, event.kind, &event.name, event.elapsed_s)
+                bindings.fire_animation_event(node, pseudo, event.kind, &event.name, event.elapsed_s)
             } else {
-                bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
+                bindings.fire_transition_event(node, pseudo, event.kind, &event.property, event.elapsed_s)
             };
             if let Err(e) = fired {
                 debug!(?id, error = %e, kind = event.kind, "animation event failed");
@@ -10215,6 +10311,23 @@ impl Engine {
                 return Ok(false);
             };
             apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
+            // `getComputedStyle(el, '::before')` reads the frame (CH2.E16).
+            {
+                let mut pseudo_styles = view.lay.pseudo_styles.borrow_mut();
+                for change in &changes {
+                    let (node, Some(pseudo)) = animations::split_key(change.node) else {
+                        continue;
+                    };
+                    if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
+                        for (index, _, is) in &change.props {
+                            animations::set_prop_value(style, *index, is);
+                        }
+                        if let Some((_, settled)) = change.settled {
+                            style.animation_settled_opacity = settled;
+                        }
+                    }
+                }
+            }
             let display_list = self.display_list_for(id, &laid);
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.layout = Some(laid);
@@ -12091,7 +12204,7 @@ impl layout_ctx::LayoutCtx {
                 }
 
                 // Check for ::before pseudo-element
-                let before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
+                let mut before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -12103,10 +12216,17 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
+                // CH2.E16: its transitions and animations, after the memo
+                // as the element's are.
+                let key = animations::pseudo_key(node.id.raw(), "::before");
+                if let Some(style) = before_style.as_mut() {
+                    self.animate_style(key, style, stylesheets);
+                }
                 self.note_pseudo_style(node.id.raw(), "::before", before_style.as_ref(), &layout_box.style);
                 if let Some(before_box) = before_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
+                .map(|b| Engine::mark_pseudo_box(b, key))
                 {
                     layout_box.children.push(before_box);
                 }
@@ -12399,7 +12519,7 @@ impl layout_ctx::LayoutCtx {
                 drop(host_scope);
 
                 // Check for ::after pseudo-element
-                let after_style = memoized_pseudo_style(node.id, Pseudo::After, || {
+                let mut after_style = memoized_pseudo_style(node.id, Pseudo::After, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -12411,10 +12531,17 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
+                // CH2.E16: its transitions and animations, after the memo
+                // as the element's are.
+                let key = animations::pseudo_key(node.id.raw(), "::after");
+                if let Some(style) = after_style.as_mut() {
+                    self.animate_style(key, style, stylesheets);
+                }
                 self.note_pseudo_style(node.id.raw(), "::after", after_style.as_ref(), &layout_box.style);
                 if let Some(after_box) = after_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
+                .map(|b| Engine::mark_pseudo_box(b, key))
                 {
                     layout_box.children.push(after_box);
                 }
@@ -13169,6 +13296,17 @@ impl layout_ctx::LayoutCtx {
 }
 
 impl Engine {
+
+    /// CH2.E16: mark a `::before`/`::after` box and the text run under it
+    /// (which takes a copy of its style) with the pseudo-element's
+    /// animation key, so a paint-only frame finds them.
+    fn mark_pseudo_box(mut b: LayoutBox, key: usize) -> LayoutBox {
+        b.pseudo_animation_key = Some(key);
+        for child in &mut b.children {
+            child.pseudo_animation_key = Some(key);
+        }
+        b
+    }
 
     /// The box half of `create_pseudo_element`, from the cascaded style.
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
@@ -16766,18 +16904,41 @@ impl layout_ctx::LayoutCtx {
         // The map is a function of the document's tree (its `<style>` text
         // and adopted sheets included), the `<link>` sheets and the
         // viewport: kept while none of them changed (LAT4b).
+        // CH2.E19: the view's element state is part of the key when the
+        // paint rules read it. The rules last read stand for the ones the
+        // key is checked against: with the sheets the same (the rest of
+        // the key), they are the same rules.
+        let state = Self::svg_element_state(document, lay);
+        let reads_state = self
+            .svg_prepass
+            .borrow()
+            .paint_rules
+            .as_ref()
+            .is_none_or(|rules| rules.reads_state);
         let key = svg_prepass::PaintKey {
             gen: rustkit_dom::mutation_generation(),
             external: Rc::downgrade(external),
             viewport: viewport.map(|(w, h)| (w.to_bits(), h.to_bits())),
             javascript_enabled,
+            state: reads_state.then(|| state.clone()),
         };
         let kept = self.svg_prepass.borrow_mut().paint_for(document.root(), &key);
         if let Some(map) = kept {
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
-        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport);
+        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport, &state);
+        // The rules read now decide whether the state is in the key.
+        let key = svg_prepass::PaintKey {
+            state: self
+                .svg_prepass
+                .borrow()
+                .paint_rules
+                .as_ref()
+                .is_none_or(|rules| rules.reads_state)
+                .then_some(state),
+            ..key
+        };
         // An unchanged map stays the same `Rc`, which is what the markup
         // keys check first.
         let map = match self.svg_paint_styles.borrow().clone() {
@@ -16788,6 +16949,31 @@ impl layout_ctx::LayoutCtx {
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
+    /// CH2.E19: the element state `lay`'s view matches svg paint rules
+    /// against: checkedness, the hovered and pressed chains, and the
+    /// focused element with the elements above it.
+    fn svg_element_state(document: &Document, lay: Option<&layout_ctx::ViewLayout>) -> SvgElementState {
+        let Some(lay) = lay else {
+            return SvgElementState::default();
+        };
+        let focus = lay.focused_node.get();
+        let mut focus_within = Vec::new();
+        let mut at = focus.and_then(|node| document.get_node(node));
+        while let Some(node) = at {
+            if node.is_element() {
+                focus_within.push(node.id.raw());
+            }
+            at = node.parent();
+        }
+        SvgElementState {
+            checked: lay.checked_states.borrow().clone(),
+            hover: lay.hover_chain.borrow().clone(),
+            active: lay.active_chain.borrow().clone(),
+            focus: focus.map(|node| node.raw()),
+            focus_within,
+        }
+    }
+
     /// `cache_svg_paint_styles`'s map, computed.
     fn svg_paint_styles_of(
         &self,
@@ -16796,6 +16982,7 @@ impl layout_ctx::LayoutCtx {
         external: &Rc<Vec<Stylesheet>>,
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
+        state: &SvgElementState,
     ) -> HashMap<usize, SvgPaintStyle> {
         let inline = self.inline_sheets(document, lay, javascript_enabled);
         let rules = self.svg_paint_rules(inline, external, viewport);
@@ -16822,7 +17009,9 @@ impl layout_ctx::LayoutCtx {
                 walk(&child, f);
             }
         }
-        let no_checked = HashMap::new();
+        // The rules match against the view's element state (CH2.E19).
+        let _state = WalkCheckedScope::enter_for_svg_paint(state);
+        let checked = &state.checked;
         let compute = |n: &Rc<Node>| -> Option<SvgPaintStyle> {
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else { return None };
             let keyed = KeyedElement::of(tag_name, attributes);
@@ -16835,7 +17024,7 @@ impl layout_ctx::LayoutCtx {
                 }
                 let specificity = SelectorMatcher::split_top_level_commas(&rule.selector)
                     .into_iter()
-                    .filter(|member| SelectorMatcher.node_matches(n, member, &no_checked) == Some(true))
+                    .filter(|member| SelectorMatcher.node_matches(n, member, checked) == Some(true))
                     .map(|member| SelectorMatcher.selector_specificity(member))
                     .max();
                 let Some(specificity) = specificity else { continue };
@@ -16895,7 +17084,7 @@ impl layout_ctx::LayoutCtx {
                 let style = match rules.local {
                     // The rules read only the element and its ancestors:
                     // an element whose chain is unchanged keeps its answer.
-                    true => prepass.element_paint(n, &rules, &mut |n| compute(n)),
+                    true => prepass.element_paint(n, &rules, &|raw| state.mark_bits(raw), &mut |n| compute(n)),
                     false => compute(n),
                 };
                 if let Some(style) = style {
@@ -16969,6 +17158,17 @@ impl layout_ctx::LayoutCtx {
             };
             !NON_LOCAL.iter().any(|t| selector.contains(t))
         });
+        // CH2.E19: whether a paint rule reads element state, so the map
+        // follows the pointer, the focus and checkedness; conservative, by
+        // the selector text.
+        const STATE: &[&str] = &[":hover", ":active", ":focus", ":checked"];
+        let reads_state = paint.iter().any(|(_, source, index, _)| {
+            let selector = match *source {
+                SheetRef::Inline(i) => &inline[i].rules[*index].selector,
+                SheetRef::External(i) => &external[i].rules[*index].selector,
+            };
+            STATE.iter().any(|t| selector.contains(t))
+        });
         let rules = Rc::new(SvgPaintRules {
             inline,
             external: Rc::downgrade(external),
@@ -16976,6 +17176,7 @@ impl layout_ctx::LayoutCtx {
             paint,
             root_vars,
             local,
+            reads_state,
         });
         self.svg_prepass.borrow_mut().paint_rules = Some(rules.clone());
         rules
@@ -17000,6 +17201,8 @@ pub(crate) struct SvgPaintRules {
     root_vars: HashMap<String, String>,
     /// No paint rule reads more than the element and its ancestors.
     pub(crate) local: bool,
+    /// A paint rule reads element state (CH2.E19).
+    pub(crate) reads_state: bool,
 }
 
 impl Engine {
@@ -18733,7 +18936,16 @@ impl SelectorMatcher {
             }
             _ => None,
         };
-        let live_own = live(node.id.raw(), attributes);
+        let mut live_own = live(node.id.raw(), attributes);
+        // The element state of the scope (CH2.E19: the inline svg paint
+        // pass), as the build marks it (`live_attributes`).
+        let own_marks = walk_marks(node.id.raw());
+        if !own_marks.is_empty() {
+            let marked = live_own.get_or_insert_with(|| attributes.clone());
+            for mark in own_marks {
+                marked.insert(mark.to_string(), String::new());
+            }
+        }
         let attributes = live_own.as_ref().unwrap_or(attributes);
         let _relational = RelationalNodeScope::enter(Some(node.clone()));
         // A selector that reads neither the ancestors nor the siblings (`.a`,
@@ -18762,6 +18974,12 @@ impl SelectorMatcher {
                 .map(|c| c.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default()
         };
+        // An ancestor's or an earlier sibling's classes, with its marks.
+        let marked_classes = |raw: usize, attributes: &HashMap<String, String>| -> Vec<String> {
+            let mut out = classes(attributes);
+            out.extend(walk_marks(raw).into_iter().map(str::to_string));
+            out
+        };
 
         // ancestors[0] is the parent, as in the cascade.
         let mut ancestors = Vec::new();
@@ -18774,7 +18992,7 @@ impl SelectorMatcher {
             let root = n.parent().is_none_or(|p| !matches!(p.node_type, NodeType::Element { .. }));
             ancestors.push(Rc::new((
                 tag_name.to_lowercase(),
-                classes(attributes),
+                marked_classes(n.id.raw(), attributes),
                 attributes.get("id").cloned(),
                 root.then(|| Rc::new(attributes.clone())),
             )));
@@ -18806,7 +19024,7 @@ impl SelectorMatcher {
                     if before {
                         let live = live(c.id.raw(), attributes);
                         let state = ElementState::of(&t, live.as_ref().unwrap_or(attributes));
-                        siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
+                        siblings_before.push((t, marked_classes(c.id.raw(), attributes), attributes.get("id").cloned(), state));
                     }
                 }
                 SiblingContext {
@@ -19797,6 +20015,11 @@ impl SelectorMatcher {
             // above it (`Engine::live_attributes`).
             "hover" => attributes.contains_key(HOVER_MARK),
             "active" => attributes.contains_key(ACTIVE_MARK),
+            // CH2.E19: only the inline svg paint pass marks the focused
+            // element and its ancestors (`WalkState::focus`); the cascade
+            // does not yet, so there they stay false.
+            "focus" => attributes.contains_key(FOCUS_MARK),
+            "focus-within" => attributes.contains_key(FOCUS_WITHIN_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -21377,11 +21600,22 @@ impl Engine {
 
     /// The forced layouts of the script task that just settled: one log
     /// line per task that had any, and the view's running count.
+    /// Each line names the most frequent cause, `write:read` (what first
+    /// dirtied the layout, and the read that found it stale), every cause
+    /// with its count, and the layouts' time (LAT7).
     fn note_forced_layouts(id: EngineViewId, stats: &mut RelayoutStats, bindings: &DomBindings) {
-        let forced = bindings.take_forced_layouts();
-        if forced > 0 {
-            info!(?id, forced_layouts = forced, "Forced layouts in the script task");
-            stats.forced_layouts = stats.forced_layouts.saturating_add(forced);
+        let report = bindings.take_forced_report();
+        if report.count > 0 {
+            info!(
+                ?id,
+                forced_layouts = report.count,
+                ms = %format!("{:.1}", report.ms),
+                cause = %report.top_cause().unwrap_or_default(),
+                causes = %report.causes_field(),
+                "Forced layouts in the script task"
+            );
+            stats.forced_layouts = stats.forced_layouts.saturating_add(report.count);
+            stats.forced_ms += report.ms;
         }
     }
 
@@ -24899,6 +25133,34 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
     ]
 }
 
+/// The document URL after a navigate response (HTML + Fetch fragment rule):
+/// the last hop wins when there was a redirect; the request's fragment is
+/// kept when the last hop has none. No redirect leaves the request alone.
+pub(crate) fn url_after_redirects(requested: &Url, response_url: &Url, had_redirects: bool) -> Url {
+    if response_url != requested && had_redirects {
+        let mut last = response_url.clone();
+        if last.fragment().is_none() {
+            last.set_fragment(requested.fragment());
+        }
+        last
+    } else {
+        requested.clone()
+    }
+}
+
+/// Insert a late external stylesheet at its document-order slot (Z row S6).
+/// `slots` and `sheets` stay the same length and the same order.
+pub(crate) fn insert_sheet_at_document_order<T>(
+    slots: &mut Vec<usize>,
+    sheets: &mut Vec<T>,
+    index: usize,
+    sheet: T,
+) {
+    let at = slots.partition_point(|&slot| slot < index);
+    slots.insert(at, index);
+    sheets.insert(at, sheet);
+}
+
 /// The list the window drew for a page scrolled by `scroll_offset`, until
 /// the renderer took the scroll as an offset (threads plan P3): the page's
 /// own list, which stays in document coordinates, inside one translate. A
@@ -25116,6 +25378,19 @@ fn publish_geometry(
 ) {
     bindings.share_element_scrolls(lay.element_scrolls.clone());
     publish_animations(bindings, &lay);
+    // LAT7: whether a write inside a hidden subtree can show it through a
+    // `:has()` rule. The rule index a build left, live (a forced layout
+    // rebuilds it); unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_has_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| index.as_ref().map(|ix| ix.reads.invalidation.has))
+                .unwrap_or(true)
+        })
+    })));
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
@@ -38752,6 +39027,13 @@ impl SubjectCompound {
 /// class or an attribute name, and then styles that element as hovered.
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
+/// CH2.E19: the focused element (`:focus`) and it and its ancestors
+/// (`:focus-within`), marked like the two above. Only the inline svg paint
+/// pass sets them (`WalkState::focus`).
+const FOCUS_MARK: &str = "\u{1}focus";
+const FOCUS_WITHIN_MARK: &str = "\u{1}focus-within";
+/// Every element-state mark.
+const STATE_MARKS: [&str; 4] = [HOVER_MARK, ACTIVE_MARK, FOCUS_MARK, FOCUS_WITHIN_MARK];
 
 thread_local! {
     /// The DOM element the compound under test is matched against, for
@@ -38803,6 +39085,10 @@ struct WalkState {
     /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
     hover: Vec<usize>,
     active: Vec<usize>,
+    /// CH2.E19: the focused element and the elements above it, marked only
+    /// for the inline svg paint pass (`WalkCheckedScope::enter_for_svg_paint`).
+    focus: Option<usize>,
+    focus_within: Vec<usize>,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -38829,8 +39115,70 @@ impl WalkCheckedScope {
                 let w = w.borrow();
                 (w.hover.clone(), w.active.clone())
             });
-            w.replace(WalkState { checked, hover, active, memo: Some(HashMap::new()) })
+            let (focus, focus_within) = {
+                let w = w.borrow();
+                (w.focus, w.focus_within.clone())
+            };
+            w.replace(WalkState { checked, hover, active, focus, focus_within, memo: Some(HashMap::new()) })
         }))
+    }
+
+    /// CH2.E19: the scope of the inline svg paint pass, with the view's
+    /// element state: checkedness, the pointer chains and the focus.
+    pub(crate) fn enter_for_svg_paint(state: &SvgElementState) -> Self {
+        WalkCheckedScope(WALK.with(|w| {
+            w.replace(WalkState {
+                checked: state.checked.clone(),
+                hover: state.hover.clone(),
+                active: state.active.clone(),
+                focus: state.focus,
+                focus_within: state.focus_within.clone(),
+                memo: Some(HashMap::new()),
+            })
+        }))
+    }
+}
+
+/// The marks the scope's element state puts on element `raw`.
+fn walk_marks(raw: usize) -> Vec<&'static str> {
+    WALK.with(|w| {
+        let w = w.borrow();
+        let mut marks = Vec::new();
+        if w.hover.contains(&raw) {
+            marks.push(HOVER_MARK);
+        }
+        if w.active.contains(&raw) {
+            marks.push(ACTIVE_MARK);
+        }
+        if w.focus == Some(raw) {
+            marks.push(FOCUS_MARK);
+        }
+        if w.focus_within.contains(&raw) {
+            marks.push(FOCUS_WITHIN_MARK);
+        }
+        marks
+    })
+}
+
+/// CH2.E19: a view's element state as the inline svg paint pass matches
+/// its rules against it (`cache_svg_paint_styles`).
+#[derive(Default, Clone, PartialEq, Debug)]
+pub(crate) struct SvgElementState {
+    pub(crate) checked: HashMap<usize, bool>,
+    pub(crate) hover: Vec<usize>,
+    pub(crate) active: Vec<usize>,
+    pub(crate) focus: Option<usize>,
+    /// The focused element and the elements above it.
+    pub(crate) focus_within: Vec<usize>,
+}
+
+impl SvgElementState {
+    /// The marks this state puts on element `raw`, as bits.
+    pub(crate) fn mark_bits(&self, raw: usize) -> u8 {
+        u8::from(self.hover.contains(&raw))
+            | u8::from(self.active.contains(&raw)) << 1
+            | u8::from(self.focus == Some(raw)) << 2
+            | u8::from(self.focus_within.contains(&raw)) << 3
     }
 }
 
@@ -38876,14 +39224,11 @@ fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
         _ => ElementState::of(&tag, attributes),
     };
     let mut classes = element_classes(attributes);
-    WALK.with(|w| {
-        let w = w.borrow();
-        for (chain, mark) in [(&w.hover, HOVER_MARK), (&w.active, ACTIVE_MARK)] {
-            if chain.contains(&node.id.raw()) {
-                classes.push(mark.to_string());
-            }
+    for mark in walk_marks(node.id.raw()) {
+        if !classes.iter().any(|c| c == mark) {
+            classes.push(mark.to_string());
         }
-    });
+    }
     Some((tag, classes, attributes.get("id").cloned(), state))
 }
 
@@ -39169,7 +39514,7 @@ fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
         .get("class")
         .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
         .unwrap_or_default();
-    for mark in [HOVER_MARK, ACTIVE_MARK] {
+    for mark in STATE_MARKS {
         if attributes.contains_key(mark) {
             classes.push(mark.to_string());
         }
@@ -39430,6 +39775,8 @@ impl AncestorCompound {
                             // mark among its classes (`element_classes`).
                             ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
                             ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
+                            ("focus", None) => out.classes.push(FOCUS_MARK.to_string()),
+                            ("focus-within", None) => out.classes.push(FOCUS_WITHIN_MARK.to_string()),
                             // The root of an HTML document is its `html`
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
@@ -39648,7 +39995,7 @@ fn key_attributes(classes: &[String], id: Option<&String>) -> HashMap<String, St
     let mut attributes = HashMap::new();
     let mut class = String::new();
     for c in classes {
-        if c == HOVER_MARK || c == ACTIVE_MARK {
+        if STATE_MARKS.contains(&c.as_str()) {
             attributes.insert(c.clone(), String::new());
             continue;
         }
@@ -40884,7 +41231,7 @@ impl PointerReads {
     fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
         let mut classes: Vec<String> = Vec::new();
         for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
-            if !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK) && !classes.contains(c) {
+            if !STATE_MARKS.contains(&c.as_str()) && !classes.contains(c) {
                 classes.push(c.clone());
             }
         }
@@ -41551,6 +41898,12 @@ fn animation_repaint_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_ANIMATION_REPAINT").is_none_or(|v| v != "0"))
 }
 
+/// The animation key of a box: its element's raw NodeId, or the key of
+/// the `::before`/`::after` it was generated for (CH2.E16).
+fn animation_key_of(b: &LayoutBox) -> Option<usize> {
+    b.node_id.or(b.pseudo_animation_key)
+}
+
 /// Whether a box is an element's own (not a text run, an anonymous box or
 /// the box of another element).
 fn element_box_of_other(b: &LayoutBox, node: usize) -> bool {
@@ -41588,7 +41941,7 @@ fn check_animation_frame(
     changes: &HashMap<usize, &layout_ctx::FrameChange>,
     found: &mut std::collections::HashSet<usize>,
 ) -> Result<(), String> {
-    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+    if let Some(change) = animation_key_of(b).and_then(|key| changes.get(&key)) {
         found.insert(change.node);
         for (index, was, is) in &change.props {
             if animations::prop_value(&b.style, *index) != *was {
@@ -41643,7 +41996,7 @@ fn inherits_colour_elsewhere(b: &LayoutBox, node: usize, old: &rustkit_css::Colo
 /// LAT2: copy an animation frame's values onto the laid-out tree
 /// (checked by `check_animation_frame`).
 fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx::FrameChange>) {
-    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+    if let Some(change) = animation_key_of(b).and_then(|key| changes.get(&key)) {
         for (index, was, is) in &change.props {
             animations::set_prop_value(&mut b.style, *index, is);
             if animations::prop_name(*index) == "color" {
@@ -41875,11 +42228,20 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 
 /// What the build gives a box besides its style and its children.
 fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
+    // CH2.E19: an inline svg whose markup changed only in author paint
+    // (another key, the same natural size) is the same box: the new icon
+    // is a paint change (`copy_changed_paint` takes its key).
+    let box_type = |x: &LayoutBox| match &x.box_type {
+        BoxType::Image { url, natural_width, natural_height } if url.starts_with("inline-svg:") => {
+            format!("InlineSvg {natural_width:?} {natural_height:?}")
+        }
+        other => format!("{other:?}"),
+    };
     let rest = |x: &LayoutBox| {
         format!(
             "{:?}",
             (
-                &x.box_type,
+                box_type(x),
                 &x.offsets,
                 &x.stacking_context,
                 &x.root_element_height,
@@ -41950,6 +42312,14 @@ fn same_shape(laid: &LayoutBox, fresh: &LayoutBox) -> bool {
 /// custom property set. Layout writes resolved values into a laid-out
 /// box's style, so the style is not replaced whole.
 fn copy_changed_paint(laid: &mut LayoutBox, kept: &LayoutBox, fresh: &LayoutBox) {
+    // An inline svg painted from another key (CH2.E19, `built_alike`).
+    if let (BoxType::Image { url: was, .. }, BoxType::Image { url: is, .. }) = (&kept.box_type, &fresh.box_type) {
+        if was != is {
+            if let BoxType::Image { url, .. } = &mut laid.box_type {
+                *url = is.clone();
+            }
+        }
+    }
     if kept.style.same_paint(&fresh.style) {
         laid.style.custom_properties = fresh.style.custom_properties.clone();
     } else {

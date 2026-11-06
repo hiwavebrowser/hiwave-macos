@@ -758,6 +758,11 @@ pub enum DomDirty {
 pub(crate) struct DirtyMark {
     bucket: Cell<DomDirty>,
     since_layout: Cell<bool>,
+    /// The kind of the write that first dirtied the published layout
+    /// (`attribute`, `class`, `style`, `text`, `html`, `insert`, `remove`,
+    /// `animation`, `form`, `sheet`, `shadow`): the forced-layout log's
+    /// cause. `None` while the layout is current.
+    cause: Cell<Option<&'static str>>,
     /// The pending bucket holds a mark other than Web Animations' write of
     /// the animated-style layer (`mark_animation_layer`). Every other mark
     /// sets it, recorded in the `MutationLog` or not (`adoptedStyleSheets`,
@@ -768,21 +773,44 @@ pub(crate) struct DirtyMark {
 }
 
 impl DirtyMark {
-    /// A script write that invalidated `bucket`.
-    pub(crate) fn mark(&self, bucket: DomDirty) {
+    /// A script write of kind `kind` that invalidated `bucket`.
+    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
-            self.mark_animation_layer(bucket);
+            self.mark_animation_layer(bucket, kind);
         }
     }
 
     /// Web Animations wrote an element's animated-style layer, and nothing
-    /// else: the one mark that leaves `beyond_animation_layer` alone.
-    pub(crate) fn mark_animation_layer(&self, bucket: DomDirty) {
+    /// else: the one mark that leaves `beyond_animation_layer` alone. It is
+    /// a script write all the same, and names its cause (`animation`) for
+    /// the forced-layout log like every other mark.
+    pub(crate) fn mark_animation_layer(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
             self.bucket.set(self.bucket.get().max(bucket));
-            self.since_layout.set(true);
+            if !self.since_layout.replace(true) {
+                self.cause.set(Some(kind));
+            }
         }
+    }
+
+    /// A script write the engine must lay out when script settles, but that
+    /// no box of the published layout can see (it is inside a `display:
+    /// none` subtree): a geometry read before then needs no forced layout.
+    ///
+    /// It is still a write the engine has to lay out, so it is beyond the
+    /// animated-style layer: the paint-only animation frame must not skip
+    /// it. A no-op write (`Clean`) is not a write and marks nothing.
+    pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.bucket.set(self.bucket.get().max(bucket));
+        }
+    }
+
+    /// What first dirtied the published layout (see `cause`).
+    pub(crate) fn cause(&self) -> Option<&'static str> {
+        self.cause.get()
     }
 
     /// Whether the pending bucket holds a mark other than the animated-style
@@ -808,6 +836,49 @@ impl DirtyMark {
     /// A layout of the DOM as it is now was published.
     pub(crate) fn laid_out(&self) {
         self.since_layout.set(false);
+        self.cause.set(None);
+    }
+}
+
+/// A script task's forced layouts (`DomBindings::take_forced_report`): how
+/// many, their time, and per cause how many, as `(write, read, count)` in
+/// the order first seen. The write is the one that first dirtied the
+/// layout the read found stale (`attribute`, `class`, `style`, `text`,
+/// `html`, `insert`, `remove`, `animation`, `form`, `sheet`, `shadow`);
+/// the read is what asked (`offset`, `rect`, `client`, `scroll_size`,
+/// `computed_style`, `element_scroll`, `scroll_chain`, `inner_text`,
+/// `laid_out`, `hit_test`, `window_scroll`, `scroll_to`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForcedLayoutReport {
+    pub count: u64,
+    pub ms: f64,
+    pub causes: Vec<(&'static str, &'static str, u64)>,
+}
+
+impl ForcedLayoutReport {
+    pub(crate) fn note(&mut self, write: &'static str, read: &'static str, ms: f64) {
+        self.ms += ms;
+        match self.causes.iter_mut().find(|(w, r, _)| *w == write && *r == read) {
+            Some(entry) => entry.2 += 1,
+            None => self.causes.push((write, read, 1)),
+        }
+    }
+
+    /// The most frequent cause as `write:read` (the first seen on a tie).
+    pub fn top_cause(&self) -> Option<String> {
+        let mut top: Option<&(&str, &str, u64)> = None;
+        for entry in &self.causes {
+            if top.is_none_or(|t| entry.2 > t.2) {
+                top = Some(entry);
+            }
+        }
+        top.map(|(w, r, _)| format!("{w}:{r}"))
+    }
+
+    /// Every cause, as `{write:read:n,...}`.
+    pub fn causes_field(&self) -> String {
+        let parts: Vec<String> = self.causes.iter().map(|(w, r, n)| format!("{w}:{r}:{n}")).collect();
+        format!("{{{}}}", parts.join(","))
     }
 }
 
@@ -1898,6 +1969,20 @@ impl DomBindings {
         self.dom_host.borrow_mut().take_forced_layouts()
     }
 
+    /// `take_forced_layouts`, with each forced layout's cause and the time
+    /// they took (the engine's per-task log line).
+    pub fn take_forced_report(&self) -> ForcedLayoutReport {
+        self.dom_host.borrow_mut().take_forced_report()
+    }
+
+    /// Whether the page's sheets have a `:has()` rule, asked when a write
+    /// lands inside a `display: none` subtree: with one, the write may show
+    /// it, and a geometry read after it lays the page out. Without a probe
+    /// the answer is yes.
+    pub fn set_has_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().has_rules = probe;
+    }
+
     /// How many times a source from `set_geometry_source` was built.
     pub fn geometry_builds(&self) -> u64 {
         self.dom_host.borrow().geometry_builds
@@ -2607,13 +2692,15 @@ impl DomBindings {
     pub fn fire_transition_event(
         &self,
         node: usize,
+        pseudo: Option<&str>,
         event_type: &str,
         property: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
-             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+             elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
+            pseudo = pseudo.unwrap_or("")
         ))?;
         Ok(())
     }
@@ -2626,13 +2713,15 @@ impl DomBindings {
     pub fn fire_animation_event(
         &self,
         node: usize,
+        pseudo: Option<&str>,
         event_type: &str,
         name: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
-             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+             elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
+            pseudo = pseudo.unwrap_or("")
         ))?;
         Ok(())
     }
@@ -3665,6 +3754,49 @@ mod tests {
             .set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
             .unwrap();
         assert_eq!(bindings.take_dirty(), DomDirty::Clean);
+    }
+
+    // #947 x #941: the LAT7 marks (write cause, unseen writes, no-op writes)
+    // against LAT2's paint-only marker (`beyond_animation_layer`).
+    #[test]
+    fn lat7_marks_and_the_animation_layer_marker() {
+        // The WAAPI layer write is a script write: it names its cause.
+        let d = DirtyMark::default();
+        d.mark_animation_layer(DomDirty::Layout, "animation");
+        assert!(d.written_since_layout());
+        assert_eq!(d.cause(), Some("animation"), "the layer write logs cause=animation");
+        assert!(!d.beyond_animation_layer(), "the layer write alone is paint-only");
+
+        // A write the published layout cannot see (display:none subtree)
+        // still changes the DOM the engine lays out next: it is beyond the
+        // layer, so the paint-only frame is not taken.
+        d.mark_unseen(DomDirty::Style);
+        assert!(d.beyond_animation_layer(), "an unseen write is beyond the layer");
+        assert_eq!(d.cause(), Some("animation"), "it does not rename the first cause");
+        assert_eq!(d.take(), DomDirty::Style);
+        assert!(!d.beyond_animation_layer(), "take resets it");
+
+        // Unseen first, on a current layout: no forced layout, but beyond.
+        let d = DirtyMark::default();
+        d.mark_unseen(DomDirty::Layout);
+        assert!(!d.written_since_layout(), "a read needs no forced layout");
+        assert_eq!(d.cause(), None);
+        assert!(d.beyond_animation_layer());
+
+        // A no-op write (the same value again: `write` answers `Clean`) is
+        // not a write, seen or unseen.
+        let d = DirtyMark::default();
+        d.mark_animation_layer(DomDirty::Layout, "animation");
+        d.mark(DomDirty::Clean, "style");
+        d.mark_unseen(DomDirty::Clean);
+        assert!(!d.beyond_animation_layer(), "a no-op write leaves the paint-only frame alone");
+        assert_eq!(d.cause(), Some("animation"));
+        assert_eq!(d.get(), DomDirty::Layout);
+
+        // A real seen write after the layer: beyond, cause kept as first.
+        d.mark(DomDirty::Layout, "text");
+        assert!(d.beyond_animation_layer());
+        assert_eq!(d.cause(), Some("animation"));
     }
 
     fn bound(html: &str) -> DomBindings {
