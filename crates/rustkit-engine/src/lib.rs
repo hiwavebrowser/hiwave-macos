@@ -673,6 +673,8 @@ mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
+mod snapshot_stage_tests;
+#[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
@@ -10340,8 +10342,14 @@ impl Engine {
         let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
         // Script reads of computed style and `getAnimations()` answer from
         // the frame.
+        // LAT8: a frame that changed nothing keeps the geometry and styles
+        // script already read (the animations' state is still renewed).
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
-            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+            if changes.is_empty() {
+                publish_animations(bindings, &view.lay);
+            } else {
+                publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+            }
         }
         if !changes.is_empty() {
             if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
@@ -21682,22 +21690,21 @@ impl Engine {
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
-            // The maps (with every element's computed style lines) are built
-            // on the first read that needs them, as `publish_geometry` does:
-            // a scrollTo after the write needs only `max_scroll`.
+            // The geometry is built on the first read that needs it, as
+            // `publish_geometry` does: a scrollTo after the write needs only
+            // `max_scroll`. Each element's computed style is formatted on
+            // its own first read (LAT8).
             let snapshot_of = built.clone();
             let styled = lay.clone();
+            let styles_of = built.clone();
             Some(rustkit_bindings::ForcedGeometry {
                 source: Box::new(move || {
                     let _snapshot_time = time_stage(Stage::Snapshot);
-                    geometry_with_root(
-                        &snapshot_of,
-                        root_element,
-                        &styled.boxless_styles.borrow(),
-                        &styled.pseudo_styles.borrow(),
-                    )
+                    set_root_font_for(&snapshot_of, root_element, &styled);
+                    geometry_only(&snapshot_of, root_element)
                 }),
                 hit_tester: Some(layout_hit_tester(move || Some(built.clone()), lay.element_scrolls.clone())),
+                computed_lines: Some(computed_lines_source(move || Some(styles_of.clone()), root_element, lay.clone())),
                 max_scroll,
             })
         }))
@@ -25370,15 +25377,7 @@ fn publish_geometry(
     lay: Rc<layout_ctx::ViewLayout>,
 ) {
     bindings.share_element_scrolls(lay.element_scrolls.clone());
-    // The CSS animations as of this layout, for `getAnimations()`, and the
-    // properties they animate, for computed reads.
-    {
-        let anims = lay.animations.borrow();
-        let mut animated = lay.animated.borrow_mut();
-        animated.css = anims.describe();
-        animated.css_props = anims.animated_props();
-    }
-    bindings.share_animated_styles(lay.animated.clone());
+    publish_animations(bindings, &lay);
     // LAT7: whether a write inside a hidden subtree can show it through a
     // `:has()` rule. The rule index a build left, live (a forced layout
     // rebuilds it); unknown counts as yes.
@@ -25395,18 +25394,16 @@ fn publish_geometry(
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
+    let styles_layout = layout.clone();
+    let styles = computed_lines_source(move || styles_layout.upgrade(), root_element, lay.clone());
     bindings.set_geometry_source(Box::new(move || {
         let Some(layout) = layout.upgrade() else {
             return Default::default();
         };
         let _snapshot_time = time_stage(Stage::Snapshot);
         let started = std::time::Instant::now();
-        let snapshot = geometry_with_root(
-            &layout,
-            root_element,
-            &lay.boxless_styles.borrow(),
-            &lay.pseudo_styles.borrow(),
-        );
+        set_root_font_for(&layout, root_element, &lay);
+        let snapshot = geometry_only(&layout, root_element);
         debug!(
             elements = snapshot.0.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
@@ -25414,6 +25411,30 @@ fn publish_geometry(
         );
         snapshot
     }));
+    // LAT8: each element's computed style is formatted on its first read.
+    bindings.set_computed_lines(Some(styles));
+}
+
+/// The CSS animations as of this frame, for `getAnimations()`, and the
+/// properties they animate, for computed reads.
+fn publish_animations(bindings: &DomBindings, lay: &layout_ctx::ViewLayout) {
+    {
+        let anims = lay.animations.borrow();
+        let mut animated = lay.animated.borrow_mut();
+        animated.css = anims.describe();
+        animated.css_props = anims.animated_props();
+    }
+    bindings.share_animated_styles(lay.animated.clone());
+}
+
+/// The root element's font size for `rem`, as `geometry_with_root` sets it.
+fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layout_ctx::ViewLayout) {
+    let boxless = lay.boxless_styles.borrow();
+    let root_style = root_element
+        .and_then(|n| boxless.get(&n))
+        .map(|b| &*b.box_.style)
+        .unwrap_or(&*layout.style);
+    computed_read::set_root_font(root_style);
 }
 
 /// How long after a wheel the next one still belongs to its gesture. macOS
@@ -25504,6 +25525,7 @@ fn layout_hit_tester(
     })
 }
 
+#[cfg(test)]
 /// `geometry_snapshot`, with the document element reported as the root box
 /// and the styles of `boxless` elements (`ViewLayout::boxless_styles`:
 /// display: contents or none, dropped empty boxes, the root) added. A node
@@ -25644,6 +25666,7 @@ impl layout_ctx::LayoutCtx {
     }
 }
 
+#[cfg(test)]
 /// Where the layout put every element, by DOM node, for script geometry reads
 /// (`DomBindings::set_geometry`). An element laid out as several boxes (a
 /// block split around anonymous boxes) reports the union of its boxes.
@@ -25653,6 +25676,16 @@ impl layout_ctx::LayoutCtx {
 /// chain, so a scroll does not cost a new snapshot.
 fn geometry_snapshot(
     root: &LayoutBox,
+) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    geometry_snapshot_with(root, true)
+}
+
+/// `geometry_snapshot`, with each element's computed-style rows only when
+/// `with_styles` (LAT8: script's reads format them per element instead,
+/// `computed_lines_source`).
+fn geometry_snapshot_with(
+    root: &LayoutBox,
+    with_styles: bool,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     /// `parent_vars` is the custom-property set of the nearest element
     /// ancestor's box (anonymous boxes between do not count): an element
@@ -25677,7 +25710,7 @@ fn geometry_snapshot(
     fn walk(
         b: &LayoutBox,
         out: &mut HashMap<usize, rustkit_bindings::BoxGeometry>,
-        styles: &mut HashMap<usize, String>,
+        mut styles: Option<&mut HashMap<usize, String>>,
         parent_vars: Option<&Arc<rustkit_css::CustomProperties>>,
         scrollers: Scrollers,
     ) -> Option<(f32, f32, f32, f32)> {
@@ -25725,7 +25758,7 @@ fn geometry_snapshot(
             && parent_vars.is_none_or(|p| !Arc::ptr_eq(p, &b.style.custom_properties));
         let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
         for child in &b.children {
-            if let Some(c) = walk(child, out, styles, child_vars, under) {
+            if let Some(c) = walk(child, out, styles.as_deref_mut(), child_vars, under) {
                 content = Some(match content {
                     Some(e) => (e.0.min(c.0), e.1.min(c.1), e.2.max(c.2), e.3.max(c.3)),
                     None => c,
@@ -25782,13 +25815,15 @@ fn geometry_snapshot(
                 sticky,
                 held,
             };
-            styles.entry(node).or_insert_with(|| {
-                let mut lines = computed_style_lines(b);
-                if own_vars {
-                    lines.push_str(&custom_property_lines(&b.style.custom_properties));
-                }
-                lines
-            });
+            if let Some(styles) = styles {
+                styles.entry(node).or_insert_with(|| {
+                    let mut lines = computed_style_lines(b);
+                    if own_vars {
+                        lines.push_str(&custom_property_lines(&b.style.custom_properties));
+                    }
+                    lines
+                });
+            }
             out.entry(node)
                 .and_modify(|g| {
                     // A second box of the same element: union.
@@ -25811,8 +25846,106 @@ fn geometry_snapshot(
     let mut out = HashMap::new();
     let mut styles = HashMap::new();
     let none = Scrollers { flow: None, absolute: None, fixed: None, held: false, holds_fixed: false };
-    walk(root, &mut out, &mut styles, None, none);
+    walk(root, &mut out, with_styles.then_some(&mut styles), None, none);
     (out, styles)
+}
+
+/// Where each element's computed style comes from in a layout, as
+/// `geometry_snapshot` picks it: the first of its boxes finished in a
+/// post-order walk (the path of child indices to it), and whether that box
+/// publishes its own custom-property set.
+fn style_box_index(root: &LayoutBox) -> HashMap<usize, (Vec<u32>, bool)> {
+    fn walk(
+        b: &LayoutBox,
+        path: &mut Vec<u32>,
+        parent_vars: Option<&Arc<rustkit_css::CustomProperties>>,
+        out: &mut HashMap<usize, (Vec<u32>, bool)>,
+    ) {
+        let own_vars = b.node_id.is_some()
+            && parent_vars.is_none_or(|p| !Arc::ptr_eq(p, &b.style.custom_properties));
+        let child_vars = if b.node_id.is_some() { Some(&b.style.custom_properties) } else { parent_vars };
+        for (i, child) in b.children.iter().enumerate() {
+            path.push(i as u32);
+            walk(child, path, child_vars, out);
+            path.pop();
+        }
+        if let Some(node) = b.node_id {
+            out.entry(node).or_insert_with(|| (path.clone(), own_vars));
+        }
+    }
+    let mut out = HashMap::new();
+    walk(root, &mut Vec::new(), None, &mut out);
+    out
+}
+
+/// LAT8: formats one element's computed style of `layout` on its first
+/// read, the rows `geometry_with_root` built for every element: the box's
+/// (or, without a box, the element's boxless style), its own custom
+/// properties, then its pseudo-elements'. The index of boxes is built on
+/// the first read; `layout` gives the layout while it is current.
+fn computed_lines_source(
+    layout: impl Fn() -> Option<Rc<LayoutBox>> + 'static,
+    root_element: Option<usize>,
+    lay: Rc<layout_ctx::ViewLayout>,
+) -> rustkit_bindings::ComputedLines {
+    let index: std::cell::OnceCell<HashMap<usize, (Vec<u32>, bool)>> = std::cell::OnceCell::new();
+    Rc::new(move |node| {
+        let layout = layout()?;
+        let _snapshot_time = time_stage(Stage::Snapshot);
+        let boxless = lay.boxless_styles.borrow();
+        let root_style = root_element
+            .and_then(|n| boxless.get(&n))
+            .map(|b| &*b.box_.style)
+            .unwrap_or(&*layout.style);
+        computed_read::set_root_font(root_style);
+        let index = index.get_or_init(|| style_box_index(&layout));
+        let mut lines = match index.get(&node) {
+            Some((path, own_vars)) => {
+                let mut b: &LayoutBox = &layout;
+                for i in path {
+                    b = b.children.get(*i as usize)?;
+                }
+                let mut lines = computed_style_lines(b);
+                if *own_vars {
+                    lines.push_str(&custom_property_lines(&b.style.custom_properties));
+                }
+                lines
+            }
+            None => {
+                let style = boxless.get(&node)?;
+                let mut lines = computed_style_lines(&style.box_);
+                if style.own_vars {
+                    lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+                }
+                lines
+            }
+        };
+        for ((at, pseudo), style) in lay.pseudo_styles.borrow().iter() {
+            if *at != node {
+                continue;
+            }
+            for row in pseudo_style_lines(style).lines() {
+                lines.push_str(&format!("\n{pseudo} {row}"));
+            }
+            for row in custom_property_lines(&style.custom_properties).lines().skip(2) {
+                lines.push_str(&format!("\n{pseudo} {row}"));
+            }
+        }
+        Some(lines)
+    })
+}
+
+/// The geometry of every element of `layout`, with the root element's
+/// (LAT8: the styles are `computed_lines_source`'s).
+fn geometry_only(
+    layout: &LayoutBox,
+    root_element: Option<usize>,
+) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
+    let mut snapshot = geometry_snapshot_with(layout, false);
+    if let Some(root) = root_element {
+        snapshot.0.entry(root).or_insert_with(|| root_element_geometry(layout));
+    }
+    snapshot
 }
 
 /// The custom properties in effect on an element, as rows after its
@@ -25987,12 +26120,26 @@ fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
     }
 }
 
+thread_local! {
+    /// How many elements' computed-style rows this thread formatted for
+    /// script reads (LAT8), never reset.
+    static STYLE_ROWS_FORMATTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// LAT8's counters on this thread: element style rows formatted for the
+/// snapshot, and the snapshot stage's ms.
+#[cfg(test)]
+pub(crate) fn snapshot_counters() -> (u64, f64) {
+    (STYLE_ROWS_FORMATTED.with(|c| c.get()), relayout_cause::snapshot_total_ms())
+}
+
 /// The computed style of one box as `name\tvalue` lines, for the properties
 /// the engine models and script commonly reads. Sizes and box edges are the
 /// used values from the laid-out box (what `getComputedStyle` reports for
 /// `width`, `height`, `margin-*`, `padding-*`, `border-*-width`); `display`
 /// is the engine's own set, so `li` reads `block`, not `list-item`.
 fn computed_style_lines(b: &LayoutBox) -> String {
+    STYLE_ROWS_FORMATTED.with(|c| c.set(c.get() + 1));
     let s = &*b.style;
     let d = &b.dimensions;
     // The border widths as CSS reports them. A styled scrollbar's space

@@ -135,7 +135,7 @@ mod web_url;
 
 pub use dom::{
     AnimatedStyles, BoxGeometry, ControlWrites, CssAnimationControl, CssAnimationInfo, ElementScrolls,
-    ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
+    ComputedLines, ForcedGeometry, ForcedLayout, GeometrySource, HitTester, SelectorMatchFn, SharedAnimatedStyles,
     SharedElementScrolls,
 };
 pub mod events;
@@ -1937,7 +1937,8 @@ impl DomBindings {
         self.dirty.laid_out();
         let mut host = self.dom_host.borrow_mut();
         host.geometry.clear();
-        host.computed.clear();
+        host.computed.borrow_mut().clear();
+        host.computed_lines = None;
         host.geometry_source = Some(source);
         host.renew_forced_budget();
     }
@@ -2033,7 +2034,16 @@ impl DomBindings {
     pub fn set_computed_styles(&self, styles: std::collections::HashMap<usize, String>) {
         let mut host = self.dom_host.borrow_mut();
         host.geometry_source = None;
-        host.computed = styles;
+        host.computed_lines = None;
+        *host.computed.borrow_mut() = styles;
+    }
+
+    /// Format each element's computed style of the layout just published
+    /// (`set_geometry_source`) on its first read, instead of all of them
+    /// with the geometry (LAT8). Call after `set_geometry_source`, which
+    /// drops the previous layout's.
+    pub fn set_computed_lines(&self, lines: Option<ComputedLines>) {
+        self.dom_host.borrow_mut().computed_lines = lines;
     }
 
     /// Set the document.

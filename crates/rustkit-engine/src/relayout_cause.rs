@@ -405,6 +405,9 @@ pub(crate) fn time_stage(stage: Stage) -> StageTimer {
 impl Drop for StageTimer {
     fn drop(&mut self) {
         let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        if matches!(self.stage, Stage::Snapshot) {
+            SNAPSHOT_TOTAL_MS.with(|t| t.set(t.get() + ms));
+        }
         STAGE_MS.with(|c| {
             let mut stages = c.get();
             stages.add(self.stage, ms);
@@ -422,6 +425,17 @@ impl Drop for StageTimer {
         };
         crate::wgate::add(hold, ms);
     }
+}
+
+thread_local! {
+    /// Every snapshot stage on this thread, never reset (LAT8's tests and
+    /// measurement read the difference across turns).
+    static SNAPSHOT_TOTAL_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The snapshot stage's time on this thread so far, in ms.
+pub(crate) fn snapshot_total_ms() -> f64 {
+    SNAPSHOT_TOTAL_MS.with(|t| t.get())
 }
 
 /// The stage times since the last take, and a fresh start.
