@@ -337,6 +337,9 @@ trait ChromeUi {
     /// leave to the page below it, in a `width` x `height` window (CH3.A3).
     /// The WebKit view: nothing, as before.
     fn compose(&self, _width: f64, _height: f64, _hole: (f64, f64, f64, f64)) {}
+    /// Stay the frontmost of the window's views, over panels built after
+    /// it (CH3.A3b). The WebKit view: nothing, as before.
+    fn keep_on_top(&self) {}
 }
 
 impl ChromeUi for WebView {
@@ -527,130 +530,66 @@ impl ChromeUi for ChromeView {
     fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
         #[cfg(all(target_os = "macos", feature = "rustkit"))]
         if let ChromeView::RustKit(view) = self {
-            CHROME_COMPOSITION.with(|c| {
-                let mut c = c.borrow_mut();
-                c.size = (width, height);
-                c.hole = Some(rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
-                c.apply(view);
-            });
+            view.compose_region(width, height, rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
+            // CH3.A3c: with a transparent chrome, its document paints the
+            // body's colour down to the page column's top (chrome.html,
+            // `.rustkit-page-band`); told only when that top moves.
+            if rustkit_chrome_alpha() {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static PAGE_TOP: AtomicU64 = AtomicU64::new(CHROME_HEIGHT_DEFAULT as u64);
+                let top = hole.1.round().max(0.0) as u64;
+                if PAGE_TOP.swap(top, Ordering::Relaxed) != top {
+                    let _ = view.wry_evaluate_script(&format!(
+                        "(function () {{ var s = document.getElementById('rustkitPageTop'); if (!s) {{ \
+                         s = document.createElement('style'); s.id = 'rustkitPageTop'; document.head.appendChild(s); }} \
+                         s.textContent = 'html[data-rustkit-alpha] .rustkit-page-band {{ height: {}px; }}'; }})()",
+                        top
+                    ));
+                }
+            }
         }
         #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
         let _ = (width, height, hole);
     }
-}
 
-/// The RustKit chrome's composition over the page (CH3.A3, see
-/// `trench/chrome/A3-composition.md`): the window's size, the page column
-/// it leaves open, and the boxes of its popups that are showing, as the
-/// chrome document last reported them (`chrome_overlays`).
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-#[derive(Default)]
-struct ChromeComposition {
-    size: (f64, f64),
-    hole: Option<rustkit_viewhost::RegionRect>,
-    overlays: Vec<rustkit_viewhost::RegionRect>,
-}
-
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-impl ChromeComposition {
-    fn apply(&self, view: &webview_rustkit::RustKitView) {
-        let region = rustkit_viewhost::compose_region(self.size.0, self.size.1, self.hole, &self.overlays);
-        tracing::debug!(size = ?self.size, hole = ?self.hole, ?region, "RustKit chrome region");
-        rustkit_viewhost::set_raw_view_region(view.host_view_raw(), Some(region));
-    }
-}
-
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-thread_local! {
-    static CHROME_COMPOSITION: std::cell::RefCell<ChromeComposition> =
-        std::cell::RefCell::new(ChromeComposition::default());
-}
-
-/// `{"cmd":"chrome_overlays","rects":[[x,y,w,h],...]}` from the RustKit
-/// chrome: the boxes of its open popups (CH3.A3). Taken before
-/// `handle_chrome_ipc`, which never sees it. True when `body` was one.
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-fn take_chrome_overlays(body: &str, view: &webview_rustkit::RustKitView) -> bool {
-    if !body.contains("\"chrome_overlays\"") {
-        return false;
-    }
-    let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
-    };
-    if msg.get("cmd").and_then(|c| c.as_str()) != Some("chrome_overlays") {
-        return false;
-    }
-    let rects: Vec<rustkit_viewhost::RegionRect> = msg
-        .get("rects")
-        .and_then(|r| r.as_array())
-        .map(|list| {
-            list.iter()
-                .filter_map(|r| {
-                    let n: Vec<f64> = r.as_array()?.iter().filter_map(|v| v.as_f64()).collect();
-                    (n.len() == 4).then(|| rustkit_viewhost::RegionRect::new(n[0], n[1], n[2], n[3]))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    info!(count = rects.len(), ?rects, "RustKit chrome overlays");
-    CHROME_COMPOSITION.with(|c| {
-        let mut c = c.borrow_mut();
-        c.overlays = rects;
-        // Before the first layout there is no size to compose in.
-        if c.hole.is_some() {
-            c.apply(view);
+    /// Keep the RustKit chrome the frontmost of the window's views (CH3.A3b,
+    /// #909 R1 nit 2): a panel (shelf, Inspector) built later is added on
+    /// top, and a chrome popup reaching into its rect was drawn under it.
+    /// The panels are inside the chrome's hole, so they still show and
+    /// take the pointer wherever the chrome paints nothing.
+    fn keep_on_top(&self) {
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if let ChromeView::RustKit(view) = self {
+            if rustkit_viewhost::raise_raw_view_to_front(view.host_view_raw()) {
+                info!("RustKit chrome raised over a panel");
+            }
         }
-    });
-    true
-}
-
-/// Whether the RustKit chrome has a popup open over the page (CH3.A3).
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-fn chrome_has_overlays() -> bool {
-    CHROME_COMPOSITION.with(|c| !c.borrow().overlays.is_empty())
-}
-
-/// Appended to the RustKit chrome's bridge (CH3.A3): reports the boxes of
-/// the chrome's popups that are showing, so the app can let them over the
-/// page and leave the rest of the page column to the page.
-const CHROME_OVERLAY_REPORTER: &str = r#"
-(function () {
-    var SELECTORS = '.downloads-panel, .history-panel, .toolbar-action-panel, .help-panel, '
-        + '.context-menu, .blocklist-dropdown, .find-modal, .command-palette';
-    var last = null;
-    function shown(el) {
-        var cs = window.getComputedStyle ? getComputedStyle(el) : null;
-        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')) return false;
-        return true;
     }
-    function report() {
-        var out = [];
-        var list = document.querySelectorAll(SELECTORS);
-        for (var i = 0; i < list.length; i++) {
-            var el = list[i];
-            if (!shown(el)) continue;
-            var r = el.getBoundingClientRect();
-            if (!(r.width > 0 && r.height > 0)) continue;
-            out.push([Math.floor(r.left), Math.floor(r.top), Math.ceil(r.width) + 1, Math.ceil(r.height) + 1]);
+}
+
+impl ChromeView {
+    /// Whether the RustKit chrome's frame on screen paints over the page
+    /// column (an open popup; CH3.A3b). Always false for the WebKit chrome.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    fn has_overlays(&self) -> bool {
+        match self {
+            ChromeView::RustKit(view) => view.region_has_overlays(),
+            ChromeView::WebKit(_) => false,
         }
-        var s = JSON.stringify(out);
-        if (s === last) return;
-        last = s;
-        window.ipc.postMessage(JSON.stringify({ cmd: 'chrome_overlays', rects: out }));
     }
-    function soon() { setTimeout(report, 0); setTimeout(report, 250); }
-    window.__hiwaveReportOverlays = report;
-    window.__hiwaveOutsideClick = function () {
-        var target = document.body;
-        var ev;
-        try { ev = new MouseEvent('click', { bubbles: true }); } catch (e) { ev = new Event('click', { bubbles: true }); }
-        target.dispatchEvent(ev);
-        soon();
-    };
-    ['click', 'mouseup', 'keyup'].forEach(function (t) { document.addEventListener(t, soon, true); });
-    setInterval(report, 1000);
-    soon();
-})();
+
+}
+
+/// The chrome document's helper for a click on the page while one of its
+/// popups is open (CH3.A3): the app tells the chrome, which closes the
+/// popup on its own outside-click handler. The chrome no longer reports its
+/// popups' boxes (CH3.A3b): the region comes from its frames.
+const CHROME_OUTSIDE_CLICK: &str = r#"
+window.__hiwaveOutsideClick = function () {
+    var ev;
+    try { ev = new MouseEvent('click', { bubbles: true }); } catch (e) { ev = new Event('click', { bubbles: true }); }
+    document.body.dispatchEvent(ev);
+};
 "#;
 
 /// `HIWAVE_RUSTKIT_CHROME=1`: the chrome is a RustKit view (CH3.A2). Needs
@@ -661,10 +600,48 @@ fn rustkit_chrome_enabled() -> bool {
         && rustkit_engine::content_thread_enabled()
 }
 
-/// The chrome document for a RustKit view: the bridge and the overlay
-/// reporter (CH3.A3), which needs the body, so it runs at the document's end.
+/// The chrome document for a RustKit view: the bridge and the outside-click
+/// helper (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
-    html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER)
+    html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK)
+}
+
+/// Load one of the app's own documents (the chrome, a panel; built with
+/// [`html_with_bridge`]) into `view`, and make it an app-owned view first (CH3.A7): only
+/// these documents get `window.ipc` / `window.hiwaveChrome`. The content
+/// view is never passed here, so web pages have none of it.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn load_app_document(view: &webview_rustkit::RustKitView, document: &str) -> hiwave_core::HiWaveResult<()> {
+    view.set_app_owned();
+    view.load_html_internal(document)
+}
+
+/// The alpha route of the RustKit chrome over the page (CH3.A3c,
+/// `trench/chrome/A3-composition.md`): the chrome's surface is transparent
+/// and its pixels decide what covers the page. On with
+/// `HIWAVE_RUSTKIT_CHROME=1` unless `HIWAVE_RUSTKIT_CHROME_ALPHA=0`, which
+/// keeps #925's opaque surface and mask (for comparison).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn rustkit_chrome_alpha() -> bool {
+    std::env::var("HIWAVE_RUSTKIT_CHROME_ALPHA").map(|v| v != "0").unwrap_or(true)
+}
+
+/// The chrome document for the RustKit chrome: with the alpha route, the
+/// root element carries `data-rustkit-alpha`, which chrome.html's CSS uses
+/// to leave the body unpainted (the WebKit chrome never sees it).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn rustkit_chrome_html(alpha: bool) -> String {
+    let html = chrome_html_with_bridge();
+    if !alpha {
+        return html;
+    }
+    match html.find("<html") {
+        Some(at) => {
+            let at = at + "<html".len();
+            format!("{} data-rustkit-alpha{}", &html[..at], &html[at..])
+        }
+        None => html,
+    }
 }
 
 /// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
@@ -760,6 +737,24 @@ const PANEL_PROBE: &str = r#"
 #[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
 fn panel_ipc_log_line(panel: &str, body: &str) -> String {
     format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
+}
+
+/// Input method text as the log carries it (CH2.E3, #918 R1 must-fix 2):
+/// the variant and the text's size, never the text, whatever the log
+/// level. A dead key's, an IME's, the accent popover's and the emoji
+/// picker's commits are typed text, password fields included; the same
+/// shapes-only rule as the panel IPC lines (#910).
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+#[cfg(target_os = "macos")]
+fn ime_input_log_line(input: &rustkit_viewhost::ImeInput) -> String {
+    use rustkit_viewhost::ImeInput;
+    match input {
+        ImeInput::SetMarked(text) => format!("ime=SetMarked len={}", text.len()),
+        ImeInput::Insert { text, replace } => {
+            format!("ime=Insert len={} replace={}", text.len(), replace.is_some())
+        }
+        ImeInput::Unmark => "ime=Unmark".to_string(),
+    }
 }
 
 /// A panel probe report as the log carries it (#910 R1 blocker 2), or
@@ -889,7 +884,7 @@ fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &st
         );
         let view = webview_rustkit::RustKitView::new(window, bounds)
             .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
-        view.load_html_internal(&html_with_bridge(html, &panel_probe_script()))
+        load_app_document(&view, &html_with_bridge(html, &panel_probe_script()))
             .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
         info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
         let panel = PanelView::RustKit(view);
@@ -969,6 +964,10 @@ impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
     fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
         (**self).compose(width, height, hole)
     }
+
+    fn keep_on_top(&self) {
+        (**self).keep_on_top()
+    }
 }
 
 fn apply_layout(
@@ -1030,6 +1029,7 @@ fn apply_layout(
     let build = |rect: Rect, html: &'static str, name: &'static str| rustkit_panel(window, rect, html, name);
     inspector.lay_out(inspector_rect, build);
     shelf.lay_out(shelf_rect, build);
+    chrome.keep_on_top();
 }
 
 /// The chrome's `window.ipc` messages, as the WebKit chrome view hands
@@ -2065,6 +2065,38 @@ fn dispatch_view_input(
                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
             }
         }
+        // A Cmd chord the content view took before the menu (CH2.E3): the
+        // page hears its keydown (metaKey) first, as in Chromium; the page
+        // answers whether it claimed it, and one it did not goes on to the
+        // menu (`rustkit_viewhost::finish_key_equivalent`). Chromium's
+        // reserved chords (Cmd+T/N/W/Q, ...) never reach here.
+        rustkit_viewhost::InputKind::KeyEquivalent { key, token } => {
+            let (vk, text) = mac_key_to_vk(&key);
+            info!(keycode = key.mac_keycode, token, "Cmd chord to the page first");
+            view.handle_command_key(vk, text, key.shift, key.alt, token);
+        }
+        // Marked and committed text from the input method: a dead key, an
+        // IME, the accent popover, the emoji picker (CH2.E3).
+        rustkit_viewhost::InputKind::Ime(input) => {
+            tracing::debug!(input = %ime_input_log_line(&input), "input method text");
+            view.ime_input(input);
+            view.relayout();
+        }
+        // An Edit menu item (CH2.E3): the command in the focused text field.
+        rustkit_viewhost::InputKind::Edit(action) => {
+            use rustkit_engine::EditCommand;
+            let command = match action {
+                rustkit_viewhost::EditAction::Copy => EditCommand::Copy,
+                rustkit_viewhost::EditAction::Cut => EditCommand::Cut,
+                rustkit_viewhost::EditAction::Paste => EditCommand::Paste,
+                rustkit_viewhost::EditAction::Undo => EditCommand::Undo,
+                rustkit_viewhost::EditAction::Redo => EditCommand::Redo,
+                rustkit_viewhost::EditAction::SelectAll => EditCommand::SelectAll,
+            };
+            info!(?action, "Edit menu action");
+            view.edit_command(command);
+            view.relayout();
+        }
         rustkit_viewhost::InputKind::Key(key) => {
             // Cmd chords are menu shortcuts, except the editing
             // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
@@ -2088,24 +2120,7 @@ fn dispatch_view_input(
                 }
                 return;
             }
-            // macOS keyCodes -> the Win32 VK numbering the edit
-            // model speaks. Text keys carry their characters.
-            let (vk, text): (u32, &str) = match key.mac_keycode {
-                51 => (0x08, ""),      // delete (backspace)
-                117 => (0x2E, ""),     // forward delete
-                123 => (0x25, ""),     // left
-                124 => (0x27, ""),     // right
-                115 => (0x24, ""),     // home
-                119 => (0x23, ""),     // end
-                36 | 76 => (0x0D, ""), // return / keypad enter
-                48 => (0x09, ""),      // tab
-                53 => (0x1B, ""),      // escape
-                116 => (0x21, ""),     // page up
-                121 => (0x22, ""),     // page down
-                126 => (0x26, ""),     // up
-                125 => (0x28, ""),     // down
-                _ => (0, key.text.as_str()),
-            };
+            let (vk, text) = mac_key_to_vk(&key);
             if vk == 0 && text.is_empty() {
                 return;
             }
@@ -2144,6 +2159,27 @@ fn dispatch_view_input(
     }
 }
 
+/// macOS keyCodes -> the Win32 VK numbering the edit model speaks. Text
+/// keys carry their characters.
+fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
+    match key.mac_keycode {
+        51 => (0x08, ""),      // delete (backspace)
+        117 => (0x2E, ""),     // forward delete
+        123 => (0x25, ""),     // left
+        124 => (0x27, ""),     // right
+        115 => (0x24, ""),     // home
+        119 => (0x23, ""),     // end
+        36 | 76 => (0x0D, ""), // return / keypad enter
+        48 => (0x09, ""),      // tab
+        53 => (0x1B, ""),      // escape
+        116 => (0x21, ""),     // page up
+        121 => (0x22, ""),     // page down
+        126 => (0x26, ""),     // up
+        125 => (0x28, ""),     // down
+        _ => (0, key.text.as_str()),
+    }
+}
+
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
     use super::*;
@@ -2166,8 +2202,46 @@ mod panel_tests {
     }
 
     #[test]
-    fn the_chrome_document_is_the_bridge_and_the_overlay_reporter() {
-        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER));
+    fn the_chrome_document_is_the_bridge_and_the_outside_click_helper() {
+        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK));
+        // CH3.A3b: no popup reporter; the region comes from the frames.
+        assert!(!chrome_html_with_bridge().contains("chrome_overlays"));
+    }
+
+    /// CH3.A7: the chrome is loaded into an app-owned view and keeps its
+    /// bridge (its startup `get_sidebar_width` reaches the window); a
+    /// content view, built as the app builds it, is not app-owned.
+    #[test]
+    fn the_chrome_loads_into_an_app_owned_view_and_round_trips_get_sidebar_width() {
+        use std::time::{Duration, Instant};
+        let content = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 800, 600));
+        assert!(!content.is_app_owned(), "a content view must not be app-owned");
+        let chrome = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 1200, 120));
+        load_app_document(&chrome, &chrome_html_with_bridge()).unwrap();
+        assert!(chrome.is_app_owned());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut got = Vec::new();
+        while !got.iter().any(|m: &String| m.contains(r#""cmd":"get_sidebar_width""#)) {
+            assert!(Instant::now() < deadline, "the chrome posted {got:?}");
+            if !chrome.step_load() {
+                chrome.process_events();
+            }
+            got.extend(chrome.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// CH3.A3c: only the RustKit chrome on the alpha route marks its root
+    /// element; chrome.html's transparent body and page band hang off it.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    #[test]
+    fn the_alpha_route_marks_the_chrome_root_element() {
+        let alpha = rustkit_chrome_html(true);
+        assert!(alpha.contains("<html data-rustkit-alpha lang=\"en\">"), "{}", &alpha[..200]);
+        assert_eq!(alpha.matches("data-rustkit-alpha").count(), CHROME_HTML.matches("data-rustkit-alpha").count() + 1);
+        assert_eq!(rustkit_chrome_html(false), chrome_html_with_bridge());
+        assert!(CHROME_HTML.contains("html[data-rustkit-alpha] body {"));
+        assert!(CHROME_HTML.contains(".rustkit-page-band {\n            display: none;"));
     }
 
     #[test]
@@ -2262,6 +2336,28 @@ mod panel_log_tests {
         // HIWAVE_DEBUG=1 / HIWAVE_TEST_HOOKS=1: whole (the real-window
         // checks read queries, h16's `?from=a2`).
         assert_eq!(page_url_for_log_as(&url, true), url);
+    }
+}
+
+// #918 R1 HOLD must-fix 2: input method text (a dead key's, an IME's, the
+// accent popover's, the emoji picker's; in a password field too) is never
+// logged, at any level: the variant and the size only.
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod ime_log_tests {
+    use super::ime_input_log_line;
+    use rustkit_viewhost::ImeInput;
+
+    const SECRET: &str = "hunter2-e3-secret";
+
+    #[test]
+    fn an_input_method_line_names_the_variant_and_size_never_the_text() {
+        let marked = ime_input_log_line(&ImeInput::SetMarked(SECRET.to_string()));
+        assert!(!marked.contains(SECRET), "{marked}");
+        assert_eq!(marked, format!("ime=SetMarked len={}", SECRET.len()));
+        let insert = ime_input_log_line(&ImeInput::Insert { text: SECRET.to_string(), replace: Some((1, 1)) });
+        assert!(!insert.contains(SECRET), "{insert}");
+        assert_eq!(insert, format!("ime=Insert len={} replace=true", SECRET.len()));
+        assert_eq!(ime_input_log_line(&ImeInput::Unmark), "ime=Unmark");
     }
 }
 
@@ -2758,7 +2854,7 @@ fn main() {
         );
         let view = webview_rustkit::RustKitView::new(&window, bounds)
             .expect("Failed to create the RustKit chrome view");
-        view.load_html_internal(&chrome_html_with_bridge())
+        load_app_document(&view, &rustkit_chrome_html(rustkit_chrome_alpha()))
             .expect("Failed to load the chrome into RustKit");
         Some(ChromeView::RustKit(view))
     } else {
@@ -3436,6 +3532,13 @@ fn main() {
         (&*chrome_webview, &*content_webview)
     {
         rustkit_viewhost::raise_raw_view_above(chrome.host_view_raw(), page.host_view_raw());
+        // CH3.A3c: a transparent surface, so its shadows, rounded corners
+        // and the find modal's dimming layer reach the page; the region
+        // below is then its hit region only.
+        if rustkit_chrome_alpha() {
+            chrome.set_transparent(true);
+            info!("RustKit chrome surface is transparent (alpha route)");
+        }
         let scale = window.scale_factor();
         let size = window.inner_size();
         let (width, height) = (size.width as f64 / scale, size.height as f64 / scale);
@@ -3862,9 +3965,6 @@ fn main() {
                     }
                     let mut booted = false;
                     for body in chrome.take_ipc_messages() {
-                        if take_chrome_overlays(&body, chrome) {
-                            continue;
-                        }
                         log_ipc("RustKit chrome IPC", &body);
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
                         booted = true;
@@ -4006,7 +4106,7 @@ fn main() {
                             if let rustkit_viewhost::InputKind::Pointer(click) = &event.kind {
                                 if click.down
                                     && click.input == rustkit_viewhost::PointerInput::Button
-                                    && chrome_has_overlays()
+                                    && chrome_for_events.has_overlays()
                                 {
                                     let _ = chrome_for_events.eval("window.__hiwaveOutsideClick && __hiwaveOutsideClick();");
                                 }
@@ -4433,8 +4533,8 @@ fn main() {
                     }
                     UserEvent::ExpandChrome if rustkit_chrome_enabled() => {
                         // CH3.A3: the RustKit chrome is over the page; its
-                        // panel is drawn over it and reports its box.
-                        let _ = chrome_for_events.eval("window.__hiwaveReportOverlays && __hiwaveReportOverlays();");
+                        // panel is drawn over it, and the frame that shows
+                        // the panel brings it into the region (CH3.A3b).
                     }
                     UserEvent::ExpandChrome => {
                         // Update chrome height
@@ -6181,6 +6281,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id().0.as_str();
+            // The real-window driver reads which shortcut the menu took.
+            info!(id, "menu event");
             match id {
                 id if id == menu_ids::NEW_TAB => {
                     // Send create_tab IPC to properly create tab in shell and sync

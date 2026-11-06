@@ -171,6 +171,13 @@ impl Engine {
             family: b.style.font_family.clone(),
             weight: b.style.font_weight.0,
             color: if b.style.color.a > 0.0 { b.style.color } else { rustkit_css::Color::BLACK },
+            // Chromium's drawn popup lists the options on the select's
+            // background colour, in the select's colour (CH2.E6b).
+            background: if b.style.background_color.a > 0.0 {
+                rustkit_css::Color { a: 1.0, ..b.style.background_color }
+            } else {
+                rustkit_css::Color::WHITE
+            },
         };
         let (family, size, weight) = (font.family.clone(), font.size, b.style.font_weight);
         let measure = |s: &str| {

@@ -104,6 +104,7 @@ families!(
     transform,
     clip,
     filter,
+    backdrop_filter,
     box_shadow,
     text_decoration,
     text,

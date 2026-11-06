@@ -15,15 +15,18 @@ has room in the strip.
 
 After: same views, one move. Right after the page view is built, the
 chrome's NSView is re-added `positioned:NSWindowAbove relativeTo:<page>`,
-so the order is page, chrome, shelf, Inspector. The chrome stays the whole
-window. `expand_chrome` no longer moves the page (the panel is drawn over
+so the order is page, chrome, shelf, Inspector; since A3b the chrome is
+also kept above the panels (see Panels), so the order is page, panels,
+chrome. The chrome stays the whole window. `expand_chrome` no longer moves the page (the panel is drawn over
 it); `expand_chrome_small` still does, because the tab-actions bar is in the
 chrome's flow and pushes the toolbar down, as before.
 
-## What is transparent: the chrome's boxes, not the frame's alpha
+## The region: the chrome's painted boxes (A3, A3b)
 
-The chrome is opaque inside its *region* and absent outside it. The region
-is a list of rects in view coordinates (top-left origin):
+With the region-only route (A3, A3b; `HIWAVE_RUSTKIT_CHROME_ALPHA=0`
+since A3c) the chrome is opaque inside its *region* and absent outside it;
+with the alpha route (A3c, below) the region is its hit region only. The
+region is a list of rects in view coordinates (top-left origin):
 
     region = window − hole + overlays
 
@@ -31,14 +34,43 @@ is a list of rects in view coordinates (top-left origin):
   sidebar's width to the right sidebar, y from the chrome height to the
   bottom (page, Inspector and shelf). `apply_layout` computes it with the
   page's rect and hands it to the chrome every time it places the views.
-* `overlays` are the boxes of the chrome's popups that are showing, which
-  the chrome document reports itself: a small script appended to the
-  RustKit chrome's bridge reads `getBoundingClientRect()` of a fixed
-  selector list (downloads, history, toolbar-action and help panels, the
-  context menu, the blocklist dropdown, the find bar) and posts
-  `{"cmd":"chrome_overlays","rects":[[x,y,w,h],...]}` when the list
-  changes: after any click or key in the chrome, and once a second. The
-  app takes that message before `handle_chrome_ipc` (which never sees it).
+* `overlays` (CH3.A3b) are the boxes the chrome's **own frame** paints over
+  the hole, read from that frame's display list
+  (`rustkit_engine::painted_boxes`): every command that puts colour on the
+  surface (fills, borders, text, images, gradients, form controls, SVG
+  shapes), where its transforms put it, cut by its clips; not inside a
+  group faded to opacity 0, not a transparent fill, not a box shadow; and
+  not a *backdrop*, a box covering 90% or more of the hole (the root/body
+  background chrome.html paints over the whole window, the main column).
+  Clipped to the hole; a box inside another (a menu's rows and text) is
+  dropped, so an open menu is one rect. No popup list, no script: any
+  popup, menu or tooltip the chrome paints over the page is in the region,
+  whatever its class.
+
+  Until A3b the overlays were reported by a script in the chrome document
+  (`getBoundingClientRect()` of a selector list, posted on click/key and
+  once a second). It is gone; only the outside-click helper is left in the
+  chrome's tail script.
+
+### The region and the frame change on the same turn
+
+`RustKitView::present_latest` presents the chrome's newest `FrameCommit`
+and, in the same call, derives that commit's overlays and applies the
+region (`FrameRegion::present` in `rustkit-viewhost`, keyed by the
+commit's generation, so an unchanged frame costs nothing). A layout
+(`compose_region`) re-derives the frame on screen against the new hole at
+once. So the mask and `hitTest:` never lag or lead the pixels by a message
+round trip, as the reporter's did (up to a second, and 250 ms after a
+click). What is left: the Metal drawable is presented by wgpu outside the
+Core Animation transaction that carries the mask (wgpu-hal's
+`present_with_transaction` is not reachable through wgpu's public API), so
+on screen the two can still land one display refresh apart; the hit region
+is exact from the turn the frame is presented.
+
+Cost: one linear pass over the chrome's display list per new chrome frame
+(bounds arithmetic only: no pixels, no GPU read-back); a 20,000-command
+list is a unit test. At rest the chrome paints nothing over the hole, so
+the region is the window less the hole and `chrome has overlays` is false.
 
 The region is applied twice, from the same rects:
 
@@ -50,21 +82,95 @@ The region is applied twice, from the same rects:
    continues to the next view down: the page. Views without a region (the
    page, every flag-off view) keep NSView's `hitTest:` unchanged.
 
-Why not the alpha of the painted frame: the renderer clears to opaque
-white and the chrome's `<body>` paints `--bg-primary` over the whole
-window, so alpha transparency needs a transparent body plus a non-opaque
-layer and a premultiplied surface (engine and compositor changes that
-would reach the page view too); and `hitTest:` runs on every mouse move on
-the main thread, where reading the frame's alpha means a GPU read-back.
-Boxes are synchronous, cost nothing per event, and the chrome document
-already knows them. The pure pieces (`region = window − hole + overlays`,
-`point in region`) are in `rustkit-viewhost` with unit tests.
+Limits of the region alone (the surface opaque, the mask binary): a
+popup's `box-shadow` outside its border box is not shown over the page; a
+rounded popup's corners show the body's colour; a full-window translucent
+overlay (the find modal's dimming layer) is a backdrop and does not dim the
+page; and the Metal drawable and the mask can land a refresh apart. CH3.A3c
+removes these with the alpha route below; `HIWAVE_RUSTKIT_CHROME_ALPHA=0`
+keeps this region-only route (for comparison).
 
-Limits, by construction: a popup's `box-shadow` outside its border box is
-clipped; a popup the engine draws that is not a DOM box (a `<select>`'s
-drop-down, CH2.E6) is only visible where it lies inside the region (the
-Mode select is in the sidebar, which is in the region); a popup class
-missing from the selector list is clipped at the hole's edge.
+## The alpha route (CH3.A3c): pixels decide what covers the page
+
+On by default with `HIWAVE_RUSTKIT_CHROME=1`. The chrome's surface is
+transparent, and the region above becomes its **hit region only**.
+
+1. **Surface.** `RustKitView::set_transparent(true)` (main.rs calls it when
+   it stacks the chrome over the page) does three things:
+   * `WindowSurface::set_transparent` -> `Presenter::set_transparent`: the
+     view's frames clear to (0, 0, 0, 0) instead of the canvas colour
+     (`commit.canvas`, white for a transparent document), and the renderer's
+     other first-pass clears (gradient, opacity-group, backdrop-filter
+     paths, which cleared to white whatever the canvas) clear to
+     transparent too (`Renderer::set_transparent` / `first_clear`).
+   * `Compositor::set_surface_transparent`: the wgpu surface is reconfigured
+     with a non-opaque composite alpha mode. Metal offers `Opaque` and
+     `PostMultiplied` only; `PostMultiplied` there does exactly one thing,
+     `CAMetalLayer.opaque = NO`. Core Animation always composites a
+     layer's contents as premultiplied (`src + dst * (1 - src.a)`), so what
+     matters is that the frame *is* premultiplied:
+   * the renderer already leaves premultiplied colour in its target: the
+     colour, glyph, image and gradient pipelines draw straight colour
+     through `ALPHA_BLENDING`, whose colour factor is `SrcAlpha` and whose
+     alpha factor is `One, OneMinusSrcAlpha`; starting from (0, 0, 0, 0)
+     that gives `(c * a, a)`, and over a premultiplied pixel it is
+     premultiplied source-over. Emoji, filters and opacity groups composite
+     premultiplied (`PREMULTIPLIED_ALPHA_BLENDING`). No pipeline changed.
+     The unit tests check every pixel of transparent frames (text, shadows,
+     gradients, a faded group) for `r, g, b <= a`; a straight-alpha pixel
+     would fail that and show as a fringe.
+   * `set_raw_view_transparent` (viewhost): the view's backing layer is not
+     opaque, and `set_raw_view_region` no longer installs a `CAShapeLayer`
+     mask for it: the region is kept for `hitTest:` only.
+2. **Document.** The app loads chrome.html into the RustKit chrome with
+   `data-rustkit-alpha` on `<html>`; chrome.html's
+   `html[data-rustkit-alpha], html[data-rustkit-alpha] body { background:
+   transparent }` leaves the body unpainted. The tab strip, toolbar,
+   sidebars, panels and popups keep their own backgrounds; `.chrome-main`
+   paints nothing, so the page column paints nothing. The WebKit chrome
+   (flag off) never gets the attribute.
+3. **What now reaches the page**: a popup's shadow outside its box, the
+   page in a rounded popup's corners, and the find modal's overlay
+   (`rgba(0, 0, 0, 0.3)`, unchanged CSS) dims the page. The pixels are
+   one Metal drawable, so the mask-vs-drawable refresh gap is gone for
+   paint.
+4. **Hit testing: the region from the display list (#925), not an alpha
+   probe.** The frame lives only on the GPU: there is no CPU copy of the
+   chrome's last frame in the engine, so an alpha probe means a read-back
+   (a staging copy and a `map_async` wait) either per frame (a full-window
+   copy on every chrome present) or per `hitTest:` (a GPU sync on the main
+   thread on every mouse move). The region costs one bounds pass per new
+   frame and is exact for boxes. What it gives up: a click on a popup's
+   shadow or in a rounded corner's transparent pixels goes to the chrome
+   (the box's bounds), not the page; a click on the find modal's dimming
+   layer over the page goes to the page (the layer is a backdrop, as with
+   the WebKit chrome, where the page view received it).
+5. **A `<select>`'s drop-down (CH2.E6, CH2.E6b).** It is not native: the
+   engine draws it as the last item of the chrome frame's display list (a
+   stacking context at `i32::MAX`, outside every clip of the page, placed
+   in view coordinates within the whole window), so it paints over the page
+   column and its box is in the region like any chrome popup (pinned by
+   `select_popup_overlay_tests`). What CH2.E6b changed: while it is open the
+   frame says so (`FrameCommit::modal_popup`) and, on the alpha route, the
+   chrome's hit region is the whole view, so a press on the page column
+   reaches the chrome's engine, which closes the drop-down and drops the
+   press (#899's outside-press rule; the macOS menu takes that press too).
+   The page does not get it. With `HIWAVE_RUSTKIT_CHROME_ALPHA=0` the region
+   is also the mask, so the whole-view region is not applied there: a page
+   press with a drop-down open still reaches the page and leaves it open.
+
+Cost: the chrome's layer is now composited over the whole window by the
+window server (it was masked to its region); see the PR for the measured
+idle CPU/RSS against #925.
+
+## Panels
+
+The chrome stays the frontmost of the window's views: a panel (shelf,
+Inspector) built after it is added on top, so `apply_layout` re-raises the
+chrome (`raise_raw_view_to_front`, first responder kept) when it is not
+the last subview. The panels lie inside the hole, so they show and take
+the pointer wherever the chrome paints nothing, and a chrome popup that
+reaches into a panel's rect is drawn over it (#909 R1 nit 2).
 
 ## Focus
 
@@ -93,6 +199,18 @@ window and the page at its rect on every resize; it now also recomputes the
 hole and re-applies the region (the mask's frame follows the layer's
 bounds, set with implicit animations off so the mask does not lag the
 frame).
+
+## The `a3_dropdown_over_page` flake (CH3.A3b)
+
+Not the region: on a failing run the app logged no mouse event at all, not
+even the move before the click, so the HID click landed in another app's
+window lying over HiWave's at that point (the driver never brought HiWave
+to the front, and `screencapture -l` captures a covered window, so the
+pixel asserts still passed). `hwdrive` now refuses an event (exit 5,
+nothing posted) unless the process is frontmost and the topmost window at
+the point is its own, and `driver.py` activates the app first and stops
+(NOT RUN) on a refusal or when the seat's HID idle time says a person is
+using the Mac.
 
 ## Found while gating (2026-11-05)
 

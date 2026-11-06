@@ -725,6 +725,11 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
             row("-webkit-filter", &value);
         }
     }
+    if !s.backdrop_filter.is_empty() {
+        if let Some(value) = filter(&s.backdrop_filter, s.color, font_px) {
+            row("backdrop-filter", &value);
+        }
+    }
     if !s.box_shadows.is_empty() {
         let value: Vec<String> = s
             .box_shadows

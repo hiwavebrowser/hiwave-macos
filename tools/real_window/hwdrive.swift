@@ -24,6 +24,7 @@
 //   hwdrive cursor                          (which AppKit cursor is showing)
 //   hwdrive scroll   <pid> <x> <y> <dx> <dy> (pixels; dy < 0 moves the page down)
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
+//   hwdrive menu     <pid> <menu title> <item title>   (press a menu bar item)
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>
 //   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
@@ -32,7 +33,8 @@
 // included). Every command prints one JSON object.
 //
 // Exit codes: 0 done, 2 usage or no window, 3 a grant is missing, 4 the
-// screen is locked (events would go to the login window).
+// screen is locked (events would go to the login window), 5 refused: the
+// process is not frontmost or another app's window is over the point.
 //
 // Build: swiftc -O -o hwdrive hwdrive.swift
 
@@ -179,7 +181,46 @@ let pid = pid_t(pidInt)
 func point(_ at: Int) -> CGPoint {
     guard args.count > at + 1 else { emit(["error": "\(cmd) needs x y"], code: 2) }
     let w = requireWindow(pid)
-    return CGPoint(x: w.frame.origin.x + num(args[at]), y: w.frame.origin.y + num(args[at + 1]))
+    let p = CGPoint(x: w.frame.origin.x + num(args[at]), y: w.frame.origin.y + num(args[at + 1]))
+    requireOwnWindowAt(p)
+    return p
+}
+
+/// A HID event goes to whatever window is on top at its point, not to a
+/// pid (CH3.A3b: the flaky `a3_dropdown_over_page` click landed in another
+/// app's window over HiWave's, and HiWave saw no event at all). Refuse,
+/// before posting anything, unless the process is frontmost and the topmost
+/// visible window at `p` (below the menu bar and Dock layers) is its own.
+func requireOwnWindowAt(_ p: CGPoint) {
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        emit(["error": "pid \(pid) is not frontmost; no event posted",
+              "frontmost": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)], code: 5)
+    }
+    let all = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    for w in all {  // front to back
+        let layer = w[kCGWindowLayer as String] as? Int ?? 0
+        let alpha = w[kCGWindowAlpha as String] as? Double ?? 1
+        guard layer < 20, alpha > 0,
+              let b = w[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: b), frame.contains(p)
+        else { continue }
+        let owner = (w[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }) ?? 0
+        if owner != pid {
+            emit(["error": "another process's window is over the point; no event posted",
+                  "owner": Int(owner), "owner_name": w[kCGWindowOwnerName as String] as? String ?? "",
+                  "at": [p.x, p.y]], code: 5)
+        }
+        return
+    }
+    emit(["error": "no window at the point; no event posted", "at": [p.x, p.y]], code: 5)
+}
+
+/// Keys go to the key window of the frontmost app: refuse unless it is ours.
+func requireFrontmost() {
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        emit(["error": "pid \(pid) is not frontmost; no key posted",
+              "frontmost": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)], code: 5)
+    }
 }
 
 switch cmd {
@@ -341,6 +382,7 @@ case "scroll":
 
 case "key":
     requireInput()
+    requireFrontmost()
     guard args.count >= 3, let code = UInt16(args[2]) else { emit(["error": "key needs a keycode"], code: 2) }
     var flags: CGEventFlags = []
     for m in args.dropFirst(3) {
@@ -361,6 +403,7 @@ case "key":
 
 case "type":
     requireInput()
+    requireFrontmost()
     guard args.count >= 3 else { emit(["error": "type needs text"], code: 2) }
     for ch in args[2] {
         let units = Array(String(ch).utf16)
@@ -375,6 +418,41 @@ case "type":
         }
     }
     emit(["typed": args[2].count])
+
+case "menu":
+    // Press an item of the app's menu bar through Accessibility, as a
+    // click on it does: muda's predefined Edit items send their action
+    // (copy:, paste:, ...) to the first responder (CH2.E3).
+    guard args.count >= 4 else { emit(["error": "menu needs a menu title and an item title"], code: 2) }
+    if !AXIsProcessTrusted() {
+        emit(["error": "no Accessibility grant (System Settings > Privacy & Security > Accessibility)"], code: 3)
+    }
+    func children(_ e: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+        return value as? [AXUIElement] ?? []
+    }
+    func title(_ e: AXUIElement) -> String {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &value) == .success else { return "" }
+        return value as? String ?? ""
+    }
+    let app = AXUIElementCreateApplication(pid)
+    var barRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &barRef) == .success,
+          let barValue = barRef
+    else { emit(["error": "no menu bar for pid \(pid)"], code: 2) }
+    let bar = barValue as! AXUIElement
+    guard let top = children(bar).first(where: { title($0) == args[2] }) else {
+        emit(["error": "no menu \(args[2])", "menus": children(bar).map(title)], code: 2)
+    }
+    let items = children(top).flatMap(children)
+    guard let item = items.first(where: { title($0) == args[3] }) else {
+        emit(["error": "no item \(args[3]) in \(args[2])", "items": items.map(title)], code: 2)
+    }
+    let err = AXUIElementPerformAction(item, kAXPressAction as CFString)
+    usleep(200_000)
+    emit(["menu": args[2], "item": args[3], "ax_error": Int(err.rawValue)], code: err == .success ? 0 : 2)
 
 case "resize":
     guard args.count >= 4 else { emit(["error": "resize needs w h"], code: 2) }

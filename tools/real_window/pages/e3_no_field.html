@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E3 no field</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  input { position: fixed; left: 0; top: 400px; width: 300px; font: 24px Menlo; }
+</style>
+<p>A page with shortcut keys and nothing editable focused.</p>
+<input id="a" value="">
+<script>
+  // CH2.E3, #918 R1 HOLD: with nothing editable focused a dead key or an
+  // IME's key is a plain key. The page reports every keydown/keyup and any
+  // composition or input event as beacons the driver reads.
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  ['keydown', 'keyup'].forEach(function (t) {
+    document.addEventListener(t, function (e) {
+      beacon('e3n-' + t + '=' + e.keyCode + '-' + encodeURIComponent(e.key));
+    });
+  });
+  ['compositionstart', 'compositionupdate', 'compositionend', 'beforeinput', 'input'].forEach(function (t) {
+    document.addEventListener(t, function (e) {
+      beacon('e3n-' + t + '=' + encodeURIComponent(e.data == null ? '' : e.data));
+    }, true);
+  });
+  beacon('e3n-ready');
+</script>

@@ -104,6 +104,11 @@ pub enum PageCmd {
     },
     GrabKeyboard,
     Relayout,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Sent before
+    /// the view's first document; see [`crate::Engine::set_app_owned`].
+    SetAppOwned {
+        owned: bool,
+    },
     /// Test hook: the next JavaScript runtime uses this host re-entry cap.
     /// The frame cap and the operand-stack cap are not changed.
     SetHostReentry {
@@ -277,6 +282,20 @@ pub enum PageInput {
     HasTextFocus {
         reply: oneshot::Sender<bool>,
     },
+    /// A macOS Cmd chord (CH2.E3): the page's keydown first. The page
+    /// answers [`PageEvent::KeyEquivalentDone`] with `token`; one it did
+    /// not claim is the menu's.
+    CommandKey {
+        key_code: u32,
+        key: String,
+        shift: bool,
+        alt: bool,
+        token: u64,
+    },
+    /// The input method's marked or committed text (CH2.E3).
+    Ime(rustkit_viewhost::ImeInput),
+    /// An Edit menu item in the focused text field (CH2.E3).
+    Edit(rustkit_dom::forms::EditCommand),
 }
 
 /// What the page tells the window.
@@ -316,6 +335,17 @@ pub enum PageEvent {
         payload: String,
         nav_id: u64,
     },
+    /// Whether the page claimed the Cmd chord `token`
+    /// ([`PageInput::CommandKey`]); the window hands one it did not to the
+    /// menu (CH2.E3).
+    KeyEquivalentDone {
+        token: u64,
+        claimed: bool,
+    },
+    /// The focused text field's marked range, selection and caret, when it
+    /// changed; `None` when no text field has focus (CH2.E3). The input
+    /// method asks for them synchronously; the window keeps the last.
+    TextInput(Option<crate::TextInputState>),
     /// The used `cursor` keyword under the pointer, when it changed
     /// (CH2.E4): `auto` resolved to `text` or `default`; `default` once the
     /// pointer left the view.
@@ -370,6 +400,8 @@ pub struct PageEndpoint {
     /// window, and the window answers its keys from this report.
     /// The last focus report: (anything focused, a text field focused).
     last_focused: Option<(bool, bool)>,
+    /// The last [`PageEvent::TextInput`] sent.
+    last_text_input: Option<Option<crate::TextInputState>>,
     /// The newest navigation the window was told failed. A navigation is
     /// reported failed at most once.
     failed_nav: u64,
@@ -396,6 +428,7 @@ pub(crate) fn adopt(
         settle_keys: false,
         wake_window: false,
         last_focused: None,
+        last_text_input: None,
         failed_nav: 0,
         devtools_counters: Arc::default(),
     }
@@ -428,6 +461,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         settle_keys: false,
         wake_window: false,
         last_focused: None,
+        last_text_input: None,
         failed_nav: 0,
         devtools_counters: Arc::default(),
     };
@@ -588,6 +622,9 @@ impl PageEndpoint {
             PageCmd::SetHostReentry { limit } => {
                 self.engine.set_host_reentry_limit(limit);
             }
+            PageCmd::SetAppOwned { owned } => {
+                self.engine.set_app_owned(self.view, owned);
+            }
             PageCmd::InstallReentryProbe { reply } => {
                 let result = self
                     .engine
@@ -682,6 +719,27 @@ impl PageEndpoint {
                     }
                     let _ = reply.send(consumed || self.settle_keys);
                 }
+            }
+            PageInput::CommandKey { key_code, key, shift, alt, token } => {
+                let claimed = self.engine.handle_command_key(view, key_code, &key, shift, alt);
+                self.emit(PageEvent::KeyEquivalentDone { token, claimed });
+            }
+            PageInput::Ime(input) => {
+                use rustkit_viewhost::ImeInput;
+                match input {
+                    ImeInput::SetMarked(text) => {
+                        self.engine.set_marked_text(view, &text);
+                    }
+                    ImeInput::Insert { text, replace } => {
+                        self.engine.insert_text_replacing(view, &text, replace);
+                    }
+                    ImeInput::Unmark => {
+                        self.engine.unmark_text(view);
+                    }
+                }
+            }
+            PageInput::Edit(command) => {
+                self.engine.run_edit_command(view, &command);
             }
             PageInput::KeyUp { key_code, key, ctrl, shift, alt } => {
                 self.engine.handle_key_up(view, key_code, &key, ctrl, shift, alt);
@@ -924,6 +982,7 @@ impl PageEndpoint {
         self.translate_engine_events();
         self.publish_commit();
         self.report_focus();
+        self.report_text_input();
         self.report_script_navigation();
         self.report_ipc();
     }
@@ -957,6 +1016,21 @@ impl PageEndpoint {
             return;
         }
         self.emit_focus();
+    }
+
+    /// Tell the content thread's window the focused text field's
+    /// text-input state when it changed (CH2.E3), after the frame it was
+    /// painted in, so the caret is the one on screen.
+    fn report_text_input(&mut self) {
+        if !self.wake_window {
+            return;
+        }
+        let state = self.engine.text_input_state(self.view);
+        if self.last_text_input == Some(state) {
+            return;
+        }
+        self.last_text_input = Some(state);
+        self.emit(PageEvent::TextInput(state));
     }
 
     /// Tell the window the cursor and tooltip under the pointer when they

@@ -28,7 +28,7 @@ pub mod table;
 pub mod text;
 
 mod filter;
-pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
+pub use filter::{filter_color_matrix, filter_steps, ColorMatrix as FilterColorMatrix, FilterStep};
 #[cfg(test)]
 mod box_opacity_tests;
 
@@ -3554,12 +3554,28 @@ impl LayoutBox {
 
         let (intrinsic_width, intrinsic_height) = form_control_intrinsic_size(&self.style, &control);
 
+        // CSS 2.1 §10.1: a `position: fixed` control's containing block is
+        // the viewport, so its percentages resolve against the viewport, not
+        // against the box that laid it out (whose height here is its flow
+        // cursor). A fixed `<input>` with `height: 50%` was its intrinsic
+        // 19px against Chromium's half viewport (CH2.B13). Bare unit trees
+        // with no viewport keep the passed block.
+        let fixed_viewport = (self.position == Position::Fixed
+            && self.viewport.0 > 0.0
+            && self.viewport.1 > 0.0)
+            .then_some(self.viewport);
+        let width_base = fixed_viewport.map_or(containing_block.content.width, |v| v.0);
+        let percent_height_base = match fixed_viewport {
+            Some(v) => Some(v.1),
+            None => percent_height_base,
+        };
+
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
         let width = match self.style.width {
             Length::Px(px) if px > 0.0 => px,
             Length::Percent(pct) => {
-                let resolved = pct / 100.0 * containing_block.content.width;
+                let resolved = pct / 100.0 * width_base;
                 if resolved > 0.0 {
                     resolved
                 } else {
@@ -3567,13 +3583,26 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
-            _ => intrinsic_width,
+            Length::Auto | Length::Zero => intrinsic_width,
+            // `vw`, `rem`, `calc()` and the rest: only px/%/em were read, so
+            // a `width: calc(25vw + 10px)` button kept its intrinsic width
+            // (CH2.B13).
+            ref other => {
+                let resolved = self.length_to_px(other, width_base);
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_width
+                }
+            }
         };
 
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
-            Length::Percent(_) if self.percent_height_computes_to_auto() => intrinsic_height,
+            Length::Percent(_) if fixed_viewport.is_none() && self.percent_height_computes_to_auto() => {
+                intrinsic_height
+            }
             Length::Percent(pct) => {
                 // The parent's definite height where the caller knows one. The
                 // containing block's own height is the flow cursor (zero on a
@@ -3591,7 +3620,18 @@ impl LayoutBox {
                 }
             }
             Length::Em(em) if em > 0.0 => em * font_size,
-            _ => intrinsic_height,
+            Length::Auto | Length::Zero => intrinsic_height,
+            // `vh`, `rem`, `calc()` and the rest, as for the width: an
+            // `<input>` with `height: 50vh` was 19 tall (Chromium 300).
+            ref other => {
+                let base = percent_height_base.unwrap_or(containing_block.content.height);
+                let resolved = self.length_to_px(other, base);
+                if resolved > 0.0 {
+                    resolved
+                } else {
+                    intrinsic_height
+                }
+            }
         };
 
         // Author margins are part of the control's margin box: the line box
@@ -3600,7 +3640,7 @@ impl LayoutBox {
         // where Chrome builds 43/39 — the margins were never resolved, so
         // margin_box() was the bare rect). The blob/composed height above is
         // the BORDER box, so padding/border stay folded into content here.
-        let cw = containing_block.content.width;
+        let cw = width_base;
         self.dimensions.margin.top = self.length_to_px(&self.style.margin_top, cw);
         self.dimensions.margin.bottom = self.length_to_px(&self.style.margin_bottom, cw);
         self.dimensions.margin.left = self.length_to_px(&self.style.margin_left, cw);
@@ -4145,7 +4185,7 @@ impl LayoutBox {
 
         // Handle float
         if self.float != Float::None {
-            self.layout_float(containing_block, float_context);
+            self.layout_float(containing_block, float_context, percent_height_base);
         }
 
         // Apply positioning offsets after normal layout
@@ -4554,7 +4594,15 @@ impl LayoutBox {
     }
 
     /// Layout a floated box.
-    fn layout_float(&mut self, containing_block: &Dimensions, float_context: &mut FloatContext) {
+    /// `percent_height_base` is the containing block's definite height, as
+    /// the caller resolved it for this box; `containing_block.content.height`
+    /// is only the parent's flow cursor here (CH2.B16).
+    fn layout_float(
+        &mut self,
+        containing_block: &Dimensions,
+        float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
+    ) {
         // Calculate dimensions
         self.calculate_block_width(containing_block);
         self.calculate_block_vertical_box_model(containing_block);
@@ -4594,13 +4642,19 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        // Layout children
-        let definite_for_children =
-            self.definite_content_height_for_children(containing_block.content.height, false);
-        self.layout_block_children(definite_for_children);
-        self.calculate_block_height(
-            (containing_block.content.height > 0.0).then_some(containing_block.content.height),
+        // Layout children. A percentage height resolves against the
+        // containing block's definite height (`percent_height_base`), exactly
+        // as the block path does. The flow cursor is not a height: with it
+        // the first float of a box (cursor 0) fell back to the viewport, so
+        // `height: 50%` in a 200px parent was 300 at a 600px viewport (CH2.B16).
+        let definite_for_children = self.definite_content_height_for_children(
+            percent_height_base.unwrap_or(containing_block.content.height),
+            percent_height_base.is_some(),
         );
+        self.layout_block_children(definite_for_children);
+        self.calculate_block_height(percent_height_base.or_else(|| {
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height)
+        }));
     }
 
     /// Offsets with percent values resolved against the containing block.
@@ -8615,8 +8669,14 @@ pub enum DisplayCommand {
         rect: Rect,
         /// Border radius for clipping.
         border_radius: BorderRadius,
-        /// The filter to apply.
-        filter: rustkit_css::BackdropFilter,
+        /// The filter list's steps, in order; never empty.
+        steps: Vec<FilterStep>,
+        /// How many groups (`PushOpacity` / `PushFilter`) the box itself
+        /// opened before this command. The backdrop is what is painted
+        /// below them (Filter Effects 2 §3: up to the backdrop root); the
+        /// filtered backdrop is drawn inside them, so the box's opacity
+        /// fades it with the box, as in Chromium.
+        own_groups: u8,
     },
     /// Draw a linear gradient.
     LinearGradient {
@@ -9992,6 +10052,10 @@ impl DisplayList {
             .filter(|commands| !commands.is_empty())
             .map(|commands| PendingOutline { clips: self.escapable_clips.clone(), commands });
 
+        // `backdrop-filter`: the content behind the box is filtered within
+        // its border box before the box paints over it.
+        self.backdrop_filter(layout_box, fades as u8 + filter_matrix.is_some() as u8);
+
         // Render this box
         self.render_box_content(layout_box);
 
@@ -10521,6 +10585,35 @@ impl DisplayList {
         }
     }
 
+    /// The `BackdropFilter` command of a box with a `backdrop-filter`
+    /// that paints something. A hidden box and a text run paint none.
+    fn backdrop_filter(&mut self, layout_box: &LayoutBox, own_groups: u8) {
+        let s = &layout_box.style;
+        if s.backdrop_filter.is_empty()
+            || s.visibility != rustkit_css::Visibility::Visible
+            || matches!(layout_box.box_type, BoxType::Text(_))
+        {
+            return;
+        }
+        let font_px = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let Some(steps) = filter_steps(&s.backdrop_filter, font_px, self.root_font_size) else {
+            return;
+        };
+        let rect = layout_box.dimensions.border_box();
+        if steps.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        self.commands.push(DisplayCommand::BackdropFilter {
+            rect,
+            border_radius: self.border_radius_px(layout_box),
+            steps,
+            own_groups,
+        });
+    }
+
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
         if layout_box.style.box_shadows.is_empty() {
@@ -11023,16 +11116,6 @@ impl DisplayList {
 
         // Use clip_rect for painting (not border_rect) to ensure proper bounds
         let paint_rect = clip_rect;
-
-        // Step 0: Apply backdrop-filter if set (must be done BEFORE any background painting)
-        // Backdrop filter applies to pixels that are already rendered behind this element
-        if !s.backdrop_filter.is_none() {
-            self.commands.push(DisplayCommand::BackdropFilter {
-                rect: paint_rect,
-                border_radius: radius,
-                filter: s.backdrop_filter,
-            });
-        }
 
         // Step 1: Paint solid background color FIRST (bottom layer)
         // This must be painted even if there's a gradient, as the gradient may be semi-transparent
