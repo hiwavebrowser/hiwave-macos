@@ -448,6 +448,8 @@ mod flex_cross_size_tests;
 #[cfg(test)]
 mod inner_text_style_tests;
 #[cfg(test)]
+mod control_percent_height_tests;
+#[cfg(test)]
 mod flex_hidden_gap_tests;
 #[cfg(test)]
 mod flex_column_definite_height_tests;
