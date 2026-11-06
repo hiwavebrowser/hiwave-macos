@@ -2851,7 +2851,11 @@ fn distribute_main_axis(
 
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+    // Signed: an overflowing line has negative free space, which
+    // `center` / `flex-end` place unsafely (CH2.B19, Box Align §4.4 and
+    // Chromium 143: a 300px item centred in 100px starts at -100).
+    let signed_free_space = container_main - total_item_size - total_gaps;
+    let free_space = signed_free_space.max(0.0);
 
     // §8.1/§9.5.12: positive free space goes to the auto margins in equal
     // shares, before `justify-content`, which then has nothing to place.
@@ -2875,10 +2879,14 @@ fn distribute_main_axis(
         free_space
     };
 
+    let unsafe_space = if signed_free_space < 0.0 { signed_free_space } else { free_space };
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
-        JustifyContent::FlexEnd => (free_space, main_gap),
-        JustifyContent::Center => (free_space / 2.0, main_gap),
+        // `center` / `flex-end` place the signed space (auto margins take
+        // none of a negative one, §9.5.12); the space-* values read the
+        // clamped one, so they fall back to the start, as in Chromium.
+        JustifyContent::FlexEnd => (unsafe_space, main_gap),
+        JustifyContent::Center => (unsafe_space / 2.0, main_gap),
         JustifyContent::SpaceBetween => {
             if line.items.len() > 1 {
                 (0.0, free_space / (line.items.len() - 1) as f32 + main_gap)
