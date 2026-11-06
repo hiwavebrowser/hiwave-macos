@@ -484,11 +484,17 @@ impl LiveWake {
 /// `MIN_LIVE_TURN`). The engine's wake skips that floor and ends the wait at
 /// once, as the app's poke does, so a page that keeps waking the loop gets
 /// back-to-back turns.
+///
+/// `after_turn` runs after every turn; it returns true when it loaded a new
+/// document into the view (a followed navigation, T17). The page clock then
+/// restarts, so the new document's timers count from its own load, and the
+/// loop goes on to the end of the same window.
 fn run_live(
     rt: &tokio::runtime::Runtime,
     engine: &mut rustkit_engine::Engine,
     view_id: rustkit_engine::EngineViewId,
     live_ms: u64,
+    after_turn: &mut dyn FnMut(&mut rustkit_engine::Engine) -> bool,
 ) -> LiveStats {
     const MIN_LIVE_TURN: Duration = Duration::from_millis(4);
     const LIVE_REQUEST_POLL: Duration = Duration::from_millis(10);
@@ -508,6 +514,12 @@ fn run_live(
         stats.requests += turn.requests as u64;
         stats.relayouts += turn.relaid_out as u32;
         stats.busy_ms += started.elapsed().as_millis() as u64;
+        if after_turn(engine) {
+            clock = Instant::now();
+            if began.elapsed() < limit {
+                continue;
+            }
+        }
         let timer = turn.next_timer_ms.map(Duration::from_millis);
         let next = if turn.in_flight > 0 {
             Some(timer.map_or(LIVE_REQUEST_POLL, |t| t.min(LIVE_REQUEST_POLL)))
@@ -630,8 +642,15 @@ fn run_capture(args: &Args) -> CaptureResult {
     if let Some(sink) = sink {
         let records = sink.records();
         if let Some(mut page) = result.page_report.take() {
-            let json: Vec<serde_json::Value> =
+            let mut json: Vec<serde_json::Value> =
                 records.iter().filter_map(|r| serde_json::to_value(r).ok()).collect();
+            // After a followed navigation (T17) the report is of the page the
+            // capture landed on: its records start at the last navigation.
+            if result.followed_navigation.is_some() {
+                if let Some(last) = json.iter().rposition(|r| r["type"] == "navigation_start") {
+                    json.drain(..last);
+                }
+            }
             let facts = report::CaptureFacts { shield: args.shield, capture_ms: result.capture_ms };
             report::apply_events(&mut page, &json, facts);
             write_report_files(args, &page);
@@ -760,32 +779,45 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
+        // T17: the page may ask to go elsewhere (a challenge interstitial, an
+        // SPA redirect, a meta refresh). One hop is followed, as the app
+        // would, and the capture is of the page it lands on.
+        let mut follow = NavigationFollow::new(!args.no_follow_navigation, load_began);
+        let followed_at_load = follow.check(&rt, &mut engine, view_id, "load");
         // The engine shows a server's error page as the page, which is what
         // the app's user should see. A capture is of the site, not of its
         // error page: it fails as it did when the engine refused the
         // response, with the same message first, so no board counts a 403
-        // as a load.
-        if let Some(status) = engine
-            .http_status(view_id)
-            .filter(|s| !(200..300).contains(s))
-        {
-            return result.failed(
-                "error",
-                format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"),
-            );
-        }
-        if let Some(log) = engine.script_log(view_id) {
-            result.script_stats = Some(script_stats(log));
-            if let Some(ref path) = args.dump_scripts {
-                if let Err(e) = fs::write(path, script_log_json(log).to_string()) {
-                    error!("Failed to write script log: {:?}", e);
-                }
+        // as a load. A page that may still navigate in the live window (a
+        // challenge) is judged where it lands, after the window.
+        if !(follow.can_follow() && args.live_ms.is_some()) {
+            if let Some(error) = follow.error.take().or_else(|| error_status(&engine, view_id)) {
+                result.followed_navigation = follow.followed.take();
+                return result.failed("error", error);
             }
         }
+        write_script_stats(&engine, view_id, args, &mut result);
         if let Some(live_ms) = args.live_ms {
-            result.live_stats = Some(run_live(&rt, &mut engine, view_id, live_ms));
-            result.capture_ms = Some(load_began.elapsed().as_secs_f64() * 1000.0);
+            let stats = run_live(&rt, &mut engine, view_id, live_ms, &mut |engine| {
+                follow.check(&rt, engine, view_id, "live")
+            });
+            result.live_stats = Some(stats);
+            // The report reads the landed page's records, whose times start
+            // at its own navigation.
+            let window_began = follow.landed_at.unwrap_or(load_began);
+            result.capture_ms = Some(window_began.elapsed().as_secs_f64() * 1000.0);
+            if let Some(error) = follow.error.take().or_else(|| error_status(&engine, view_id)) {
+                result.followed_navigation = follow.followed.take();
+                return result.failed("error", error);
+            }
+            // After a hop in the window, the landed page's script log is the
+            // one that matters.
+            if follow.followed.is_some() && !followed_at_load {
+                write_script_stats(&engine, view_id, args, &mut result);
+            }
         }
+        result.followed_navigation = follow.followed.take();
+        result.navigations_not_followed = follow.not_followed;
     } else if let Some(html) = html_content {
         if let Err(e) = engine.load_html(view_id, &html) {
             return result.failed("error", format!("Failed to load HTML: {:?}", e));
@@ -1786,6 +1818,105 @@ fn shield_interceptor(args: &Args) -> Option<rustkit_net::RequestInterceptor> {
     Some(hiwave_shield_intercept::create_shield_interceptor())
 }
 
+/// The view's script log as `script_stats`, and `--dump-scripts`.
+fn write_script_stats(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+    args: &Args,
+    result: &mut CaptureResult,
+) {
+    if let Some(log) = engine.script_log(view_id) {
+        result.script_stats = Some(script_stats(log));
+        if let Some(ref path) = args.dump_scripts {
+            if let Err(e) = fs::write(path, script_log_json(log).to_string()) {
+                error!("Failed to write script log: {:?}", e);
+            }
+        }
+    }
+}
+
+/// A server's error page as the capture's failure (see the URL load).
+fn error_status(
+    engine: &rustkit_engine::Engine,
+    view_id: rustkit_engine::EngineViewId,
+) -> Option<String> {
+    let status = engine.http_status(view_id).filter(|s| !(200..300).contains(s))?;
+    Some(format!("Failed to load URL: NavigationError(\"HTTP error\") (HTTP {status}; the engine rendered its body)"))
+}
+
+/// T17: follows the first navigation a URL capture's page asks for, and
+/// counts the rest.
+struct NavigationFollow {
+    enabled: bool,
+    began: Instant,
+    followed: Option<FollowedNavigation>,
+    /// When the followed load returned: the landed page's records start here.
+    landed_at: Option<Instant>,
+    not_followed: u32,
+    error: Option<String>,
+}
+
+impl NavigationFollow {
+    fn new(enabled: bool, began: Instant) -> Self {
+        Self { enabled, began, followed: None, landed_at: None, not_followed: 0, error: None }
+    }
+
+    /// True while a hop is still allowed.
+    fn can_follow(&self) -> bool {
+        self.enabled && self.followed.is_none() && self.error.is_none()
+    }
+
+    /// Take the page's navigation ask, if any. The first one (when enabled)
+    /// is loaded into the view; returns true when it was.
+    fn check(
+        &mut self,
+        rt: &tokio::runtime::Runtime,
+        engine: &mut rustkit_engine::Engine,
+        view_id: rustkit_engine::EngineViewId,
+        during: &str,
+    ) -> bool {
+        let Some((target, replace)) = engine.take_script_navigation_with_replace(view_id) else {
+            return false;
+        };
+        if !self.can_follow() {
+            self.not_followed += 1;
+            tracing::info!(to = %shape_url(&target), "Page asked to navigate: not followed");
+            return false;
+        }
+        let at_ms = self.began.elapsed().as_millis() as u64;
+        let to = shape_url(&target);
+        tracing::info!(%to, during, at_ms, replace, "Following the page's navigation");
+        let url = match Url::parse(&target) {
+            Ok(url) => url,
+            Err(e) => {
+                self.error = Some(format!("Failed to load followed URL: invalid URL: {e}"));
+                return false;
+            }
+        };
+        self.followed = Some(FollowedNavigation { to, during: during.to_string(), at_ms, replace });
+        if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
+            self.error = Some(format!("Failed to load followed URL: {:?}", e));
+            return false;
+        }
+        self.landed_at = Some(Instant::now());
+        true
+    }
+}
+
+/// Origin and path only: no query, fragment or userinfo (the shape rule).
+fn shape_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            url.set_query(None);
+            url.set_fragment(None);
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        Err(_) => "<unparseable url>".to_string(),
+    }
+}
+
 fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     let mut config = EngineConfig::for_parity_testing();
     if let Some(horizon) = args.timer_horizon_ms {
@@ -1799,6 +1930,9 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     config.inspector.keep_url_query = args.event_log_keep_query;
     config.inspector.keep_console_text = args.event_log_console_text;
     config.inspector.keep_error_text = args.event_log_error_text;
+    // A URL capture that will follow the page's navigation need not wait
+    // for images the leaving page's scripts added (as in the app).
+    config.follows_script_navigation = args.url.is_some() && !args.no_follow_navigation;
     config
 }
 
@@ -2685,7 +2819,10 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
                             break;
                         }
                     }
-                    let body = if line.starts_with("GET /two") {
+                    let body = if line.starts_with("GET /slow") {
+                        std::thread::sleep(Duration::from_millis(300));
+                        "location.assign('/two');".to_string()
+                    } else if line.starts_with("GET /two") {
                         concat!(
                             "<html><head><style>html,body{margin:0;background:rgb(0,160,0)}</style></head>",
                             "<body><div id=two style=\"width:123px;height:77px\"></div></body></html>"
@@ -2696,9 +2833,12 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
                             "<html><head><style>html,body{{margin:0;background:rgb(200,0,0)}}</style>{head}</head><body><div id=one style=\"height:40px\"></div></body></html>"
                         )
                     };
+                    // `/challenge…` is page one as a 403, the way a
+                    // challenge interstitial is served.
+                    let status = if line.starts_with("GET /challenge") { "403 Forbidden" } else { "200 OK" };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                 });
@@ -2729,13 +2869,26 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
     /// Capture `/` of a [`two_page_site`] live for 2.5 s: the frame's pixel
     /// at (200, 150), the event log's navigation URLs, the result.
     fn capture_two_page_site(head: &'static str, extra: &[&str], tag: &str) -> ([u8; 3], Vec<String>, CaptureResult) {
+        let (pixel, navigations, result) = capture_two_page_site_at("/", head, extra, tag);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        (pixel.expect("a frame"), navigations, result)
+    }
+
+    /// [`capture_two_page_site`] from `path`, whatever the outcome; no frame
+    /// when the capture failed.
+    fn capture_two_page_site_at(
+        path: &str,
+        head: &'static str,
+        extra: &[&str],
+        tag: &str,
+    ) -> (Option<[u8; 3]>, Vec<String>, CaptureResult) {
         let port = two_page_site(head);
         let dir = std::env::temp_dir().join(format!("parity-capture-t17-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let log = dir.join("events.jsonl");
         let frame = dir.join("frame.ppm");
-        let url = format!("http://127.0.0.1:{port}/");
+        let url = format!("http://127.0.0.1:{port}{path}");
         let mut argv = vec![
             "parity-capture",
             "--url",
@@ -2754,7 +2907,6 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         argv.extend_from_slice(extra);
         let args = Args::try_parse_from(argv).unwrap();
         let result = run_capture(&args);
-        assert_eq!(result.status, "ok", "{:?}", result.error);
         let navigations = fs::read_to_string(&log)
             .unwrap()
             .lines()
@@ -2762,7 +2914,7 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             .filter(|r| r["type"] == "navigation_start")
             .map(|r| r["url"].as_str().unwrap_or("").to_string())
             .collect();
-        let pixel = ppm_pixel(&frame, 200, 150);
+        let pixel = frame.exists().then(|| ppm_pixel(&frame, 200, 150));
         let _ = fs::remove_dir_all(&dir);
         (pixel, navigations, result)
     }
@@ -2790,9 +2942,51 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert!(navigations[0].ends_with('/') && navigations[1].ends_with("/two"), "{navigations:?}");
         let followed = result.followed_navigation.expect("the hop is reported");
         assert!(followed.to.ends_with("/two"), "{}", followed.to);
-        assert_eq!(followed.during, "live");
-        assert!(followed.at_ms >= 400, "{}", followed.at_ms);
+        // The load runs the page's timers up to its 5 s virtual horizon, so a
+        // 500 ms timer's ask is seen as the load returns.
+        assert_eq!(followed.during, "load");
         assert!(!followed.replace);
+    }
+
+    /// T17: an ask made in the live window (by a script a timer inserts,
+    /// whose fetch is answered 300 ms later) is followed there, and the
+    /// window goes on with the landed page.
+    #[test]
+    fn a_navigation_asked_in_the_live_window_is_followed_there() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) = capture_two_page_site(
+            "<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/slow'; document.head.appendChild(s); }, 50);</script>",
+            &[],
+            "live",
+        );
+        assert!(is_green(pixel), "{pixel:?}");
+        assert_eq!(navigations.len(), 2, "{navigations:?}");
+        let followed = result.followed_navigation.expect("the hop is reported");
+        assert_eq!(followed.during, "live");
+        assert!(followed.at_ms >= 250, "{}", followed.at_ms);
+        assert!(result.live_stats.expect("live stats").turns > 1);
+    }
+
+    /// T17: after a hop, `--report` reads the landed page only: one
+    /// navigation, so `settled` is not forced to "changing".
+    #[test]
+    fn the_report_of_a_followed_capture_is_of_the_landed_page() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parity-capture-t17-landed-report-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("report.json");
+        let (_, _, result) = capture_two_page_site(
+            "<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/slow'; document.head.appendChild(s); }, 50);</script>",
+            &["--report", json.to_str().unwrap()],
+            "report",
+        );
+        assert!(result.followed_navigation.is_some());
+        let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(&json).unwrap()).unwrap();
+        let settled = &report["settled"];
+        assert_eq!(settled["navigated"], false, "{settled}");
+        assert!(settled["last_relayout_ms_before"].as_f64().is_some(), "{settled}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// T17 red: a `<meta http-equiv=refresh>` to another page is followed the
@@ -2821,6 +3015,28 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
         assert!(is_red(pixel), "{pixel:?}");
         assert_eq!(navigations.len(), 2, "one hop only: {navigations:?}");
         assert!(result.navigations_not_followed >= 1, "{}", result.navigations_not_followed);
+    }
+
+    /// T17: a challenge interstitial (a 403 whose page sends the browser on)
+    /// is captured where it lands; a 403 that stays put still fails the
+    /// capture with the old message.
+    #[test]
+    fn a_challenge_page_is_judged_where_it_lands() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) = capture_two_page_site_at(
+            "/challenge",
+            "<script>setTimeout(function () { var s = document.createElement('script'); s.src = '/slow'; document.head.appendChild(s); }, 50);</script>",
+            &[],
+            "challenge",
+        );
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        assert!(pixel.is_some_and(is_green), "{pixel:?}");
+        assert_eq!(navigations.len(), 2, "{navigations:?}");
+        let (pixel, _, result) = capture_two_page_site_at("/challenge", "", &[], "blocked");
+        assert_eq!(result.status, "error");
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("(HTTP 403; the engine rendered its body)"), "{error}");
+        assert!(pixel.is_none());
     }
 
     /// `--no-follow-navigation` keeps the old capture: the page as it was.
