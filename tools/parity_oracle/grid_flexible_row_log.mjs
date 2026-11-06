@@ -41,7 +41,9 @@ console.log('chrome ' + browser.version());
 for (const c of data.cases) {
   const page = await browser.newPage({ viewport: { width, height } });
   await page.setContent(c.html);
-  c.chrome_boxes = await page.evaluate(EXPR[data.boxes] || BOXES);
+  // A case file may name its own expression ("expr"), e.g. one that
+  // reads innerText rather than boxes (inner_text_style_cases.json).
+  c.chrome_boxes = await page.evaluate(data.expr || EXPR[data.boxes] || BOXES);
   console.log(c.name + '  ' + c.chrome_boxes);
   if (c.html_longhand) {
     // The same page with the shorthand written out as its longhands.

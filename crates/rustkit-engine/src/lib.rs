@@ -444,6 +444,10 @@ mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
+mod flex_cross_size_tests;
+#[cfg(test)]
+mod inner_text_style_tests;
+#[cfg(test)]
 mod control_percent_height_tests;
 #[cfg(test)]
 mod flex_hidden_gap_tests;
@@ -564,6 +568,8 @@ mod positioned_form_control_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(all(test, feature = "headless"))]
+mod unitless_zero_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -23923,6 +23929,8 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     // wikipedia's `minmax(0,1fr)` and `12.25rem` columns never parsed. `rem`
     // assumes the 16px root, as `fit-content()` and `flex-basis` do.
     match parse_length(value)? {
+        // A bare `0` parses to `Px(0.0)` (CH2.B14); `Zero` kept for safety.
+        rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
         rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
         _ => None,
@@ -28276,7 +28284,8 @@ mod tests {
 
     #[test]
     fn test_parse_length() {
-        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Zero));
+        // An authored `0` is `0px`; `Length::Zero` is the unset default (CH2.B14).
+        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Px(0.0)));
         assert_eq!(parse_length("auto"), Some(rustkit_css::Length::Auto));
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));
@@ -28663,7 +28672,7 @@ mod tests {
 
     #[test]
     fn border_radius_shorthand_expands_one_to_four_values() {
-        use rustkit_css::Length::{Percent, Px, Zero};
+        use rustkit_css::Length::{Percent, Px};
         let circular = |value: &str| {
             parse_border_radius_shorthand(value).map(|corners| {
                 corners.map(|c| {
@@ -28678,7 +28687,7 @@ mod tests {
         assert_eq!(circular("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
         assert_eq!(
             circular("8px 8px 0 0"),
-            Some([Px(8.0), Px(8.0), Zero, Zero])
+            Some([Px(8.0), Px(8.0), Px(0.0), Px(0.0)])
         );
         assert_eq!(
             circular("1px 2px"),
@@ -45951,7 +45960,8 @@ mod individual_transform_tests {
         assert_eq!(
             s.effective_transform().ops,
             vec![
-                TransformOp::Translate(Length::Px(10.0), Length::Zero),
+                // An authored `0` is `0px` (CH2.B14).
+                TransformOp::Translate(Length::Px(10.0), Length::Px(0.0)),
                 TransformOp::Rotate(90.0),
                 TransformOp::Scale(2.0, 2.0),
                 TransformOp::TranslateX(Length::Px(1.0)),
