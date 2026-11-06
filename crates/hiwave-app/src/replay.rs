@@ -30,7 +30,6 @@ pub fn parse_replay_proxy<I>(args: I) -> Result<Option<Url>, String>
 where
     I: IntoIterator<Item = String>,
 {
-    if true { let _ = args; return Ok(None); } // RED STUB
     let mut found: Option<Url> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {

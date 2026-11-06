@@ -257,7 +257,7 @@ fn content_engine_builder_with(replay_proxy: Option<url::Url>) -> EngineBuilder 
         .post_load_requests_live(true)
         // T18: HAR replay in the real window. The engine rewrites each
         // request to the proxy and refuses any non-loopback connection.
-        .replay_proxy({ let _ = replay_proxy; None })
+        .replay_proxy(replay_proxy)
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
