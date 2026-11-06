@@ -21,6 +21,7 @@ pub use rustkit_bindings::IpcMessage;
 /// The clipboard edit commands use (CH2.E1); a platform one plugs in with
 /// [`Engine::set_clipboard`].
 pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
+pub use rustkit_dom::forms::EditCommand;
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -288,6 +289,8 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+mod text_input;
+pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
@@ -518,6 +521,8 @@ mod live_turn_budget_tests;
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod app_bridge_tests;
+#[cfg(all(test, feature = "headless"))]
+mod text_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod text_control_select_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1373,6 +1378,10 @@ pub struct EngineConfig {
     /// watchdog is armed once per execution, and script still running when
     /// its allowance is spent is stopped.
     pub live_turn_budget_ms: u64,
+    /// Copy, cut and paste use the system clipboard (macOS `NSPasteboard`,
+    /// CH2.E3) instead of an in-memory one. Off by default: tests and
+    /// captures must not touch the user's clipboard. The app turns it on.
+    pub system_clipboard: bool,
     /// The embedder loads the URL a page's script asks for
     /// ([`Engine::take_script_navigation`]), as the live app does. A load
     /// whose scripts have asked to leave then does not wait for the images
@@ -1418,6 +1427,7 @@ impl Default for EngineConfig {
             follows_script_navigation: false,
             post_load_requests_live: false,
             inspector: InspectorConfig::tab(),
+            system_clipboard: false,
         }
     }
 }
@@ -2739,13 +2749,18 @@ impl Engine {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         console_log::install_console_diag();
+        let system_clipboard = config.system_clipboard;
         Ok(Self {
             config,
             presenter,
             page_commits: HashMap::new(),
             nav_seq,
             host_reentry_override: None,
-            clipboard: MemoryClipboard::shared(),
+            clipboard: if system_clipboard {
+                text_input::system_clipboard()
+            } else {
+                MemoryClipboard::shared()
+            },
             clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
@@ -5839,7 +5854,6 @@ impl Engine {
         alt: bool,
     ) -> bool {
         let _hold = wgate::hold("key");
-        use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         // An open `<select>` drop-down takes the keys; the page hears none.
         if let Some(changed) = self.select_popup_key(id, key_code, key, ctrl, alt) {
@@ -5857,12 +5871,29 @@ impl Engine {
         {
             return false;
         }
+        self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
+    }
+
+    /// What a key does in the focused element `focused` once its keydown
+    /// was not cancelled: edit a contenteditable host, a drop-down or a
+    /// text control. Whether a value or caret changed.
+    pub(crate) fn text_key_default(
+        &mut self,
+        id: EngineViewId,
+        focused: usize,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        use rustkit_dom::forms::{keyboard, KeyHandleResult};
         // A contenteditable host: the page's DOM is what is edited.
-        if self.is_editing_host(id, focused.raw()) {
-            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        if self.is_editing_host(id, focused) {
+            return self.editable_key(id, focused, key_code, key, ctrl);
         }
         // A focused, closed drop-down: keys open it or change its value.
-        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, ctrl, alt) {
+        if let Some(changed) = self.closed_select_key(id, focused, key_code, key, ctrl, alt) {
             return changed;
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
@@ -5871,7 +5902,7 @@ impl Engine {
         // `ctrl` is the command modifier: the window passes Ctrl-or-Cmd.
         let platform = rustkit_dom::forms::KeyPlatform::current();
         if let Some(command) = keyboard::command_for_key(platform, key_code, key, ctrl, shift, alt) {
-            if let Some(changed) = self.user_edit_command(id, focused.raw(), &command) {
+            if let Some(changed) = self.user_edit_command(id, focused, &command) {
                 return changed;
             }
         }
@@ -5879,7 +5910,7 @@ impl Engine {
         // writes script's control values into the same map.
         let (result, value) = {
             let edit_states = lay.edit_states.borrow();
-            let Some(state) = edit_states.get(&focused.raw()) else {
+            let Some(state) = edit_states.get(&focused) else {
                 return false;
             };
             let result = keyboard::handle_key(
@@ -5893,7 +5924,7 @@ impl Engine {
             let mut stopped = None;
             if let Some(view) = self.views.get(&id) {
                 if let Some(bindings) = view.bindings.as_ref() {
-                    bindings.sync_control_value(focused.raw(), value);
+                    bindings.sync_control_value(focused, value);
                     // As `fire_mouse`: a document being left hears no
                     // `input`; its control's value is kept current all the
                     // same.
@@ -5901,7 +5932,7 @@ impl Engine {
                         let typed = (!key.is_empty() && !ctrl).then_some(key);
                         let _turn = rustkit_js::DiagTurn::enter("live");
                         let armed = arm_live_turn(&self.config, bindings);
-                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                        if let Err(e) = bindings.fire_input_event(focused, typed) {
                             debug!(?id, error = %e, "input listener threw");
                         }
                         stopped = end_live_turn(&self.config, armed, bindings, "event:input");
@@ -6066,6 +6097,21 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) -> bool {
+        self.fire_key_mods(id, node, event_type, key_code, text, (ctrl, shift, alt, false))
+    }
+
+    /// [`Self::fire_key`] with the Meta key as well: `mods` is
+    /// (ctrl, shift, alt, meta). A macOS Cmd chord is `metaKey` (CH2.E3).
+    pub(crate) fn fire_key_mods(
+        &mut self,
+        id: EngineViewId,
+        node: Option<usize>,
+        event_type: &str,
+        key_code: u32,
+        text: &str,
+        mods: (bool, bool, bool, bool),
+    ) -> bool {
+        let (ctrl, shift, alt, meta) = mods;
         let key = match key_code {
             0x08 => "Backspace",
             0x09 => "Tab",
@@ -6101,6 +6147,7 @@ impl Engine {
             ctrl_key: ctrl,
             alt_key: alt,
             shift_key: shift,
+            meta_key: meta,
             ..Default::default()
         };
         let _turn = rustkit_js::DiagTurn::enter("live");
@@ -21547,6 +21594,13 @@ impl EngineBuilder {
     /// (`EngineConfig::live_turn_budget_ms`).
     pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
         self.config.live_turn_budget_ms = ms;
+        self
+    }
+
+    /// Copy, cut and paste use the system clipboard
+    /// (`EngineConfig::system_clipboard`).
+    pub fn system_clipboard(mut self, on: bool) -> Self {
+        self.config.system_clipboard = on;
         self
     }
 

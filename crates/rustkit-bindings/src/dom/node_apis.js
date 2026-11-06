@@ -233,6 +233,11 @@
         el.__rkEdited = false;
         el.dispatchEvent(new g.Event('change', { bubbles: true }));
     }
+    // A composition in the element losing the focus ends first (CH2.E3).
+    function finishComposing(el) {
+        var f = Document.prototype.__rkFinishComposing;
+        if (typeof f === 'function') f.call(document, el);
+    }
     // The focus update steps: change, then blur/focusout on the old
     // element (with nothing focused), then focus/focusin on the new one.
     function focus() {
@@ -240,7 +245,7 @@
         if (old === this || !isFocusable(this)) return;
         focused = null;
         moved = true;
-        if (old) { commit(old); fire(old, 'blur', this); fire(old, 'focusout', this); }
+        if (old) { finishComposing(old); commit(old); fire(old, 'blur', this); fire(old, 'focusout', this); }
         focused = this;
         fire(this, 'focus', old);
         fire(this, 'focusin', old);
@@ -249,6 +254,7 @@
         if (current() !== this) return;
         focused = null;
         moved = true;
+        finishComposing(this);
         commit(this);
         fire(this, 'blur', null);
         fire(this, 'focusout', null);

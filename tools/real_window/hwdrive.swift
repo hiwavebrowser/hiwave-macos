@@ -24,6 +24,7 @@
 //   hwdrive cursor                          (which AppKit cursor is showing)
 //   hwdrive scroll   <pid> <x> <y> <dx> <dy> (pixels; dy < 0 moves the page down)
 //   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
+//   hwdrive menu     <pid> <menu title> <item title>   (press a menu bar item)
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>
 //   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
@@ -375,6 +376,41 @@ case "type":
         }
     }
     emit(["typed": args[2].count])
+
+case "menu":
+    // Press an item of the app's menu bar through Accessibility, as a
+    // click on it does: muda's predefined Edit items send their action
+    // (copy:, paste:, ...) to the first responder (CH2.E3).
+    guard args.count >= 4 else { emit(["error": "menu needs a menu title and an item title"], code: 2) }
+    if !AXIsProcessTrusted() {
+        emit(["error": "no Accessibility grant (System Settings > Privacy & Security > Accessibility)"], code: 3)
+    }
+    func children(_ e: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+        return value as? [AXUIElement] ?? []
+    }
+    func title(_ e: AXUIElement) -> String {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &value) == .success else { return "" }
+        return value as? String ?? ""
+    }
+    let app = AXUIElementCreateApplication(pid)
+    var barRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &barRef) == .success,
+          let barValue = barRef
+    else { emit(["error": "no menu bar for pid \(pid)"], code: 2) }
+    let bar = barValue as! AXUIElement
+    guard let top = children(bar).first(where: { title($0) == args[2] }) else {
+        emit(["error": "no menu \(args[2])", "menus": children(bar).map(title)], code: 2)
+    }
+    let items = children(top).flatMap(children)
+    guard let item = items.first(where: { title($0) == args[3] }) else {
+        emit(["error": "no item \(args[3]) in \(args[2])", "items": items.map(title)], code: 2)
+    }
+    let err = AXUIElementPerformAction(item, kAXPressAction as CFString)
+    usleep(200_000)
+    emit(["menu": args[2], "item": args[3], "ax_error": Int(err.rawValue)], code: err == .success ? 0 : 2)
 
 case "resize":
     guard args.count >= 4 else { emit(["error": "resize needs w h"], code: 2) }

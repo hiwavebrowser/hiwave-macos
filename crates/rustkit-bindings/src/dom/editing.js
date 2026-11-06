@@ -38,11 +38,12 @@
         var r = start === undefined ? SEL(I.gen(), id) : SEL(I.gen(), id, start, end, dir);
         return typeof r === 'string' ? JSON.parse(r) : null;
     });
-    function fire(el, type, inputType, data, cancelable) {
+        function fire(el, type, inputType, data, cancelable, isComposing) {
         if (type === 'input') hidden(el, '__rkEdited', true);
         var ev = new g.InputEvent(type, {
             bubbles: true, cancelable: !!cancelable, composed: true, view: g,
-            inputType: inputType, data: data === undefined ? null : data
+            inputType: inputType, data: data === undefined ? null : data,
+            isComposing: !!isComposing
         });
         ev.isTrusted = true;
         return el.dispatchEvent(ev);
@@ -101,6 +102,78 @@
         if (!r) return null;
         if (r.changed) fire(el, 'input', r.inputType, r.data);
         return JSON.stringify(r);
+    });
+
+    // ---- the platform's marked text (CH2.E3, macOS NSTextInputClient) ----
+    // One composition at a time, in UTF-16 offsets of its control's value.
+    // Chrome 143's order (tools/parity_oracle/composition_log.mjs): the first
+    // mark fires compositionstart (data: the text it replaces); each mark
+    // fires compositionupdate, beforeinput and input (insertCompositionText,
+    // isComposing, beforeinput not cancelable); a commit is a last update
+    // then compositionend; an empty mark cancels (input data null, then
+    // compositionend ''); unmark keeps the text and fires compositionend.
+    var composing = null;
+    function compose(el, type, data) {
+        var ev = new g.CompositionEvent(type, {
+            bubbles: true, cancelable: true, composed: true, view: g, data: data
+        });
+        ev.isTrusted = true;
+        el.dispatchEvent(ev);
+    }
+    function replaceMarked(c, text) {
+        compose(c.el, 'compositionupdate', text);
+        fire(c.el, 'beforeinput', 'insertCompositionText', text, false, true);
+        var r = run(c.el, c.id, 'insertText', text, { start: c.start, end: c.end }, true);
+        c.end = r ? r.end : c.start;
+        c.text = text;
+        fire(c.el, 'input', 'insertCompositionText', text === '' ? null : text, false, true);
+    }
+    function marked() {
+        return composing ? { marked: [composing.start, composing.end], text: composing.text } : { marked: null };
+    }
+    hidden(Document.prototype, '__rkCompose', function (id, action, text) {
+        if (composing && (composing.gen !== I.gen() || composing.id !== id)) composing = null;
+        var el = typeof id === 'number' ? I.wrap(id) : null;
+        if (!el || !/^(input|textarea)$/.test(el.localName)) return null;
+        var c = composing;
+        if (action === 'state') return JSON.stringify(marked());
+        if (action === 'unmark') {
+            if (!c) return JSON.stringify({ changed: false, marked: null });
+            composing = null;
+            compose(el, 'compositionend', c.text);
+            return JSON.stringify({ changed: true, marked: null });
+        }
+        if (action === 'commit') {
+            if (!c) return null;
+            replaceMarked(c, String(text));
+            composing = null;
+            compose(el, 'compositionend', c.text);
+            return JSON.stringify({ changed: true, marked: null });
+        }
+        // mark
+        text = String(text);
+        if (!c) {
+            if (text === '') return JSON.stringify({ changed: false, marked: null });
+            var sel = I.selectionOf(el);
+            c = composing = { el: el, id: id, gen: I.gen(), start: sel.start, end: sel.end, text: '' };
+            compose(el, 'compositionstart', String(el.value).substring(sel.start, sel.end));
+        }
+        replaceMarked(c, text);
+        if (text === '') {
+            composing = null;
+            compose(el, 'compositionend', '');
+        }
+        return JSON.stringify(marked());
+    });
+
+    // Focus leaving `el` mid-composition (node_apis.js focus()/blur(), a
+    // click elsewhere): Chrome 143 keeps the marked text and fires
+    // compositionend before blur (tools/parity_oracle/ime_gate_log.mjs).
+    hidden(Document.prototype, '__rkFinishComposing', function (el) {
+        var c = composing;
+        if (!c || c.el !== el) return;
+        composing = null;
+        if (c.gen === I.gen()) compose(el, 'compositionend', c.text);
     });
 
     // ---- navigator.clipboard (Clipboard API §6, text only) ----
