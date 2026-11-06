@@ -145,18 +145,83 @@ fn a_style_write_reads_back_serialized() {
     assert_eq!(read, "matrix(1, 0, 0, 1, 10, 5)");
 }
 
-/// The #866 R1's 124 cases (its own pages, not this file's). Each says what it
-/// must read: Chromium's answer, or what develop read before this change where
-/// the engine still cannot answer (`base`), or `gap` (neither, listed in the PR).
-#[test]
-fn r1_cases() {
-    const R1: &str = include_str!("../../../tools/parity_oracle/computed_read_r1_cases.json");
+const R1: &str = include_str!("../../../tools/parity_oracle/computed_read_r1_cases.json");
+
+/// Cases per `r1_part_*` test. Each case loads its own page (about 1 s in a
+/// debug build, more under load), and one test holds the GPU guard for all of
+/// its cases, so the #866 R1 list runs as [`R1_PARTS`] tests (T23).
+const R1_PER_PART: usize = 8;
+const R1_PARTS: usize = 16;
+
+fn r1_all() -> Vec<serde_json::Value> {
     let doc: serde_json::Value = serde_json::from_str(R1).expect("r1 cases");
+    doc["cases"].as_array().expect("cases").clone()
+}
+
+/// The parts cover the R1 list exactly: a case added to the JSON past the last
+/// part, or a part left empty, fails here without building an engine.
+#[test]
+fn r1_parts_cover_every_case_once() {
+    let n = r1_all().len();
+    assert!(
+        n <= R1_PARTS * R1_PER_PART,
+        "{n} R1 cases, {R1_PARTS} parts of {R1_PER_PART} hold {}: add r1_part tests",
+        R1_PARTS * R1_PER_PART
+    );
+    assert!(
+        n > (R1_PARTS - 1) * R1_PER_PART,
+        "{n} R1 cases leave r1_part_{} empty: drop it",
+        R1_PARTS - 1
+    );
+}
+
+macro_rules! r1_parts {
+    ($($name:ident = $part:expr),* $(,)?) => {
+        $(#[test] fn $name() { r1_cases($part); })*
+        #[test]
+        fn r1_part_list_matches_r1_parts() {
+            let parts = [$($part),*];
+            assert_eq!(parts.len(), R1_PARTS);
+            assert!(parts.iter().enumerate().all(|(i, p)| i == *p));
+        }
+    };
+}
+
+r1_parts!(
+    r1_part_00 = 0,
+    r1_part_01 = 1,
+    r1_part_02 = 2,
+    r1_part_03 = 3,
+    r1_part_04 = 4,
+    r1_part_05 = 5,
+    r1_part_06 = 6,
+    r1_part_07 = 7,
+    r1_part_08 = 8,
+    r1_part_09 = 9,
+    r1_part_10 = 10,
+    r1_part_11 = 11,
+    r1_part_12 = 12,
+    r1_part_13 = 13,
+    r1_part_14 = 14,
+    r1_part_15 = 15,
+);
+
+/// The #866 R1's cases (its own pages, not this file's), part `part` of
+/// [`R1_PARTS`]. Each says what it must read: Chromium's answer, or what
+/// develop read before that change where the engine still cannot answer
+/// (`base`), or `gap` (neither, listed in the PR).
+fn r1_cases(part: usize) {
+    let all = r1_all();
+    let cases = all.chunks(R1_PER_PART).nth(part).unwrap_or(&[]);
+    assert!(!cases.is_empty(), "r1 part {part} has no cases");
+    // The hold starts when the guard is taken, not when the test starts:
+    // time queued behind other GPU tests is theirs.
+    crate::test_gpu::hold_for_this_test();
     let started = std::time::Instant::now();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let mut wrong = Vec::new();
     let mut counts = std::collections::BTreeMap::new();
-    for c in doc["cases"].as_array().expect("cases") {
+    for c in cases {
         let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
         let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
         engine.load_html(id, &s("html")).expect("load");
@@ -177,9 +242,9 @@ fn r1_cases() {
         }
         let _ = engine.destroy_view(id);
     }
-    eprintln!("r1 reads: {counts:?}");
+    eprintln!("r1 part {part} reads: {counts:?}");
     assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
-    within_half_the_gpu_guard("r1_cases", started);
+    within_half_the_gpu_guard(&format!("r1 part {part}"), started);
 }
 
 /// A test holds the GPU guard from its first engine to its end, and every GPU
@@ -189,6 +254,7 @@ fn r1_cases() {
 fn within_half_the_gpu_guard(name: &str, started: std::time::Instant) {
     let held = started.elapsed();
     let limit = crate::test_gpu::MAX_WAIT / 2;
+    eprintln!("{name} held the GPU guard {:.1}s", held.as_secs_f64());
     assert!(
         held < limit,
         "{name} held the GPU test guard {:.1}s, over half its {}s limit; split it",
