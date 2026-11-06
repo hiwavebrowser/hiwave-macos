@@ -565,6 +565,8 @@ mod positioned_form_control_tests;
 #[cfg(all(test, feature = "headless"))]
 mod flex_justify_overflow_tests;
 #[cfg(all(test, feature = "headless"))]
+mod fixed_cb_width_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
