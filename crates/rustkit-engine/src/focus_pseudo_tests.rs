@@ -312,7 +312,7 @@ const STAR_PAGE: &str = "<!doctype html><html><head><style>body { margin: 0 }\
     *:focus { outline: none }\
     *:hover { background-color: rgb(255, 0, 0) }\
     #d { height: 40px }</style></head><body>\
-    <input id=i><button id=b>B</button><div id=d>x</div><div id=e style='height:40px'>e</div></body></html>";
+    <input id=i><button id=b>B</button><div id=w><div id=d>x</div></div><div id=e style='height:40px'>e</div></body></html>";
 
 #[test]
 fn star_focus_outline_none_takes_the_ring_away() {
@@ -336,6 +336,6 @@ fn star_hover_matches_the_hovered_chain() {
     let (x, y) = centre(&mut engine, id, "d");
     engine.mouse_move_at_point(id, x, y);
     assert_eq!(css(&mut engine, id, "d", "background-color"), "rgb(255, 0, 0)", "the hovered element");
-    assert_eq!(js(&mut engine, id, "getComputedStyle(document.body).backgroundColor"), "rgb(255, 0, 0)", "its ancestor");
+    assert_eq!(css(&mut engine, id, "w", "background-color"), "rgb(255, 0, 0)", "its parent");
     assert_eq!(css(&mut engine, id, "e", "background-color"), "rgba(0, 0, 0, 0)", "not its sibling");
 }

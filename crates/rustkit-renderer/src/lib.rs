@@ -5070,7 +5070,6 @@ impl Renderer {
         self.draw_solid_rect(rect, background_color);
 
         // Draw border
-        let border_rect = rect;
         self.draw_solid_rect(
             Rect::new(rect.x, rect.y, rect.width, border_width),
             border_color,
@@ -5253,7 +5252,7 @@ impl Renderer {
         border_width: f32,
         _border_radius: f32,
         pressed: bool,
-        focused: bool,
+        _focused: bool,
         font_family: &str,
         font_weight: u16,
         padding: [f32; 4],

@@ -18840,7 +18840,8 @@ impl layout_ctx::LayoutCtx {
                 });
             }
             let tag_end = compound.find(stop).unwrap_or(compound.len());
-            let tag_part = &compound[..tag_end];
+            // `*:hover`, `*.a`: the universal selector names no tag (CH2.E22).
+            let tag_part = Some(&compound[..tag_end]).filter(|t| *t != "*").unwrap_or("");
             let rest = &compound[tag_end..];
             let class = rest.strip_prefix('.').map(|r| {
                 let end = r.find(stop).unwrap_or(r.len());
@@ -19543,8 +19544,10 @@ impl SelectorMatcher {
         let tag_part = &remaining[..tag_end];
         remaining = &remaining[tag_end..];
 
-        // Check tag name (if specified)
-        if !tag_part.is_empty() && !tag_part.eq_ignore_ascii_case(tag_name) {
+        // Check tag name (if specified). The universal selector with more
+        // after it (`*:focus`, `*:hover`, `*.a`) names none: it matched no
+        // element at all (CH2.E22, an R1 hold on #954).
+        if !tag_part.is_empty() && tag_part != "*" && !tag_part.eq_ignore_ascii_case(tag_name) {
             return false;
         }
 
@@ -38769,7 +38772,10 @@ impl SubjectCompound {
 
         let is_delim = |c| c == '.' || c == '#' || c == ':' || c == '[';
         let tag_end = selector.find(is_delim).unwrap_or(selector.len());
-        let tag = selector[..tag_end].to_string();
+        // `*:focus`, `*:hover`, `*.a`: the universal selector names no tag;
+        // kept as the tag `*`, it matched no element (CH2.E22, an R1 hold
+        // on #954).
+        let tag = Some(&selector[..tag_end]).filter(|t| *t != "*").unwrap_or("").to_string();
         let mut remaining = &selector[tag_end..];
         let mut parts = Vec::new();
         while !remaining.is_empty() {
@@ -39528,8 +39534,10 @@ impl AncestorCompound {
             let at_end = i == chars.len();
             if at_end || is_delimiter(chars[i]) {
                 // Tag name at the start
+                // `*` names no tag (`*:hover`: the pointer index filed it
+                // under the tag `*`, which no element is; CH2.E22).
                 if i > current_start && current_start == 0 && chars[0] != '.' && chars[0] != '#' {
-                    out.tag = Some(text(0, i));
+                    out.tag = Some(text(0, i)).filter(|t| t != "*");
                 }
 
                 if !at_end {
