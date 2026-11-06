@@ -39935,7 +39935,7 @@ struct PointerReads {
     compounds: Vec<PointerCompound>,
     /// Index into `compounds` by tag, classes, id and attributes.
     seen: HashMap<PointerCompoundKey, usize>,
-    /// Each `:has()` whose argument reads it (LAT3, ebay's
+    /// Each `:has()` whose argument reads it (LAT3, a marketplace's
     /// `[data-x]:not(:has([data-x]:hover)):hover::after`).
     has: Vec<HasPointer>,
     /// Some selector names it where neither `compounds` nor `has` shows it

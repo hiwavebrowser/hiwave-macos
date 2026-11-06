@@ -933,7 +933,7 @@ fn zz_cascade_timing_of_a_feed_hover() {
 }
 
 // ---------------------------------------------------------------------------
-// LAT3 (Pete's flag-on log, 11-05): every one of ebay's 59 hover restyles
+// LAT3 (Pete's flag-on log, 11-05): every one of a top-20 marketplace's 59 hover restyles
 // missed the short path with "a rule reads the pseudo-class where no
 // compound shows it" and cost a full build and layout (210 ms). The sheet's
 // only such rules are two of the shape
@@ -952,7 +952,7 @@ fn clear_miss() {
 
 const ANYWHERE_MISS: &str = "a rule reads the pseudo-class where no compound shows it";
 
-/// eBay's shape: a debug outline drawn on an element carrying an attribute
+/// A marketplace's shape: a debug outline drawn on an element carrying an attribute
 /// that no element of the page carries. It can never match, so no move
 /// restyles anything for it.
 #[test]
@@ -1056,13 +1056,13 @@ fn a_hover_inside_a_complex_not_member_takes_the_short_path() {
     assert_eq!(painted(&engine, view), at_rest, "off the feed");
 }
 
-/// The ebay-shaped sheet over about 5,000 boxes: hover rules nested in
+/// The marketplace-shaped sheet over about 5,000 boxes: hover rules nested in
 /// `:is()` / `:where()`, on a compound left of a combinator, with
 /// `:not([disabled],[aria-disabled=true])`, a `::after`, and the
 /// `:has(:hover)` debug rule. Every move takes the short path, and its two
 /// builds take a small fraction of the full build (both are printed).
 #[test]
-fn an_ebay_shaped_sheet_hovers_on_the_short_path_in_a_few_ms() {
+fn a_marketplace_shaped_sheet_hovers_on_the_short_path_in_a_few_ms() {
     let mut html = String::from(
         "<style>body{margin:0;font:13px/16px sans-serif}\
          .grid{width:1200px}\
@@ -1125,7 +1125,7 @@ fn an_ebay_shaped_sheet_hovers_on_the_short_path_in_a_few_ms() {
     let (short, full, move_ms, full_ms) = (median(short), median(full), median(move_ms), median(full_ms));
     let [builds, list, snapshot, render] = split.map(median);
     println!(
-        "LAT3 ebay shape: boxes={total} build_ms per move {short:.2} (short path) vs {full:.2} (full build); \
+        "LAT3 marketplace shape: boxes={total} build_ms per move {short:.2} (short path) vs {full:.2} (full build); \
          whole move {move_ms:.1} ms (builds+patch {builds:.1}, display list {list:.1}, snapshot {snapshot:.1}, \
          render {render:.1}) vs whole relayout {full_ms:.1} ms"
     );
