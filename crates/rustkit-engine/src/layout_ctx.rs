@@ -57,7 +57,10 @@ pub(crate) struct LayoutCtx {
     /// with them. One map per context, so between builds it is the map of
     /// the view built last: `export_layout_json`, which reads it outside a
     /// build, recomputes it for the view it exports.
-    pub(crate) svg_paint_styles: RefCell<HashMap<usize, crate::SvgPaintStyle>>,
+    pub(crate) svg_paint_styles: RefCell<Rc<HashMap<usize, crate::SvgPaintStyle>>>,
+    /// What the inline svg pre-pass keeps between builds: the id index,
+    /// each svg's markup key and the paint maps (`svg_prepass`, LAT4b).
+    pub(crate) svg_prepass: RefCell<crate::svg_prepass::SvgPrepass>,
 }
 
 impl Default for LayoutCtx {
@@ -69,6 +72,7 @@ impl Default for LayoutCtx {
             building: RefCell::default(),
             svg_cache: RefCell::default(),
             svg_paint_styles: RefCell::default(),
+            svg_prepass: RefCell::default(),
         }
     }
 }
@@ -383,6 +387,7 @@ impl LayoutCtx {
                 "svg_paint_styles",
                 self.svg_paint_styles.try_borrow_mut().is_ok(),
             ),
+            ("svg_prepass", self.svg_prepass.try_borrow_mut().is_ok()),
             ("style_trace", self.style_trace.try_borrow_mut().is_ok()),
             ("hover_chain", lay.hover_chain.try_borrow_mut().is_ok()),
             ("active_chain", lay.active_chain.try_borrow_mut().is_ok()),
@@ -392,6 +397,7 @@ impl LayoutCtx {
                 lay.checked_states.try_borrow_mut().is_ok(),
             ),
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
+            ("prepared_sheets", lay.prepared_sheets.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
             (
                 "boxless_styles",
@@ -489,6 +495,11 @@ pub(crate) struct ViewLayout {
     pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.
     pub(crate) sheet_cache: RefCell<crate::SheetCache>,
+    /// The sheets this view's last full build cascaded with, prepared
+    /// (kept for the viewport, ranked by `@layer`) with their custom
+    /// properties, under the identity of what they were made from. The
+    /// next build takes them unless a sheet or the viewport changed.
+    pub(crate) prepared_sheets: RefCell<Option<crate::PreparedSheets>>,
     /// The rule index this view was last built with: its `reads` say
     /// which elements a `:hover` or `:active` rule can match, so which
     /// changes of the two chains are a restyle.

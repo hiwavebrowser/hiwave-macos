@@ -42,6 +42,24 @@ use tracing::debug;
 
 thread_local! {
     static REMOVAL_ARMED: Cell<bool> = const { Cell::new(false) };
+    /// Counts every change to any tree on this thread (`mutation_generation`).
+    static MUTATION_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A number that changes whenever any DOM tree on this thread changes: a
+/// child inserted or removed, a node's data replaced (attributes, text),
+/// a shadow root attached or moved, adopted sheets set. A node's data is
+/// not interior-mutable, so these are the only ways a tree changes. Equal
+/// readings mean no tree changed in between, so a cache derived from the
+/// DOM (the engine's inline svg markup, LAT4b) may be taken as it is.
+/// One counter per thread, not per document: a change to another
+/// document only costs such a cache a check.
+pub fn mutation_generation() -> u64 {
+    MUTATION_GENERATION.with(Cell::get)
+}
+
+pub(crate) fn note_mutation() {
+    MUTATION_GENERATION.with(|g| g.set(g.get().wrapping_add(1)));
 }
 
 static REMOVAL_HOOK: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
@@ -184,6 +202,7 @@ impl Node {
     /// One string per `adoptedStyleSheets` entry, in order. An empty
     /// string is a disabled sheet and is skipped by style resolution.
     pub fn set_adopted_styles(&self, texts: Vec<String>) {
+        note_mutation();
         *self.adopted_styles.borrow_mut() = texts;
     }
 
@@ -282,6 +301,7 @@ impl Node {
 
     /// Append a child node.
     pub fn append_child(self: &Rc<Self>, child: Rc<Node>) {
+        note_mutation();
         // Update child's parent
         *child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -318,6 +338,7 @@ impl Node {
             }
         }
         if let Some(parent) = self.parent() {
+            note_mutation();
             // Update sibling links
             if let Some(prev) = self.previous_sibling() {
                 *prev.next_sibling.borrow_mut() = self.next_sibling.borrow().clone();
@@ -338,6 +359,7 @@ impl Node {
 
     /// Insert a child node before a reference node.
     pub fn insert_before(self: &Rc<Self>, new_child: Rc<Node>, reference: Rc<Node>) {
+        note_mutation();
         // Find the index of the reference node
         let mut children = self.children.borrow_mut();
         let ref_idx = children.iter().position(|c| Rc::ptr_eq(c, &reference));
@@ -793,6 +815,7 @@ impl Document {
         if Rc::ptr_eq(&old, &self.root) {
             return None;
         }
+        note_mutation();
         let new = Node::new(id, node_type);
         new.event_target.adopt_listeners(&old.event_target);
         *new.adopted_styles.borrow_mut() = old.adopted_styles.borrow().clone();

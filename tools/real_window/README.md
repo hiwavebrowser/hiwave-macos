@@ -21,6 +21,16 @@ starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
 `HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
 is logged as its `cmd` and size only, always.
 
+## Which chrome
+
+The RustKit chrome (chrome.html, the shelf, the Inspector and the settings
+page as RustKit views) is the app's default on macOS (CH3.A5a), so every
+check runs on it unless it says otherwise; the app logs
+`Chrome: RustKit (default; ...)` at startup. `HIWAVE_RUSTKIT_CHROME=0` keeps
+the WebKit chrome (the escape hatch). Only the checks that cover the escape
+hatch set it: `e9_redirect_webkit` and the flag-off half of
+`a7_no_bridge_in_content`.
+
 ## What a run does
 
 For each check it starts a fresh app on a throwaway profile, restored on one
@@ -96,7 +106,10 @@ of a run (about a minute for all checks).
 | `e4_drag` | CH2.E4 | `hwdrive drag`: `pointermove` with `buttons` 1 | yes |
 | `e4_cursor_hand` | CH2.E4 CSS cursor | `e4_mouse.html`: `hwdrive cursor` reads the system cursor: hand over the link, left-right over `ew-resize`, arrow in the title bar | yes |
 | `e4_tooltip` | CH2.E4 `title` | the link's `title` is the view's tooltip (debug log) and a tooltip window shows after a rest | yes |
-| `e4_chrome_tab` | CH2.E4, `HIWAVE_RUSTKIT_CHROME=1` | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
+| `e9_redirect` | CH2.E9 redirect | `e9_start` redirects to `e9_final.html`: the saved tab holds the committed URL and the title | no |
+| `e9_redirect_webkit` | CH2.E9, `HIWAVE_RUSTKIT_CHROME=0` | as `e9_redirect`, on the WebKit chrome (the escape hatch) | no |
+| `a7_no_bridge_in_content` | CH3.A7 | `a7_bridge.html`: the page sees no `window.ipc` / `window.hiwaveChrome`, with `HIWAVE_RUSTKIT_CHROME=0` and by default | no |
+| `e4_chrome_tab` | CH2.E4, RustKit chrome (the default) | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
 | `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks
