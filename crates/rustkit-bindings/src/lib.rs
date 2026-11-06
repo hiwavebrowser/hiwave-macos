@@ -763,11 +763,29 @@ pub(crate) struct DirtyMark {
     /// `animation`, `form`, `sheet`, `shadow`): the forced-layout log's
     /// cause. `None` while the layout is current.
     cause: Cell<Option<&'static str>>,
+    /// The pending bucket holds a mark other than Web Animations' write of
+    /// the animated-style layer (`mark_animation_layer`). Every other mark
+    /// sets it, recorded in the `MutationLog` or not (`adoptedStyleSheets`,
+    /// `attachShadow`, `customElements.define`, a CSS animation control,
+    /// the embedder's `mark_dirty`), so the engine's paint-only animation
+    /// frame is taken only when the layer write is all that changed.
+    beyond_animation_layer: Cell<bool>,
 }
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
     pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.mark_animation_layer(bucket, kind);
+        }
+    }
+
+    /// Web Animations wrote an element's animated-style layer, and nothing
+    /// else: the one mark that leaves `beyond_animation_layer` alone. It is
+    /// a script write all the same, and names its cause (`animation`) for
+    /// the forced-layout log like every other mark.
+    pub(crate) fn mark_animation_layer(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
             self.bucket.set(self.bucket.get().max(bucket));
             if !self.since_layout.replace(true) {
@@ -788,11 +806,18 @@ impl DirtyMark {
         self.cause.get()
     }
 
+    /// Whether the pending bucket holds a mark other than the animated-style
+    /// layer's.
+    pub(crate) fn beyond_animation_layer(&self) -> bool {
+        self.beyond_animation_layer.get()
+    }
+
     pub(crate) fn get(&self) -> DomDirty {
         self.bucket.get()
     }
 
     fn take(&self) -> DomDirty {
+        self.beyond_animation_layer.set(false);
         self.bucket.replace(DomDirty::Clean)
     }
 
@@ -1180,7 +1205,19 @@ impl DomBindings {
     pub fn mark_dirty(&self, bucket: DomDirty) {
         // The embedder's marks are for its own flush, not script writes:
         // they do not make a geometry read lay the page out.
+        if bucket != DomDirty::Clean {
+            self.dirty.beyond_animation_layer.set(true);
+        }
         self.dirty.bucket.set(self.dirty.get().max(bucket));
+    }
+
+    /// Whether the invalidation pending (until `take_dirty`) holds anything
+    /// besides Web Animations' writes of the animated-style layer: any other
+    /// script write, with a `MutationLog` record or without one, or a
+    /// `mark_dirty` from the embedder. Read before `take_dirty`. The engine
+    /// paints an animation frame without a layout only when this is false.
+    pub fn dirty_beyond_animation_layer(&self) -> bool {
+        self.dirty.beyond_animation_layer()
     }
 
     /// The invalidation pending since the last call, which is reset to

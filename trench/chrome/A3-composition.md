@@ -1,7 +1,8 @@
 # CH3.A3 composition: the RustKit chrome over the page
 
-Flag: `HIWAVE_RUSTKIT_CHROME=1` only. Flag off (the WebKit chrome) is not
-touched: no call below runs for `ChromeView::WebKit`.
+The RustKit chrome only; it is the macOS default since CH3.A5a.
+`HIWAVE_RUSTKIT_CHROME=0` (the WebKit chrome) is not touched: no call below
+runs for `ChromeView::WebKit`.
 
 ## View hierarchy
 
@@ -92,7 +93,7 @@ keeps this region-only route (for comparison).
 
 ## The alpha route (CH3.A3c): pixels decide what covers the page
 
-On by default with `HIWAVE_RUSTKIT_CHROME=1`. The chrome's surface is
+On by default with the RustKit chrome. The chrome's surface is
 transparent, and the region above becomes its **hit region only**.
 
 1. **Surface.** `RustKitView::set_transparent(true)` (main.rs calls it when
