@@ -2185,6 +2185,63 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         );
     }
 
+    /// CH3.A9: a chrome command (`set_tabs` here, `sendIpc('create_tab')`
+    /// for Cmd+T) is a script for the chrome's own content thread, and
+    /// what the chrome's script posts back is what the window acts on. The
+    /// round trip must not wait on anything else: not on the page's
+    /// thread, held here by a script that does not yield (i0a_spin's
+    /// shape), and not on the chrome thread's idle wait for its next
+    /// timer (up to 50 ms on develop, so Cmd+T took 2-47 ms longer than
+    /// on the WebKit chrome, more on a loaded Mac).
+    #[test]
+    fn content_thread_a_chrome_eval_round_trips_within_50_ms_while_the_page_is_held() {
+        fn committed(view: &RustKitView) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while view.latest_commit.borrow().is_none() {
+                assert!(Instant::now() < deadline, "the document never committed");
+                wake(view);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let page = content_view();
+        page.load_html_internal("<p>page</p>").unwrap();
+        committed(&page);
+        let chrome = content_view();
+        chrome.set_app_owned();
+        chrome
+            .load_html_internal(
+                "<div id=tabs></div><script>window.setTabs = function (n) { \
+                 document.getElementById('tabs').textContent = 'tabs ' + n; \
+                 window.ipc.postMessage('set_tabs ' + n); };</script>",
+            )
+            .unwrap();
+        committed(&chrome);
+        let _ = chrome.take_ipc_messages();
+        // The page's thread is held for 3 s by a script that never yields.
+        let _held = page.content.as_ref().unwrap().eval("var t = Date.now(); while (Date.now() - t < 3000) {}");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let mut took = Vec::new();
+        // Each command right after the last answer: the moment the chrome
+        // thread has just gone idle.
+        for n in 0..10 {
+            let sent = Instant::now();
+            let _ = chrome.execute_script_sync(&format!("setTabs({n})"));
+            let want = format!("set_tabs {n}");
+            loop {
+                if chrome.take_ipc_messages().contains(&want) {
+                    break;
+                }
+                assert!(sent.elapsed() < Duration::from_secs(2), "the chrome never answered {want}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            took.push(sent.elapsed().as_millis());
+        }
+        assert!(started.elapsed() < Duration::from_millis(2_500), "the page was no longer held");
+        let worst = *took.iter().max().unwrap();
+        assert!(worst < 50, "chrome round trips (ms) while the page is held: {took:?}");
+    }
+
     /// CH3.A7: a page is not told about the app bridge. Its own script
     /// reads `typeof window.ipc` and `typeof window.hiwaveChrome` while it
     /// loads; Chromium 143 answers `undefined,undefined`.
