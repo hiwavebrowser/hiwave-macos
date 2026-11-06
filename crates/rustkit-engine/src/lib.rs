@@ -1151,6 +1151,9 @@ struct ViewState {
     /// until the first, and after a focus moved from the keyboard. Kept
     /// across documents, as Chromium keeps it per page.
     focus_by_pointer: bool,
+    /// CH2.E22: the focused button a Space keydown went to; its keyup
+    /// clicks it.
+    space_armed: Option<usize>,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -2941,6 +2944,7 @@ impl Engine {
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
+            space_armed: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3055,6 +3059,7 @@ impl Engine {
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
+            space_armed: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3186,6 +3191,7 @@ impl Engine {
             last_dirty: None,
             pointer_restyle: false,
             focus_by_pointer: false,
+            space_armed: None,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -6046,15 +6052,35 @@ impl Engine {
 
         // CH2.E22: Tab and Shift+Tab move the focus once the page let the
         // keydown through (sequential focus navigation).
+        // The keydown goes to the page's focused element (a button or a
+        // link has no engine focus), as Chromium's goes to activeElement.
         if key_code == 0x09 && !ctrl && !alt {
-            let at = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
+            let at = self.page_focus(id);
             if self.fire_key(id, at, "keydown", key_code, key, ctrl, shift, alt) {
                 self.sequential_focus(id, shift);
             }
             return true;
         }
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
-            return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
+            let not_cancelled = self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
+            // A focused button: Enter clicks it at the keydown; Space's
+            // keydown is taken (no scroll) and clicks it at the keyup
+            // (Chromium 143, CH2.E22).
+            if let Some(button) = self.page_focus(id).filter(|raw| self.is_key_activated_button(id, *raw)) {
+                if key_code == 0x0D && !ctrl && !alt {
+                    if not_cancelled {
+                        self.click_element(id, button, 0.0, 0.0);
+                    }
+                    return true;
+                }
+                if key == " " && !ctrl && !alt {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.space_armed = not_cancelled.then_some(button);
+                    }
+                    return true;
+                }
+            }
+            return !not_cancelled;
         };
         // The page hears the key first; a cancelled keydown types nothing.
         // Enter's keydown is `submit_focused_form`'s, which the caller
@@ -6188,7 +6214,13 @@ impl Engine {
     ) {
         let _hold = wgate::hold("key_up");
         let focused = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
-        self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
+        let not_cancelled = self.fire_key(id, focused, "keyup", key_code, key, ctrl, shift, alt);
+        // The Space a focused button took at its keydown clicks it now
+        // (CH2.E22).
+        let armed = self.views.get_mut(&id).and_then(|v| v.space_armed.take());
+        if let Some(button) = armed.filter(|b| key == " " && not_cancelled && self.page_focus(id) == Some(*b)) {
+            self.click_element(id, button, 0.0, 0.0);
+        }
     }
 
     /// Build the submission for the form containing the focused control.
@@ -8347,8 +8379,11 @@ impl Engine {
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
             bindings.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                // Only a selector that names a focus pseudo-class reads it:
+                // a `querySelectorAll` of anything else clones nothing.
                 let _focus = lay
                     .as_ref()
+                    .filter(|_| selector.contains(":focus"))
                     .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
@@ -8799,8 +8834,11 @@ impl Engine {
             // cascade does (CH2.E22).
             let lay = self.views.get(&id).map(|view| view.lay.clone());
             bindings.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                // Only a selector that names a focus pseudo-class reads it:
+                // a `querySelectorAll` of anything else clones nothing.
                 let _focus = lay
                     .as_ref()
+                    .filter(|_| selector.contains(":focus"))
                     .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
@@ -20015,9 +20053,8 @@ impl SelectorMatcher {
             // above it (`Engine::live_attributes`).
             "hover" => attributes.contains_key(HOVER_MARK),
             "active" => attributes.contains_key(ACTIVE_MARK),
-            // CH2.E19: only the inline svg paint pass marks the focused
-            // element and its ancestors (`WalkState::focus`); the cascade
-            // does not yet, so there they stay false.
+            // The focused element and its ancestors, as the build marks
+            // them (`live_attributes`, `WalkState::focus`; CH2.E19/E22).
             "focus" => attributes.contains_key(FOCUS_MARK),
             "focus-within" => attributes.contains_key(FOCUS_WITHIN_MARK),
             "focus-visible" => attributes.contains_key(FOCUS_VISIBLE_MARK),
@@ -38843,9 +38880,10 @@ impl SubjectCompound {
 /// class or an attribute name, and then styles that element as hovered.
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
-/// CH2.E19: the focused element (`:focus`) and it and its ancestors
-/// (`:focus-within`), marked like the two above. Only the inline svg paint
-/// pass sets them (`WalkState::focus`).
+/// The focused element (`:focus`) and it and its ancestors
+/// (`:focus-within`), marked like the two above: by the build
+/// (`live_attributes`, CH2.E22) and the inline svg paint pass
+/// (`WalkState::focus`, CH2.E19).
 const FOCUS_MARK: &str = "\u{1}focus";
 const FOCUS_WITHIN_MARK: &str = "\u{1}focus-within";
 /// CH2.E22: the focused element when it matches `:focus-visible`.

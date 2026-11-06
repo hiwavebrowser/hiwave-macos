@@ -235,3 +235,71 @@ fn the_ua_focus_visible_outline_is_chromiums() {
     assert_eq!(active(&mut engine, id), "a");
     assert_eq!(css(&mut engine, id, "a", "outline-offset"), "1px", "a link's ring is 1px out");
 }
+
+/// Whether the view's display list paints the UA focus ring: an `auto`
+/// outline in rgb(0, 95, 204), drawn as a rounded ring (radius >= 3).
+fn paints_the_ring(engine: &Engine, id: EngineViewId) -> bool {
+    let ring = rustkit_css::Color::new(0, 95, 204, 1.0);
+    let view = engine.views.get(&id).expect("view");
+    view.display_list.as_ref().expect("list").commands.iter().any(|c| {
+        matches!(c, rustkit_layout::DisplayCommand::RoundedBorder { colors, .. } if colors.iter().all(|c| *c == ring))
+    })
+}
+
+#[test]
+fn a_clicked_field_paints_the_ring_and_an_outline_none_field_does_not() {
+    // The renderer's own ring is gone: the UA outline is what shows a
+    // focused text field.
+    let (mut engine, id) = page_with(
+        "<body style='margin:20px'><input id=i><br><input id=n style='outline:none'><div id=d style='height:40px'>x</div></body>",
+    );
+    assert!(!paints_the_ring(&engine, id), "at rest");
+    click(&mut engine, id, "i");
+    assert!(paints_the_ring(&engine, id), "a clicked field paints its auto outline");
+    click(&mut engine, id, "n");
+    assert!(!paints_the_ring(&engine, id), "an outline:none field paints none (and the blurred one neither)");
+}
+
+const KEYS_PAGE: &str = "<body style='margin:0'>\
+    <button id=b>B</button><a id=a href='#x'>L</a>\
+    <div style='visibility:hidden'><button id=v>v</button></div>\
+    <fieldset disabled><button id=fd>fd</button></fieldset>\
+    <div inert><button id=in>in</button></div>\
+    <button id=last>last</button>\
+    <script>window.log = []; ['keydown', 'keyup', 'click'].forEach(function (t) {\
+      document.addEventListener(t, function (e) { log.push(t + ':' + e.target.id); }, true); });</script></body>";
+
+#[test]
+fn tab_skips_hidden_inert_and_disabled_fieldset_controls() {
+    // Chromium 143: b, a, last (a shadow root's button comes between a and
+    // last there; shadow trees are not walked here).
+    let (mut engine, id) = page_with(KEYS_PAGE);
+    let mut order = Vec::new();
+    for _ in 0..3 {
+        tab(&mut engine, id, false);
+        order.push(active(&mut engine, id));
+    }
+    assert_eq!(order, ["b", "a", "last"]);
+}
+
+#[test]
+fn keys_go_to_a_tab_focused_button_and_enter_and_space_click_it() {
+    // Chromium 143: Enter is `keydown click keyup`; Space clicks at its
+    // keyup.
+    let (mut engine, id) = page_with(KEYS_PAGE);
+    tab(&mut engine, id, false);
+    assert_eq!(active(&mut engine, id), "b");
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:", "the first Tab's keydown: the body (no id)");
+    js(&mut engine, id, "log.length = 0; 0");
+    tab(&mut engine, id, false);
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:b", "Tab's keydown at the focused button");
+    tab(&mut engine, id, true);
+    js(&mut engine, id, "log.length = 0; 0");
+    assert!(engine.handle_text_key(id, 0x0D, "", false, false, false), "Enter is taken");
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:b click:b");
+    js(&mut engine, id, "log.length = 0; 0");
+    assert!(engine.handle_text_key(id, 0, " ", false, false, false), "Space's keydown is taken: no scroll");
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:b", "no click at the keydown");
+    engine.handle_key_up(id, 0, " ", false, false, false);
+    assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:b keyup:b click:b", "the keyup clicks");
+}

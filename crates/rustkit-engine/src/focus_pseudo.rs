@@ -158,12 +158,71 @@ impl Engine {
     pub(crate) fn pointer_focus_target(node: &Rc<Node>) -> Option<usize> {
         let mut at = Some(node.clone());
         while let Some(n) = at {
-            if Self::focus_tab_index(&n).is_some() {
+            if Self::focus_tab_index(&n).is_some() && !Self::focus_blocked(&n) {
                 return Some(n.id.raw());
             }
             at = n.parent();
         }
         None
+    }
+
+    /// Whether an element is kept from the focus by what is above it: an
+    /// `inert` ancestor (or itself), or, for a form control, a disabled
+    /// `<fieldset>` it is in outside that fieldset's first `<legend>`
+    /// (HTML §4.10.18.2; Chromium 143 skips both in the Tab order).
+    fn focus_blocked(node: &Rc<Node>) -> bool {
+        let control = matches!(
+            &node.node_type,
+            NodeType::Element { tag_name, .. }
+                if matches!(tag_name.to_lowercase().as_str(), "input" | "select" | "textarea" | "button")
+        );
+        let mut child = node.clone();
+        let mut at = Some(node.clone());
+        while let Some(n) = at {
+            if let NodeType::Element { tag_name, attributes, .. } = &n.node_type {
+                if attributes.contains_key("inert") {
+                    return true;
+                }
+                if control && !Rc::ptr_eq(&n, node) && tag_name.eq_ignore_ascii_case("fieldset") && attributes.contains_key("disabled") {
+                    let first_legend = n.children().into_iter().find(|c| {
+                        matches!(&c.node_type, NodeType::Element { tag_name, .. } if tag_name.eq_ignore_ascii_case("legend"))
+                    });
+                    if !first_legend.is_some_and(|legend| Rc::ptr_eq(&legend, &child)) {
+                        return true;
+                    }
+                }
+            }
+            child = n.clone();
+            at = n.parent().or_else(|| n.shadow_host());
+        }
+        false
+    }
+
+    /// The page's focused element (raw NodeId): a button or a link too,
+    /// which take no keys as a control does.
+    pub(crate) fn page_focus(&self, id: EngineViewId) -> Option<usize> {
+        self.views.get(&id)?.lay.focus_chain.borrow().first().copied()
+    }
+
+    /// A button Enter and Space click (Chromium 143): `<button>` and the
+    /// button-like `<input>` types, not disabled.
+    pub(crate) fn is_key_activated_button(&self, id: EngineViewId, raw: usize) -> bool {
+        let Some(node) = self.node(id, raw) else {
+            return false;
+        };
+        let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+            return false;
+        };
+        if attributes.contains_key("disabled") {
+            return false;
+        }
+        match tag_name.to_lowercase().as_str() {
+            "button" => true,
+            "input" => attributes
+                .get("type")
+                .is_some_and(|t| matches!(t.to_ascii_lowercase().as_str(), "button" | "submit" | "reset")),
+            _ => false,
+        }
     }
 
     /// Tab (Shift+Tab: `backward`): the focus moves to the next (previous)
@@ -179,13 +238,23 @@ impl Engine {
             return;
         };
         let layout = view.layout.clone();
-        // A focusable element with a box (a `display: none` one is not in
-        // the order), tabindex >= 0, in tree order.
+        // A focusable element that is rendered (it has a box: not
+        // `display: none`, which a `[hidden]` element is unless the author
+        // shows it) and visible, not inert or in a disabled fieldset, with
+        // tabindex >= 0, in tree order. Shadow trees are not walked: the
+        // page's focus (the bindings) cannot hold an element in one yet
+        // (no retargeting, `ShadowRoot.activeElement` is null), so Tab
+        // skips them.
         let mut order: Vec<(usize, i32)> = Vec::new();
         fn walk(node: &Rc<Node>, layout: Option<&LayoutBox>, order: &mut Vec<(usize, i32)>) {
             if let Some(index) = Engine::focus_tab_index(node).filter(|i| *i >= 0) {
                 let raw = node.id.raw();
-                if layout.is_none_or(|layout| box_of_node(layout, raw).is_some()) {
+                let shown = match layout {
+                    None => true,
+                    Some(layout) => box_of_node(layout, raw)
+                        .is_some_and(|b| b.style.visibility == rustkit_css::Visibility::Visible),
+                };
+                if shown && !Engine::focus_blocked(node) {
                     order.push((raw, index));
                 }
             }
