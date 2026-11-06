@@ -1,0 +1,80 @@
+{
+ "viewport": [
+  400,
+  300
+ ],
+ "boxes": "xywh",
+ "cases": [
+  {
+   "name": "style-only",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  },
+  {
+   "name": "side-style-dashed",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top-style:dashed\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:13 b:0:13:10:10"
+  },
+  {
+   "name": "style-two-values",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid none\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:16 b:0:16:10:10"
+  },
+  {
+   "name": "width-then-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:1px;border-style:solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:12:12 b:0:12:10:10"
+  },
+  {
+   "name": "style-then-width",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-width:2px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:14:14 b:0:14:10:10"
+  },
+  {
+   "name": "style-then-zero",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-width:0\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "style-then-thin",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-width:thin\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:12:12 b:0:12:10:10"
+  },
+  {
+   "name": "style-then-thick",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-width:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "side-width-medium",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-left-width:medium;border-right-width:1px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:14:16 b:0:16:10:10"
+  },
+  {
+   "name": "style-none",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:none\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "style-then-none",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border-style:none\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "none-then-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:none;border-style:dotted\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  },
+  {
+   "name": "rule-style-only",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}.s{border-style:solid}</style></head><body><div id=a class=s></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  },
+  {
+   "name": "shorthand-style-only",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
