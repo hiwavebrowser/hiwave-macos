@@ -2242,6 +2242,35 @@
     "value": "var(--missing)",
     "inline": true,
     "chrome": "0px"
+   },
+   {
+    "prop": "padding-left",
+    "base": "padding:5px",
+    "value": "var(--missing)",
+    "chrome": "0px"
+   },
+   {
+    "prop": "margin-right",
+    "base": "margin:10px",
+    "value": "var(--missing)",
+    "chrome": "0px"
+   },
+   {
+    "prop": "border-left-width",
+    "base": "border:3px solid;border-width:var(--missing)",
+    "value": "",
+    "chrome": "3px",
+    "gap": "initial border-width is medium under a style; RustKit's unset Length::Zero takes medium only with CH2.B18 (#950)"
+   },
+   {
+    "prop": "display",
+    "value": "unset",
+    "chrome": "inline"
+   },
+   {
+    "prop": "display",
+    "value": "initial",
+    "chrome": "inline"
    }
   ]
  }
