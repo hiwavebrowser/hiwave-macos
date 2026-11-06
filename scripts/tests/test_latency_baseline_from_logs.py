@@ -50,7 +50,7 @@ LOG = f"""   Compiling something v0.1.0
 # LAT1: two visits. a.example: a full window of 100 entries and a 20-entry visit-end window,
 # with three logged holds of 50 ms or more (fewer than the 7 above rank 114 of 120): p95 under 50.
 # b.example: 20 entries, three logged holds (60, 70, 400): rank 19 of 20 is the 70.
-LAT1_LOG = f"""{E}2026-11-06T10:00:00.000000Z  INFO rustkit_engine: Loading URL id=EngineViewId(1) url=https://a.example/p?x=1 replace=false
+LAT1_LOG = f"""{E}2026-11-06T10:00:00.000000Z  INFO rustkit_engine: Loading URL id=EngineViewId(1) url=https://a.example/lat1path?x=1 replace=false
 2026-11-06T10:00:00.100000Z  INFO rustkit_engine: Running page script source=inline#1 bytes=10
 2026-11-06T10:00:01.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=move ms=120 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=120.0
 2026-11-06T10:00:02.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=move ms=80 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=80.0
@@ -61,7 +61,7 @@ LAT1_LOG = f"""{E}2026-11-06T10:00:00.000000Z  INFO rustkit_engine: Loading URL 
 2026-11-06T10:00:06.000000Z  INFO rustkit_engine::presenter: Input to present p50_ms=10 p95_ms=80 max_ms=90 n=100
 2026-11-06T10:00:07.000000Z  INFO rustkit_engine::presenter: Input to present p50_ms=12 p95_ms=120 max_ms=200 n=100
 2026-11-06T10:01:00.000000Z  INFO rustkit_engine::wgate: Content thread holds n=20 p50_ms=1.0 p95_ms=3.0 max_ms=4.0 over_50=0 by_entry=move:20:3.0 at=navigation
-2026-11-06T10:01:00.000100Z  INFO rustkit_engine: Loading URL id=EngineViewId(1) url=https://b.example/q?y=2 replace=false
+2026-11-06T10:01:00.000100Z  INFO rustkit_engine: Loading URL id=EngineViewId(1) url=https://b.example/lat1other?y=2 replace=false
 2026-11-06T10:01:00.100000Z  INFO rustkit_engine: Running page script source=inline#1 bytes=10
 2026-11-06T10:01:01.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=click ms=60 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=60.0
 2026-11-06T10:01:02.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=click ms=70 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=70.0
@@ -116,7 +116,7 @@ class Lat1HoldSummary(unittest.TestCase):
         tool.print_table(self.s, out)
         text = out.getvalue()
         self.assertIn("exit metric", text)
-        for leak in ("?x=", "?y=", "/p", "/q", "https://"):
+        for leak in ("?x=", "?y=", "lat1path", "lat1other", "https://"):
             self.assertNotIn(leak, text)
 
 

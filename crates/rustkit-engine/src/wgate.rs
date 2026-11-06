@@ -53,18 +53,36 @@
 //!    An input that changed no frame (a move over nothing) is dropped at
 //!    the next `render_changed_views`, not charged to the next frame.
 //!
+//! 3. **Hold summary (LAT1).** Every outermost entry, whatever its length,
+//!    is one sample of its thread's summary; one line covers at most
+//!    [`HOLD_SUMMARY_EVERY`] entries and a navigation (the start of a `load`
+//!    or `load_html` entry) or the engine's drop ends it early:
+//!
+//!    ```text
+//!    Content thread holds n=100 p50_ms=0.4 p95_ms=38.2 max_ms=612.0 over_50=3 by_entry=move:80:12.1,live_turn:20:96.0 at=every_100
+//!    ```
+//!
+//!    `by_entry` is `entry:n:p95_ms`, most entries first. Merged with the
+//!    hold lines above (every entry of 50 ms or more), the summaries give
+//!    the exact p95 over all entries whenever it is 50 ms or more
+//!    (`tools/latency/baseline_from_logs.py`). The line carries no page
+//!    content, only entry names and milliseconds.
+//!
 //! Limits: the hold log sees entries into the engine, not the app's own
 //! work between them (chrome messages, the UI WebView); `window_stall.rs`
 //! in the app measures those from outside. A hold inside a single
 //! `Instant` read's resolution is 0.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::time::Instant;
 
 /// The shortest hold that is reported, in milliseconds (the W-gate's
 /// figure).
 pub const HOLD_THRESHOLD_MS: f64 = 50.0;
+
+/// How many entries make one hold summary line at most (LAT1).
+pub const HOLD_SUMMARY_EVERY: usize = 100;
 
 /// How many input-to-present samples make one summary line.
 pub const LATENCY_SUMMARY_EVERY: usize = 100;
@@ -289,6 +307,12 @@ thread_local! {
     /// How many [`WindowHold`] guards are open; only the outermost
     /// reports.
     static HOLD_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Every outermost entry since the last hold summary line: its name
+    /// and milliseconds (LAT1).
+    static HOLD_SUMMARY: RefCell<Vec<(&'static str, f32)>> = const { RefCell::new(Vec::new()) };
+    /// The last hold summary line this thread logged, for tests.
+    #[cfg(test)]
+    static LAST_SUMMARY: RefCell<Option<String>> = const { RefCell::new(None) };
     /// The last hold the outermost guard reported, for tests.
     #[cfg(test)]
     static LAST_HOLD: Cell<Option<(&'static str, f64)>> = const { Cell::new(None) };
@@ -383,6 +407,10 @@ pub(crate) fn hold(entry: &'static str) -> WindowHold {
         depth == 0
     });
     if outermost {
+        // A navigation ends the visit's summary; the load is the next one's.
+        if matches!(entry, "load" | "load_html") {
+            flush_hold_summary("navigation");
+        }
         charge();
         HOLD_MS.with(|c| c.set(HoldMs::default()));
     }
@@ -411,7 +439,88 @@ impl Drop for WindowHold {
             LAST_HOLD.with(|c| c.set(Some((self.entry, total_ms))));
             tracing::warn!("{line}");
         }
+        let full = HOLD_SUMMARY.with(|summary| {
+            let mut summary = summary.borrow_mut();
+            if summary.capacity() == 0 {
+                summary.reserve_exact(HOLD_SUMMARY_EVERY);
+            }
+            summary.push((self.entry, total_ms as f32));
+            summary.len() >= HOLD_SUMMARY_EVERY
+        });
+        if full {
+            flush_hold_summary("every_100");
+        }
     }
+}
+
+/// Logs this thread's hold summary line for the entries since the last
+/// one, if any, and starts a new one. `at` says what ended it:
+/// `every_100`, `navigation` or `drop` (the engine's).
+pub(crate) fn flush_hold_summary(at: &str) {
+    let line = HOLD_SUMMARY.with(|summary| {
+        let mut summary = summary.borrow_mut();
+        let line = hold_summary_line(hold_thread_name(), &summary, at);
+        summary.clear();
+        line
+    });
+    if let Some(line) = line {
+        #[cfg(test)]
+        LAST_SUMMARY.with(|c| *c.borrow_mut() = Some(line.clone()));
+        tracing::info!("{line}");
+    }
+}
+
+/// The last hold summary line this thread logged, taken, for tests.
+#[cfg(test)]
+pub(crate) fn take_last_summary() -> Option<String> {
+    LAST_SUMMARY.with(|c| c.borrow_mut().take())
+}
+
+/// Nearest-rank percentile `p` (0..=1) of sorted `values`; 0 when empty.
+fn nearest_rank(sorted: &[f32], p: f64) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let k = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+    sorted[k - 1]
+}
+
+/// The hold summary line of `samples` (entry, ms), or `None` when there
+/// are none. Pure, so its shape is testable without a clock.
+pub(crate) fn hold_summary_line(thread: &str, samples: &[(&'static str, f32)], at: &str) -> Option<String> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut all: Vec<f32> = samples.iter().map(|&(_, ms)| ms).collect();
+    all.sort_unstable_by(f32::total_cmp);
+    let mut by_entry: Vec<(&str, Vec<f32>)> = Vec::new();
+    for &(entry, ms) in samples {
+        match by_entry.iter_mut().find(|(name, _)| *name == entry) {
+            Some((_, values)) => values.push(ms),
+            None => by_entry.push((entry, vec![ms])),
+        }
+    }
+    for (_, values) in &mut by_entry {
+        values.sort_unstable_by(f32::total_cmp);
+    }
+    by_entry.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    let by_entry = by_entry
+        .iter()
+        .map(|(entry, values)| format!("{entry}:{}:{:.1}", values.len(), nearest_rank(values, 0.95)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let over = all.iter().filter(|&&ms| f64::from(ms) >= HOLD_THRESHOLD_MS).count();
+    Some(format!(
+        "{thread} thread holds n={} p50_ms={:.1} p95_ms={:.1} max_ms={:.1} over_{}={} by_entry={} at={}",
+        all.len(),
+        nearest_rank(&all, 0.5),
+        nearest_rank(&all, 0.95),
+        all.last().copied().unwrap_or(0.0),
+        HOLD_THRESHOLD_MS as u32,
+        over,
+        by_entry,
+        at
+    ))
 }
 
 /// `Content` on the page thread, `Window` everywhere else. The content
@@ -704,6 +813,64 @@ mod tests {
             add(HoldStage::Build, 1.0);
         }
         assert_eq!(LAST_HOLD.with(|c| c.get()), None);
+    }
+
+    /// LAT1: ten cheap clicks and one slow one are eleven entries with a
+    /// p50 under 50 ms, where the hold log alone shows only the slow one.
+    #[test]
+    fn the_hold_summary_counts_every_entry_by_kind() {
+        let mut samples: Vec<(&'static str, f32)> = vec![("click", 5.0); 10];
+        samples.push(("click", 200.0));
+        samples.push(("move", 1.5));
+        samples.push(("move", 2.5));
+        let line = hold_summary_line("Content", &samples, "navigation").expect("a line");
+        assert_eq!(
+            line,
+            "Content thread holds n=13 p50_ms=5.0 p95_ms=200.0 max_ms=200.0 over_50=1 by_entry=click:11:200.0,move:2:2.5 at=navigation"
+        );
+        assert_eq!(hold_summary_line("Content", &[], "drop"), None, "no entries, no line");
+        // Ties in count sort by name, so the line is stable.
+        let line = hold_summary_line("Window", &[("scroll", 1.0), ("key", 2.0)], "drop").unwrap();
+        assert!(line.contains(" by_entry=key:1:2.0,scroll:1:1.0 "), "{line}");
+    }
+
+    #[test]
+    fn the_hold_summary_is_logged_every_hundred_entries_and_at_a_navigation() {
+        flush_hold_summary("drop");
+        let _ = take_last_summary();
+        for i in 0..HOLD_SUMMARY_EVERY {
+            {
+                let _h = hold(if i % 2 == 0 { "move" } else { "scroll" });
+            }
+            if i + 1 < HOLD_SUMMARY_EVERY {
+                assert_eq!(take_last_summary(), None, "entry {i}");
+            }
+        }
+        let line = take_last_summary().expect("the hundredth entry summarises");
+        assert!(line.starts_with("Window thread holds n=100 "), "{line}");
+        assert!(line.contains(" by_entry=move:50:"), "{line}");
+        assert!(line.contains(",scroll:50:"), "{line}");
+        assert!(line.ends_with(" at=every_100"), "{line}");
+        // Nested entries are part of the outer one, not samples of their own.
+        {
+            let _outer = hold("click");
+            let _inner = hold("relayout");
+        }
+        {
+            let _load = hold("load");
+            let line = take_last_summary().expect("a navigation ends the visit");
+            assert!(line.starts_with("Window thread holds n=1 "), "{line}");
+            assert!(line.contains(" by_entry=click:1:"), "{line}");
+            assert!(line.ends_with(" at=navigation"), "{line}");
+        }
+        {
+            let _load = hold("load_html");
+        }
+        let line = take_last_summary().expect("the load was the new visit's first entry");
+        assert!(line.contains(" by_entry=load:1:"), "{line}");
+        flush_hold_summary("drop");
+        let line = take_last_summary().expect("the drop ends the last visit");
+        assert!(line.contains("n=1 ") && line.contains(" by_entry=load_html:1:") && line.ends_with(" at=drop"), "{line}");
     }
 
     #[test]

@@ -2788,6 +2788,14 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
     }
 }
 
+impl Drop for Engine {
+    /// The last visit's hold summary (LAT1): the entries since the last
+    /// line, which no navigation or hundredth entry ended.
+    fn drop(&mut self) {
+        wgate::flush_hold_summary("drop");
+    }
+}
+
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -9255,12 +9263,16 @@ impl Engine {
         // the build itself (`LayoutCtx::with_building`), so a forced
         // layout sees them too.
 
+        // The builds' sheet and custom-property extraction (LAT1): outside
+        // `build_ms`, so the line names it.
+        let extract_before = SheetExtract::totals().extract_us;
         let layout_skipped = self.relayout_uncounted(id)?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
         self.close_stale_select_popup(id);
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let extract_ms = SheetExtract::totals().extract_us.saturating_sub(extract_before) as f64 / 1000.0;
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
@@ -9285,13 +9297,14 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
             took_ms,
             stages,
+            extract_ms,
             layout_skipped,
             would
         );
@@ -40592,7 +40605,6 @@ impl SheetExtract {
     }
 
     /// The totals of this thread's builds so far.
-    #[cfg(test)]
     pub(crate) fn totals() -> SheetExtract {
         SHEET_EXTRACT_TOTALS.with(Cell::get)
     }

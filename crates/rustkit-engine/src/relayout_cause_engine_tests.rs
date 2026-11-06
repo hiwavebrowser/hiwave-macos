@@ -442,3 +442,48 @@ fn a_navigation_summary_scrubs_the_outgoing_url() {
         );
     }
 }
+
+/// LAT1: the hold summary line covers every entry by name and carries no
+/// page content; the engine's drop logs the last visit's.
+#[test]
+fn the_hold_summary_line_names_entries_and_milliseconds_only() {
+    let lines = capture_lines("thread holds n=", || {
+        let (mut engine, view) = engine_and_view();
+        engine
+            .load_html(view, "<p id=secretid>private words</p>")
+            .expect("load_html");
+        for _ in 0..3 {
+            engine
+                .execute_script(view, "document.getElementById('secretid').textContent")
+                .unwrap();
+        }
+        drop(engine);
+    });
+    let line = lines.last().expect("the drop logs the visit's summary");
+    assert!(line.contains(" at=drop"), "{line}");
+    assert!(line.contains("load_html:1:"), "{line}");
+    assert!(line.contains("script:3:"), "{line}");
+    for field in ["p50_ms", "p95_ms", "max_ms"] {
+        assert!(field_ms(line, field).is_some(), "{field}: {line}");
+    }
+    for leak in ["secretid", "private", "words"] {
+        assert!(!line.contains(leak), "{leak}: {line}");
+    }
+}
+
+/// LAT1: the relayout line names the sheet and custom-property extraction
+/// (`extract_ms`), which `build_ms` does not include.
+#[test]
+fn the_relayout_line_carries_the_sheet_extraction_time() {
+    let vars: String = (0..3000).map(|i| format!("--v{i}:{i}px;")).collect();
+    let page = format!("<style>:root{{{vars}}} p{{width:var(--v7)}}</style><p>x</p>");
+    let (mut engine, view) = engine_and_view();
+    let lines = relayout_lines(|| {
+        engine.load_html(view, &page).expect("load_html");
+    });
+    let line = lines.last().expect("a relayout line");
+    let extract = field_ms(line, "extract_ms").expect("extract_ms");
+    let took = field_ms(line, "took_ms").expect("took_ms");
+    assert!(extract > 0.0, "3,000 custom properties take time to extract: {line}");
+    assert!(extract <= took, "{line}");
+}
