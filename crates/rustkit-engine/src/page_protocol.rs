@@ -395,6 +395,10 @@ pub struct PageEndpoint {
     /// Post the window's live wake when an event is published. The
     /// same-thread drain does not: it is already on the window thread.
     wake_window: bool,
+    /// Notified with every command the content thread's window sends, so
+    /// the thread's idle wait ends at once (CH3.A9). `None` on the
+    /// same-thread path, which never waits.
+    cmd_wake: Option<Arc<tokio::sync::Notify>>,
     /// The last [`PageEvent::Focused`] sent. A script's `focus()`, an
     /// autofocus or a new document moves focus without any input from the
     /// window, and the window answers its keys from this report.
@@ -427,6 +431,7 @@ pub(crate) fn adopt(
         visible: true,
         settle_keys: false,
         wake_window: false,
+        cmd_wake: None,
         last_focused: None,
         last_text_input: None,
         failed_nav: 0,
@@ -460,6 +465,7 @@ pub fn connect(mut engine: Engine, view: EngineViewId) -> (PageHandle, PageEndpo
         visible: true,
         settle_keys: false,
         wake_window: false,
+        cmd_wake: None,
         last_focused: None,
         last_text_input: None,
         failed_nav: 0,
@@ -578,6 +584,10 @@ impl PageEndpoint {
                 // `location.href =` and `link.click()` from this script.
                 // The same-thread window asks with TakeNavigation instead.
                 self.report_script_navigation();
+                // What the script posted on `window.ipc` goes now, not
+                // after the next live turn (CH3.A9: the chrome's
+                // `sendIpc('create_tab')` for Cmd+T).
+                self.report_ipc();
             }
             PageCmd::SetVisible { visible } => {
                 self.visible = visible;
@@ -1132,6 +1142,10 @@ impl PageEndpoint {
         self.wake_window = wake;
     }
 
+    pub(crate) fn set_command_wake(&mut self, wake: Arc<tokio::sync::Notify>) {
+        self.cmd_wake = Some(wake);
+    }
+
     /// What devtools has cost this page so far.
     pub fn devtools_counters(&self) -> Arc<DevtoolsCounters> {
         Arc::clone(&self.devtools_counters)
@@ -1177,7 +1191,15 @@ impl PageEndpoint {
                 cmds = self.drain_coalesced();
                 if cmds.is_empty() {
                     let wait_ms = turn.next_timer_ms.unwrap_or(50).clamp(2, 50);
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    let wait = std::time::Duration::from_millis(wait_ms);
+                    // A command ends the wait (CH3.A9): the chrome's Cmd+T
+                    // used to sit here until the chrome's next timer.
+                    match &self.cmd_wake {
+                        Some(wake) => {
+                            let _ = tokio::time::timeout(wait, wake.notified()).await;
+                        }
+                        None => tokio::time::sleep(wait).await,
+                    }
                     continue;
                 }
             }

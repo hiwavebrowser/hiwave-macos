@@ -84,7 +84,7 @@ struct Boot {
 /// Dropping it signals Stop and Close and returns. It does not join the
 /// thread: a caller that is the window must not wait out page work.
 pub struct ContentThread {
-    cmd: Sender<PageCmd>,
+    cmd: CmdSender,
     events: Receiver<PageEvent>,
     boot_rx: Mutex<Option<Receiver<Result<Boot, String>>>>,
     boot: Mutex<Option<Result<Boot, String>>>,
@@ -92,6 +92,25 @@ pub struct ContentThread {
     join: Mutex<Option<JoinHandle<()>>>,
     exited: Arc<AtomicBool>,
     stack_bytes: usize,
+}
+
+/// The window's end of the page's command channel. Every command also
+/// wakes the content thread, which otherwise sleeps until its page's next
+/// timer (up to 50 ms) before it looks at the channel again (CH3.A9: the
+/// RustKit chrome's Cmd+T waited out that sleep).
+struct CmdSender {
+    tx: Sender<PageCmd>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl CmdSender {
+    fn send(&self, cmd: PageCmd) -> Result<(), mpsc::SendError<PageCmd>> {
+        let sent = self.tx.send(cmd);
+        // A permit is kept when the thread is not waiting yet, so a
+        // command sent during a turn still ends the sleep after it.
+        self.wake.notify_one();
+        sent
+    }
 }
 
 impl ContentThread {
@@ -105,6 +124,8 @@ impl ContentThread {
         stack_bytes: usize,
     ) -> Result<Self, ContentThreadError> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
+        let cmd_wake = Arc::new(tokio::sync::Notify::new());
+        let cmd_wake_for_thread = Arc::clone(&cmd_wake);
         let (ev_tx, ev_rx) = mpsc::channel();
         let (boot_tx, boot_rx) = mpsc::channel();
         let nav_seq = Arc::new(AtomicU64::new(0));
@@ -141,6 +162,7 @@ impl ContentThread {
                     let mut endpoint = adopt(engine, view, cmd_rx, ev_tx);
                     endpoint.set_settle_keys(true);
                     endpoint.set_wake_window(true);
+                    endpoint.set_command_wake(cmd_wake_for_thread);
                     let _ = boot_tx.send(Ok(Boot {
                         control,
                         canceller,
@@ -164,7 +186,7 @@ impl ContentThread {
             })
             .map_err(|e| ContentThreadError::Spawn(e.to_string()))?;
         Ok(Self {
-            cmd: cmd_tx,
+            cmd: CmdSender { tx: cmd_tx, wake: cmd_wake },
             events: ev_rx,
             boot_rx: Mutex::new(Some(boot_rx)),
             boot: Mutex::new(None),

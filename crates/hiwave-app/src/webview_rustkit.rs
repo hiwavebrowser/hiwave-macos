@@ -2239,6 +2239,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
         }
         assert!(started.elapsed() < Duration::from_millis(2_500), "the page was no longer held");
         let worst = *took.iter().max().unwrap();
+        println!("chrome round trips (ms) while the page is held: {took:?}");
         assert!(worst < 50, "chrome round trips (ms) while the page is held: {took:?}");
     }
 
