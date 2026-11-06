@@ -14,6 +14,12 @@ implements them):
                Chrome for the site already exceeds 15% in the same run, the
                check is scored "unstable" (0 points, reported separately).
 
+The Chrome oracle runs headed, off-screen (A1; --oracle-headless for the old
+identity). A Chrome capture that landed on Chrome's own error page or a
+top-level HTTP >= 400 document is `oracle_blocked`: it is no oracle, so
+READABLE and LOOKS RIGHT are oracle failures for that site, the summary names
+it, and SCORABLE n/m (A2) leaves it out. /60 itself is unchanged.
+
 Writes trench/realsite/runs/<ts>/<site>.json and summary.json, prints a
 one-screen table. Exits 0 even when sites fail; non-zero only when the
 instrument itself is broken (no Chrome, no parity-capture, no node).
@@ -189,6 +195,24 @@ def chrome_capture(url, png, text_json, width, height, env):
     return res
 
 
+def oracle_blocked(c):
+    """Why a Chrome capture shows an error page instead of the site, or None.
+
+    A capture that "succeeded" on Chrome's own error page (x, 2026-09-26:
+    "Access to x.com was denied", HTTP 403) is not an oracle for the site;
+    scoring against it credits or fails RustKit against an error page.
+    Ported from atlas/trench-realsite (T19).
+    """
+    if c.get("status") != "ok":
+        return None
+    if str(c.get("final_url") or "").startswith("chrome-error://"):
+        return "chrome error page (%s)" % (c.get("nav_error") or "no nav error")
+    st = c.get("http_status")
+    if isinstance(st, int) and st >= 400:
+        return "top-level document HTTP %d" % st
+    return None
+
+
 def pixel_diff(a, b, diff_png, env):
     res, err, _ = run_json(
         ["node", str(ORACLE), "diff", str(a), str(b)] + ([str(diff_png)] if diff_png else []),
@@ -215,8 +239,14 @@ def score_site(site, capture_bin, outdir, width, height, env):
     rec["chrome"] = chrome
     # The oracle is whichever Chrome capture succeeded (screenshots of heavy
     # pages occasionally time out under swiftshader); self-noise needs both.
+    # A capture of Chrome's own error/403 page is no oracle (oracle_blocked).
+    for c in chrome:
+        why = oracle_blocked(c)
+        if why:
+            c["oracle_blocked"] = why
     ok_tags = [t for t, c in zip("ab", chrome)
-               if c.get("status") == "ok" and (d / f"chrome-{t}.png").exists()]
+               if c.get("status") == "ok" and not c.get("oracle_blocked")
+               and (d / f"chrome-{t}.png").exists()]
     chrome_ok = bool(ok_tags)
     oracle = ok_tags[0] if ok_tags else "a"
     rec["oracle_capture"] = oracle if chrome_ok else None
@@ -256,7 +286,8 @@ def score_site(site, capture_bin, outdir, width, height, env):
     # READABLE
     readable = {"pass": False}
     if not chrome_ok:
-        readable["why"] = "chrome capture failed: %s" % chrome[0].get("error")
+        readable["why"] = "chrome capture failed: %s" % (
+            chrome[0].get("oracle_blocked") or chrome[0].get("error"))
         readable["oracle_failed"] = True
     else:
         cw = words(json.loads((d / f"chrome-{oracle}-text.json").read_text(encoding="utf-8", errors="replace"))["text"])
@@ -323,6 +354,41 @@ def fmt_row(r):
         r["id"], mark(r["loads"]), mark(rd), ratio, mark(lk), diff, noise, r["points"], why[:60])
 
 
+def summarize(rows, ts, width, height, all_ids):
+    summary = {
+        "ts": ts,
+        "chrome": PINNED_CHROME_VERSION,
+        "oracle_headless": os.environ.get("REALSITE_ORACLE_HEADLESS") == "1",
+        "viewport": [width, height],
+        "sites": len(rows),
+        "points": sum(r["points"] for r in rows),
+        "max_points": 3 * len(rows),
+        "loads": sum(bool(r["loads"]["pass"]) for r in rows),
+        "readable": sum(bool(r["readable"]["pass"]) for r in rows),
+        "looks_right": sum(bool(r["looks_right"]["pass"]) for r in rows),
+        "looks_right_unstable": [r["id"] for r in rows if r["looks_right"].get("unstable")],
+        "readable_unscored": [r["id"] for r in rows if r["readable"].get("unscored")],
+        "oracle_failed": [r["id"] for r in rows if r["oracle_capture"] is None],
+        # Both Chrome captures landed on an error page (a subset of oracle_failed).
+        "oracle_blocked": {r["id"]: r["chrome"][0]["oracle_blocked"] for r in rows
+                           if r["oracle_capture"] is None and r["chrome"]
+                           and all(c.get("oracle_blocked") for c in r["chrome"])},
+        "blocked": {r["id"]: "%s/%s" % (r["access"]["vendor"], r["access"]["status"])
+                    for r in rows if r["access"]["blocked"]},
+        "per_site": {r["id"]: r["points"] for r in rows},
+    }
+    # n/scorable (A2): points on the sites the board can score at all, i.e.
+    # neither RustKit's access probe nor Chrome's oracle was blocked.
+    # Reported alongside /60, never instead of it.
+    scorable = [r for r in rows if not r["access"]["blocked"]
+                and r["id"] not in summary["oracle_blocked"]]
+    summary["scorable_sites"] = len(scorable)
+    summary["scorable_points"] = sum(r["points"] for r in scorable)
+    summary["scorable_max"] = 3 * len(scorable)
+    summary["full_run"] = {r["id"] for r in rows} == set(all_ids)
+    return summary
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
@@ -331,7 +397,12 @@ def main():
     ap.add_argument("--v2", action="store_true", help="run Scorer v2 diagnostics beside V1 board upon completion")
     ap.add_argument("--capture-bin", default=str(REPO / "target/release/parity-capture"))
     ap.add_argument("--out", help="run directory (default trench/realsite/runs/<ts>)")
+    ap.add_argument("--oracle-headless", action="store_true",
+                    help="run the Chrome oracle headless (the pre-A1 identity) for a before/after "
+                         "reading; the default is headed, off-screen")
     args = ap.parse_args()
+    if args.oracle_headless:
+        os.environ["REALSITE_ORACLE_HEADLESS"] = "1"
 
     manifest_path = Path(args.sites_file) if args.sites_file else (HOLDOUT_SITES_FILE if args.holdout else DEFAULT_SITES_FILE)
     cfg = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -370,23 +441,7 @@ def main():
         sys.exit("INSTRUMENT BROKEN: oracle ran Chrome %s, pinned is %s" % (
             sorted(versions), PINNED_CHROME_VERSION))
 
-    summary = {
-        "ts": ts,
-        "chrome": PINNED_CHROME_VERSION,
-        "viewport": [width, height],
-        "sites": len(rows),
-        "points": sum(r["points"] for r in rows),
-        "max_points": 3 * len(rows),
-        "loads": sum(r["loads"]["pass"] for r in rows),
-        "readable": sum(r["readable"]["pass"] for r in rows),
-        "looks_right": sum(r["looks_right"]["pass"] for r in rows),
-        "looks_right_unstable": [r["id"] for r in rows if r["looks_right"].get("unstable")],
-        "readable_unscored": [r["id"] for r in rows if r["readable"].get("unscored")],
-        "oracle_failed": [r["id"] for r in rows if r["oracle_capture"] is None],
-        "blocked": {r["id"]: "%s/%s" % (r["access"]["vendor"], r["access"]["status"])
-                    for r in rows if r["access"]["blocked"]},
-        "per_site": {r["id"]: r["points"] for r in rows},
-    }
+    summary = summarize(rows, ts, width, height, [s["id"] for s in sites])
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("-" * 78)
     print("POINTS %d/%d   loads %d  readable %d  looks-right %d   unstable: %s   oracle failed: %s" % (
@@ -394,6 +449,11 @@ def main():
         summary["looks_right"], ", ".join(summary["looks_right_unstable"]) or "none",
         ", ".join(summary["oracle_failed"]) or "none"))
     print("BLOCKED %s" % (", ".join("%s (%s)" % kv for kv in summary["blocked"].items()) or "none"))
+    print("ORACLE BLOCKED %s" % (
+        ", ".join("%s (%s)" % kv for kv in summary["oracle_blocked"].items()) or "none"))
+    print("SCORABLE %d/%d on %d sites   oracle: %s" % (
+        summary["scorable_points"], summary["scorable_max"], summary["scorable_sites"],
+        "headless" if os.environ.get("REALSITE_ORACLE_HEADLESS") == "1" else "headed"))
     print("run: %s" % outdir.relative_to(REPO) if outdir.is_relative_to(REPO) else outdir)
 
     if args.v2:
