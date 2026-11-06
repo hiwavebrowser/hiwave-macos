@@ -1796,6 +1796,11 @@ pub struct LayoutBox {
     /// Whether the pointer is over this scroller's thumb
     /// (`::-webkit-scrollbar-thumb:hover`). Set by the engine.
     pub scrollbar_thumb_hovered: std::cell::Cell<bool>,
+    /// The engine's animation key of the `::before`/`::after` this box (or
+    /// the text run under it) was generated for, `None` for every other
+    /// box. A pseudo-element has no node of its own (`node_id` is `None`),
+    /// so a paint-only animation frame finds its boxes by this.
+    pub pseudo_animation_key: Option<usize>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -1851,6 +1856,7 @@ impl LayoutBox {
             sticky_paths: std::cell::RefCell::new(Vec::new()),
             scrollbar_overflows: std::cell::Cell::new((false, false)),
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
+            pseudo_animation_key: None,
         }
     }
 

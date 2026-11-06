@@ -2597,13 +2597,15 @@ impl DomBindings {
     pub fn fire_transition_event(
         &self,
         node: usize,
+        pseudo: Option<&str>,
         event_type: &str,
         property: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireTransition({node}, {event_type:?}, {{ propertyName: {property:?}, \
-             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+             elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
+            pseudo = pseudo.unwrap_or("")
         ))?;
         Ok(())
     }
@@ -2616,13 +2618,15 @@ impl DomBindings {
     pub fn fire_animation_event(
         &self,
         node: usize,
+        pseudo: Option<&str>,
         event_type: &str,
         name: &str,
         elapsed_s: f32,
     ) -> Result<(), BindingError> {
         self.runtime.borrow_mut().evaluate_script(&format!(
             "document.__rkFireAnimation({node}, {event_type:?}, {{ animationName: {name:?}, \
-             elapsedTime: {elapsed_s}, pseudoElement: '' }});"
+             elapsedTime: {elapsed_s}, pseudoElement: {pseudo:?} }});",
+            pseudo = pseudo.unwrap_or("")
         ))?;
         Ok(())
     }

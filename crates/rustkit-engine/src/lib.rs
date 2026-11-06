@@ -10034,10 +10034,12 @@ impl Engine {
             return Ok(laid);
         };
         for event in &events {
+            // A pseudo-element's events go to its element (CH2.E16).
+            let (node, pseudo) = animations::split_key(event.node);
             let fired = if event.kind.starts_with("animation") {
-                bindings.fire_animation_event(event.node, event.kind, &event.name, event.elapsed_s)
+                bindings.fire_animation_event(node, pseudo, event.kind, &event.name, event.elapsed_s)
             } else {
-                bindings.fire_transition_event(event.node, event.kind, &event.property, event.elapsed_s)
+                bindings.fire_transition_event(node, pseudo, event.kind, &event.property, event.elapsed_s)
             };
             if let Err(e) = fired {
                 debug!(?id, error = %e, kind = event.kind, "animation event failed");
@@ -10120,6 +10122,23 @@ impl Engine {
                 return Ok(false);
             };
             apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
+            // `getComputedStyle(el, '::before')` reads the frame (CH2.E16).
+            {
+                let mut pseudo_styles = view.lay.pseudo_styles.borrow_mut();
+                for change in &changes {
+                    let (node, Some(pseudo)) = animations::split_key(change.node) else {
+                        continue;
+                    };
+                    if let Some(style) = pseudo_styles.get_mut(&(node, pseudo)) {
+                        for (index, _, is) in &change.props {
+                            animations::set_prop_value(style, *index, is);
+                        }
+                        if let Some((_, settled)) = change.settled {
+                            style.animation_settled_opacity = settled;
+                        }
+                    }
+                }
+            }
             let display_list = self.display_list_for(id, &laid);
             let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
             view.layout = Some(laid);
@@ -11942,7 +11961,7 @@ impl layout_ctx::LayoutCtx {
                 }
 
                 // Check for ::before pseudo-element
-                let before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
+                let mut before_style = memoized_pseudo_style(node.id, Pseudo::Before, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -11954,10 +11973,17 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
+                // CH2.E16: its transitions and animations, after the memo
+                // as the element's are.
+                let key = animations::pseudo_key(node.id.raw(), "::before");
+                if let Some(style) = before_style.as_mut() {
+                    self.animate_style(key, style, stylesheets);
+                }
                 self.note_pseudo_style(node.id.raw(), "::before", before_style.as_ref());
                 if let Some(before_box) = before_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
+                .map(|b| Engine::mark_pseudo_box(b, key))
                 {
                     layout_box.children.push(before_box);
                 }
@@ -12250,7 +12276,7 @@ impl layout_ctx::LayoutCtx {
                 drop(host_scope);
 
                 // Check for ::after pseudo-element
-                let after_style = memoized_pseudo_style(node.id, Pseudo::After, || {
+                let mut after_style = memoized_pseudo_style(node.id, Pseudo::After, || {
                     self.pseudo_element_style(
                         &tag_lower,
                         attributes,
@@ -12262,10 +12288,17 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
+                // CH2.E16: its transitions and animations, after the memo
+                // as the element's are.
+                let key = animations::pseudo_key(node.id.raw(), "::after");
+                if let Some(style) = after_style.as_mut() {
+                    self.animate_style(key, style, stylesheets);
+                }
                 self.note_pseudo_style(node.id.raw(), "::after", after_style.as_ref());
                 if let Some(after_box) = after_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
+                .map(|b| Engine::mark_pseudo_box(b, key))
                 {
                     layout_box.children.push(after_box);
                 }
@@ -12978,6 +13011,17 @@ impl layout_ctx::LayoutCtx {
 }
 
 impl Engine {
+
+    /// CH2.E16: mark a `::before`/`::after` box and the text run under it
+    /// (which takes a copy of its style) with the pseudo-element's
+    /// animation key, so a paint-only frame finds them.
+    fn mark_pseudo_box(mut b: LayoutBox, key: usize) -> LayoutBox {
+        b.pseudo_animation_key = Some(key);
+        for child in &mut b.children {
+            child.pseudo_animation_key = Some(key);
+        }
+        b
+    }
 
     /// The box half of `create_pseudo_element`, from the cascaded style.
     fn pseudo_element_box(pseudo_style: ComputedStyle) -> Option<LayoutBox> {
@@ -40830,6 +40874,12 @@ fn animation_repaint_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_ANIMATION_REPAINT").is_none_or(|v| v != "0"))
 }
 
+/// The animation key of a box: its element's raw NodeId, or the key of
+/// the `::before`/`::after` it was generated for (CH2.E16).
+fn animation_key_of(b: &LayoutBox) -> Option<usize> {
+    b.node_id.or(b.pseudo_animation_key)
+}
+
 /// Whether a box is an element's own (not a text run, an anonymous box or
 /// the box of another element).
 fn element_box_of_other(b: &LayoutBox, node: usize) -> bool {
@@ -40867,7 +40917,7 @@ fn check_animation_frame(
     changes: &HashMap<usize, &layout_ctx::FrameChange>,
     found: &mut std::collections::HashSet<usize>,
 ) -> Result<(), String> {
-    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+    if let Some(change) = animation_key_of(b).and_then(|key| changes.get(&key)) {
         found.insert(change.node);
         for (index, was, is) in &change.props {
             if animations::prop_value(&b.style, *index) != *was {
@@ -40922,7 +40972,7 @@ fn inherits_colour_elsewhere(b: &LayoutBox, node: usize, old: &rustkit_css::Colo
 /// LAT2: copy an animation frame's values onto the laid-out tree
 /// (checked by `check_animation_frame`).
 fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx::FrameChange>) {
-    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+    if let Some(change) = animation_key_of(b).and_then(|key| changes.get(&key)) {
         for (index, was, is) in &change.props {
             animations::set_prop_value(&mut b.style, *index, is);
             if animations::prop_name(*index) == "color" {

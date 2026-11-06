@@ -141,7 +141,11 @@ pub struct CssAnimationInfo {
     /// view: script's `CSSAnimation`/`CSSTransition` object is keyed on it,
     /// so a restart or a same-name replacement is a new object.
     pub id: u64,
+    /// The element: the originating element of a pseudo-element's.
     pub node: usize,
+    /// `::before` or `::after` for a pseudo-element's animation
+    /// (`effect.pseudoElement`), `None` for the element's own.
+    pub pseudo: Option<&'static str>,
     /// `animation` or `transition`.
     pub kind: &'static str,
     /// The `animation` list index, or the transition's property index.
@@ -1872,10 +1876,11 @@ pub(crate) fn install(
                 .iter()
                 .map(|a| {
                     format!(
-                        "{{\"id\":{},\"node\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
+                        "{{\"id\":{},\"node\":{},\"pseudo\":{},\"kind\":{:?},\"index\":{},\"name\":{},\"start\":{},\"paused\":{},\"delay\":{},\
                          \"duration\":{},\"iterations\":{},\"direction\":{:?},\"fill\":{:?},\"easing\":{},\"ended\":{}}}",
                         a.id,
                         a.node,
+                        a.pseudo.map_or("null".to_string(), |p| format!("{p:?}")),
                         a.kind,
                         a.index,
                         serde_json::to_string(&a.name).unwrap_or_default(),
