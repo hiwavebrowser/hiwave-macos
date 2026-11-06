@@ -13,7 +13,8 @@ fn parse_width_takes_keywords_and_non_negative_lengths() {
     assert_eq!(Outline::parse_width("medium"), Some(Length::Px(3.0)));
     assert_eq!(Outline::parse_width("thick"), Some(Length::Px(5.0)));
     assert_eq!(Outline::parse_width("1.5px"), Some(Length::Px(1.5)));
-    assert_eq!(Outline::parse_width("0"), Some(Length::Zero));
+    // A bare `0` is `0px` (CH2.B14).
+    assert_eq!(Outline::parse_width("0"), Some(Length::Px(0.0)));
     assert_eq!(Outline::parse_width("2em"), Some(Length::Em(2.0)));
 }
 
@@ -31,7 +32,8 @@ fn parse_offset_takes_a_signed_length_and_refuses_percent() {
     assert_eq!(Outline::parse_offset("3px"), Some(Length::Px(3.0)));
     assert_eq!(Outline::parse_offset("-3px"), Some(Length::Px(-3.0)));
     assert_eq!(Outline::parse_offset("1.5em"), Some(Length::Em(1.5)));
-    assert_eq!(Outline::parse_offset("0"), Some(Length::Zero));
+    // A bare `0` is `0px` (CH2.B14).
+    assert_eq!(Outline::parse_offset("0"), Some(Length::Px(0.0)));
     assert_eq!(Outline::parse_offset("10%"), None);
     assert_eq!(Outline::parse_offset("2"), None);
     assert_eq!(Outline::parse_offset("auto"), None);
