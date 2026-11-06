@@ -2450,6 +2450,8 @@ impl LayoutBox {
         containing_block: &Dimensions,
         definite_height: Option<f32>,
     ) {
+        let fixed_cb = self.fixed_sizing_block(containing_block);
+        let containing_block = fixed_cb.as_ref().unwrap_or(containing_block);
         match &self.box_type {
             BoxType::Block | BoxType::AnonymousBlock => {
                 // Check for flex or grid container
@@ -2515,6 +2517,38 @@ impl LayoutBox {
         self.apply_position_offsets(containing_block);
         // This box is final: anchor its abspos children to its padding box.
         self.reanchor_absolute_children();
+    }
+
+    /// The block a `position: fixed` box is SIZED against, or `None` for
+    /// any other box (and for a bare unit tree with no viewport set).
+    ///
+    /// CSS 2.1 §10.1: a fixed box's containing block is the viewport.
+    /// `apply_position_offsets` already placed it there, but its size was
+    /// taken from the block that laid it out: `width: 50%` inside a 100 px
+    /// div came out 50 px, and an `inset: 0` flex overlay inside a consent
+    /// manager's zero-size fixed wrapper laid its items out in a 0 px line,
+    /// so `justify-content: center` put the dialog at x −224 (#935's hold).
+    /// The stand-in keeps its origin and height (the static position and the
+    /// flow cursor); only the width becomes the viewport's, less the insets
+    /// when both are set with `width: auto` (§10.3.7: the stretch the offsets
+    /// apply afterwards, so the children are laid out at the width the box
+    /// ends with). Known limit: in that case a `%` margin or padding resolves
+    /// against the narrowed width, not the viewport's.
+    fn fixed_sizing_block(&self, containing_block: &Dimensions) -> Option<Dimensions> {
+        if self.position != Position::Fixed || self.viewport.0 <= 0.0 || self.viewport.1 <= 0.0 {
+            return None;
+        }
+        let viewport_cb = Dimensions {
+            content: Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1),
+            ..Default::default()
+        };
+        let offsets = self.resolved_offsets(&viewport_cb);
+        let mut cb = containing_block.clone();
+        cb.content.width = match (offsets.left, offsets.right, &self.style.width) {
+            (Some(left), Some(right), Length::Auto) => (self.viewport.0 - left - right).max(0.0),
+            _ => self.viewport.0,
+        };
+        Some(cb)
     }
 
     /// Layout an inline box.
@@ -4095,6 +4129,8 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
+        let fixed_cb = self.fixed_sizing_block(containing_block);
+        let containing_block = fixed_cb.as_ref().unwrap_or(containing_block);
         // Handle clear property
         if self.clear != Clear::None {
             let clear_y = float_context.clear(self.clear);
@@ -4761,6 +4797,7 @@ impl LayoutBox {
         // translate the subtree by the delta. Static/sticky produce no origin
         // change (sticky only records a threshold), so this is a no-op there.
         let (origin_x, origin_y) = (self.dimensions.content.x, self.dimensions.content.y);
+        let origin_h = self.dimensions.content.height;
         match self.position {
             Position::Static => {
                 // No offsets applied
@@ -4833,6 +4870,26 @@ impl LayoutBox {
         if dx != 0.0 || dy != 0.0 {
             for child in &mut self.children {
                 crate::flex::translate_subtree(child, dx, dy);
+            }
+        }
+
+        // A fixed `inset: 0` flex container learns its used height only here
+        // (its block size came from its content). `reanchor_absolute` re-runs
+        // flex for an absolute box whose stretch changed its size; a fixed
+        // box never goes through it, so `align-items: center` in a fixed
+        // overlay kept its items at the top (#935's hold, consent dialogs).
+        if self.position == Position::Fixed
+            && self.viewport.0 > 0.0
+            && self.viewport.1 > 0.0
+            && self.style.display.is_flex()
+            && self.dimensions.content.height != origin_h
+        {
+            let viewport_cb = Dimensions {
+                content: Rect::new(0.0, 0.0, self.viewport.0, self.viewport.1),
+                ..Default::default()
+            };
+            if let Some(inset_height) = self.inset_definite_content_height(&viewport_cb) {
+                crate::flex::layout_fixed_inset_flex_container(self, &viewport_cb, inset_height);
             }
         }
     }

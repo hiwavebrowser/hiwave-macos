@@ -421,6 +421,21 @@ pub(crate) fn layout_flex_container_at_resolved_percent_height(
     layout_flex_container_at(container, &container_box, None, None, Some(inner_height));
 }
 
+/// As [`layout_flex_container_in`], for a `position: fixed` container whose
+/// opposite insets made its height definite (`inset_height`, its inner
+/// height against the viewport). In a ROW that height is the definite cross
+/// size, which `layout_flex_container_in` does not read (see the note at
+/// `container_cross_size`): a fixed `inset: 0; align-items: center` overlay
+/// kept its dialog at the top (#935's hold).
+pub(crate) fn layout_fixed_inset_flex_container(
+    container: &mut LayoutBox,
+    viewport_cb: &Dimensions,
+    inset_height: f32,
+) {
+    let container_box = container.dimensions.clone();
+    layout_flex_container_at(container, &container_box, Some(viewport_cb), None, Some(inset_height));
+}
+
 /// As [`layout_flex_container_in`], for a container that is itself a flex
 /// item whose parent flex has already fixed its used inner HEIGHT.
 ///
