@@ -150,7 +150,9 @@ def launch_options(env_extra):
                        text=True, env=env, timeout=60)
     if p.returncode != 0:
         raise AssertionError("node failed: %s" % p.stderr.strip()[-400:])
-    return json.loads(p.stdout.strip().splitlines()[-1])
+    out = json.loads(p.stdout.strip().splitlines()[-1])
+    out["_stderr"] = p.stderr
+    return out
 
 
 @unittest.skipUnless(NODE, "node not on PATH")
@@ -165,19 +167,43 @@ class OracleHeadedA1(unittest.TestCase):
 
     def test_headed_only_when_asked_and_the_lock_is_held(self):
         lock = Path(tempfile.mkdtemp(prefix="t19_lock_")) / "realwindow.lock"
+        me = str(os.getpid())
+        asked = {"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock),
+                 "REALSITE_LOCK_OWNER": me}
         try:
             # Asked, but nobody holds the lock: still headless.
-            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock)})
+            o = launch_options(asked)
             self.assertIs(o["headless"], True)
+            # A bare directory (the shell recipe's lock, someone else's) is not ours.
             lock.mkdir()
-            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock)})
+            o = launch_options(asked)
+            self.assertIs(o["headless"], True)
+            (lock / "pid").write_text(me)
+            o = launch_options(asked)
             self.assertIs(o["headless"], False)
             self.assertIn("--window-position=-2400,0", o["args"])
             self.assertIn("--window-size=1280,800", o["args"])
             # --oracle-headless (compat) wins over a headed request.
-            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_ORACLE_HEADLESS": "1",
-                                "REALSITE_REALWINDOW_LOCK": str(lock)})
+            o = launch_options(dict(asked, REALSITE_ORACLE_HEADLESS="1"))
             self.assertIs(o["headless"], True)
+        finally:
+            shutil.rmtree(lock.parent, ignore_errors=True)
+
+    def test_headed_refused_when_the_lock_names_another_pid(self):
+        """R1 (#960): the lock existing is not enough; the caller must own it."""
+        lock = Path(tempfile.mkdtemp(prefix="t19_lock_")) / "realwindow.lock"
+        try:
+            lock.mkdir()
+            (lock / "pid").write_text("4242")
+            for owner in (str(os.getpid()), None):
+                env = {"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock)}
+                if owner:
+                    env["REALSITE_LOCK_OWNER"] = owner
+                o = launch_options(env)
+                self.assertIs(o["headless"], True, owner)
+                self.assertFalse(any(a.startswith("--window-position") for a in o["args"]))
+                self.assertIn("headless", o["_stderr"])
+                self.assertIn("4242", o["_stderr"])  # the logged reason names the holder
         finally:
             shutil.rmtree(lock.parent, ignore_errors=True)
 
@@ -215,7 +241,8 @@ class RealWindowGate(unittest.TestCase):
         with self.session(False) as o:
             self.assertFalse(o.headed)
             self.assertFalse(self.lock_path.exists())
-            env = o.apply({"REALSITE_ORACLE_HEADED": "1"})  # a stray env can't sneak through
+            env = o.apply({"REALSITE_ORACLE_HEADED": "1", "REALSITE_LOCK_OWNER": "1"})  # a stray env can't sneak through
+            self.assertNotIn("REALSITE_LOCK_OWNER", env)
             self.assertNotEqual(env.get("REALSITE_ORACLE_HEADED"), "1")
             self.assertEqual(env.get("REALSITE_ORACLE_HEADLESS"), "1")
 
@@ -227,6 +254,8 @@ class RealWindowGate(unittest.TestCase):
             env = o.apply({})
             self.assertEqual(env.get("REALSITE_ORACLE_HEADED"), "1")
             self.assertEqual(env.get("REALSITE_REALWINDOW_LOCK"), str(self.lock_path))
+            # The launcher goes headed only when the lock's pid file names this owner.
+            self.assertEqual(env.get("REALSITE_LOCK_OWNER"), str(os.getpid()))
             self.assertNotIn("REALSITE_ORACLE_HEADLESS", env)
         self.assertFalse(self.lock_path.exists())
 
@@ -260,6 +289,114 @@ class RealWindowGate(unittest.TestCase):
         with self.session(True) as o:
             self.assertTrue(o.headed)
         self.assertFalse(self.lock_path.exists())
+
+    def _dead_pid(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        return dead.pid
+
+    def test_dead_lock_recovery_loses_to_a_runner_that_recovered_first(self):
+        """R1 (#960): two runners both read the same dead pid; exactly one may hold.
+
+        Runner B (a live process) recovers the dead lock between runner A's read
+        of the dead pid and A's own recovery. A must go back to waiting and B's
+        lock must be left exactly as B made it.
+        """
+        dead = self._dead_pid()
+        self.lock_path.mkdir()
+        (self.lock_path / "pid").write_text(str(dead))
+        b = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (b.kill(), b.wait()))
+        a = realsite_board.RealWindowLock(self.lock_path, wait_s=0, sleep=lambda s: None)
+        real_holder = a.holder
+        fired = []
+
+        def holder_then_b_recovers():
+            pid = real_holder()
+            if not fired and pid == dead:
+                fired.append(1)
+                # B's whole recovery lands here: dead lock gone, B's live lock made.
+                shutil.rmtree(self.lock_path)
+                self.lock_path.mkdir()
+                (self.lock_path / "pid").write_text(str(b.pid))
+            return pid
+
+        with mock.patch.object(a, "holder", holder_then_b_recovers):
+            got = a.acquire()
+        self.assertTrue(fired)
+        self.assertFalse(got, "A took the lock B already held: two holders")
+        self.assertFalse(a.held)
+        self.assertEqual((self.lock_path / "pid").read_text().strip(), str(b.pid))
+        a.release()  # a non-holder's release must not touch B's lock
+        self.assertEqual((self.lock_path / "pid").read_text().strip(), str(b.pid))
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["realwindow.lock"])
+
+    def test_dead_lock_already_renamed_away_means_wait(self):
+        """The other recoverer renamed the stale dir first: ENOENT -> back to waiting."""
+        dead = self._dead_pid()
+        self.lock_path.mkdir()
+        (self.lock_path / "pid").write_text(str(dead))
+        a = realsite_board.RealWindowLock(self.lock_path, wait_s=0, sleep=lambda s: None)
+        real_holder = a.holder
+
+        def holder_then_renamed():
+            pid = real_holder()
+            if pid == dead and self.lock_path.exists():
+                os.rename(self.lock_path, self.tmp / "realwindow.lock.stale-other")
+            return pid
+
+        with mock.patch.object(a, "holder", holder_then_renamed):
+            self.assertFalse(a.acquire())
+        self.assertFalse(self.lock_path.exists())
+
+    def test_stale_recovery_renames_then_removes(self):
+        dead = self._dead_pid()
+        self.lock_path.mkdir()
+        (self.lock_path / "pid").write_text(str(dead))
+        renames = []
+        real_rename = os.rename
+
+        def spy(src, dst, *a, **kw):
+            renames.append((Path(src).name, Path(dst).name))
+            return real_rename(src, dst, *a, **kw)
+
+        lock = realsite_board.RealWindowLock(self.lock_path, wait_s=0, sleep=lambda s: None)
+        with mock.patch.object(realsite_board.os, "rename", spy):
+            self.assertTrue(lock.acquire())
+        self.assertTrue(any(s == "realwindow.lock" and d.startswith("realwindow.lock.stale-%d-" % dead)
+                            for s, d in renames), renames)
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["realwindow.lock"])
+        self.assertEqual((self.lock_path / "pid").read_text().strip(), str(os.getpid()))
+        lock.release()
+        self.assertFalse(self.lock_path.exists())
+
+    def test_two_concurrent_recoverers_one_holder(self):
+        """Two processes race to recover the same dead lock, ten rounds: one holder each time."""
+        script = (
+            "import sys, time, os\n"
+            "sys.path.insert(0, %r)\n"
+            "import realsite_board as rb\n"
+            "go = sys.argv[2]\n"
+            "while not os.path.exists(go): pass\n"
+            "l = rb.RealWindowLock(sys.argv[1], wait_s=0, sleep=lambda s: None)\n"
+            "got = l.acquire()\n"
+            "print(1 if got else 0, flush=True)\n"
+            "time.sleep(0.4)\n"
+        ) % str(REPO / "scripts")
+        for rnd in range(10):
+            go = self.tmp / ("go-%d" % rnd)
+            if not (self.lock_path / "pid").exists():
+                shutil.rmtree(self.lock_path, ignore_errors=True)
+                self.lock_path.mkdir()
+                (self.lock_path / "pid").write_text(str(self._dead_pid()))
+            procs = [subprocess.Popen([sys.executable, "-c", script, str(self.lock_path), str(go)],
+                                      stdout=subprocess.PIPE, text=True) for _ in range(2)]
+            go.write_text("")
+            outs = [p.communicate(timeout=60)[0].strip() for p in procs]
+            # The winner exits without releasing: its pid is now dead for the next round.
+            self.assertEqual(sorted(outs), ["0", "1"], "round %d: %r" % (rnd, outs))
+            leftovers = [p.name for p in self.tmp.iterdir() if p.name.startswith("realwindow.lock.")]
+            self.assertEqual(leftovers, [], "round %d" % rnd)
 
     def test_seat_in_use_falls_back_to_headless_with_the_reason(self):
         with self.session(True, idle=12.0) as o:
