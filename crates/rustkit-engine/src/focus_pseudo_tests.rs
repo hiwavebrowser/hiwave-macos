@@ -303,3 +303,39 @@ fn keys_go_to_a_tab_focused_button_and_enter_and_space_click_it() {
     engine.handle_key_up(id, 0, " ", false, false, false);
     assert_eq!(js(&mut engine, id, "log.join(' ')"), "keydown:b keyup:b click:b", "the keyup clicks");
 }
+
+/// Chromium 143 (standards mode; `*:hover` is the quirks-mode hover quirk's
+/// case, a doctype keeps it out): the universal selector with a state
+/// pseudo-class matches as `:focus` alone does. `*:focus{outline:none}`
+/// takes the UA ring away after a click, a Tab and script's `focus()`.
+const STAR_PAGE: &str = "<!doctype html><html><head><style>body { margin: 0 }\
+    *:focus { outline: none }\
+    *:hover { background-color: rgb(255, 0, 0) }\
+    #d { height: 40px }</style></head><body>\
+    <input id=i><button id=b>B</button><div id=d>x</div><div id=e style='height:40px'>e</div></body></html>";
+
+#[test]
+fn star_focus_outline_none_takes_the_ring_away() {
+    let (mut engine, id) = page_with(STAR_PAGE);
+    js(&mut engine, id, "$('b').focus(); 0");
+    assert_eq!(css(&mut engine, id, "b", "outline-style"), "none", "script focus");
+    assert!(!paints_the_ring(&engine, id), "script focus: no ring painted");
+    click(&mut engine, id, "i");
+    assert_eq!(active(&mut engine, id), "i");
+    assert_eq!(css(&mut engine, id, "i", "outline-style"), "none", "a click");
+    assert!(!paints_the_ring(&engine, id), "a click: no ring painted");
+    tab(&mut engine, id, false);
+    assert_eq!(active(&mut engine, id), "b");
+    assert_eq!(css(&mut engine, id, "b", "outline-style"), "none", "Tab");
+    assert!(!paints_the_ring(&engine, id), "Tab: no ring painted");
+}
+
+#[test]
+fn star_hover_matches_the_hovered_chain() {
+    let (mut engine, id) = page_with(STAR_PAGE);
+    let (x, y) = centre(&mut engine, id, "d");
+    engine.mouse_move_at_point(id, x, y);
+    assert_eq!(css(&mut engine, id, "d", "background-color"), "rgb(255, 0, 0)", "the hovered element");
+    assert_eq!(js(&mut engine, id, "getComputedStyle(document.body).backgroundColor"), "rgb(255, 0, 0)", "its ancestor");
+    assert_eq!(css(&mut engine, id, "e", "background-color"), "rgba(0, 0, 0, 0)", "not its sibling");
+}
