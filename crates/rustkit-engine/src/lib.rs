@@ -16428,8 +16428,9 @@ impl Engine {
 
 impl layout_ctx::LayoutCtx {
     /// The parsed sheet of each `<style>` element the document has, in
-    /// tree order. Parsing is a function of the text alone (no base URL,
-    /// no `media` attribute, nothing from the element), so a sheet whose
+    /// tree order, less those script disabled. Parsing is a function of the
+    /// text alone (no base URL; a `media` attribute is folded into the text
+    /// by `style_sheet_text`), so a sheet whose
     /// text `view`'s cache has seen is taken from it instead of parsed
     /// again (`RUSTKIT_SHEET_CACHE`). A cached sheet is shared with the
     /// cache: callers that change it take a copy (`Rc::unwrap_or_clone`).
@@ -16444,14 +16445,13 @@ impl layout_ctx::LayoutCtx {
             if !sheet_element_counts(javascript_enabled, &style_el) {
                 continue;
             }
-            let mut css_text = String::new();
-            for child in style_el.children() {
-                if let NodeType::Text(text) = &child.node_type {
-                    css_text.push_str(text);
-                }
+            // `sheet.disabled = true` from script (CH2.E17).
+            if document.style_sheet_disabled(&style_el) {
+                continue;
             }
+            let css_text = rustkit_dom::style_element_text(&style_el);
             if !css_text.is_empty() {
-                texts.push(css_text);
+                texts.push(style_sheet_text(&style_el, css_text));
             }
         }
 
@@ -16474,6 +16474,27 @@ impl layout_ctx::LayoutCtx {
     fn take_sheets_parsed(&self) -> usize {
         self.with_building_lay(|lay| lay.sheet_cache.borrow_mut().take_parsed())
             .unwrap_or_else(|| ADHOC_SHEET_CACHE.with(|cache| cache.borrow_mut().take_parsed()))
+    }
+}
+
+/// The CSS text a `<style>` element contributes: `css_text`, inside
+/// `@media <list> { ... }` when the element has a `media` attribute
+/// (HTML 4.2.6: the sheet applies only where the list matches). The list is
+/// serialized first, so a query Chrome rejects (`foo bar`) becomes
+/// `not all` and matches nothing; an empty list applies everywhere. The
+/// engine has no `@import`, so wrapping the text changes nothing else, and
+/// the wrapped rules carry the list as their outermost `@media` condition,
+/// which the cascade re-evaluates on every resize.
+pub(crate) fn style_sheet_text(element: &Node, css_text: String) -> String {
+    let media = match &element.node_type {
+        NodeType::Element { attributes, .. } => attributes.get("media"),
+        _ => None,
+    };
+    let list = media.map(|m| rustkit_css::media_query_list_serialize(m)).unwrap_or_default();
+    if list.is_empty() {
+        css_text
+    } else {
+        format!("@media {list} {{\n{css_text}\n}}")
     }
 }
 

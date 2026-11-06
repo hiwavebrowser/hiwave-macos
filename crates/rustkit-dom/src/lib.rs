@@ -411,6 +411,22 @@ pub struct Document {
     /// The names that settle found present and undefined, minus any
     /// defined since: `:defined` for the cascade only.
     settled_custom_elements: RefCell<std::collections::HashSet<String>>,
+    /// `<style>` elements whose sheet script disabled
+    /// (`sheet.disabled = true`), each with the text the sheet had then.
+    /// New text makes a new, enabled sheet (CSSOM: "update a style
+    /// block"), so a sheet counts as disabled only while the text matches.
+    disabled_style_sheets: RefCell<HashMap<NodeId, String>>,
+}
+
+/// The CSS text of a `<style>` element: its Text children, in order.
+pub fn style_element_text(element: &Node) -> String {
+    let mut text = String::new();
+    for child in element.children() {
+        if let NodeType::Text(s) = &child.node_type {
+            text.push_str(s);
+        }
+    }
+    text
 }
 
 /// Sink for building a Document from HTML parsing.
@@ -683,7 +699,32 @@ impl Document {
             defined_custom_elements: RefCell::new(std::collections::HashSet::new()),
             custom_element_definitions_settled: Cell::new(false),
             settled_custom_elements: RefCell::new(std::collections::HashSet::new()),
+            disabled_style_sheets: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Set the `disabled` flag of `<style>` element `element`'s sheet. The
+    /// sheet is the one for the element's current text: called again after
+    /// a CSSOM edit rewrites the text.
+    pub fn set_style_sheet_disabled(&self, element: &Node, disabled: bool) {
+        note_mutation();
+        let mut map = self.disabled_style_sheets.borrow_mut();
+        if disabled {
+            map.insert(element.id, style_element_text(element));
+        } else {
+            map.remove(&element.id);
+        }
+    }
+
+    /// Whether `<style>` element `element`'s sheet is disabled: script set
+    /// the flag and the text has not changed since.
+    pub fn style_sheet_disabled(&self, element: &Node) -> bool {
+        let map = self.disabled_style_sheets.borrow();
+        if map.is_empty() {
+            return false;
+        }
+        map.get(&element.id)
+            .is_some_and(|text| *text == style_element_text(element))
     }
 
     /// Parse HTML and create a document (new rustkit-html parser).
