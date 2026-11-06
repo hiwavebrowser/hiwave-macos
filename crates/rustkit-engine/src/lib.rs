@@ -482,6 +482,10 @@ mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
+mod transform_parse_pure_tests;
+#[cfg(test)]
+mod individual_translate_parse_tests;
+#[cfg(test)]
 mod author_svg_stroke_tests;
 #[cfg(test)]
 mod pseudo_display_none_tests;

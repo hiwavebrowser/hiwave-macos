@@ -53,6 +53,8 @@ mod flex_item_min_height_tests;
 #[cfg(test)]
 mod fit_content_width_tests;
 #[cfg(test)]
+mod element_scroll_extent_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
