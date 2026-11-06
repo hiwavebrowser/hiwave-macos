@@ -421,6 +421,21 @@ pub(crate) fn layout_flex_container_at_resolved_percent_height(
     layout_flex_container_at(container, &container_box, None, None, Some(inner_height));
 }
 
+/// As [`layout_flex_container_in`], for a `position: fixed` container whose
+/// opposite insets made its height definite (`inset_height`, its inner
+/// height against the viewport). In a ROW that height is the definite cross
+/// size, which `layout_flex_container_in` does not read (see the note at
+/// `container_cross_size`): a fixed `inset: 0; align-items: center` overlay
+/// kept its dialog at the top (#935's hold).
+pub(crate) fn layout_fixed_inset_flex_container(
+    container: &mut LayoutBox,
+    viewport_cb: &Dimensions,
+    inset_height: f32,
+) {
+    let container_box = container.dimensions.clone();
+    layout_flex_container_at(container, &container_box, Some(viewport_cb), None, Some(inset_height));
+}
+
 /// As [`layout_flex_container_in`], for a container that is itself a flex
 /// item whose parent flex has already fixed its used inner HEIGHT.
 ///
@@ -2828,7 +2843,11 @@ fn distribute_main_axis(
 
     let total_item_size: f32 = line.items.iter().map(|i| i.outer_main_size()).sum();
     let total_gaps = main_gap * (line.items.len().saturating_sub(1)) as f32;
-    let free_space = (container_main - total_item_size - total_gaps).max(0.0);
+    // Signed: an overflowing line has negative free space, which
+    // `center` / `flex-end` place unsafely (CH2.B19, Box Align §4.4 and
+    // Chromium 143: a 300px item centred in 100px starts at -100).
+    let signed_free_space = container_main - total_item_size - total_gaps;
+    let free_space = signed_free_space.max(0.0);
 
     // §8.1/§9.5.12: positive free space goes to the auto margins in equal
     // shares, before `justify-content`, which then has nothing to place.
@@ -2852,10 +2871,14 @@ fn distribute_main_axis(
         free_space
     };
 
+    let unsafe_space = if signed_free_space < 0.0 { signed_free_space } else { free_space };
     let (initial_offset, spacing) = match justify_content {
         JustifyContent::FlexStart => (0.0, main_gap),
-        JustifyContent::FlexEnd => (free_space, main_gap),
-        JustifyContent::Center => (free_space / 2.0, main_gap),
+        // `center` / `flex-end` place the signed space (auto margins take
+        // none of a negative one, §9.5.12); the space-* values read the
+        // clamped one, so they fall back to the start, as in Chromium.
+        JustifyContent::FlexEnd => (unsafe_space, main_gap),
+        JustifyContent::Center => (unsafe_space / 2.0, main_gap),
         JustifyContent::SpaceBetween => {
             if line.items.len() > 1 {
                 (0.0, free_space / (line.items.len() - 1) as f32 + main_gap)
