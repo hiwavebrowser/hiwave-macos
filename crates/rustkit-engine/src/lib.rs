@@ -447,6 +447,12 @@ mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
+mod flex_cross_size_tests;
+#[cfg(test)]
+mod inner_text_style_tests;
+#[cfg(test)]
+mod control_percent_height_tests;
+#[cfg(test)]
 mod flex_hidden_gap_tests;
 #[cfg(test)]
 mod flex_column_definite_height_tests;
@@ -514,6 +520,8 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod app_bridge_tests;
+#[cfg(all(test, feature = "headless"))]
 mod text_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod text_control_select_tests;
@@ -567,6 +575,8 @@ mod positioned_form_control_tests;
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
+#[cfg(all(test, feature = "headless"))]
+mod unitless_zero_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -989,6 +999,10 @@ struct ViewState {
     /// plan's per-view frame count; the tests read it to see how many draws
     /// one input cost).
     frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -2814,6 +2828,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -2925,6 +2940,7 @@ impl Engine {
             lay: Rc::default(),
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -3053,6 +3069,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -5773,6 +5790,20 @@ impl Engine {
     /// The clipboard this engine's views edit with.
     pub fn clipboard(&self) -> SharedClipboard {
         self.clipboard.clone()
+    }
+
+    /// CH3.A7: mark view `id` as one the app owns (the chrome, the shelf,
+    /// the Inspector, the settings page). Documents the app loads into it
+    /// from then on get the app bridge; a web view (the default) never does.
+    pub fn set_app_owned(&mut self, id: EngineViewId, owned: bool) {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.app_owned = owned;
+        }
+    }
+
+    /// Whether the app owns view `id` (see [`Self::set_app_owned`]).
+    pub fn is_app_owned(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.app_owned)
     }
 
     /// Let script in view `id` read the clipboard
@@ -8524,8 +8555,16 @@ impl Engine {
             .map_err(|e| EngineError::JsError(e.to_string()))?;
             self.apply_host_reentry_limit(&mut js_runtime);
 
-            let bindings =
-                DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            // CH3.A7: the app bridge only for a document the app itself
+            // loads into a view it owns (the chrome, a panel). A URL load
+            // (`load_url_for_nav`) never gets it.
+            let app_owned = self.views.get(&id).is_some_and(|view| view.app_owned);
+            let bindings = if app_owned {
+                DomBindings::new_app_owned(js_runtime)
+            } else {
+                DomBindings::new(js_runtime)
+            }
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
@@ -21404,7 +21443,12 @@ impl Engine {
 
         for (&view_id, view_state) in &self.views {
             if let Some(ref bindings) = view_state.bindings {
-                for ipc_msg in bindings.drain_ipc_queue() {
+                let drained = bindings.drain_ipc_queue();
+                if !view_state.app_owned {
+                    log_ignored_ipc(view_id, &drained);
+                    continue;
+                }
+                for ipc_msg in drained {
                     messages.push((view_id, ipc_msg));
                 }
             }
@@ -21416,11 +21460,19 @@ impl Engine {
     /// What `id`'s page posted with `window.ipc.postMessage` since the
     /// last drain.
     pub fn drain_view_ipc(&self, id: EngineViewId) -> Vec<IpcMessage> {
-        self.views
-            .get(&id)
-            .and_then(|view| view.bindings.as_ref())
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let drained = view
+            .bindings
+            .as_ref()
             .map(|bindings| bindings.drain_ipc_queue())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !view.app_owned {
+            log_ignored_ipc(id, &drained);
+            return Vec::new();
+        }
+        drained
     }
 
     /// Check if any view has pending IPC messages.
@@ -21431,6 +21483,39 @@ impl Engine {
                 .map(|b| b.has_pending_ipc())
                 .unwrap_or(false)
         })
+    }
+}
+
+/// CH3.A7: IPC from a view the app does not own is dropped. The log names
+/// each message's `cmd` (when it is a plain identifier) and its size,
+/// never the body: a page's text must not reach the log.
+fn log_ignored_ipc(view: EngineViewId, messages: &[IpcMessage]) {
+    for message in messages {
+        warn!(
+            ?view,
+            cmd = %ipc_cmd_shape(&message.payload),
+            bytes = message.payload.len(),
+            "IPC from a view the app does not own ignored"
+        );
+    }
+}
+
+/// The `cmd` of an IPC body when it is a short `[a-z0-9_]` name, else a
+/// placeholder; nothing else of the body.
+fn ipc_cmd_shape(payload: &str) -> String {
+    let cmd = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned));
+    match cmd {
+        Some(c)
+            if !c.is_empty()
+                && c.len() <= 48
+                && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') =>
+        {
+            c
+        }
+        Some(_) => "<non-identifier>".to_string(),
+        None => "<no cmd>".to_string(),
     }
 }
 
@@ -23975,6 +24060,8 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     // wikipedia's `minmax(0,1fr)` and `12.25rem` columns never parsed. `rem`
     // assumes the 16px root, as `fit-content()` and `flex-basis` do.
     match parse_length(value)? {
+        // A bare `0` parses to `Px(0.0)` (CH2.B14); `Zero` kept for safety.
+        rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
         rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
         _ => None,
@@ -28328,7 +28415,8 @@ mod tests {
 
     #[test]
     fn test_parse_length() {
-        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Zero));
+        // An authored `0` is `0px`; `Length::Zero` is the unset default (CH2.B14).
+        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Px(0.0)));
         assert_eq!(parse_length("auto"), Some(rustkit_css::Length::Auto));
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));
@@ -28715,7 +28803,7 @@ mod tests {
 
     #[test]
     fn border_radius_shorthand_expands_one_to_four_values() {
-        use rustkit_css::Length::{Percent, Px, Zero};
+        use rustkit_css::Length::{Percent, Px};
         let circular = |value: &str| {
             parse_border_radius_shorthand(value).map(|corners| {
                 corners.map(|c| {
@@ -28730,7 +28818,7 @@ mod tests {
         assert_eq!(circular("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
         assert_eq!(
             circular("8px 8px 0 0"),
-            Some([Px(8.0), Px(8.0), Zero, Zero])
+            Some([Px(8.0), Px(8.0), Px(0.0), Px(0.0)])
         );
         assert_eq!(
             circular("1px 2px"),
@@ -46003,7 +46091,8 @@ mod individual_transform_tests {
         assert_eq!(
             s.effective_transform().ops,
             vec![
-                TransformOp::Translate(Length::Px(10.0), Length::Zero),
+                // An authored `0` is `0px` (CH2.B14).
+                TransformOp::Translate(Length::Px(10.0), Length::Px(0.0)),
                 TransformOp::Rotate(90.0),
                 TransformOp::Scale(2.0, 2.0),
                 TransformOp::TranslateX(Length::Px(1.0)),
