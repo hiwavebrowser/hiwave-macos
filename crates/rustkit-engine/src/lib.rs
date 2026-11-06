@@ -569,6 +569,8 @@ mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
+mod svg_paint_state_tests;
+#[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
 #[cfg(test)]
 thread_local! {
