@@ -1,5 +1,0 @@
-[2m2026-11-06T00:13:00.361336Z[0m [32m INFO[0m [2mrustkit_engine::presenter[0m[2m:[0m Engine initialized with GPU renderer [3madapter[0m[2m=[0m"Apple M2 Max"
-[2m2026-11-06T00:13:00.361353Z[0m [32m INFO[0m [2mrustkit_engine[0m[2m:[0m Initializing RustKit Engine
-[2m2026-11-06T00:13:00.485061Z[0m [32m INFO[0m [2mrustkit_engine[0m[2m:[0m Headless view created [3mid[0m[2m=[0mEngineViewId(1)
-[2m2026-11-06T00:13:00.485101Z[0m [32m INFO[0m [2mrustkit_engine[0m[2m:[0m Loading URL [3mid[0m[2m=[0mEngineViewId(1) [3murl[0m[2m=[0mhttps://www.lyft.com/ [3mreplace[0m[2m=[0mfalse
-[2m2026-11-06T00:13:00.599970Z[0m [33m WARN[0m [2mrustkit_engine::wgate[0m[2m:[0m Window thread hold entry=load ms=115 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 acquire_ms=0.0 execute_ms=0.0 present_ms=0.0 script_ms=0.0 script_turns=0 script_longest_ms=0.0 script_stopped=0 parse_ms=0.0 style_ms=0.0 doc_fetch_ms=114.8 sheets_ms=0.0 fonts_ms=0.0 images_ms=0.0 script_fetch_ms=0.0 script_net_ms=0.0 other_ms=0.0
