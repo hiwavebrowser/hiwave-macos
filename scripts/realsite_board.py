@@ -10,8 +10,9 @@ implements them):
                colour).
   READABLE     >= 80% of the distinct words Chrome shows in the first
                viewport appear in RustKit's first-viewport text runs.
-  LOOKS RIGHT  first-viewport pixel diff vs Chrome <= 15%. If Chrome vs
-               Chrome for the site already exceeds 15% in the same run, the
+  LOOKS RIGHT  first-viewport pixel diff vs Chrome <= 20% (LOOKS_RIGHT_MAX;
+               15% until 2026-11-06). If Chrome vs Chrome for the site
+               already exceeds that bound in the same run, the
                check is scored "unstable" (0 points, reported separately).
 
 Writes trench/realsite/runs/<ts>/<site>.json and summary.json, prints a
@@ -48,7 +49,9 @@ PINNED_CHROME_VERSION = "148.0.7778.216"
 LOAD_TIMEOUT_MS = 30000
 BLANK_MIN_FRACTION = 0.02
 READABLE_MIN = 0.80
-LOOKS_RIGHT_MAX = 15.0
+# Pete 2026-11-06: "raise the real site board to 20% looks right for now"
+# (was 15 % since T1). docs/GATES.md lists every gate.
+LOOKS_RIGHT_MAX = 20.0
 CHROME_SETTLE_MS = 5000
 
 WORD_RE = re.compile(r"\w+", re.UNICODE)
