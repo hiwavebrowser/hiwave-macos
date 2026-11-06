@@ -274,3 +274,32 @@ fn a_user_scroll_up_while_lines_stream_is_kept_and_the_bottom_resumes_following(
     assert!(top >= max - 1, "following the newest line again ({top} of {max})");
 }
 
+
+#[test]
+fn the_first_lines_show_in_the_task_that_brings_them() {
+    // The chrome board (and a person) takes a frame before the page's next
+    // animation frame runs: the lines must already be rows by then.
+    let (mut engine, view) = inspector();
+    frames(&mut engine, view, 2);
+    let js = format!(
+        "{} String(document.querySelectorAll('#console-output .console-entry').length) + ',' + \
+         document.getElementById('error-count').textContent + ',' + \
+         document.getElementById('console-empty').style.display",
+        batch_js("first", "error", 0, 4)
+    );
+    let same_task = eval(&mut engine, view, &js);
+    assert!(same_task.starts_with("4,4,"), "rows and counts in the same task: {same_task}");
+    assert!(same_task.ends_with(",none"), "the empty state is hidden: {same_task}");
+    // On the Console tab with no frame run, the rows are there too.
+    console_tab(&mut engine, view);
+    assert_eq!(rows(&mut engine, view), 4);
+    // Lines while a frame is already due are coalesced into it.
+    let js = format!(
+        "{} {} String(document.querySelectorAll('#console-output .console-entry').length)",
+        batch_js("more", "log", 10, 1),
+        batch_js("more", "log", 11, 1)
+    );
+    let _ = eval(&mut engine, view, &js);
+    frames(&mut engine, view, 3);
+    assert_eq!(rows(&mut engine, view), 6);
+}
