@@ -655,21 +655,7 @@ use url::Url;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HWND;
 
-/// `url` for an info line (CH3.A6): scheme, host and path — no userinfo,
-/// query or fragment; a `data:` URL only up to its media type. The whole
-/// URL goes to the debug line beside it.
-fn url_for_log(url: &Url) -> String {
-    if url.scheme() == "data" {
-        let path = url.path();
-        return format!("data:{}", &path[..path.find(',').unwrap_or(path.len())]);
-    }
-    let mut shown = url.clone();
-    let _ = shown.set_username("");
-    let _ = shown.set_password(None);
-    shown.set_query(None);
-    shown.set_fragment(None);
-    shown.to_string()
-}
+use rustkit_net::{str_url_for_log, url_for_log};
 
 #[cfg(test)]
 mod url_for_log_tests {
@@ -7995,7 +7981,7 @@ impl Engine {
         // response"): the document on screen stays and keeps running. It
         // is not a failure; the load just ends with nothing committed.
         if matches!(status.as_u16(), 204 | 205) {
-            info!(?id, %url, %status, "Navigation answered with no content; the page stays");
+            info!(?id, url = %url_for_log(&url), %status, "Navigation answered with no content; the page stays");
             if let Some(received) = received {
                 received.read(0);
             }
@@ -8049,7 +8035,7 @@ impl Engine {
 
                 return Err(EngineError::NavigationError("HTTP error".into()));
             }
-            warn!(?id, %url, %status, bytes = body.len(), "Showing the body of an error response as the page");
+            warn!(?id, url = %url_for_log(&url), %status, bytes = body.len(), "Showing the body of an error response as the page");
             error_page = Some(body);
         }
 
@@ -16866,7 +16852,7 @@ impl Engine {
                     match tokio::time::timeout_at(deadline, &mut fetch).await {
                         Ok(sheet) => (index, Ok(sheet)),
                         Err(_) => {
-                            warn!(%url, "Stylesheet over the subresource budget; it is applied when it arrives");
+                            warn!(url = %url_for_log(&url), "Stylesheet over the subresource budget; it is applied when it arrives");
                             (index, Err(fetch))
                         }
                     }
@@ -16900,7 +16886,7 @@ impl Engine {
         url: Url,
         deadline: tokio::time::Instant,
     ) -> Option<Stylesheet> {
-        info!(%url, "Loading external stylesheet");
+        info!(url = %url_for_log(&url), "Loading external stylesheet");
         // A sheet still loading at the deadline is recorded over budget.
         let guard = inspector
             .begin_request(&url, "GET", ResourceType::Stylesheet, Some("parser"))
@@ -16926,12 +16912,12 @@ impl Engine {
                                 Some(stylesheet)
                             }
                             Err(e) => {
-                                warn!(?e, %url, "Failed to parse external stylesheet");
+                                warn!(?e, url = %url_for_log(&url), "Failed to parse external stylesheet");
                                 None
                             }
                         },
                         Err(e) => {
-                            warn!(?e, %url, "Failed to read stylesheet body");
+                            warn!(?e, url = %url_for_log(&url), "Failed to read stylesheet body");
                             None
                         }
                     }
@@ -16939,13 +16925,13 @@ impl Engine {
                     if let Some(received) = received {
                         received.unread();
                     }
-                    warn!(status = %response.status, %url, "Failed to fetch stylesheet");
+                    warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch stylesheet");
                     None
                 }
             }
             Err(e) => {
                 inspector::fail_net(guard, &e);
-                warn!(?e, %url, "Failed to fetch stylesheet");
+                warn!(?e, url = %url_for_log(&url), "Failed to fetch stylesheet");
                 None
             }
         }
@@ -17127,7 +17113,7 @@ impl Engine {
                     let loader = loader.clone();
                     let initiator = initiator_of(&url);
                     async move {
-                        info!(%url, "Loading SVG image");
+                        info!(url = %url_for_log(&url), "Loading SVG image");
                         let guard = inspector.begin_request(&url, "GET", ResourceType::Image, Some(initiator));
                         let fetched = match tokio::time::timeout_at(
                             deadline,
@@ -17140,7 +17126,7 @@ impl Engine {
                                 if let Some(guard) = guard {
                                     guard.fail(FailureStage::OverBudget, "subresource budget spent");
                                 }
-                                warn!(%url, "Failed to fetch SVG image: over the subresource budget");
+                                warn!(url = %url_for_log(&url), "Failed to fetch SVG image: over the subresource budget");
                                 return None;
                             }
                         };
@@ -17159,7 +17145,7 @@ impl Engine {
                                             if let Some(received) = received {
                                                 received.fail(FailureStage::Decode, "SVG did not parse");
                                             }
-                                            warn!(?e, %url, "Failed to parse SVG image");
+                                            warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
                                             None
                                         }
                                     },
@@ -17167,7 +17153,7 @@ impl Engine {
                                         if let Some(received) = received {
                                             received.fail(FailureStage::Decode, "body is not UTF-8");
                                         }
-                                        warn!(?e, %url, "Failed to read SVG body");
+                                        warn!(?e, url = %url_for_log(&url), "Failed to read SVG body");
                                         None
                                     }
                                 }
@@ -17176,12 +17162,12 @@ impl Engine {
                                 if let Some(guard) = guard {
                                     guard.received(&response).unread();
                                 }
-                                warn!(status = %response.status, %url, "Failed to fetch SVG image");
+                                warn!(status = %response.status, url = %url_for_log(&url), "Failed to fetch SVG image");
                                 None
                             }
                             Err(e) => {
                                 inspector::fail_net(guard, &e);
-                                warn!(?e, %url, "Failed to fetch SVG image");
+                                warn!(?e, url = %url_for_log(&url), "Failed to fetch SVG image");
                                 None
                             }
                         }
@@ -17206,7 +17192,7 @@ impl Engine {
             let loader = loader.clone();
             let initiator = initiator_of(&url);
             async move {
-                info!(%url, "Loading image");
+                info!(url = %url_for_log(&url), "Loading image");
                 let load = fetch_raster_image(
                     &loader,
                     &image_manager,
@@ -17216,7 +17202,7 @@ impl Engine {
                     Some((inspector, initiator, deadline)),
                 );
                 let Ok(loaded) = tokio::time::timeout_at(deadline, load).await else {
-                    warn!(%url, "Image over the subresource budget; rendering without it");
+                    warn!(url = %url_for_log(&url), "Image over the subresource budget; rendering without it");
                     return (false, None);
                 };
                 match loaded {
@@ -17232,11 +17218,11 @@ impl Engine {
                     Err(rustkit_image::ImageError::Svg(xml)) => {
                         match rustkit_svg::SvgDocument::parse(&xml) {
                             Ok(doc) => {
-                                info!(%url, "Image served as image/svg+xml; using the SVG lane");
+                                info!(url = %url_for_log(&url), "Image served as image/svg+xml; using the SVG lane");
                                 (true, Some((url.to_string(), image_svg(doc))))
                             }
                             Err(e) => {
-                                warn!(?e, %url, "Failed to parse SVG image");
+                                warn!(?e, url = %url_for_log(&url), "Failed to parse SVG image");
                                 (false, None)
                             }
                         }
@@ -17246,7 +17232,7 @@ impl Engine {
                         (false, None)
                     }
                     Err(e) => {
-                        warn!(?e, %url, "Failed to load image");
+                        warn!(?e, url = %url_for_log(&url), "Failed to load image");
                         (false, None)
                     }
                 }
@@ -17528,7 +17514,7 @@ impl Engine {
                 },
                 FontSource::Remote(_) => {}
                 FontSource::Blocked(reason) => {
-                    warn!(family = %rule.family, src = %rule.src, reason, "@font-face: source not loadable");
+                    warn!(family = %rule.family, src = %str_url_for_log(&rule.src), reason, "@font-face: source not loadable");
                     self.lctx.font_loader.mark_failed(key);
                 }
             }
@@ -17576,7 +17562,7 @@ impl Engine {
         let inspector = self.views.get(&id).map(|v| v.inspector.clone());
         let inspector = &inspector;
         let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
-            info!(%family, %url, "Loading web font");
+            info!(%family, url = %url_for_log(&url), "Loading web font");
             let load = async {
                 let guard = inspector
                     .as_ref()
@@ -17629,7 +17615,7 @@ impl Engine {
                     loaded += 1;
                 }
                 Err(reason) => {
-                    warn!(%family, %url, %reason, "Web font not loaded");
+                    warn!(%family, url = %url_for_log(&url), %reason, "Web font not loaded");
                     self.lctx.font_loader.mark_failed(key);
                 }
             }
