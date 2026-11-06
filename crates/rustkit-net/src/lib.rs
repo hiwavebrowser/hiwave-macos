@@ -39,6 +39,71 @@ pub use security::{
     ReferrerPolicy, SameSite, SandboxFlags, SecurityContext, SecurityError,
 };
 
+/// `url` for an info or warn line (CH3.A6/A6b): scheme, host and path — no
+/// userinfo, query or fragment (signed CDN URLs carry tokens there); a
+/// `data:` URL only up to its payload. The whole URL belongs on debug.
+pub fn url_for_log(url: &Url) -> String {
+    if url.scheme() == "data" {
+        let path = url.path();
+        return format!("data:{}", &path[..path.find(',').unwrap_or(path.len())]);
+    }
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+/// [`url_for_log`] for text that may not parse as a URL (a relative
+/// reference, an `@font-face` `src` list): each `?…`/`#…` run is cut up
+/// to the next `)`, quote, comma or white space.
+pub fn str_url_for_log(text: &str) -> String {
+    if let Ok(url) = Url::parse(text) {
+        return url_for_log(&url);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut cutting = false;
+    for c in text.chars() {
+        if c == '?' || c == '#' {
+            cutting = true;
+        } else if cutting && (c == ')' || c == '"' || c == '\'' || c == ',' || c.is_whitespace()) {
+            cutting = false;
+        }
+        if !cutting {
+            out.push(c);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod url_for_log_tests {
+    use super::{str_url_for_log, url_for_log};
+    use url::Url;
+
+    #[test]
+    fn a_url_on_an_info_line_is_scheme_host_and_path() {
+        let s = "a6-secret";
+        let u = |t: &str| Url::parse(t).unwrap();
+        assert_eq!(url_for_log(&u(&format!("https://u:{s}@a.test:8080/p/q?t={s}#{s}"))), "https://a.test:8080/p/q");
+        assert_eq!(url_for_log(&u(&format!("data:text/html,<p>{s}</p>"))), "data:text/html");
+        assert_eq!(url_for_log(&u("about:blank")), "about:blank");
+    }
+
+    #[test]
+    fn text_that_is_not_a_url_loses_each_query_and_fragment_run() {
+        let s = "a6b-secret";
+        assert_eq!(str_url_for_log(&format!("https://u:{s}@a.test/p?t={s}#{s}")), "https://a.test/p");
+        assert_eq!(str_url_for_log(&format!("not a url?{s}")), "not a url");
+        assert_eq!(str_url_for_log(&format!("rel/p#{s}")), "rel/p");
+        assert_eq!(
+            str_url_for_log(&format!("url(/f.woff2?t={s}) format(\"woff2\"), url('/g.woff#{s}')")),
+            "url(/f.woff2) format(\"woff2\"), url('/g.woff')"
+        );
+    }
+}
+
 /// Errors that can occur in networking.
 #[derive(Error, Debug)]
 pub enum NetError {
@@ -720,11 +785,11 @@ impl ResourceLoader {
             match action {
                 InterceptAction::Allow => {}
                 InterceptAction::Block => {
-                    warn!(url = %request.url, "Request blocked by interceptor");
+                    warn!(url = %url_for_log(&request.url), "Request blocked by interceptor");
                     return Err(NetError::Blocked(None));
                 }
                 InterceptAction::BlockedBy(reason) => {
-                    warn!(url = %request.url, list = %reason.list, "Request blocked by interceptor");
+                    warn!(url = %url_for_log(&request.url), list = %reason.list, "Request blocked by interceptor");
                     return Err(NetError::Blocked(Some(reason)));
                 }
                 InterceptAction::Redirect(new_url) => {
