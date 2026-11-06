@@ -221,7 +221,14 @@ const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 const LIVE_TURN_BUDGET_MS: u64 = 5_000;
 
 /// The engine builder for content views, before the shield is attached.
+/// A launch with `--replay-proxy` sends every request to that server.
 fn content_engine_builder() -> EngineBuilder {
+    content_engine_builder_with(crate::replay::replay_proxy())
+}
+
+/// [`content_engine_builder`] with an explicit replay proxy (`None`: the
+/// network).
+fn content_engine_builder_with(replay_proxy: Option<url::Url>) -> EngineBuilder {
     // Browser-plausible UA. "HiWave/1.0 RustKit/1.0" alone got us
     // instantly rate-limited as a scraper even by Wikimedia (HTTP 429 on
     // every thumbnail, 2026-08-05 live session) — servers gate on the
@@ -248,6 +255,9 @@ fn content_engine_builder() -> EngineBuilder {
         // it neither holds the window thread inside the load nor delays
         // PageLoaded. 3.3 s of the eBay listing's 17.7 s hold was this.
         .post_load_requests_live(true)
+        // T18: HAR replay in the real window. The engine rewrites each
+        // request to the proxy and refuses any non-loopback connection.
+        .replay_proxy({ let _ = replay_proxy; None })
 }
 
 /// `HIWAVE_RENDER_EVERY_WAKE=1`: draw at every wake of the event loop,
@@ -341,7 +351,13 @@ impl RustKitView {
     /// A flag-off content view with no window (tests).
     #[cfg(test)]
     fn headless(bounds: Bounds) -> Self {
-        let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
+        Self::headless_from(content_engine_builder(), bounds)
+    }
+
+    /// [`Self::headless`] from a given builder (tests).
+    #[cfg(test)]
+    fn headless_from(builder: EngineBuilder, bounds: Bounds) -> Self {
+        let mut engine = builder.build().expect("engine (no GPU?)");
         let view_id = engine.create_headless_view(bounds).expect("headless view");
         let (handle, endpoint) = connect(engine, view_id);
         Self::from_parts(
@@ -1740,6 +1756,118 @@ mod tests {
 
     fn view() -> RustKitView {
         RustKitView::headless(Bounds::new(0, 0, 400, 300))
+    }
+
+    /// A stand-in for `tools/parity_oracle/har_server.py`: answers each
+    /// request by its `X-Original-URL` from `pages` (404 otherwise) and
+    /// records every URL it was asked for, with the `Host` it was sent.
+    fn replay_server(
+        pages: &'static [(&'static str, &'static str, &'static str)],
+    ) -> (url::Url, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let log = Arc::clone(&log);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 2048];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).into_owned();
+                    let header = |name: &str| {
+                        text.lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    let original = header("x-original-url");
+                    log.lock().unwrap().push((original.clone(), header("host")));
+                    let (status, kind, body) = match pages.iter().find(|(u, _, _)| *u == original) {
+                        Some((_, kind, body)) => ("200 OK", *kind, *body),
+                        None => ("404 Not Found", "text/plain", "HAR Entry Not Found"),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        (url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(), seen)
+    }
+
+    /// T18: `hiwave --replay-proxy` loads a HAR'd page, its sheet and its
+    /// script from three hosts, with every request answered by the local
+    /// server. The `.test` hosts do not resolve, so a request that went to
+    /// the network instead would fail and leave the page without them.
+    #[test]
+    fn a_replay_launch_loads_a_har_page_with_no_request_off_this_machine() {
+        static PAGES: &[(&str, &str, &str)] = &[
+            (
+                "http://shop.replay.test/item?sku=7",
+                "text/html",
+                "<html><head><link rel=stylesheet href='http://cdn.replay.test/a.css'>\
+                 <script src='http://js.replay.test/a.js'></script></head>\
+                 <body><p id=p>replayed</p></body></html>",
+            ),
+            ("http://cdn.replay.test/a.css", "text/css", "#p { margin-left: 37px }"),
+            ("http://js.replay.test/a.js", "text/javascript", "document.title = 'from-har';"),
+        ];
+        let (proxy, seen) = replay_server(PAGES);
+        let view = RustKitView::headless_from(
+            content_engine_builder_with(Some(proxy)),
+            Bounds::new(0, 0, 400, 300),
+        );
+        view.wry_load_url("http://shop.replay.test/item?sku=7").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while view.step_load() {
+            assert!(Instant::now() < deadline, "the replayed load never finished");
+        }
+        let title = view.execute_script_sync("document.title").unwrap_or_default();
+        assert!(title.contains("from-har"), "document.title = {title:?}");
+        let margin = view
+            .execute_script_sync("getComputedStyle(document.getElementById('p')).marginLeft")
+            .unwrap_or_default();
+        assert!(margin.contains("37px"), "margin-left = {margin:?}");
+        // The page keeps its own address: script sees the HAR'd origin.
+        let href = view.execute_script_sync("location.href").unwrap_or_default();
+        assert!(href.contains("shop.replay.test/item"), "location.href = {href:?}");
+
+        let seen = seen.lock().unwrap().clone();
+        let mut urls: Vec<&str> = seen.iter().map(|(u, _)| u.as_str()).collect();
+        urls.sort();
+        urls.dedup();
+        assert_eq!(
+            urls,
+            [
+                "http://cdn.replay.test/a.css",
+                "http://js.replay.test/a.js",
+                "http://shop.replay.test/item?sku=7",
+            ],
+            "the replay server saw {seen:?}"
+        );
+        for (url, host) in &seen {
+            let want = url::Url::parse(url).unwrap();
+            assert_eq!(Some(host.as_str()), want.host_str(), "Host sent for {url}");
+        }
+    }
+
+    #[test]
+    fn a_normal_launch_has_no_replay_proxy() {
+        assert!(crate::replay::replay_proxy().is_none());
+        assert!(content_engine_builder().config().replay_proxy.is_none());
     }
 
     /// #739 / Pete's item 4: the window took no click while a page loaded,

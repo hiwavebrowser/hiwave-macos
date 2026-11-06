@@ -48,6 +48,7 @@ const SIDEBAR_WIDTH: f64 = 220.0;
 const LOAD_WAKE: std::time::Duration = std::time::Duration::from_millis(1);
 
 mod ipc;
+mod replay;
 mod state;
 mod webview;
 mod window_stall;
@@ -2746,6 +2747,28 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
     info!("Starting HiWave...");
+    // T18: `--replay-proxy URL` sends every request of the RustKit views to
+    // a local HAR replay server. Set before any view is built; a bad value
+    // stops the launch rather than letting it go to the network.
+    match replay::parse_replay_proxy(std::env::args().skip(1)) {
+        Ok(proxy) => {
+            if let Some(ref url) = proxy {
+                if !cfg!(all(target_os = "macos", feature = "rustkit")) {
+                    eprintln!("hiwave: {} needs the RustKit content view; not starting", replay::FLAG);
+                    std::process::exit(2);
+                }
+                info!(
+                    "Replay launch: every page request goes to {} (HAR replay); the shield sees only loopback URLs and blocks nothing",
+                    url
+                );
+            }
+            replay::set_replay_proxy(proxy);
+        }
+        Err(e) => {
+            eprintln!("hiwave: {e}; not starting");
+            std::process::exit(2);
+        }
+    }
     #[cfg(target_os = "macos")]
     info!(
         "Main thread stack: {} MiB",
