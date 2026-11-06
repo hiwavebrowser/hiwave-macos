@@ -160,7 +160,7 @@ impl Engine {
             }
         }
         // `:hover` follows the pointer; nothing else of the move is heard.
-        self.pointer_moved(id, viewport_x, viewport_y, true);
+        self.pointer_moved(id, viewport_x, viewport_y, true, false);
         self.drag_iteration(id, viewport_x, viewport_y);
         true
     }
@@ -223,7 +223,7 @@ impl Engine {
         view.drag.candidate = None;
         view.drag.active.as_ref()?;
         if view.pointer_at != Some((viewport_x, viewport_y)) {
-            self.pointer_moved(id, viewport_x, viewport_y, true);
+            self.pointer_moved(id, viewport_x, viewport_y, true, false);
             self.drag_iteration(id, viewport_x, viewport_y);
         }
         let view = self.views.get_mut(&id)?;
