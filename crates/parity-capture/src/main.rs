@@ -2016,6 +2016,56 @@ mod tests {
         assert!(inlined < fixture);
     }
 
+    /// The WPT masking reftests mask a box with an image file beside the
+    /// page (`mask-image: url(support/50x50-opaque-blue.svg)`), served by
+    /// wptserve. `load_html` fetches no image (about:blank base, http(s)
+    /// only), so the box painted nothing and 15 of the 30 css-masking-mask
+    /// cases failed without measuring the mask. Chromium 148 on this page
+    /// served over http: purple at (10, 10), white at (58, 10) and (10, 100).
+    /// (Over file:// Chromium paints nothing either: a mask image is a
+    /// CORS-mode fetch and a file:// page has an opaque origin.)
+    #[test]
+    fn an_html_file_capture_masks_with_an_image_file_beside_the_page() {
+        let dir = std::env::temp_dir().join(format!("pc-test-mask-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_file(
+            &dir,
+            "support/blue.svg",
+            r#"<svg width="50" height="50" xmlns="http://www.w3.org/2000/svg"><rect width="50" height="50" fill="blue"/></svg>"#,
+        );
+        write_file(
+            &dir,
+            "page.html",
+            "<!DOCTYPE html><style>body { margin: 0 } div { width: 64px; height: 128px; \
+background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-repeat; }</style><div></div>",
+        );
+        let frame = dir.join("frame.ppm");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            dir.join("page.html").to_str().unwrap(),
+            "--width",
+            "100",
+            "--height",
+            "160",
+            "--dump-frame",
+            frame.to_str().unwrap(),
+        ])
+        .expect("the command line parses");
+        let result = capture(&args, None, &mut None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let ppm = fs::read(&frame).unwrap();
+        let header_end = ppm.windows(4).position(|w| w == b"255\n").unwrap() + 4;
+        let pixel = |x: usize, y: usize| {
+            let i = header_end + (y * 100 + x) * 3;
+            [ppm[i], ppm[i + 1], ppm[i + 2]]
+        };
+        assert_eq!(pixel(10, 10), [128, 0, 128], "under the mask image");
+        assert_eq!(pixel(58, 10), [255, 255, 255], "right of the 50px mask image");
+        assert_eq!(pixel(10, 100), [255, 255, 255], "below it (no-repeat)");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn leaves_remote_and_missing_links_alone() {
         let dir = std::env::temp_dir().join("pc-test-remote");
