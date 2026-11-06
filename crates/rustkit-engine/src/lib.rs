@@ -432,6 +432,8 @@ mod outline_apply_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sheet_reuse_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
@@ -10279,7 +10281,12 @@ impl layout_ctx::LayoutCtx {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
+        let extract_started = std::time::Instant::now();
         let inline_sheets = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
+        let mut parsed = match sheet_cache_enabled() {
+            true => self.take_sheets_parsed(),
+            false => inline_sheets.len(),
+        };
         let adopted = document.root().adopted_styles();
         // The fingerprint vouches for the `<style>` and `<link>` sheets
         // only. Adopted sheets are parsed fresh below, so with any the rule
@@ -10306,6 +10313,7 @@ impl layout_ctx::LayoutCtx {
             if text.is_empty() {
                 continue;
             }
+            parsed += 1;
             match Stylesheet::parse(&text) {
                 Ok(stylesheet) => stylesheets.push(stylesheet),
                 Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
@@ -10385,10 +10393,24 @@ impl layout_ctx::LayoutCtx {
             trace.clear();
         }
 
+        let reused = stylesheets.len().saturating_sub(parsed);
+        let extract_ms = extract_started.elapsed().as_secs_f64() * 1000.0;
+        SheetExtract::add(SheetExtract {
+            builds: 1,
+            parsed,
+            reused,
+            prepared_built: 1,
+            prepared_reused: 0,
+            extract_us: (extract_ms * 1000.0) as u64,
+        });
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
             external_count = external_stylesheets.len(),
             css_var_count = css_vars.len(),
+            reused,
+            parsed,
+            prepared = "built",
+            extract_ms = format_args!("{extract_ms:.1}"),
             "Extracted stylesheets and CSS variables"
         );
 
@@ -16132,6 +16154,13 @@ impl layout_ctx::LayoutCtx {
             Some(lay) => lookup(&mut lay.sheet_cache.borrow_mut()),
             None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
         }
+    }
+
+    /// The `<style>` sheets the building view's sheet cache (or the ad-hoc
+    /// one) parsed since the last build asked.
+    fn take_sheets_parsed(&self) -> usize {
+        self.with_building_lay(|lay| lay.sheet_cache.borrow_mut().take_parsed())
+            .unwrap_or_else(|| ADHOC_SHEET_CACHE.with(|cache| cache.borrow_mut().take_parsed()))
     }
 }
 
@@ -39231,6 +39260,62 @@ thread_local! {
     /// The `<style>` sheet cache of builds that have no view.
     static ADHOC_SHEET_CACHE: std::cell::RefCell<SheetCache> =
         std::cell::RefCell::new(SheetCache::default());
+    /// What the builds on this thread did with their sheets, summed.
+    static SHEET_EXTRACT_TOTALS: Cell<SheetExtract> = const {
+        Cell::new(SheetExtract { builds: 0, parsed: 0, reused: 0, prepared_built: 0, prepared_reused: 0, extract_us: 0 })
+    };
+}
+
+/// What layout builds did with their sheets (the "Extracted stylesheets"
+/// line), summed over builds: how many sheets each parsed and how many it
+/// took as already parsed, and whether its prepared set (the copies kept
+/// for the viewport, ranked by `@layer`, and the custom properties) was
+/// built or taken from the view's cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SheetExtract {
+    pub builds: usize,
+    pub parsed: usize,
+    pub reused: usize,
+    pub prepared_built: usize,
+    pub prepared_reused: usize,
+    /// Time from the start of the sheet extraction to the start of the
+    /// element walk, microseconds.
+    pub extract_us: u64,
+}
+
+impl SheetExtract {
+    /// The totals since `earlier`.
+    #[cfg(test)]
+    pub(crate) fn since(self, earlier: SheetExtract) -> SheetExtract {
+        SheetExtract {
+            builds: self.builds - earlier.builds,
+            parsed: self.parsed - earlier.parsed,
+            reused: self.reused - earlier.reused,
+            prepared_built: self.prepared_built - earlier.prepared_built,
+            prepared_reused: self.prepared_reused - earlier.prepared_reused,
+            extract_us: self.extract_us - earlier.extract_us,
+        }
+    }
+
+    fn add(one: SheetExtract) {
+        SHEET_EXTRACT_TOTALS.with(|t| {
+            let sum = t.get();
+            t.set(SheetExtract {
+                builds: sum.builds + one.builds,
+                parsed: sum.parsed + one.parsed,
+                reused: sum.reused + one.reused,
+                prepared_built: sum.prepared_built + one.prepared_built,
+                prepared_reused: sum.prepared_reused + one.prepared_reused,
+                extract_us: sum.extract_us + one.extract_us,
+            })
+        });
+    }
+
+    /// The totals of this thread's builds so far.
+    #[cfg(test)]
+    pub(crate) fn totals() -> SheetExtract {
+        SHEET_EXTRACT_TOTALS.with(Cell::get)
+    }
 }
 
 /// The index `shared_rule_index` last built or reused, with the selectors
@@ -39289,6 +39374,8 @@ struct SheetCache {
     /// Lookups answered from the cache and parsed, for tests.
     hits: usize,
     misses: usize,
+    /// `misses` as the last build's `take_parsed` saw it.
+    reported: usize,
 }
 
 impl SheetCache {
@@ -39322,6 +39409,14 @@ impl SheetCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+    }
+
+    /// The sheets parsed since the last call: by this build, or for it by
+    /// the steps of its relayout that ran first (the svg paint styles).
+    fn take_parsed(&mut self) -> usize {
+        let parsed = self.misses - self.reported;
+        self.reported = self.misses;
+        parsed
     }
 }
 
