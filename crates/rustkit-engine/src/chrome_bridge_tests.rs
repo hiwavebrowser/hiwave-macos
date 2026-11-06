@@ -48,6 +48,16 @@ fn chrome() -> (Engine, EngineViewId) {
     (engine, view)
 }
 
+/// Long enough for the chrome to apply what it was sent: its state waits
+/// at most 200 ms after the last apply (`STATE_MIN_INTERVAL_MS`), then a
+/// frame.
+fn settle(engine: &mut Engine, view: EngineViewId) {
+    std::thread::sleep(std::time::Duration::from_millis(210));
+    for _ in 0..16 {
+        frame(engine, view);
+    }
+}
+
 /// One live turn of 16 ms: an animation frame.
 fn frame(engine: &mut Engine, view: EngineViewId) {
     rt().block_on(engine.pump_live(view, 16));
@@ -122,18 +132,14 @@ fn full_state(title: &str, loading: bool, blocked: u32) -> String {
 fn a_hundred_progress_updates_lay_the_chrome_out_at_most_twice() {
     let (mut engine, view) = chrome();
     run(&mut engine, view, &bridge(&full_state("Page", false, 0)));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     let before = relayouts(&engine, view);
     for i in 1..=100 {
         run(&mut engine, view, &bridge(&format!(
             r#"{{"loading":true,"title":"Page","shield":{{"enabled":true,"requests_blocked":{i},"trackers_blocked":0}}}}"#
         )));
     }
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     let laid = relayouts(&engine, view) - before;
     assert!(laid <= 2, "100 progress updates laid the chrome out {laid} times");
     assert_eq!(read(&mut engine, view, "document.getElementById('shieldCount').textContent"), "100");
@@ -149,9 +155,7 @@ fn a_hundred_progress_updates_lay_the_chrome_out_at_most_twice() {
 fn unchanged_state_every_frame_does_not_lay_the_chrome_out() {
     let (mut engine, view) = chrome();
     run(&mut engine, view, &bridge(&full_state("Page", true, 5)));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     assert_eq!(read(&mut engine, view, "document.querySelector('.tab.active .tab-title').textContent"), "Page");
     let before = relayouts(&engine, view);
     for _ in 0..100 {
@@ -168,18 +172,14 @@ fn unchanged_state_every_frame_does_not_lay_the_chrome_out() {
 fn a_new_title_updates_the_tab_in_place() {
     let (mut engine, view) = chrome();
     run(&mut engine, view, &bridge(&full_state("Loading", true, 0)));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     run(&mut engine, view, "document.querySelector('.tab.active').__a10 = 7; document.querySelector('#sidebarWorkspaceList .workspace-entry') && (document.querySelector('#sidebarWorkspaceList .workspace-entry').__a10 = 7)");
     run(&mut engine, view, &bridge(&format!(
         r#"{{"title":"Done","tabs":{},"workspaces":{},"loading":false}}"#,
         tabs("Done", 2),
         workspaces("Done", 2)
     )));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     assert_eq!(read(&mut engine, view, "document.querySelector('.tab.active .tab-title').textContent"), "Done");
     assert_eq!(read(&mut engine, view, "document.querySelector('.tab.active').__a10"), "7", "the tab was rebuilt");
     assert_eq!(
@@ -199,14 +199,10 @@ fn a_new_title_updates_the_tab_in_place() {
 fn a_new_tab_rebuilds_the_strip() {
     let (mut engine, view) = chrome();
     run(&mut engine, view, &bridge(&full_state("Page", false, 0)));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     let four = r#"[{"id":1,"title":"One","url":"http://127.0.0.1/p1","is_active":false,"locked":false,"last_visited":1,"decay_level":0},{"id":2,"title":"Page","url":"http://127.0.0.1/p2","is_active":false,"locked":false,"last_visited":2,"decay_level":0},{"id":3,"title":"Three","url":"http://127.0.0.1/p3","is_active":false,"locked":false,"last_visited":3,"decay_level":0},{"id":4,"title":"New Tab","url":"hiwave://newtab","is_active":true,"locked":false,"last_visited":4,"decay_level":0}]"#;
     run(&mut engine, view, &bridge(&format!(r#"{{"tabs":{four}}}"#)));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     assert_eq!(read(&mut engine, view, "document.querySelectorAll('.tab').length"), "4");
     assert_eq!(read(&mut engine, view, "document.querySelector('.tab.active').dataset.id"), "4");
 }
@@ -222,10 +218,34 @@ fn state_sent_before_the_chrome_booted_is_applied() {
         "(function(){{var a=window.__hiwaveApplyState; window.__hiwaveApplyState=undefined; {}; window.__hiwaveApplyState=a; window.__hiwaveDrainEarlyState();}})()",
         bridge(r#"{"url":"http://127.0.0.1/early"}"#)
     ));
-    for _ in 0..3 {
-        frame(&mut engine, view);
-    }
+    settle(&mut engine, view);
     assert_eq!(read(&mut engine, view, "document.getElementById('urlInput').value"), "http://127.0.0.1/early");
+}
+
+/// A load's stream of changes (the shield counter climbing every frame
+/// for a second and more) lays the chrome out at most five times a second,
+/// and the last value is what it shows.
+#[test]
+fn a_stream_of_changes_is_at_most_five_relayouts_a_second() {
+    let (mut engine, view) = chrome();
+    run(&mut engine, view, &bridge(&full_state("Page", true, 0)));
+    settle(&mut engine, view);
+    let (before, started) = (relayouts(&engine, view), std::time::Instant::now());
+    let mut i = 0;
+    while started.elapsed() < std::time::Duration::from_millis(1200) {
+        i += 1;
+        run(&mut engine, view, &bridge(&format!(
+            r#"{{"shield":{{"enabled":true,"requests_blocked":{i},"trackers_blocked":0}}}}"#
+        )));
+        frame(&mut engine, view);
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let wall = started.elapsed().as_millis() as u32;
+    let laid = relayouts(&engine, view) - before;
+    assert!(laid <= wall / 200 + 1, "{laid} relayouts in {wall} ms of changes");
+    assert!(laid >= 2, "the changes were shown as they came, not only at the end: {laid}");
+    settle(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.getElementById('shieldCount').textContent"), i.to_string());
 }
 
 /// The legacy per-call scripts the app sent for one navigation before
@@ -292,12 +312,16 @@ fn chrome_bridge_measure() {
                 frame(&mut engine, view);
             }
         }
+        // What is still waiting is applied.
+        settle(&mut engine, view);
+        eprintln!("A10 {name}: by first cause {}", engine.relayout_stats(view).expect("view").by_first_cause);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let stats = engine.relayout_stats(view).expect("view");
+        let laid = relayouts(&engine, view) - before;
         eprintln!(
-            "A10 {name}: 20 navigations, {scripts} scripts, {} relayouts ({} script_mutation), total {:.1} ms wall, relayout total_ms {:.1}",
-            relayouts(&engine, view) - before,
-            stats.by_first_cause.get("script_mutation"),
+            "A10 {name}: 20 navigations, {scripts} scripts, {laid} relayouts ({:.2}/navigation, {:.1}/s of wall), {:.1} ms wall, relayout total_ms {:.1}",
+            laid as f64 / 20.0,
+            laid as f64 * 1000.0 / ms,
             ms,
             stats.total_ms
         );

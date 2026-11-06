@@ -63,12 +63,6 @@ impl<V: ChromeUi> CoalescedChrome<V> {
         }
     }
 
-    fn take_state_all(&self) -> Option<String> {
-        let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        let parts: Vec<String> = pending.iter().map(|(k, j)| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), j)).collect();
-        (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(",")))
-    }
-
     /// The turn's state as one object, without the values the chrome has
     /// already been sent. Empty when nothing is left.
     fn take_state(&self) -> Option<String> {
@@ -105,11 +99,13 @@ impl<V: ChromeUi> ChromeUi for CoalescedChrome<V> {
     }
 
     fn send_state(&self, key: &'static str, json: String) {
-        // RED (CH3.A10): not coalesced yet; each value goes at once.
-        let _ = (&self.deferred, &self.sent);
-        self.pending.borrow_mut().push((key, json));
-        if let Some(state) = self.take_state_all() {
-            let _ = self.view.eval(&bridge_script(&state));
+        {
+            let mut pending = self.pending.borrow_mut();
+            pending.retain(|(k, _)| *k != key);
+            pending.push((key, json));
+        }
+        if !self.deferred {
+            self.flush_state();
         }
     }
 
