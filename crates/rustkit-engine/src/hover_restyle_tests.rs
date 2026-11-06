@@ -931,3 +931,196 @@ fn zz_cascade_timing_of_a_feed_hover() {
     engine.relayout(view).expect("relayout");
     eprintln!("build_ms={:.2}", last_build_ms(&engine, view));
 }
+
+// ---------------------------------------------------------------------------
+// LAT3 (Pete's flag-on log, 11-05): every one of ebay's 59 hover restyles
+// missed the short path with "a rule reads the pseudo-class where no
+// compound shows it" and cost a full build and layout (210 ms). The sheet's
+// only such rules are two of the shape
+// `[data-x]:not(:has([data-x]:hover)):hover::after`: `:hover` inside
+// `:has()`, which the pointer index did not file, so any `:hover` change
+// could change any element. A `:hover` inside a complex `:not()` member
+// (`.a:not(.b:hover .a)`) missed the same way. Chrome restyles the
+// `:has()` subjects above the changed element and the elements a `:not()`
+// member's compounds name, and nothing else.
+// ---------------------------------------------------------------------------
+
+/// Clears the last miss, so a hit leaves it empty.
+fn clear_miss() {
+    LAST_RESTYLE_MISS.with(|why| why.borrow_mut().clear());
+}
+
+const ANYWHERE_MISS: &str = "a rule reads the pseudo-class where no compound shows it";
+
+/// eBay's shape: a debug outline drawn on an element carrying an attribute
+/// that no element of the page carries. It can never match, so no move
+/// restyles anything for it.
+#[test]
+fn a_has_hover_rule_that_matches_nothing_keeps_the_short_path() {
+    let (mut engine, view) = feed_page(
+        20,
+        "[data-dbg=indigo]:not(:has([data-dbg]:hover)):hover::after,\
+         [data-dbg]:not(:has([data-dbg]:hover)):hover::after{content:'';outline:2px solid red}",
+    );
+    let at_rest = painted(&engine, view);
+    let at = centre(&mut engine, view, "document.getElementById('p3')");
+    clear_miss();
+    hover(&mut engine, view, at);
+    assert_eq!(last_miss(), "", "the short path was taken");
+    assert_eq!(skipped(&engine, view), 1, "every rule that can match is paint");
+    assert!(walked() < 60, "the two builds went into {} nodes: two posts, twice", walked());
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 3 hovered");
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(skipped(&engine, view), 2);
+    assert_eq!(painted(&engine, view), at_rest, "off the feed");
+}
+
+/// `:has(.btn:hover)`: the post whose button is hovered is the subject. It
+/// is restyled (with what is under it) on the short path; the other posts
+/// are not built. Chrome 143 (the probe in the PR body):
+/// post 3's background is rgb(255, 238, 238) with its button hovered,
+/// rgb(246, 247, 248) with its title hovered, post 4's stays transparent.
+#[test]
+fn a_has_hover_rule_restyles_its_subject_on_the_short_path() {
+    let (mut engine, view) = feed_page(20, ".post:has(.btn:hover){background:#fee}");
+    let bg = |engine: &mut Engine, n: usize| {
+        computed(engine, view, &format!("document.getElementById('p{n}')"), "background-color")
+    };
+    let at_rest = painted(&engine, view);
+    let btn = "document.getElementById('p3').querySelector('.btn')";
+    let at = centre(&mut engine, view, btn);
+    clear_miss();
+    hover(&mut engine, view, at);
+    assert_eq!(last_miss(), "", "the short path was taken");
+    assert_eq!(skipped(&engine, view), 1, "a background is paint");
+    assert_eq!(bg(&mut engine, 3), "rgb(255, 238, 238)", "the post holds the hovered button");
+    assert_eq!(bg(&mut engine, 4), "rgba(0, 0, 0, 0)", "the next post does not");
+    assert!(walked() < 60, "the two builds went into {} nodes: two posts, twice", walked());
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "button hovered");
+
+    let at = centre(&mut engine, view, "document.getElementById('p3').querySelector('.title')");
+    clear_miss();
+    hover(&mut engine, view, at);
+    assert_eq!(last_miss(), "");
+    assert_eq!(skipped(&engine, view), 2);
+    assert_eq!(bg(&mut engine, 3), "rgb(246, 247, 248)", "the title is hovered, the button is not");
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "title hovered");
+
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(skipped(&engine, view), 3);
+    assert_eq!(painted(&engine, view), at_rest, "off the feed");
+}
+
+/// A `:has(:hover)` rule that sets a layout property still lays the page
+/// out, for the property's sake and not for the index's.
+#[test]
+fn a_has_hover_rule_that_sets_a_width_is_laid_out() {
+    let (mut engine, view) = feed_page(20, ".post:has(.btn:hover){width:500px}");
+    let width = |engine: &mut Engine, n: usize| -> f32 {
+        js_string(engine, view, &format!("String(document.getElementById('p{n}').getBoundingClientRect().width)"))
+            .parse()
+            .expect("width")
+    };
+    assert_eq!(width(&mut engine, 3), 600.0);
+    let at = centre(&mut engine, view, "document.getElementById('p3').querySelector('.btn')");
+    clear_miss();
+    hover(&mut engine, view, at);
+    assert_eq!(skipped(&engine, view), 0, "width is layout");
+    assert_eq!(last_miss(), "style: width");
+    assert_eq!(width(&mut engine, 3), 518.0, "500px plus padding and border");
+    assert_eq!(width(&mut engine, 4), 600.0);
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "button hovered");
+}
+
+/// `:hover` in a complex `:not()` member: the meta line is grey only under a
+/// hovered post. The post is the compound the member names; restyling its
+/// subtree reaches the meta line. Chrome 143: rgb(1, 2, 3) at rest,
+/// rgb(119, 119, 119) under the hovered post.
+#[test]
+fn a_hover_inside_a_complex_not_member_takes_the_short_path() {
+    let (mut engine, view) = feed_page(20, ".meta:not(.post:hover .meta){color:rgb(1,2,3)}");
+    let meta = |engine: &mut Engine, n: usize| {
+        computed(engine, view, &format!("document.getElementById('p{n}').querySelector('.meta')"), "color")
+    };
+    assert_eq!(meta(&mut engine, 3), "rgb(1, 2, 3)");
+    let at_rest = painted(&engine, view);
+    let at = centre(&mut engine, view, "document.getElementById('p3')");
+    clear_miss();
+    hover(&mut engine, view, at);
+    assert_eq!(last_miss(), "", "the short path was taken");
+    assert_eq!(skipped(&engine, view), 1, "a colour is paint");
+    assert_eq!(meta(&mut engine, 3), "rgb(119, 119, 119)", "under the hovered post");
+    assert_eq!(meta(&mut engine, 4), "rgb(1, 2, 3)");
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "post 3 hovered");
+    hover(&mut engine, view, BESIDE);
+    assert_eq!(painted(&engine, view), at_rest, "off the feed");
+}
+
+/// The ebay-shaped sheet over about 5,000 boxes: hover rules nested in
+/// `:is()` / `:where()`, on a compound left of a combinator, with
+/// `:not([disabled],[aria-disabled=true])`, a `::after`, and the
+/// `:has(:hover)` debug rule. Every move takes the short path, and its two
+/// builds stay under 5 ms in a debug build (the full build is quoted).
+#[test]
+fn an_ebay_shaped_sheet_hovers_on_the_short_path_in_a_few_ms() {
+    let mut html = String::from(
+        "<style>body{margin:0;font:13px/16px sans-serif}\
+         .grid{width:1200px}\
+         .item{display:inline-block;width:280px;margin:4px;padding:6px;border:1px solid #ddd;vertical-align:top}\
+         .item .title{color:#111} .item .price{font-weight:bold} .btn{display:inline-block;padding:2px 6px}\
+         :is(.item:focus-within,.item:hover) .btn{background:#eef}\
+         .grid :is(.item .title:hover,.item .title:focus-visible){color:#06c;text-decoration:underline}\
+         :where(.item:hover) .price{color:#c00}\
+         .btn:not([disabled],[aria-disabled=true]):hover:after{content:'';outline:1px solid #06c}\
+         .item:hover:not(:active) .meta{color:#555}\
+         .vl:is(:hover,:focus-within)>.pop{background:#ffe}\
+         [data-dbg=indigo]:not(:has([data-dbg]:hover)):hover:after,\
+         [data-dbg]:not(:has([data-dbg]:hover)):hover:after{content:'';outline:2px solid red}\
+         </style><div class=grid>",
+    );
+    for i in 0..330 {
+        html.push_str(&format!(
+            "<div class=item id=i{i}><div class=title>Item {i} with a title of some words</div>\
+             <div class=price>$ {i}.99</div><div class=meta>Free shipping <b>new</b></div>\
+             <div class=vl><span class=pop>pop</span></div>\
+             <span class=btn>Watch</span><span class=btn aria-disabled=true>Buy</span></div>"
+        ));
+    }
+    html.push_str("</div>");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 4000 })
+        .expect("view");
+    engine.load_html(view, &html).expect("load_html");
+    let total = boxes(engine.views.get(&view).unwrap().layout.as_ref().unwrap());
+    assert!(total > 5000, "{total} boxes");
+    let mut full = Vec::new();
+    let mut full_ms = Vec::new();
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        engine.relayout(view).expect("relayout");
+        full_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        full.push(last_build_ms(&engine, view));
+    }
+    let mut short = Vec::new();
+    let mut move_ms = Vec::new();
+    for n in 10..20 {
+        let target = if n % 2 == 0 { "" } else { ".querySelector('.title')" };
+        let at = centre(&mut engine, view, &format!("document.getElementById('i{n}'){target}"));
+        let before = skipped(&engine, view);
+        clear_miss();
+        let started = std::time::Instant::now();
+        hover(&mut engine, view, at);
+        move_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(last_miss(), "", "item {n}: the short path was taken");
+        assert_eq!(skipped(&engine, view), before + 1, "item {n}: every hover rule is paint");
+        short.push(last_build_ms(&engine, view));
+    }
+    assert_same(&painted(&engine, view), &painted_by_a_full_relayout(&mut engine, view), "item 19's title hovered");
+    let (short, full, move_ms, full_ms) = (median(short), median(full), median(move_ms), median(full_ms));
+    println!(
+        "LAT3 ebay shape: boxes={total} build_ms per move {short:.2} (short path) vs {full:.2} (full build); \
+         whole move {move_ms:.1} ms vs whole relayout {full_ms:.1} ms"
+    );
+    assert!(short <= 5.0, "a move's builds took {short:.2} ms (full build {full:.2} ms)");
+}
