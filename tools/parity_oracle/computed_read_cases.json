@@ -1855,8 +1855,7 @@
    {
     "prop": "gap",
     "value": "0",
-    "chrome": "0px",
-    "gap": "zero is the unset value: reads normal"
+    "chrome": "0px"
    }
   ],
   "grid": [

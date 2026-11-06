@@ -519,6 +519,14 @@ pub struct Renderer {
     /// frame sets it. The display list covers the viewport it was laid out
     /// for, and this colour is what a larger surface shows past that.
     clear_color: wgpu::Color,
+    /// A transparent target (CH3.A3c, the RustKit chrome over the page):
+    /// every first pass clears to (0, 0, 0, 0) instead of the canvas or
+    /// white. Every pipeline already leaves premultiplied colour in its
+    /// target (straight sources through `ALPHA_BLENDING`, whose alpha is
+    /// `One, OneMinusSrcAlpha`; premultiplied ones through
+    /// `PREMULTIPLIED_ALPHA_BLENDING`), so starting from transparent the
+    /// frame is premultiplied, as Core Animation composites it.
+    transparent: bool,
 }
 
 /// A stacking context for z-ordering.
@@ -794,7 +802,24 @@ impl Renderer {
             filter_sampler,
             surface_format,
             clear_color: wgpu::Color::WHITE,
+            transparent: false,
         })
+    }
+
+    /// Draw frames into a transparent target (CH3.A3c): see `transparent`.
+    pub fn set_transparent(&mut self, transparent: bool) {
+        self.transparent = transparent;
+    }
+
+    /// What a frame's first pass clears to on the paths that did not take
+    /// the canvas colour (gradients, opacity groups, backdrop filters):
+    /// white, as before, unless the target is transparent.
+    fn first_clear(&self) -> wgpu::Color {
+        if self.transparent {
+            wgpu::Color::TRANSPARENT
+        } else {
+            wgpu::Color::WHITE
+        }
     }
 
     /// The colour a frame clears to. The page's canvas, so a surface that
@@ -971,7 +996,7 @@ impl Renderer {
 
         {
             let load_op = if clear {
-                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+                wgpu::LoadOp::Clear(self.first_clear())
             } else {
                 wgpu::LoadOp::Load
             };
@@ -1063,7 +1088,7 @@ impl Renderer {
                             view: target,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                load: wgpu::LoadOp::Clear(self.first_clear()),
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -1083,7 +1108,7 @@ impl Renderer {
 
         {
             let load_op = if clear {
-                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+                wgpu::LoadOp::Clear(self.first_clear())
             } else {
                 wgpu::LoadOp::Load
             };
@@ -2407,7 +2432,7 @@ impl Renderer {
         });
         {
             let load = if clear {
-                wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+                wgpu::LoadOp::Clear(self.first_clear())
             } else {
                 wgpu::LoadOp::Load
             };
@@ -6514,6 +6539,8 @@ impl Renderer {
                 b: 1.0,
                 a: 1.0,
             }
+        } else if self.transparent {
+            wgpu::Color::TRANSPARENT
         } else {
             self.clear_color
         };

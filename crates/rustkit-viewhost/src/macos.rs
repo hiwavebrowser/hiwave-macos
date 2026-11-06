@@ -42,6 +42,8 @@ pub struct MacOSViewHost {
 use crate::input_queue::{drain_input_kind, push_input, retire_view_input, InputKind};
 #[cfg(target_os = "macos")]
 use crate::input_queue::{PendingClick, PendingKey, PendingScroll, PointerInput};
+#[cfg(target_os = "macos")]
+use crate::input_queue::{text_input_state, EditAction, ImeInput};
 
 /// The name of the ivar each `RustKitContentView` carries its [`ViewId`] in.
 #[cfg(target_os = "macos")]
@@ -89,6 +91,155 @@ pub fn drain_pending_scrolls() -> Vec<PendingScroll> {
 fn view_id_of(this: &objc::runtime::Object) -> ViewId {
     let raw: u64 = unsafe { *this.get_ivar::<u64>(VIEW_ID_IVAR) };
     ViewId::from_raw(raw)
+}
+
+// ── text input (CH2.E3) ────────────────────────────────────────────────────
+
+/// `NSNotFound`.
+#[cfg(target_os = "macos")]
+const NOT_FOUND: u64 = i64::MAX as u64;
+
+/// `NSRange`, with the encoding the runtime wants for a method that takes
+/// or returns one (the cocoa crate's has none).
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RkRange {
+    location: u64,
+    length: u64,
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl objc::Encode for RkRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{_NSRange=QQ}") }
+    }
+}
+
+/// What the input method did with the key `keyDown:` handed it.
+#[cfg(target_os = "macos")]
+struct KeyDownContext {
+    view: ViewId,
+    /// It marked or committed composed text: the key was the input
+    /// method's, not the page's.
+    composed: bool,
+    /// Plain text it inserted with nothing marked: the key's text.
+    inserted: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static KEY_DOWN: std::cell::RefCell<Option<KeyDownContext>> = const { std::cell::RefCell::new(None) };
+    /// Each view's marked text, set the moment the input method marks it:
+    /// (start, length) in UTF-16 units of the field's value. The input
+    /// method asks `hasMarkedText`/`markedRange` right after it marks, long
+    /// before the page could answer.
+    static MARKED: std::cell::RefCell<HashMap<ViewId, (usize, usize)>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Drop `view`'s marked text: its field lost the focus (CH2.E3, #918 R1).
+/// Main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn forget_marked(view: ViewId) {
+    MARKED.with(|m| m.borrow_mut().remove(&view));
+}
+
+/// Cmd chords the view took for the page, by token: the retained `NSEvent`
+/// that goes on to the menu when the page does not claim it.
+#[cfg(target_os = "macos")]
+static KEY_EQUIVALENTS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+#[cfg(target_os = "macos")]
+static NEXT_KEY_EQUIVALENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A string the input method passed: an `NSString` or an
+/// `NSAttributedString` (marked text with its underline).
+#[cfg(target_os = "macos")]
+unsafe fn text_of(obj: id) -> String {
+    if obj == nil {
+        return String::new();
+    }
+    let attributed = objc::runtime::Class::get("NSAttributedString").expect("NSAttributedString");
+    let is_attributed: bool = msg_send![obj, isKindOfClass: attributed];
+    let string: id = if is_attributed { msg_send![obj, string] } else { obj };
+    let utf8: *const std::os::raw::c_char = msg_send![string, UTF8String];
+    if utf8.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+    }
+}
+
+/// The Cmd chords Chromium keeps from the page (`IsReservedCommandOrKey`):
+/// new/close tab and window, reopen tab, tab switching, quit. Chrome 143
+/// on this seat: a page's `preventDefault()` does not stop Cmd+T or Cmd+N,
+/// and the page hears no keydown for them; it does hear Cmd+L, Cmd+D and
+/// Cmd+K (tools/real_window, `e3_cmd_key_to_page`'s probe).
+///
+/// `chars` is the event's `charactersIgnoringModifiers`: letters and
+/// brackets match by the character the key types, as the menu's key
+/// equivalents do, so Cmd+W is the W of a Dvorak or AZERTY layout, not the
+/// US W key's position. The arrows, and a key whose character is not
+/// ASCII (a Cyrillic or Greek layout, where AppKit matches the menu by the
+/// US key), go by `keycode`.
+pub fn is_reserved_chord(chars: &str, keycode: u16, cmd: bool, shift: bool, alt: bool) -> bool {
+    const Q: u16 = 12;
+    const W: u16 = 13;
+    const T: u16 = 17;
+    const N: u16 = 45;
+    const BRACKET_RIGHT: u16 = 30;
+    const BRACKET_LEFT: u16 = 33;
+    const LEFT: u16 = 123;
+    const RIGHT: u16 = 124;
+    if !cmd {
+        return false;
+    }
+    if let LEFT | RIGHT = keycode {
+        return alt && !shift;
+    }
+    let mut it = chars.chars();
+    let ch = match (it.next(), it.next()) {
+        (Some(c), None) if c.is_ascii() => Some(c.to_ascii_lowercase()),
+        _ => None,
+    };
+    let ch = ch.or(match keycode {
+        Q => Some('q'),
+        W => Some('w'),
+        T => Some('t'),
+        N => Some('n'),
+        BRACKET_LEFT => Some('['),
+        BRACKET_RIGHT => Some(']'),
+        _ => None,
+    });
+    match ch {
+        Some('q' | 'w' | 't' | 'n') => !alt,
+        Some('[' | ']' | '{' | '}') => shift && !alt,
+        _ => false,
+    }
+}
+
+/// The page did (`claimed`) or did not take the Cmd chord `token`
+/// (`InputKind::KeyEquivalent`). One it did not goes on to the main menu,
+/// Chromium's order: page first, then the menu. Call on the main thread.
+#[cfg(target_os = "macos")]
+pub fn finish_key_equivalent(token: u64, claimed: bool) {
+    let event = {
+        let mut held = KEY_EQUIVALENTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(at) = held.iter().position(|(t, _)| *t == token) else {
+            return;
+        };
+        held.remove(at).1 as id
+    };
+    unsafe {
+        if !claimed {
+            let app: id = msg_send![objc::runtime::Class::get("NSApplication").expect("NSApplication"), sharedApplication];
+            let menu: id = msg_send![app, mainMenu];
+            if menu != nil {
+                let taken: bool = msg_send![menu, performKeyEquivalent: event];
+                debug!(token, taken, "Cmd chord the page did not claim went to the menu");
+            }
+        }
+        let _: () = msg_send![event, release];
+    }
 }
 
 /// The NSView subclass that hosts RustKit content.
@@ -153,6 +304,20 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             }
         }
         extern "C" fn mouse_down(this: &Object, _sel: Sel, event: id) {
+            // A press mid-composition finishes it first (#918 R1): the input
+            // method forgets its marked text, the page keeps it (unmark:
+            // compositionend), before the press can move the focus. Chrome
+            // keeps the text when the focus leaves a composing field.
+            let view = view_id_of(this);
+            if MARKED.with(|m| m.borrow_mut().remove(&view)).is_some() {
+                unsafe {
+                    let context: id = msg_send![this, inputContext];
+                    if context != nil {
+                        let _: () = msg_send![context, discardMarkedText];
+                    }
+                }
+                push_input(view, InputKind::Ime(ImeInput::Unmark));
+            }
             record(this, event, true, PointerInput::Button);
         }
         extern "C" fn mouse_up(this: &Object, _sel: Sel, event: id) {
@@ -254,22 +419,14 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             // and only one was wired.
             true
         }
-        extern "C" fn record_key(this: &Object, event: id, up: bool) {
-            unsafe {
-                let chars: id = msg_send![event, characters];
-                let text = if chars != nil {
-                    let utf8: *const std::os::raw::c_char = msg_send![chars, UTF8String];
-                    if utf8.is_null() {
-                        String::new()
-                    } else {
-                        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
-                    }
-                } else {
-                    String::new()
+        unsafe fn pending_key(event: id, up: bool, text: Option<String>) -> PendingKey {
+                let text = match text {
+                    Some(text) => text,
+                    None => text_of(msg_send![event, characters]),
                 };
                 let keycode: u16 = msg_send![event, keyCode];
                 let flags: u64 = msg_send![event, modifierFlags];
-                let key = PendingKey {
+                PendingKey {
                     text,
                     mac_keycode: keycode,
                     up,
@@ -277,39 +434,257 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                     cmd: flags & (1 << 20) != 0,    // NSEventModifierFlagCommand
                     shift: flags & (1 << 17) != 0,  // NSEventModifierFlagShift
                     alt: flags & (1 << 19) != 0,    // NSEventModifierFlagOption
-                };
-                push_input(view_id_of(this), InputKind::Key(key));
+                }
+        }
+        extern "C" fn record_key(this: &Object, event: id, up: bool, text: Option<String>) {
+            unsafe {
+                push_input(view_id_of(this), InputKind::Key(pending_key(event, up, text)));
             }
         }
         extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
-            record_key(this, event, false);
             // Deliberately NOT calling super: consuming here is what keeps a
             // keystroke from ALSO reaching whatever else might interpret it.
-            // Cmd-shortcuts still work: the menu system sees key equivalents
-            // before the responder chain does.
-        }
-        // Edit > Select All (muda's predefined item, Cmd+A) is a key
-        // equivalent: AppKit hands Cmd+A to the menu before any keyDown:,
-        // and the menu sends `selectAll:` down the responder chain, so the
-        // chord never reached the page (CH2.E12). Answer the action as the
-        // chord itself, a Cmd+A key press; the window decides whether a
-        // focused text field takes it.
-        extern "C" fn select_all(this: &Object, _sel: Sel, _sender: id) {
-            for up in [false, true] {
-                let key = PendingKey {
-                    text: "a".to_string(),
-                    mac_keycode: 0, // kVK_ANSI_A
-                    up,
-                    ctrl: false,
-                    cmd: true,
-                    shift: false,
-                    alt: false,
-                };
-                push_input(view_id_of(this), InputKind::Key(key));
+            unsafe {
+                let flags: u64 = msg_send![event, modifierFlags];
+                if flags & (1 << 20) != 0 {
+                    // A Cmd chord no menu item took (performKeyEquivalent:
+                    // passed it on): the page's, as a key.
+                    return record_key(this, event, false, None);
+                }
+                // The input method first (CH2.E3): a dead key or an IME
+                // marks and commits through setMarkedText:/insertText:,
+                // a plain key comes back as insertText: or
+                // doCommandBySelector:. Only with a text field focused
+                // (#918 R1): with nothing editable the view has no input
+                // context, as Chromium has none for TEXT_INPUT_TYPE_NONE,
+                // so a dead key or an IME's key is a plain key the page's
+                // shortcuts hear.
+                let view = view_id_of(this);
+                if text_input_state(view).is_none() {
+                    forget_marked(view);
+                    return record_key(this, event, false, None);
+                }
+                let marked_before = MARKED.with(|m| m.borrow().contains_key(&view));
+                KEY_DOWN.with(|k| {
+                    *k.borrow_mut() = Some(KeyDownContext { view, composed: false, inserted: None })
+                });
+                let context: id = msg_send![this, inputContext];
+                if context != nil {
+                    let _: bool = msg_send![context, handleEvent: event];
+                }
+                let done = KEY_DOWN.with(|k| k.borrow_mut().take());
+                let Some(done) = done else { return };
+                if done.composed || marked_before {
+                    // The input method's: the page hears the composition.
+                    return;
+                }
+                // A plain key: the page hears it as one, with the text the
+                // input method inserted for it (an Option+letter character
+                // is the key's own text), and the window maps the specials
+                // (arrows, delete, return) from the keyCode as before.
+                record_key(this, event, false, done.inserted);
             }
         }
         extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
-            record_key(this, event, true);
+            record_key(this, event, true, None);
+        }
+        // ---- NSTextInputClient (CH2.E3) ----
+        extern "C" fn set_marked_text(this: &Object, _sel: Sel, string: id, _selected: RkRange, replacement: RkRange) {
+            let view = view_id_of(this);
+            let text = unsafe { text_of(string) };
+            let units = text.encode_utf16().count();
+            MARKED.with(|m| {
+                let mut m = m.borrow_mut();
+                if units == 0 {
+                    m.remove(&view);
+                } else if let Some(marked) = m.get_mut(&view) {
+                    marked.1 = units;
+                } else {
+                    let start = if replacement.location != NOT_FOUND {
+                        replacement.location as usize
+                    } else {
+                        text_input_state(view).map_or(0, |s| s.selected.0)
+                    };
+                    m.insert(view, (start, units));
+                }
+            });
+            KEY_DOWN.with(|k| {
+                if let Some(k) = k.borrow_mut().as_mut().filter(|k| k.view == view) {
+                    k.composed = true;
+                }
+            });
+            push_input(view, InputKind::Ime(ImeInput::SetMarked(text)));
+        }
+        extern "C" fn insert_text_replacing(this: &Object, _sel: Sel, string: id, replacement: RkRange) {
+            let view = view_id_of(this);
+            let text = unsafe { text_of(string) };
+            let had_marked = MARKED.with(|m| m.borrow_mut().remove(&view).is_some());
+            let replace = (!had_marked && replacement.location != NOT_FOUND)
+                .then_some((replacement.location as usize, replacement.length as usize));
+            let deferred = KEY_DOWN.with(|k| {
+                let mut k = k.borrow_mut();
+                let Some(k) = k.as_mut().filter(|k| k.view == view) else {
+                    return false;
+                };
+                if had_marked || replace.is_some() || k.composed {
+                    k.composed = true;
+                    return false;
+                }
+                // A plain key's text: it goes with the key itself.
+                k.inserted.get_or_insert_with(String::new).push_str(&text);
+                true
+            });
+            if !deferred {
+                push_input(view, InputKind::Ime(ImeInput::Insert { text, replace }));
+            }
+        }
+        extern "C" fn insert_text(this: &Object, sel: Sel, string: id) {
+            insert_text_replacing(this, sel, string, RkRange { location: NOT_FOUND, length: 0 });
+        }
+        extern "C" fn unmark_text(this: &Object, _sel: Sel) {
+            let view = view_id_of(this);
+            if MARKED.with(|m| m.borrow_mut().remove(&view).is_some()) {
+                push_input(view, InputKind::Ime(ImeInput::Unmark));
+            }
+        }
+        // No input context while nothing editable has focus (#918 R1):
+        // Chromium's view answers nil for TEXT_INPUT_TYPE_NONE, so no input
+        // method composes keys that have nowhere to go.
+        extern "C" fn input_context(this: &Object, _sel: Sel) -> id {
+            if text_input_state(view_id_of(this)).is_none() {
+                return nil;
+            }
+            unsafe {
+                let superclass = Class::get("NSView").expect("NSView class");
+                msg_send![super(this, superclass), inputContext]
+            }
+        }
+        extern "C" fn has_marked_text(this: &Object, _sel: Sel) -> bool {
+            let view = view_id_of(this);
+            MARKED.with(|m| m.borrow().contains_key(&view))
+        }
+        extern "C" fn marked_range(this: &Object, _sel: Sel) -> RkRange {
+            let view = view_id_of(this);
+            match MARKED.with(|m| m.borrow().get(&view).copied()) {
+                Some((start, len)) => RkRange { location: start as u64, length: len as u64 },
+                None => RkRange { location: NOT_FOUND, length: 0 },
+            }
+        }
+        extern "C" fn selected_range(this: &Object, _sel: Sel) -> RkRange {
+            let view = view_id_of(this);
+            if let Some((start, len)) = MARKED.with(|m| m.borrow().get(&view).copied()) {
+                return RkRange { location: (start + len) as u64, length: 0 };
+            }
+            match text_input_state(view) {
+                Some(s) => RkRange {
+                    location: s.selected.0 as u64,
+                    length: s.selected.1.saturating_sub(s.selected.0) as u64,
+                },
+                None => RkRange { location: NOT_FOUND, length: 0 },
+            }
+        }
+        extern "C" fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> id {
+            unsafe { msg_send![objc::runtime::Class::get("NSArray").expect("NSArray"), array] }
+        }
+        extern "C" fn attributed_substring(_this: &Object, _sel: Sel, _range: RkRange, _actual: *mut std::ffi::c_void) -> id {
+            // The page's text is not mirrored here; the input method works
+            // without it (reconversion and the dictionary panel do not).
+            nil
+        }
+        extern "C" fn character_index_for_point(_this: &Object, _sel: Sel, _point: cocoa::foundation::NSPoint) -> u64 {
+            NOT_FOUND
+        }
+        // Where the IME's candidate window goes: under the caret the page
+        // last reported, in screen coordinates.
+        extern "C" fn first_rect_for_range(this: &Object, _sel: Sel, range: RkRange, actual: *mut std::ffi::c_void) -> cocoa::foundation::NSRect {
+            use cocoa::foundation::{NSPoint, NSRect, NSSize};
+            unsafe {
+                if !actual.is_null() {
+                    *(actual as *mut RkRange) = range;
+                }
+                let frame: NSRect = msg_send![this, frame];
+                let (x, top, height) = text_input_state(view_id_of(this))
+                    .and_then(|s| s.caret)
+                    .unwrap_or((0.0, 0.0, 0.0));
+                // The view is not flipped: its y runs up from the bottom.
+                let local = NSRect::new(NSPoint::new(x, frame.size.height - top - height), NSSize::new(0.0, height));
+                let in_window: NSRect = msg_send![this, convertRect: local toView: nil];
+                let window: id = msg_send![this, window];
+                if window == nil {
+                    return in_window;
+                }
+                msg_send![window, convertRectToScreen: in_window]
+            }
+        }
+        extern "C" fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
+            // A key the input method did not turn into text (arrows,
+            // delete, return, emacs chords): the key itself goes to the
+            // page from keyDown:, which maps it from its keyCode.
+            let _ = this;
+        }
+        // ---- the Edit menu (CH2.E3) ----
+        // muda's predefined Edit items send these down the responder chain.
+        // They reach the page as edit commands, with no keydown, as a menu
+        // click in Chrome does. A Cmd chord reaches them only when the page
+        // did not claim it (performKeyEquivalent: below), so they never
+        // loop back into a key. (#912's selectAll: queued a Cmd+A press;
+        // with the chord now going to the page first that press would come
+        // back here unclaimed, so it is an edit action too.)
+        fn edit(this: &Object, action: EditAction) {
+            push_input(view_id_of(this), InputKind::Edit(action));
+        }
+        extern "C" fn copy(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::Copy)
+        }
+        extern "C" fn cut(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::Cut)
+        }
+        extern "C" fn paste(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::Paste)
+        }
+        extern "C" fn undo(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::Undo)
+        }
+        extern "C" fn redo(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::Redo)
+        }
+        extern "C" fn select_all(this: &Object, _sel: Sel, _sender: id) {
+            edit(this, EditAction::SelectAll)
+        }
+        // A Cmd chord while this view has the keyboard: the page hears its
+        // keydown before the menu (Chromium's order, CH2.E3). AppKit asks
+        // every view of the key window before the main menu; the view takes
+        // the chord, and the app hands back the ones the page did not
+        // claim (`finish_key_equivalent`). Chromium's reserved chords
+        // (Cmd+T/N/W/Q, ...) go straight to the menu, as in Chrome.
+        extern "C" fn perform_key_equivalent(this: &Object, _sel: Sel, event: id) -> bool {
+            unsafe {
+                let superclass = Class::get("NSView").expect("NSView class");
+                let pass = |event: id| -> bool { msg_send![super(this, superclass), performKeyEquivalent: event] };
+                let kind: u64 = msg_send![event, type];
+                let flags: u64 = msg_send![event, modifierFlags];
+                if kind != 10 || flags & (1 << 20) == 0 {
+                    return pass(event);
+                }
+                let window: id = msg_send![this, window];
+                let responder: id = if window == nil { nil } else { msg_send![window, firstResponder] };
+                if responder != this as *const Object as id {
+                    return pass(event);
+                }
+                let key = pending_key(event, false, None);
+                let plain = text_of(msg_send![event, charactersIgnoringModifiers]);
+                if is_reserved_chord(&plain, key.mac_keycode, key.cmd, key.shift, key.alt) {
+                    return pass(event);
+                }
+                let token = NEXT_KEY_EQUIVALENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _: id = msg_send![event, retain];
+                KEY_EQUIVALENTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((token, event as usize));
+                push_input(view_id_of(this), InputKind::KeyEquivalent { key, token });
+                true
+            }
         }
         extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> bool {
             // A click on an inactive window should reach the page (this is
@@ -356,7 +731,51 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
             );
             decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
+            decl.add_method(
+                sel!(setMarkedText:selectedRange:replacementRange:),
+                set_marked_text as extern "C" fn(&Object, Sel, id, RkRange, RkRange),
+            );
+            decl.add_method(
+                sel!(insertText:replacementRange:),
+                insert_text_replacing as extern "C" fn(&Object, Sel, id, RkRange),
+            );
+            decl.add_method(sel!(insertText:), insert_text as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(unmarkText), unmark_text as extern "C" fn(&Object, Sel));
+            decl.add_method(sel!(hasMarkedText), has_marked_text as extern "C" fn(&Object, Sel) -> bool);
+            decl.add_method(sel!(inputContext), input_context as extern "C" fn(&Object, Sel) -> id);
+            decl.add_method(sel!(markedRange), marked_range as extern "C" fn(&Object, Sel) -> RkRange);
+            decl.add_method(sel!(selectedRange), selected_range as extern "C" fn(&Object, Sel) -> RkRange);
+            decl.add_method(
+                sel!(validAttributesForMarkedText),
+                valid_attributes_for_marked_text as extern "C" fn(&Object, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(attributedSubstringForProposedRange:actualRange:),
+                attributed_substring as extern "C" fn(&Object, Sel, RkRange, *mut std::ffi::c_void) -> id,
+            );
+            decl.add_method(
+                sel!(characterIndexForPoint:),
+                character_index_for_point as extern "C" fn(&Object, Sel, cocoa::foundation::NSPoint) -> u64,
+            );
+            decl.add_method(
+                sel!(firstRectForCharacterRange:actualRange:),
+                first_rect_for_range
+                    as extern "C" fn(&Object, Sel, RkRange, *mut std::ffi::c_void) -> cocoa::foundation::NSRect,
+            );
+            decl.add_method(
+                sel!(doCommandBySelector:),
+                do_command_by_selector as extern "C" fn(&Object, Sel, Sel),
+            );
+            decl.add_method(sel!(copy:), copy as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(cut:), cut as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(paste:), paste as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(undo:), undo as extern "C" fn(&Object, Sel, id));
+            decl.add_method(sel!(redo:), redo as extern "C" fn(&Object, Sel, id));
             decl.add_method(sel!(selectAll:), select_all as extern "C" fn(&Object, Sel, id));
+            decl.add_method(
+                sel!(performKeyEquivalent:),
+                perform_key_equivalent as extern "C" fn(&Object, Sel, id) -> bool,
+            );
             decl.add_method(
                 sel!(mouseDown:),
                 mouse_down as extern "C" fn(&Object, Sel, id),
@@ -375,6 +794,11 @@ pub fn rustkit_content_view_class() -> &'static objc::runtime::Class {
                 sel!(updateTrackingAreas),
                 update_tracking_areas as extern "C" fn(&Object, Sel),
             );
+        }
+        // The input context exists only for a view that says it is a
+        // text input client (`-[NSView inputContext]`).
+        if let Some(protocol) = objc::runtime::Protocol::get("NSTextInputClient") {
+            decl.add_protocol(protocol);
         }
         decl.register();
     });
@@ -401,6 +825,53 @@ impl RegionStore {
 
 #[cfg(target_os = "macos")]
 static REGIONS: RegionStore = RegionStore(std::sync::OnceLock::new());
+
+/// Make a `RustKitContentView` a transparent view (CH3.A3c, the alpha
+/// route): its layer is not opaque and its region, when it has one, is
+/// only its hit region (`hitTest:`), not a layer mask, so its own pixels
+/// decide what covers the views below. Takes effect at the next
+/// [`set_raw_view_region`]. No-op for a view of another class.
+#[cfg(target_os = "macos")]
+pub fn set_raw_view_transparent(view: isize, transparent: bool) {
+    use objc::runtime::{Class, Object};
+    if view == 0 {
+        return;
+    }
+    let view = view as id;
+    unsafe {
+        let class: *const Class = msg_send![view, class];
+        if class != rustkit_content_view_class() as *const Class {
+            return;
+        }
+        let id = view_id_of(&*(view as *const Object)).raw();
+        if let Ok(mut set) = TRANSPARENT_VIEWS.get_or_init(|| Mutex::new(std::collections::HashSet::new())).lock() {
+            if transparent {
+                set.insert(id);
+            } else {
+                set.remove(&id);
+            }
+        }
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            // wgpu's CAMetalLayer is a sublayer; its own `opaque` follows the
+            // surface's alpha mode (`Compositor::set_surface_transparent`).
+            let _: () = msg_send![layer, setOpaque: !transparent];
+        }
+    }
+}
+
+/// `RustKitContentView`s made transparent (CH3.A3c): their region is a hit
+/// region only.
+#[cfg(target_os = "macos")]
+static TRANSPARENT_VIEWS: std::sync::OnceLock<Mutex<std::collections::HashSet<u64>>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn is_transparent_view(id: u64) -> bool {
+    TRANSPARENT_VIEWS
+        .get()
+        .and_then(|set| set.lock().ok().map(|set| set.contains(&id)))
+        .unwrap_or(false)
+}
 
 /// Give a `RustKitContentView` a region (CH3.A3): outside the rects (view
 /// coordinates, top-left origin) the view is not composited (a mask on its
@@ -436,6 +907,9 @@ pub fn set_raw_view_region(view: isize, region: Option<Vec<crate::region::Region
         let transaction = Class::get("CATransaction").expect("CATransaction class");
         let _: () = msg_send![transaction, begin];
         let _: () = msg_send![transaction, setDisableActions: true];
+        // A transparent view's pixels decide what covers the views below
+        // (CH3.A3c): its region is for `hitTest:` only, never a mask.
+        let region = if is_transparent_view(id) { None } else { region };
         match region {
             None => {
                 let _: () = msg_send![layer, setMask: nil];
@@ -507,6 +981,40 @@ pub fn raise_raw_view_above(view: isize, below: isize) {
         }
         // NSWindowAbove = 1.
         let _: () = msg_send![superview, addSubview: view positioned: 1i64 relativeTo: below];
+    }
+}
+
+/// Make `view` the frontmost of its superview's subviews, when it is not
+/// already (CH3.A3b: the RustKit chrome over panels built after it). The
+/// window's first responder is kept: a view re-added to its superview can
+/// lose it. True when the view moved.
+#[cfg(target_os = "macos")]
+pub fn raise_raw_view_to_front(view: isize) -> bool {
+    if view == 0 {
+        return false;
+    }
+    let view = view as id;
+    unsafe {
+        let superview: id = msg_send![view, superview];
+        if superview == nil {
+            return false;
+        }
+        let subviews: id = msg_send![superview, subviews];
+        let last: id = msg_send![subviews, lastObject];
+        if last == view {
+            return false;
+        }
+        let window: id = msg_send![view, window];
+        let responder: id = if window != nil { msg_send![window, firstResponder] } else { nil };
+        // NSWindowAbove = 1; relative to nil: above every sibling.
+        let _: () = msg_send![superview, addSubview: view positioned: 1i64 relativeTo: nil];
+        if window != nil && responder != nil {
+            let now: id = msg_send![window, firstResponder];
+            if now != responder {
+                let _: bool = msg_send![window, makeFirstResponder: responder];
+            }
+        }
+        true
     }
 }
 
