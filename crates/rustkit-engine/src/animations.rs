@@ -472,6 +472,25 @@ pub(crate) struct Animations {
     /// The last id handed to a transition or animation (one sequence
     /// for both, so an id names one record of either kind).
     last_id: u64,
+    /// LAT2: each animated element's style as the last build cascaded it,
+    /// and what the build painted of it, so that a frame can be restyled
+    /// without a build (`LayoutCtx::animation_frame`).
+    pub(crate) captured: HashMap<usize, Captured>,
+}
+
+/// An animated element as the last build (or animation frame) left it.
+#[derive(Clone, Debug)]
+pub(crate) struct Captured {
+    /// Its cascaded style, before transitions, animations and script's
+    /// animated-style layer.
+    pub(crate) cascaded: ComputedStyle,
+    /// The animatable properties' values after them (`all_values`).
+    pub(crate) values: Vec<AnimValue>,
+    /// `animation_settled_opacity` after them (paint reads it for a box
+    /// that names an animation).
+    pub(crate) settled_opacity: Option<f32>,
+    /// Script's animated-style entries the build applied.
+    pub(crate) script: Option<Vec<(String, String, String)>>,
 }
 
 impl Animations {
@@ -589,7 +608,26 @@ impl Animations {
         for a in gone {
             self.cancel_animation_event(&a);
         }
+        self.captured.retain(|node, _| seen(*node, &self.seen));
         self.seen.retain(|_, s| *s == serial);
+    }
+
+    /// Whether `node` has a transition or a CSS animation record.
+    pub(crate) fn has_records(&self, node: usize) -> bool {
+        self.transitions.iter().any(|t| t.node == node) || self.css.iter().any(|a| a.node == node)
+    }
+
+    /// The elements with a transition or a CSS animation record.
+    pub(crate) fn record_nodes(&self) -> Vec<usize> {
+        let mut nodes: Vec<usize> = self
+            .transitions
+            .iter()
+            .map(|t| t.node)
+            .chain(self.css.iter().map(|a| a.node))
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
     }
 
     /// Cancel this element's transitions (it lost its computed style).
@@ -984,6 +1022,34 @@ pub(crate) fn prop_indices(name: &str) -> Vec<usize> {
 /// The value of animatable property `index` in `style`.
 pub(crate) fn prop_value(style: &ComputedStyle, index: usize) -> AnimValue {
     (PROPS[index].get)(style)
+}
+
+/// The name of animatable property `index`.
+pub(crate) fn prop_name(index: usize) -> &'static str {
+    PROPS[index].name
+}
+
+/// Every animatable property's value in `style`, by index.
+pub(crate) fn all_values(style: &ComputedStyle) -> Vec<AnimValue> {
+    PROPS.iter().map(|p| (p.get)(style)).collect()
+}
+
+/// Whether animatable property `index` changes what is painted and
+/// nothing layout reads (LAT2): a frame that moves only these keeps the
+/// laid-out boxes. `color` inherits, so the frame repaints the text runs
+/// that take it too (`Engine::paint_animation_frame`).
+pub(crate) fn is_paint_prop(index: usize) -> bool {
+    matches!(
+        PROPS[index].name,
+        "opacity"
+            | "transform"
+            | "color"
+            | "background-color"
+            | "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
+            | "border-left-color"
+    )
 }
 
 /// One running CSS animation (css-animations-1 §4, web-animations-1 §4.8

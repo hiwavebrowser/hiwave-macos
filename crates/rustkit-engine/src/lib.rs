@@ -1235,7 +1235,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1243,7 +1243,9 @@ impl ViewState {
             stats.mutations,
             stats.trees_reused,
             stats.total_ms,
-            stats.layouts_skipped
+            stats.layouts_skipped,
+            stats.animation_frames_painted,
+            stats.animation_paint_ms
         );
     }
 
@@ -9967,7 +9969,8 @@ impl Engine {
             anims.active() && anims.last_build_clock != Some(anims.clock_ms)
         };
         let mut laid = false;
-        if needs_frame {
+        // LAT2: a frame that moves only paint keeps the laid-out boxes.
+        if needs_frame && !self.paint_animation_frame(id)? {
             self.relayout_for(id, RelayoutCause::Animation)?;
             laid = true;
         }
@@ -10008,6 +10011,116 @@ impl Engine {
         inspector_glue::drain_errors(bindings, &view.inspector, "timers");
         laid |= self.flush_script_dom_writes(id, Some(RelayoutCause::Animation))?;
         Ok(laid)
+    }
+
+    /// LAT2: one frame of the view's animations, transitions and Web
+    /// Animations without a build or a layout. The animated elements are
+    /// restyled from the style they cascaded to at the last build
+    /// (`LayoutCtx::animation_frame`); when every value that moved is
+    /// paint (`animations::is_paint_prop`), the new values are copied onto
+    /// the laid-out boxes (and `color` onto the text runs that inherit
+    /// it), the display list is built from them and the view is painted.
+    /// `false` when the frame needs a relayout: a layout property moved,
+    /// an element has no captured style, the boxes do not show the last
+    /// frame, or anything else is pending for the view.
+    fn paint_animation_frame(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        if !animation_repaint_enabled() {
+            return Ok(false);
+        }
+        let miss = |why: &str| {
+            debug!(?id, why, "Animation frame needs a layout");
+            Ok(false)
+        };
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let (Some(with), Some(_), Some(_), Some(document)) =
+            (view.laid_with.as_ref(), view.layout.as_ref(), view.display_list.as_ref(), view.document.clone())
+        else {
+            return miss("no layout");
+        };
+        if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
+            return miss("a relayout is pending");
+        }
+        let size = match view.headless_bounds {
+            Some(b) => (b.width, b.height),
+            None => match self.presenter.as_mut().map(|p| p.host_bounds(view.viewhost_id)) {
+                Some(Ok(b)) => (b.width, b.height),
+                _ => return miss("no bounds"),
+            },
+        };
+        let view = &self.views[&id];
+        if with.size != size {
+            return miss("resized");
+        }
+        let started = std::time::Instant::now();
+        let changes = match self.lctx.animation_frame(self.build_view(id)) {
+            Ok(changes) => changes,
+            Err(why) => return miss(&why),
+        };
+        // The canvas takes the root's and body's background at build.
+        let root = document.document_element().map(|n| n.id.raw());
+        let body = document.body().map(|n| n.id.raw());
+        if changes.iter().any(|c| Some(c.node) == root || Some(c.node) == body) {
+            return miss("the root element or body animates");
+        }
+        if !changes.is_empty() {
+            let by_node: HashMap<usize, &layout_ctx::FrameChange> =
+                changes.iter().map(|c| (c.node, c)).collect();
+            let layout = view.layout.as_ref().expect("checked above");
+            let mut found = std::collections::HashSet::new();
+            if let Err(why) = check_animation_frame(layout, &by_node, &mut found) {
+                return miss(&why);
+            }
+            // An element without a box (`display: contents`) passes its
+            // colour to boxes this frame does not know.
+            for change in &changes {
+                let colour = change.props.iter().any(|(i, _, _)| animations::prop_name(*i) == "color");
+                if colour && !found.contains(&change.node) {
+                    return miss("an element without a box changes colour");
+                }
+            }
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            let Some(mut laid) = view.layout.take() else {
+                return Ok(false);
+            };
+            apply_animation_frame(Rc::make_mut(&mut laid), &by_node);
+            let display_list = self.display_list_for(id, &laid);
+            let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+            view.layout = Some(laid);
+            view.display_list = Some(Arc::new(display_list));
+            // The images a frame paints are the ones laid out.
+            let planned = view.images_planned_for == view.frame_generation;
+            view.frame_generation += 1;
+            if planned {
+                view.images_planned_for = view.frame_generation;
+            }
+        }
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        // Script reads of computed style and `getAnimations()` answer from
+        // the frame.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+        }
+        if !changes.is_empty() {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.set_forced_layout(self.forced_layout_for(id));
+            }
+        }
+        // The frame's own cost: restyle, patch, display list. The commit
+        // below is the presenter's (on the window thread in the app).
+        let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if !changes.is_empty() {
+            self.render(id)?;
+        }
+        if let Some(view) = self.views.get_mut(&id) {
+            let stats = &mut view.relayout_stats;
+            stats.layouts_skipped = stats.layouts_skipped.saturating_add(1);
+            stats.animation_frames_painted = stats.animation_frames_painted.saturating_add(1);
+            stats.animation_paint_ms += took_ms;
+        }
+        debug!(?id, elements = changes.len(), took_ms, "Animation frame painted without layout");
+        Ok(true)
     }
 
     /// Whether the node of raw id `raw` is in `document`'s tree.
@@ -20716,10 +20829,37 @@ impl Engine {
         let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
         let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
         let element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+        let canvas_painted = bindings.take_canvas_painted();
+        // LAT2: script's animated-style layer is all that was written (a
+        // Web Animations frame): a frame that moves only paint keeps the
+        // laid-out boxes.
+        let layer_only = dirty != DomDirty::Clean
+            && !log.full
+            && !log.records.is_empty()
+            && log
+                .records
+                .iter()
+                .all(|r| r.kind == rustkit_bindings::MutationKind::Style && r.attr.is_none())
+            && !element_scrolled
+            && !canvas_painted;
+        if layer_only && self.paint_animation_frame(id)? {
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+                bindings.take_script_mutations();
+            }
+            if scrolled {
+                self.render(id)?;
+            }
+            return Ok(scrolled);
+        }
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(bindings) = view.bindings.as_ref() else {
+            return Ok(false);
+        };
         if dirty != DomDirty::Clean {
             view.pending_dirty = Some(view.dirty_set(&log));
         }
-        let canvas_painted = bindings.take_canvas_painted();
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
             if element_scrolled || canvas_painted {
@@ -40640,6 +40780,128 @@ fn note_snapshot_image(image_box: &LayoutBox, width: Option<f32>, height: Option
             }
         }
     });
+}
+
+/// Unless `RUSTKIT_ANIMATION_REPAINT=0`: an animation frame that moves
+/// only paint keeps the laid-out tree (LAT2). Read once.
+fn animation_repaint_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_ANIMATION_REPAINT").is_none_or(|v| v != "0"))
+}
+
+/// Whether a box is an element's own (not a text run, an anonymous box or
+/// the box of another element).
+fn element_box_of_other(b: &LayoutBox, node: usize) -> bool {
+    b.node_id.is_some_and(|other| other != node)
+}
+
+/// Whether `b` or a box under it is fixed or sticky: a transform on an
+/// ancestor holds them (layout reads whether it is the identity).
+fn holds_fixed_or_sticky(b: &LayoutBox) -> bool {
+    b.position == rustkit_layout::Position::Fixed
+        || matches!(b.style.position, rustkit_css::Position::Fixed | rustkit_css::Position::Sticky)
+        || b.children.iter().any(holds_fixed_or_sticky)
+}
+
+/// The runs under element box `b` that take its colour: text and
+/// anonymous boxes, not other elements' boxes (or what is under them).
+fn for_inherited_runs(b: &mut LayoutBox, node: usize, f: &mut dyn FnMut(&mut LayoutBox)) {
+    for child in &mut b.children {
+        if element_box_of_other(child, node) {
+            continue;
+        }
+        f(child);
+        for_inherited_runs(child, node, f);
+    }
+}
+
+/// LAT2: whether the laid-out tree shows the last frame of every element
+/// that `changes` moves, so that copying the new values onto it paints
+/// what a relayout would: each of its boxes holds the old values, a
+/// transform that becomes or stops being the identity holds no fixed or
+/// sticky box, and a colour change reaches no other element that took
+/// the old colour (it inherits it, and its own boxes are not patched).
+fn check_animation_frame(
+    b: &LayoutBox,
+    changes: &HashMap<usize, &layout_ctx::FrameChange>,
+    found: &mut std::collections::HashSet<usize>,
+) -> Result<(), String> {
+    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+        found.insert(change.node);
+        for (index, was, is) in &change.props {
+            if animations::prop_value(&b.style, *index) != *was {
+                return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
+            }
+            match animations::prop_name(*index) {
+                "transform" => {
+                    let identity = |v: &animations::AnimValue| {
+                        let mut s = rustkit_css::ComputedStyle::default();
+                        animations::set_prop_value(&mut s, *index, v);
+                        s.effective_transform().is_identity()
+                    };
+                    if identity(was) != identity(is) && b.children.iter().any(holds_fixed_or_sticky) {
+                        return Err("a transform comes or goes over a fixed or sticky box".into());
+                    }
+                }
+                "color" => {
+                    let animations::AnimValue::Color(old) = was else { continue };
+                    if let Some(why) = inherits_colour_elsewhere(b, change.node, old) {
+                        return Err(why);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((was, _)) = change.settled {
+            if b.style.animation_settled_opacity != was {
+                return Err("the box does not show the last settled opacity".into());
+            }
+        }
+    }
+    b.children.iter().try_for_each(|child| check_animation_frame(child, changes, found))
+}
+
+/// The first element under `b` (not under another element) that shows
+/// the colour `old` it would inherit from element `node`.
+fn inherits_colour_elsewhere(b: &LayoutBox, node: usize, old: &rustkit_css::Color) -> Option<String> {
+    for child in &b.children {
+        if element_box_of_other(child, node) {
+            if child.style.color == *old {
+                return Some("an element under it takes the colour".into());
+            }
+            continue;
+        }
+        if let Some(why) = inherits_colour_elsewhere(child, node, old) {
+            return Some(why);
+        }
+    }
+    None
+}
+
+/// LAT2: copy an animation frame's values onto the laid-out tree
+/// (checked by `check_animation_frame`).
+fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx::FrameChange>) {
+    if let Some(change) = b.node_id.and_then(|node| changes.get(&node)) {
+        for (index, was, is) in &change.props {
+            animations::set_prop_value(&mut b.style, *index, is);
+            if animations::prop_name(*index) == "color" {
+                let (animations::AnimValue::Color(old), animations::AnimValue::Color(new)) = (was, is) else {
+                    continue;
+                };
+                for_inherited_runs(b, change.node, &mut |run| {
+                    if run.style.color == *old {
+                        run.style.color = *new;
+                    }
+                });
+            }
+        }
+        if let Some((_, is)) = change.settled {
+            b.style.animation_settled_opacity = is;
+        }
+    }
+    for child in &mut b.children {
+        apply_animation_frame(child, changes);
+    }
 }
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only

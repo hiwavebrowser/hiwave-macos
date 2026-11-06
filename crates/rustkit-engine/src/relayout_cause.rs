@@ -240,7 +240,8 @@ pub struct RelayoutStats {
     /// Animation frames painted without a relayout (LAT2): every value
     /// the frame moved was paint, copied onto the laid-out boxes.
     pub animation_frames_painted: u32,
-    /// Time spent in them: restyle, display list, paint.
+    /// Time spent in them: the restyle, the patch and the display list
+    /// (the commit to the presenter is not counted).
     pub animation_paint_ms: f64,
     /// Forced layouts: script read geometry after a DOM write in the same
     /// task, so the page was laid out (not painted) for the read.
