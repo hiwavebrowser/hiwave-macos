@@ -3735,6 +3735,49 @@ mod tests {
         assert_eq!(bindings.take_dirty(), DomDirty::Clean);
     }
 
+    // #947 x #941: the LAT7 marks (write cause, unseen writes, no-op writes)
+    // against LAT2's paint-only marker (`beyond_animation_layer`).
+    #[test]
+    fn lat7_marks_and_the_animation_layer_marker() {
+        // The WAAPI layer write is a script write: it names its cause.
+        let d = DirtyMark::default();
+        d.mark_animation_layer(DomDirty::Layout, "animation");
+        assert!(d.written_since_layout());
+        assert_eq!(d.cause(), Some("animation"), "the layer write logs cause=animation");
+        assert!(!d.beyond_animation_layer(), "the layer write alone is paint-only");
+
+        // A write the published layout cannot see (display:none subtree)
+        // still changes the DOM the engine lays out next: it is beyond the
+        // layer, so the paint-only frame is not taken.
+        d.mark_unseen(DomDirty::Style);
+        assert!(d.beyond_animation_layer(), "an unseen write is beyond the layer");
+        assert_eq!(d.cause(), Some("animation"), "it does not rename the first cause");
+        assert_eq!(d.take(), DomDirty::Style);
+        assert!(!d.beyond_animation_layer(), "take resets it");
+
+        // Unseen first, on a current layout: no forced layout, but beyond.
+        let d = DirtyMark::default();
+        d.mark_unseen(DomDirty::Layout);
+        assert!(!d.written_since_layout(), "a read needs no forced layout");
+        assert_eq!(d.cause(), None);
+        assert!(d.beyond_animation_layer());
+
+        // A no-op write (the same value again: `write` answers `Clean`) is
+        // not a write, seen or unseen.
+        let d = DirtyMark::default();
+        d.mark_animation_layer(DomDirty::Layout, "animation");
+        d.mark(DomDirty::Clean, "style");
+        d.mark_unseen(DomDirty::Clean);
+        assert!(!d.beyond_animation_layer(), "a no-op write leaves the paint-only frame alone");
+        assert_eq!(d.cause(), Some("animation"));
+        assert_eq!(d.get(), DomDirty::Layout);
+
+        // A real seen write after the layer: beyond, cause kept as first.
+        d.mark(DomDirty::Layout, "text");
+        assert!(d.beyond_animation_layer());
+        assert_eq!(d.cause(), Some("animation"));
+    }
+
     fn bound(html: &str) -> DomBindings {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         bindings
