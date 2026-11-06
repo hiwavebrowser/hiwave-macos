@@ -1320,6 +1320,7 @@ impl ViewState {
         // And the parsed `<style>` sheets: correct to keep (they are keyed
         // by text), but the new document is unlikely to share them.
         self.lay.sheet_cache.borrow_mut().clear();
+        self.lay.prepared_sheets.borrow_mut().take();
         self.initial_layout_deferred = false;
         self.images_attempted.clear();
     }
@@ -10287,70 +10288,98 @@ impl layout_ctx::LayoutCtx {
             true => self.take_sheets_parsed(),
             false => inline_sheets.len(),
         };
-        let adopted = document.root().adopted_styles();
-        // The fingerprint vouches for the `<style>` and `<link>` sheets
-        // only. Adopted sheets are parsed fresh below, so with any the rule
-        // index compares selectors instead; reused by fingerprint, it
-        // indexed none of their rules.
-        let fingerprint = match adopted.iter().all(String::is_empty) {
-            true => self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport),
-            false => None,
-        };
-        // Copies: the steps below filter and rank the rules in place, and
-        // must not reach the cached sheets.
-        let mut stylesheets: Vec<Stylesheet> =
-            inline_sheets.into_iter().map(Rc::unwrap_or_clone).collect();
+        // `document.adoptedStyleSheets` follows the document's `<style>`
+        // and `<link>` sheets. The document node holds the text.
+        let adopted: Vec<String> =
+            document.root().adopted_styles().into_iter().filter(|text| !text.is_empty()).collect();
+        // What the prepared sheets are made of, by identity (see
+        // `SheetsFingerprint`); `None` when the build cannot vouch for it.
+        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport);
 
         // Everything from here to the finished box tree is what Chrome's
         // `UpdateLayoutTree` covers; stylesheet parsing above is its `parse`.
         let cascade_started = parse_started.map(|t| (t.elapsed(), std::time::Instant::now()));
+        // Sub-phase marks for the "Cascade timing" line: sheet copy and
+        // `@media` filter, custom-property extraction, rule index, walk.
+        let mark = || cascade_started.map(|_| std::time::Instant::now());
 
-        // Add external stylesheets (loaded from <link> elements)
-        stylesheets.extend(external_stylesheets.iter().cloned());
-        // `document.adoptedStyleSheets` follows the document's `<style>`
-        // and `<link>` sheets. The document node holds the text.
-        for text in adopted {
-            if text.is_empty() {
-                continue;
+        // LAT4: the view's last prepared sheets, while nothing they were
+        // made from changed. A `<style>` whose text changed is a new sheet
+        // from the sheet cache (only it parsed), a late or replaced
+        // `<link>` list a new `Rc`, an adopted sheet's edit new text, a
+        // resize another viewport: each a different fingerprint.
+        let lay = self.building_lay();
+        let prepared = match (&fingerprint, &lay) {
+            (Some(now), Some(lay)) => lay
+                .prepared_sheets
+                .borrow()
+                .as_ref()
+                .filter(|prepared| prepared.from.as_ref().is_some_and(|from| from.same_as(now)))
+                .cloned(),
+            _ => None,
+        };
+        let prepared_reused = prepared.is_some();
+        let (vars_started, prepared) = match prepared {
+            Some(prepared) => (mark(), prepared),
+            None => {
+                // Copies: the steps below filter and rank the rules in
+                // place, and must not reach the cached sheets.
+                let mut stylesheets: Vec<Stylesheet> =
+                    inline_sheets.iter().map(|sheet| Stylesheet::clone(sheet)).collect();
+                // Add external stylesheets (loaded from <link> elements)
+                stylesheets.extend(external_stylesheets.iter().cloned());
+                for text in &adopted {
+                    parsed += 1;
+                    match Stylesheet::parse(text) {
+                        Ok(stylesheet) => stylesheets.push(stylesheet),
+                        Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
+                    }
+                }
+                Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
+                // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
+                rustkit_css::assign_layer_order(&mut stylesheets);
+                let vars_started = mark();
+                let css_vars = Rc::new(self.extract_css_variables(&stylesheets));
+                // The `::first-letter` scan runs only on a page with some
+                // `@container` rule (#782 R2 nit).
+                let any_container_rule =
+                    stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
+                let container_first_letter = any_container_rule
+                    && stylesheets
+                        .iter()
+                        .any(|s| s.rules.iter().any(container_query::floats_first_letter));
+                let prepared = PreparedSheets {
+                    from: fingerprint.clone(),
+                    // The document tree's sheets. Shared, so the build can
+                    // hand them back to nodes slotted from the document
+                    // (`shadow_tree`); the rules stay where they are, so
+                    // the rule index still recognizes them.
+                    sheets: Rc::new(stylesheets),
+                    css_vars,
+                    any_container_rule,
+                    container_first_letter,
+                };
+                if let (Some(_), Some(lay)) = (&prepared.from, &lay) {
+                    *lay.prepared_sheets.borrow_mut() = Some(prepared.clone());
+                }
+                (vars_started, prepared)
             }
-            parsed += 1;
-            match Stylesheet::parse(&text) {
-                Ok(stylesheet) => stylesheets.push(stylesheet),
-                Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
-            }
-        }
-
-        Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
-        // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
-        rustkit_css::assign_layer_order(&mut stylesheets);
-        // The document tree's sheets. Shared, so the build can hand them
-        // back to nodes slotted from the document (`shadow_tree`); the
-        // rules stay where they are, so the rule index still recognizes them.
-        let stylesheets = Rc::new(stylesheets);
+        };
+        drop(lay);
+        drop(inline_sheets);
+        let stylesheets = prepared.sheets;
+        let css_vars = prepared.css_vars;
         let _tree_scopes = shadow_tree::BuildScope::install(
             document,
             &stylesheets,
             viewport,
             javascript_enabled,
         );
-
-        // Sub-phase marks for the "Cascade timing" line: sheet copy and
-        // `@media` filter, custom-property extraction, rule index, walk.
-        let mark = || cascade_started.map(|_| std::time::Instant::now());
-        let vars_started = mark();
-        let css_vars = self.extract_css_variables(&stylesheets);
         let index_started = mark();
-        // The `::first-letter` scan runs only on a page with some
-        // `@container` rule (#782 R2 nit).
-        let any_container_rule =
-            stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
         let _container_queries = container_query::DocumentScope::install(
             viewport,
-            any_container_rule,
-            any_container_rule
-                && stylesheets
-                    .iter()
-                    .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
+            prepared.any_container_rule,
+            prepared.container_first_letter,
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -10399,8 +10428,8 @@ impl layout_ctx::LayoutCtx {
             builds: 1,
             parsed,
             reused,
-            prepared_built: 1,
-            prepared_reused: 0,
+            prepared_built: usize::from(!prepared_reused),
+            prepared_reused: usize::from(prepared_reused),
             extract_us: (extract_ms * 1000.0) as u64,
         });
         info!(
@@ -10409,7 +10438,7 @@ impl layout_ctx::LayoutCtx {
             css_var_count = css_vars.len(),
             reused,
             parsed,
-            prepared = "built",
+            prepared = if prepared_reused { "reused" } else { "built" },
             extract_ms = format_args!("{extract_ms:.1}"),
             "Extracted stylesheets and CSS variables"
         );
@@ -17931,14 +17960,15 @@ impl layout_ctx::LayoutCtx {
 impl layout_ctx::LayoutCtx {
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
-    /// and the view's external list (likewise), plus the viewport the
-    /// `@media` filter will use. `None` when the external sheets are not
+    /// and the view's external list (likewise), the adopted sheets' text,
+    /// plus the viewport the `@media` filter will use. `None` when the external sheets are not
     /// the building view's own list or the cache is off; the rule index
     /// then compares selectors.
     fn sheets_fingerprint(
         &self,
         inline: &[Rc<Stylesheet>],
         external: &[Stylesheet],
+        adopted: &[String],
         viewport: Option<(f32, f32)>,
     ) -> Option<SheetsFingerprint> {
         if !sheet_cache_enabled() {
@@ -17959,6 +17989,7 @@ impl layout_ctx::LayoutCtx {
             viewport,
             inline: inline.to_vec(),
             external,
+            adopted: adopted.to_vec(),
         })
     }
 }
@@ -39328,8 +39359,9 @@ struct LastRuleIndex {
 }
 
 /// What a layout build's sheet list is made of, by identity: the `<style>`
-/// sheets as the sheet cache holds them, the view's external list, and
-/// the viewport that decides which `@media` rules stay. The build's sheets
+/// sheets as the sheet cache holds them, the view's external list, the
+/// adopted sheets' text, and the viewport that decides which `@media`
+/// rules stay. The build's sheets
 /// are a pure function of these (copies, filtered by the viewport), so two
 /// equal fingerprints mean the same selectors in the same places.
 ///
@@ -39342,6 +39374,27 @@ struct SheetsFingerprint {
     inline: Vec<Rc<Stylesheet>>,
     /// `None` when the build has no external sheets.
     external: Option<Rc<Vec<Stylesheet>>>,
+    /// The text of each adopted sheet (`document.adoptedStyleSheets`),
+    /// which the build parses after the others.
+    adopted: Vec<String>,
+}
+
+/// A build's sheets as the cascade reads them, kept on the view
+/// (`ViewLayout::prepared_sheets`) for the next build made `from` the same
+/// sheets: copies of the `<style>`, `<link>` and adopted sheets with the
+/// `@media` rules the viewport rejects dropped and the `@layer`s ranked,
+/// the custom properties declared on the root, and whether any rule is an
+/// `@container` one. Immutable once made; a build that changes a sheet
+/// makes a new one.
+#[derive(Clone)]
+pub(crate) struct PreparedSheets {
+    /// `None`: made by a build that could not vouch for its sheets (not
+    /// kept).
+    from: Option<SheetsFingerprint>,
+    sheets: Rc<Vec<Stylesheet>>,
+    css_vars: Rc<HashMap<String, String>>,
+    any_container_rule: bool,
+    container_first_letter: bool,
 }
 
 impl SheetsFingerprint {
@@ -39354,6 +39407,7 @@ impl SheetsFingerprint {
                 (Some(a), Some(b)) => Rc::ptr_eq(a, b),
                 _ => false,
             }
+            && self.adopted == other.adopted
     }
 }
 
