@@ -953,30 +953,47 @@ impl DomBindings {
         self.runtime.borrow_mut().install_reentry_probe();
     }
 
-    /// Create new DOM bindings.
-    pub fn new(mut runtime: JsRuntime) -> Result<Self, BindingError> {
-        debug!("Initializing DOM bindings");
+    /// Create DOM bindings for a web document: no app bridge. The page
+    /// sees no `window.ipc`, `window.hiwaveChrome` or `__rk_ipc_post`, as
+    /// in Chromium (CH3.A7).
+    pub fn new(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, false)
+    }
 
-        // `window.ipc.postMessage` lands here (CH2.E9). Registered before
-        // the setup scripts: a global added after them made every page
-        // load measurably slower (two app tests 1.4 s -> 3.0 s).
+    /// Create DOM bindings for one of the app's own documents (the chrome,
+    /// a panel): with the app bridge, `window.ipc.postMessage` and
+    /// `window.hiwaveChrome.postMessage`, whose messages
+    /// [`Self::drain_ipc_queue`] hands to the app (CH2.E9, CH3.A7).
+    pub fn new_app_owned(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, true)
+    }
+
+    fn build(mut runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+        debug!(app_bridge, "Initializing DOM bindings");
+
+        // `window.ipc.postMessage` lands here (CH2.E9), in an app-owned
+        // document only (CH3.A7). Registered before the setup scripts: a
+        // global added after them made every page load measurably slower
+        // (two app tests 1.4 s -> 3.0 s).
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
-        let queue = Rc::clone(&ipc_queue);
-        runtime.register_host_function(
-            "__rk_ipc_post",
-            1,
-            Box::new(move |args| {
-                if let Some(JsValue::String(payload)) = args.first() {
-                    queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
-                }
-                JsValue::Undefined
-            }),
-        )?;
+        if app_bridge {
+            let queue = Rc::clone(&ipc_queue);
+            runtime.register_host_function(
+                "__rk_ipc_post",
+                1,
+                Box::new(move |args| {
+                    if let Some(JsValue::String(payload)) = args.first() {
+                        queue.borrow_mut().push(IpcMessage { payload: payload.clone() });
+                    }
+                    JsValue::Undefined
+                }),
+            )?;
+        }
 
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut runtime)?;
+        Self::inject_globals(&mut runtime, app_bridge)?;
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
@@ -1042,6 +1059,16 @@ impl DomBindings {
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
         runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        // CH3.A7: the engine's own globals (`__rustkit_*`, `__rk*`) stay
+        // out of `Object.keys(window)` and for-in, which list none of them
+        // in Chromium. They stay configurable: setup scripts redefine some.
+        runtime.evaluate_script(
+            "Object.getOwnPropertyNames(globalThis).forEach(function (n) { \
+               if (n.indexOf('__rustkit_') !== 0 && n.indexOf('__rk') !== 0) return; \
+               var d = Object.getOwnPropertyDescriptor(globalThis, n); \
+               if (d && d.enumerable && d.configurable) { d.enumerable = false; Object.defineProperty(globalThis, n, d); } \
+             });",
+        )?;
 
         Ok(Self {
             runtime: RefCell::new(runtime),
@@ -1294,7 +1321,7 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime) -> Result<(), BindingError> {
+    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool) -> Result<(), BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -1397,7 +1424,8 @@ impl DomBindings {
         // Intl (en-US only) and the toLocale*String methods over it (web_intl.js).
         runtime.evaluate_script(include_str!("web_intl.js"))?;
 
-        // IPC bridge for communication with Rust
+        // IPC bridge for communication with Rust: the app's own documents
+        // only (CH3.A7). A web page gets none of it, as in Chromium.
         let ipc_js = r#"
             // IPC object for browser-to-Rust communication. The message
             // goes to a queue on the Rust side (`__rk_ipc_post`, installed
@@ -1416,7 +1444,9 @@ impl DomBindings {
             };
         "#;
 
-        runtime.evaluate_script(ipc_js)?;
+        if app_bridge {
+            runtime.evaluate_script(ipc_js)?;
+        }
 
         // Document object stub
         let document_js = r#"

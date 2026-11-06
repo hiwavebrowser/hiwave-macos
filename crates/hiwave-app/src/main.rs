@@ -667,6 +667,16 @@ fn chrome_html_with_bridge() -> String {
     html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER)
 }
 
+/// Load one of the app's own documents (the chrome, a panel; built with
+/// [`html_with_bridge`]) into `view`, and make it an app-owned view first (CH3.A7): only
+/// these documents get `window.ipc` / `window.hiwaveChrome`. The content
+/// view is never passed here, so web pages have none of it.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn load_app_document(view: &webview_rustkit::RustKitView, document: &str) -> hiwave_core::HiWaveResult<()> {
+    view.set_app_owned();
+    view.load_html_internal(document)
+}
+
 /// A document for a RustKit view: `JS_BRIDGE` (the WebKit views run it as
 /// an initialization script) as the head's first script, and `tail`, when
 /// there is one, as the body's last (CH3.A4: the panels' documents).
@@ -859,7 +869,7 @@ fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &st
         );
         let view = webview_rustkit::RustKitView::new(window, bounds)
             .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
-        view.load_html_internal(&html_with_bridge(html, &panel_probe_script()))
+        load_app_document(&view, &html_with_bridge(html, &panel_probe_script()))
             .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
         info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
         let panel = PanelView::RustKit(view);
@@ -2140,6 +2150,29 @@ mod panel_tests {
         assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER));
     }
 
+    /// CH3.A7: the chrome is loaded into an app-owned view and keeps its
+    /// bridge (its startup `get_sidebar_width` reaches the window); a
+    /// content view, built as the app builds it, is not app-owned.
+    #[test]
+    fn the_chrome_loads_into_an_app_owned_view_and_round_trips_get_sidebar_width() {
+        use std::time::{Duration, Instant};
+        let content = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 800, 600));
+        assert!(!content.is_app_owned(), "a content view must not be app-owned");
+        let chrome = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 1200, 120));
+        load_app_document(&chrome, &chrome_html_with_bridge()).unwrap();
+        assert!(chrome.is_app_owned());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut got = Vec::new();
+        while !got.iter().any(|m: &String| m.contains(r#""cmd":"get_sidebar_width""#)) {
+            assert!(Instant::now() < deadline, "the chrome posted {got:?}");
+            if !chrome.step_load() {
+                chrome.process_events();
+            }
+            got.extend(chrome.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn input_goes_to_the_view_it_was_recorded_on() {
         let (page, chrome, shelf, settings) = (ViewId::new(), ViewId::new(), ViewId::new(), ViewId::new());
@@ -2707,7 +2740,7 @@ fn main() {
         );
         let view = webview_rustkit::RustKitView::new(&window, bounds)
             .expect("Failed to create the RustKit chrome view");
-        view.load_html_internal(&chrome_html_with_bridge())
+        load_app_document(&view, &chrome_html_with_bridge())
             .expect("Failed to load the chrome into RustKit");
         Some(ChromeView::RustKit(view))
     } else {
