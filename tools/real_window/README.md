@@ -97,6 +97,7 @@ of a run (about a minute for all checks).
 | `e4_cursor_hand` | CH2.E4 CSS cursor | `e4_mouse.html`: `hwdrive cursor` reads the system cursor: hand over the link, left-right over `ew-resize`, arrow in the title bar | yes |
 | `e4_tooltip` | CH2.E4 `title` | the link's `title` is the view's tooltip (debug log) and a tooltip window shows after a rest | yes |
 | `e4_chrome_tab` | CH2.E4, `HIWAVE_RUSTKIT_CHROME=1` | hand over a chrome tab; a right press on it reaches chrome.html's handler (Tab Actions panel in the saved frame), no native menu | yes |
+| `e19_icon_hover` | CH2.E19 | `e19_icon_hover.html`: an inline svg icon filled red, green by `#b:hover svg path`; the frame at rest, under the pointer, and off the button | yes |
 | `b11_settings_save` | CH2.B11 Save Settings | `e9_final.html`; the sidebar's Settings, the 'Sidebar Open on Startup' toggle and Save Settings, found by `hwdrive find` (Accessibility) and clicked; asserts settings.json changed and that the page said 'Settings saved!' only when it was written | yes, and Accessibility |
 
 ### The I0(a) checks
