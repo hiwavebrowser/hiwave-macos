@@ -4,8 +4,9 @@
 Ported from atlas/trench-realsite (A1 + A2): when the Chrome oracle lands on a
 403/challenge page or a chrome-error:// page, the site is `oracle_blocked`:
 READABLE/LOOKS RIGHT are oracle failures (not RustKit fails), the summary names
-it, and `n/scorable` leaves it out. The oracle runs headed, off-screen, by
-default (A1); REALSITE_ORACLE_HEADLESS=1 / --oracle-headless restores headless.
+it, and `n/scorable` leaves it out. The oracle is headless by default; headed
+(A1) is opt-in (--oracle-headed / REALSITE_ORACLE_HEADED=1), needs an idle
+seat, and holds ~/.claude/realwindow.lock for the run (R1 HOLD on #960).
 
 No browser and no network: the Chrome and RustKit captures are stubbed.
 """
@@ -154,23 +155,36 @@ def launch_options(env_extra):
 
 @unittest.skipUnless(NODE, "node not on PATH")
 class OracleHeadedA1(unittest.TestCase):
+    """R1 HOLD (#960): headless is the default; headed is opt-in and needs the lock."""
 
-    def test_default_is_headed_and_off_screen(self):
+    def test_default_is_headless(self):
         o = launch_options({})
-        self.assertIs(o["headless"], False)
-        self.assertIn("--window-position=-2400,0", o["args"])
-        self.assertIn("--window-size=1280,800", o["args"])
-        self.assertIn("--force-color-profile=srgb", o["args"])  # deterministic flags kept
-
-    def test_env_restores_headless(self):
-        o = launch_options({"REALSITE_ORACLE_HEADLESS": "1"})
         self.assertIs(o["headless"], True)
         self.assertFalse(any(a.startswith("--window-position") for a in o["args"]))
+        self.assertIn("--force-color-profile=srgb", o["args"])  # deterministic flags kept
 
-    def test_board_flag_sets_the_env(self):
+    def test_headed_only_when_asked_and_the_lock_is_held(self):
+        lock = Path(tempfile.mkdtemp(prefix="t19_lock_")) / "realwindow.lock"
+        try:
+            # Asked, but nobody holds the lock: still headless.
+            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock)})
+            self.assertIs(o["headless"], True)
+            lock.mkdir()
+            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_REALWINDOW_LOCK": str(lock)})
+            self.assertIs(o["headless"], False)
+            self.assertIn("--window-position=-2400,0", o["args"])
+            self.assertIn("--window-size=1280,800", o["args"])
+            # --oracle-headless (compat) wins over a headed request.
+            o = launch_options({"REALSITE_ORACLE_HEADED": "1", "REALSITE_ORACLE_HEADLESS": "1",
+                                "REALSITE_REALWINDOW_LOCK": str(lock)})
+            self.assertIs(o["headless"], True)
+        finally:
+            shutil.rmtree(lock.parent, ignore_errors=True)
+
+    def test_board_flags_exist(self):
         src = (REPO / "scripts" / "realsite_board.py").read_text(encoding="utf-8")
-        self.assertIn("--oracle-headless", src)
-        self.assertIn("REALSITE_ORACLE_HEADLESS", src)
+        for flag in ("--oracle-headed", "--oracle-headless", "REALSITE_ORACLE_HEADED"):
+            self.assertIn(flag, src)
 
     def test_board_capture_uses_the_shared_launch_and_records_status(self):
         src = (REPO / "tools" / "parity_oracle" / "realsite.mjs").read_text(encoding="utf-8")
@@ -178,6 +192,98 @@ class OracleHeadedA1(unittest.TestCase):
         self.assertIn("oracleLaunchOptions(", body)
         self.assertIn("http_status", body)
         self.assertIn("isNavigationRequest()", body)
+
+
+class RealWindowGate(unittest.TestCase):
+    """The board's headed oracle holds ~/.claude/realwindow.lock and needs an idle seat."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="t19_gate_"))
+        self.lock_path = self.tmp / "realwindow.lock"
+        patcher = mock.patch.object(realsite_board, "REALWINDOW_LOCK", self.lock_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.log = []
+
+    def session(self, want_headed, idle=10_000.0, wait_s=0):
+        return realsite_board.OracleSession(want_headed, lock_wait_s=wait_s,
+                                            idle_fn=lambda: idle, log=self.log.append,
+                                            sleep=lambda s: None)
+
+    def test_headless_by_default_takes_no_lock(self):
+        with self.session(False) as o:
+            self.assertFalse(o.headed)
+            self.assertFalse(self.lock_path.exists())
+            env = o.apply({"REALSITE_ORACLE_HEADED": "1"})  # a stray env can't sneak through
+            self.assertNotEqual(env.get("REALSITE_ORACLE_HEADED"), "1")
+            self.assertEqual(env.get("REALSITE_ORACLE_HEADLESS"), "1")
+
+    def test_headed_takes_and_releases_the_lock(self):
+        with self.session(True) as o:
+            self.assertTrue(o.headed)
+            self.assertTrue(self.lock_path.is_dir())
+            self.assertEqual((self.lock_path / "pid").read_text().strip(), str(os.getpid()))
+            env = o.apply({})
+            self.assertEqual(env.get("REALSITE_ORACLE_HEADED"), "1")
+            self.assertEqual(env.get("REALSITE_REALWINDOW_LOCK"), str(self.lock_path))
+            self.assertNotIn("REALSITE_ORACLE_HEADLESS", env)
+        self.assertFalse(self.lock_path.exists())
+
+    def test_lock_released_when_the_run_raises(self):
+        with self.assertRaises(RuntimeError):
+            with self.session(True) as o:
+                self.assertTrue(self.lock_path.is_dir())
+                raise RuntimeError("boom")
+        self.assertFalse(self.lock_path.exists())
+
+    def test_lock_busy_means_no_headed_launch(self):
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            self.lock_path.mkdir()
+            (self.lock_path / "pid").write_text(str(holder.pid))
+            with self.assertRaises(realsite_board.OracleLockBusy) as cm:
+                with self.session(True):
+                    self.fail("headed oracle ran without the lock")
+            self.assertIn("ORACLE BLOCKED", str(cm.exception))
+            # The other holder's lock is left alone.
+            self.assertEqual((self.lock_path / "pid").read_text(), str(holder.pid))
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_stale_lock_of_a_dead_pid_is_recovered(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.lock_path.mkdir()
+        (self.lock_path / "pid").write_text(str(dead.pid))
+        with self.session(True) as o:
+            self.assertTrue(o.headed)
+        self.assertFalse(self.lock_path.exists())
+
+    def test_seat_in_use_falls_back_to_headless_with_the_reason(self):
+        with self.session(True, idle=12.0) as o:
+            self.assertFalse(o.headed)
+            self.assertFalse(self.lock_path.exists())
+            self.assertIn("HID idle", o.reason)
+            self.assertEqual(o.apply({}).get("REALSITE_ORACLE_HEADLESS"), "1")
+            s = realsite_board.summarize([dict(score(OK), id="g")], "ts", 1280, 800, ["g"], oracle=o)
+        self.assertIs(s["oracle_headless"], True)
+        self.assertIn("HID idle", s["oracle_reason"])
+        self.assertTrue(any("HID idle" in line for line in self.log))
+
+    def test_seat_becoming_active_mid_run_drops_to_headless(self):
+        idle = [10_000.0]
+        o = realsite_board.OracleSession(True, lock_wait_s=0, idle_fn=lambda: idle[0],
+                                         log=self.log.append, sleep=lambda s: None)
+        with o:
+            self.assertTrue(o.headed)
+            idle[0] = 3.0
+            o.recheck("google")
+            self.assertFalse(o.headed)
+            self.assertFalse(self.lock_path.exists())
+            self.assertIn("google", o.reason)
+        self.assertFalse(self.lock_path.exists())
 
 
 if __name__ == "__main__":
