@@ -110,6 +110,13 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// Do not follow a navigation the page asks for during a URL capture
+    /// (`location` set, `link.click()`, `form.submit()`, a meta refresh):
+    /// capture the first page as it was. By default one hop is followed and
+    /// reported as `followed_navigation`.
+    #[arg(long)]
+    no_follow_navigation: bool,
+
     /// Write the view's Inspector event log for the whole capture to this
     /// file, as JSON Lines (one record per line; see
     /// docs/INSPECTOR_EVENT_LOG.md). URLs lose their query and fragment.
@@ -272,6 +279,32 @@ struct CaptureResult {
     /// Absent means an older capture tool. `false` is the flag-off worker.
     #[serde(default)]
     content_thread: bool,
+    /// URL mode: the one navigation the page asked for and the capture
+    /// followed (T17). The frame and dumps are of the page it landed on.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    followed_navigation: Option<FollowedNavigation>,
+    /// URL mode: navigations the page asked for that were not followed (a
+    /// second hop, or any with `--no-follow-navigation`).
+    #[serde(skip_serializing_if = "is_zero", default)]
+    navigations_not_followed: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A followed script navigation, shape-only: the target is origin and path,
+/// no query, fragment or userinfo.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct FollowedNavigation {
+    to: String,
+    /// `load` (asked before the first page's load returned) or `live` (asked
+    /// from a live-loop turn).
+    during: String,
+    /// Milliseconds from the first load's start to the ask being seen.
+    at_ms: u64,
+    /// `location.replace()`, a meta refresh or the same URL again.
+    replace: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -366,6 +399,8 @@ impl CaptureResult {
             page_report: None,
             capture_ms: None,
             content_thread: false,
+            followed_navigation: None,
+            navigations_not_followed: 0,
         }
     }
 
@@ -2629,5 +2664,177 @@ p { height: 300px; margin: 0 } #bar { position: fixed; left: 0; right: 0; bottom
             split_selector_list(":is(#a, .b) > span, [title=\"x, y\"]"),
             vec![":is(#a, .b) > span", "[title=\"x, y\"]"]
         );
+    }
+
+    /// T17: a two-page site on a local port. `/two` is page two (green, a
+    /// 123x77 box); every other path is page one (red), with `head`.
+    fn two_page_site(head: &'static str) -> u16 {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let body = if line.starts_with("GET /two") {
+                        concat!(
+                            "<html><head><style>html,body{margin:0;background:rgb(0,160,0)}</style></head>",
+                            "<body><div id=two style=\"width:123px;height:77px\"></div></body></html>"
+                        )
+                        .to_string()
+                    } else {
+                        format!(
+                            "<html><head><style>html,body{{margin:0;background:rgb(200,0,0)}}</style>{head}</head><body><div id=one style=\"height:40px\"></div></body></html>"
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        port
+    }
+
+    /// One pixel of a binary PPM frame.
+    fn ppm_pixel(path: &Path, x: usize, y: usize) -> [u8; 3] {
+        let ppm = fs::read(path).unwrap();
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while fields.len() < 4 {
+            let start = pos;
+            while !ppm[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            fields.push(std::str::from_utf8(&ppm[start..pos]).unwrap().to_string());
+            pos += 1;
+        }
+        assert_eq!(fields[0], "P6");
+        let width: usize = fields[1].parse().unwrap();
+        let p = &ppm[pos + (y * width + x) * 3..][..3];
+        [p[0], p[1], p[2]]
+    }
+
+    /// Capture `/` of a [`two_page_site`] live for 2.5 s: the frame's pixel
+    /// at (200, 150), the event log's navigation URLs, the result.
+    fn capture_two_page_site(head: &'static str, extra: &[&str], tag: &str) -> ([u8; 3], Vec<String>, CaptureResult) {
+        let port = two_page_site(head);
+        let dir = std::env::temp_dir().join(format!("parity-capture-t17-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("events.jsonl");
+        let frame = dir.join("frame.ppm");
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut argv = vec![
+            "parity-capture",
+            "--url",
+            url.as_str(),
+            "--width",
+            "400",
+            "--height",
+            "300",
+            "--live-ms",
+            "2500",
+            "--event-log",
+            log.to_str().unwrap(),
+            "--dump-frame",
+            frame.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(extra);
+        let args = Args::try_parse_from(argv).unwrap();
+        let result = run_capture(&args);
+        assert_eq!(result.status, "ok", "{:?}", result.error);
+        let navigations = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|r| r["type"] == "navigation_start")
+            .map(|r| r["url"].as_str().unwrap_or("").to_string())
+            .collect();
+        let pixel = ppm_pixel(&frame, 200, 150);
+        let _ = fs::remove_dir_all(&dir);
+        (pixel, navigations, result)
+    }
+
+    fn is_green(p: [u8; 3]) -> bool {
+        p[1] > 120 && p[0] < 60 && p[2] < 60
+    }
+
+    fn is_red(p: [u8; 3]) -> bool {
+        p[0] > 150 && p[1] < 60 && p[2] < 60
+    }
+
+    /// T17 red: a page whose script navigates 500 ms after load is captured
+    /// as the page it lands on, and the event log names both URLs.
+    #[test]
+    fn a_script_navigation_during_the_capture_is_followed_one_hop() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) = capture_two_page_site(
+            "<script>setTimeout(function () { location.assign('/two'); }, 500);</script>",
+            &[],
+            "script",
+        );
+        assert!(is_green(pixel), "the frame is not the page the script navigated to: {pixel:?}");
+        assert_eq!(navigations.len(), 2, "{navigations:?}");
+        assert!(navigations[0].ends_with('/') && navigations[1].ends_with("/two"), "{navigations:?}");
+        let followed = result.followed_navigation.expect("the hop is reported");
+        assert!(followed.to.ends_with("/two"), "{}", followed.to);
+        assert_eq!(followed.during, "live");
+        assert!(followed.at_ms >= 400, "{}", followed.at_ms);
+        assert!(!followed.replace);
+    }
+
+    /// T17 red: a `<meta http-equiv=refresh>` to another page is followed the
+    /// same way, as a replace.
+    #[test]
+    fn a_meta_refresh_during_the_capture_is_followed_one_hop() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) =
+            capture_two_page_site("<meta http-equiv=\"refresh\" content=\"0; url=/two\">", &[], "meta");
+        assert!(is_green(pixel), "{pixel:?}");
+        assert_eq!(navigations.len(), 2, "{navigations:?}");
+        let followed = result.followed_navigation.expect("the hop is reported");
+        assert!(followed.replace, "a refresh replaces the entry");
+    }
+
+    /// T17: one hop only. Page one sends itself to `/?again`, which is page
+    /// one again and asks again: that second ask is counted, not followed.
+    #[test]
+    fn a_second_script_navigation_is_counted_not_followed() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) = capture_two_page_site(
+            "<script>setTimeout(function () { location.assign('/?again'); }, 100);</script>",
+            &[],
+            "twice",
+        );
+        assert!(is_red(pixel), "{pixel:?}");
+        assert_eq!(navigations.len(), 2, "one hop only: {navigations:?}");
+        assert!(result.navigations_not_followed >= 1, "{}", result.navigations_not_followed);
+    }
+
+    /// `--no-follow-navigation` keeps the old capture: the page as it was.
+    #[test]
+    fn no_follow_navigation_captures_the_first_page() {
+        let _one_at_a_time = LIVE_WAKE_IS_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (pixel, navigations, result) = capture_two_page_site(
+            "<script>setTimeout(function () { location.assign('/two'); }, 500);</script>",
+            &["--no-follow-navigation"],
+            "nofollow",
+        );
+        assert!(is_red(pixel), "{pixel:?}");
+        assert_eq!(navigations.len(), 1, "{navigations:?}");
+        assert!(result.followed_navigation.is_none());
+        assert_eq!(result.navigations_not_followed, 1);
     }
 }
