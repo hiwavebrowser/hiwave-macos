@@ -797,8 +797,15 @@ impl DirtyMark {
     /// A script write the engine must lay out when script settles, but that
     /// no box of the published layout can see (it is inside a `display:
     /// none` subtree): a geometry read before then needs no forced layout.
+    ///
+    /// It is still a write the engine has to lay out, so it is beyond the
+    /// animated-style layer: the paint-only animation frame must not skip
+    /// it. A no-op write (`Clean`) is not a write and marks nothing.
     pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
-        self.bucket.set(self.bucket.get().max(bucket));
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.bucket.set(self.bucket.get().max(bucket));
+        }
     }
 
     /// What first dirtied the published layout (see `cause`).
