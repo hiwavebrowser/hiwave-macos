@@ -2055,7 +2055,9 @@ impl Renderer {
             Some(depth) => layers[depth].0.clone(),
             None => {
                 if !*cleared {
-                    self.clear_view(base, self.clear_color);
+                    // A transparent target (CH3.A3c) starts from (0, 0, 0, 0), as the frame clear does.
+                    let color = if self.transparent { wgpu::Color::TRANSPARENT } else { self.clear_color };
+                    self.clear_view(base, color);
                     *cleared = true;
                 }
                 base.clone()
