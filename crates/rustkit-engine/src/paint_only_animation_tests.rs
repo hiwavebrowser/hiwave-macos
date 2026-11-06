@@ -310,7 +310,7 @@ fn a_web_animation_of_opacity_takes_the_paint_path() {
     // The first frame writes the layer for the first time: a layout.
     frame(&mut engine, view, 16);
     frame(&mut engine, view, 16);
-    let (relaid, skip0) = (relayouts(&engine, view), skipped(&engine, view));
+    let (mut relaid, skip0) = (relayouts(&engine, view), skipped(&engine, view));
     let mut last = opacities(&engine, view);
     for i in 0..5u32 {
         frame(&mut engine, view, 16);
@@ -319,7 +319,111 @@ fn a_web_animation_of_opacity_takes_the_paint_path() {
         last = now;
         assert_eq!(relayouts(&engine, view), relaid, "frame {i}: no relayout");
         assert_eq!(skipped(&engine, view), skip0 + i + 1, "frame {i}");
+        let painted = list(&engine, view);
+        assert_eq!(painted, list_by_a_full_relayout(&mut engine, view), "frame {i}");
+        // The full relayout above is not a frame; it moves `relayouts`.
+        relaid = relayouts(&engine, view);
     }
+}
+
+/// A page with a running Web Animation (`#a`, opacity) and a box `#b`
+/// 50px wide. Once the animation frames take the paint path, `write`
+/// runs in a `requestAnimationFrame` callback, the same turn as a frame's
+/// layer write; after a few more frames `expr` is read. Whatever the
+/// write dirtied must reach the layout: the paint path is taken only
+/// when the layer write is all that changed (#941 R1 HOLD).
+fn write_in_a_web_animation_frame(head: &str, body: &str, write: &str, expr: &str) -> String {
+    let (mut engine, view, _server) = load(&format!(
+        "<!doctype html><style>body{{margin:0}}\
+         #a{{width:50px;height:50px;background:green}}\
+         #b{{width:50px;height:20px;background:blue}}{head}\
+         </style><div id=a></div>{body}\
+         <script>var a=document.getElementById('a'),b=document.getElementById('b');</script>"
+    ));
+    run(
+        &mut engine,
+        view,
+        "a.animate([{opacity:1},{opacity:0.2}],{duration:1000,iterations:Infinity})",
+    );
+    for _ in 0..4 {
+        frame(&mut engine, view, 16);
+    }
+    let skip0 = skipped(&engine, view);
+    frame(&mut engine, view, 16);
+    if animation_repaint_enabled() {
+        assert_eq!(skipped(&engine, view), skip0 + 1, "the animation frames take the paint path");
+    }
+    run(&mut engine, view, &format!("requestAnimationFrame(function(){{{write}}})"));
+    for _ in 0..4 {
+        frame(&mut engine, view, 16);
+    }
+    let value = read(&mut engine, view, expr);
+    let painted = list(&engine, view);
+    assert_eq!(painted, list_by_a_full_relayout(&mut engine, view), "the painted frame is the laid-out one");
+    value
+}
+
+/// `document.adoptedStyleSheets` marks the page dirty with no mutation
+/// record.
+#[test]
+fn an_adopted_sheet_in_a_web_animation_frame_reaches_the_layout() {
+    let width = write_in_a_web_animation_frame(
+        "",
+        "<div id=b></div>",
+        "var s=new CSSStyleSheet();s.replaceSync('#b{width:123px}');document.adoptedStyleSheets=[s];",
+        "b.offsetWidth+','+getComputedStyle(b).width",
+    );
+    assert_eq!(width, "123,123px");
+}
+
+/// `customElements.define` upgrades `:defined` with no mutation record.
+#[test]
+fn a_custom_element_definition_in_a_web_animation_frame_reaches_the_layout() {
+    let width = write_in_a_web_animation_frame(
+        "x-y{display:block;width:50px;height:20px}x-y:defined{width:123px}",
+        "<x-y id=c></x-y>",
+        "customElements.define('x-y',class extends HTMLElement{});",
+        "document.getElementById('c').offsetWidth",
+    );
+    assert_eq!(width, "123");
+}
+
+/// `attachShadow` takes the host's children out of the rendering (no
+/// slot) with no mutation record.
+#[test]
+fn an_attach_shadow_in_a_web_animation_frame_reaches_the_layout() {
+    let width = write_in_a_web_animation_frame(
+        "#h{display:inline-block}",
+        "<div id=b></div><div id=h><div style=\"width:123px;height:10px\"></div></div>",
+        "document.getElementById('h').attachShadow({mode:'open'});",
+        "document.getElementById('h').offsetWidth",
+    );
+    assert_eq!(width, "0");
+}
+
+/// A CSS animation's `finish()` from script (the engine applies it at its
+/// next build) with no mutation record.
+#[test]
+fn a_css_animation_control_in_a_web_animation_frame_reaches_the_layout() {
+    let width = write_in_a_web_animation_frame(
+        "#b{animation:g 1s linear paused both}@keyframes g{from{width:50px}to{width:123px}}",
+        "<div id=b></div>",
+        "b.getAnimations()[0].finish();",
+        "b.offsetWidth",
+    );
+    assert_eq!(width, "123");
+}
+
+/// The control: an inline style write has a record and always lays out.
+#[test]
+fn an_inline_style_write_in_a_web_animation_frame_reaches_the_layout() {
+    let width = write_in_a_web_animation_frame(
+        "",
+        "<div id=b></div>",
+        "b.style.width='123px';",
+        "b.offsetWidth",
+    );
+    assert_eq!(width, "123");
 }
 
 /// The reduced cnn/amazon page: 500 boxes of text and one spinning
