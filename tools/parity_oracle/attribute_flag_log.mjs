@@ -35,7 +35,9 @@ const out = await page.evaluate(() => {
     qsa_unquoted: q('[data-b=Foo i]'),
     qsa_bad_flag: q('[data-r="foo" x]'),
     matches_i: document.querySelector('[data-k]').matches('[data-k="foo" i]'),
-    closest_i: document.querySelector('[data-m] nav').closest('[data-m="open" i]')?.tagName ?? null,
+    closest_i: document.querySelector('[data-m]').firstElementChild.closest('[data-m="open" i]')?.tagName ?? null,
+    // Not a flag case: an attribute on an ancestor compound in a query.
+    qsa_ancestor_attr: document.querySelectorAll('[data-m] nav').length,
   };
 });
 console.log(JSON.stringify(out, null, 1));

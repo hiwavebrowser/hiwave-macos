@@ -117,7 +117,7 @@ mod script {
             "true"
         );
         assert_eq!(
-            js("document.querySelector('[data-m] nav').closest('[data-m=\"open\" i]').tagName"),
+            js("document.querySelector('[data-m]').firstElementChild.closest('[data-m=\"open\" i]').tagName"),
             "DIV"
         );
     }
