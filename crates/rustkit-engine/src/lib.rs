@@ -9452,6 +9452,11 @@ impl Engine {
             if let Some(view) = self.views.get_mut(&id) {
                 (*view.lay.hover_chain.borrow_mut(), *view.lay.active_chain.borrow_mut()) = chains;
             }
+            // CH2.E19: the inline svgs' author paint follows the chains
+            // (`button:hover svg path`): the map and the parsed icons of
+            // this build's chains, kept by the pre-pass when unchanged.
+            self.cache_svg_paint_styles(document, id, Some((size.0 as f32, size.1 as f32)));
+            self.lctx.cache_inline_svgs(document);
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
@@ -16432,18 +16437,41 @@ impl layout_ctx::LayoutCtx {
         // The map is a function of the document's tree (its `<style>` text
         // and adopted sheets included), the `<link>` sheets and the
         // viewport: kept while none of them changed (LAT4b).
+        // CH2.E19: the view's element state is part of the key when the
+        // paint rules read it. The rules last read stand for the ones the
+        // key is checked against: with the sheets the same (the rest of
+        // the key), they are the same rules.
+        let state = Self::svg_element_state(document, lay);
+        let reads_state = self
+            .svg_prepass
+            .borrow()
+            .paint_rules
+            .as_ref()
+            .is_none_or(|rules| rules.reads_state);
         let key = svg_prepass::PaintKey {
             gen: rustkit_dom::mutation_generation(),
             external: Rc::downgrade(external),
             viewport: viewport.map(|(w, h)| (w.to_bits(), h.to_bits())),
             javascript_enabled,
+            state: reads_state.then(|| state.clone()),
         };
         let kept = self.svg_prepass.borrow_mut().paint_for(document.root(), &key);
         if let Some(map) = kept {
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
-        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport);
+        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport, &state);
+        // The rules read now decide whether the state is in the key.
+        let key = svg_prepass::PaintKey {
+            state: self
+                .svg_prepass
+                .borrow()
+                .paint_rules
+                .as_ref()
+                .is_none_or(|rules| rules.reads_state)
+                .then_some(state),
+            ..key
+        };
         // An unchanged map stays the same `Rc`, which is what the markup
         // keys check first.
         let map = match self.svg_paint_styles.borrow().clone() {
@@ -16454,6 +16482,31 @@ impl layout_ctx::LayoutCtx {
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
+    /// CH2.E19: the element state `lay`'s view matches svg paint rules
+    /// against: checkedness, the hovered and pressed chains, and the
+    /// focused element with the elements above it.
+    fn svg_element_state(document: &Document, lay: Option<&layout_ctx::ViewLayout>) -> SvgElementState {
+        let Some(lay) = lay else {
+            return SvgElementState::default();
+        };
+        let focus = lay.focused_node.get();
+        let mut focus_within = Vec::new();
+        let mut at = focus.and_then(|node| document.get_node(node));
+        while let Some(node) = at {
+            if node.is_element() {
+                focus_within.push(node.id.raw());
+            }
+            at = node.parent();
+        }
+        SvgElementState {
+            checked: lay.checked_states.borrow().clone(),
+            hover: lay.hover_chain.borrow().clone(),
+            active: lay.active_chain.borrow().clone(),
+            focus: focus.map(|node| node.raw()),
+            focus_within,
+        }
+    }
+
     /// `cache_svg_paint_styles`'s map, computed.
     fn svg_paint_styles_of(
         &self,
@@ -16462,6 +16515,7 @@ impl layout_ctx::LayoutCtx {
         external: &Rc<Vec<Stylesheet>>,
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
+        state: &SvgElementState,
     ) -> HashMap<usize, SvgPaintStyle> {
         let inline = self.inline_sheets(document, lay, javascript_enabled);
         let rules = self.svg_paint_rules(inline, external, viewport);
@@ -16488,7 +16542,9 @@ impl layout_ctx::LayoutCtx {
                 walk(&child, f);
             }
         }
-        let no_checked = HashMap::new();
+        // The rules match against the view's element state (CH2.E19).
+        let _state = WalkCheckedScope::enter_for_svg_paint(state);
+        let checked = &state.checked;
         let compute = |n: &Rc<Node>| -> Option<SvgPaintStyle> {
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else { return None };
             let keyed = KeyedElement::of(tag_name, attributes);
@@ -16501,7 +16557,7 @@ impl layout_ctx::LayoutCtx {
                 }
                 let specificity = SelectorMatcher::split_top_level_commas(&rule.selector)
                     .into_iter()
-                    .filter(|member| SelectorMatcher.node_matches(n, member, &no_checked) == Some(true))
+                    .filter(|member| SelectorMatcher.node_matches(n, member, checked) == Some(true))
                     .map(|member| SelectorMatcher.selector_specificity(member))
                     .max();
                 let Some(specificity) = specificity else { continue };
@@ -16561,7 +16617,7 @@ impl layout_ctx::LayoutCtx {
                 let style = match rules.local {
                     // The rules read only the element and its ancestors:
                     // an element whose chain is unchanged keeps its answer.
-                    true => prepass.element_paint(n, &rules, &mut |n| compute(n)),
+                    true => prepass.element_paint(n, &rules, &|raw| state.mark_bits(raw), &mut |n| compute(n)),
                     false => compute(n),
                 };
                 if let Some(style) = style {
@@ -16635,6 +16691,17 @@ impl layout_ctx::LayoutCtx {
             };
             !NON_LOCAL.iter().any(|t| selector.contains(t))
         });
+        // CH2.E19: whether a paint rule reads element state, so the map
+        // follows the pointer, the focus and checkedness; conservative, by
+        // the selector text.
+        const STATE: &[&str] = &[":hover", ":active", ":focus", ":checked"];
+        let reads_state = paint.iter().any(|(_, source, index, _)| {
+            let selector = match *source {
+                SheetRef::Inline(i) => &inline[i].rules[*index].selector,
+                SheetRef::External(i) => &external[i].rules[*index].selector,
+            };
+            STATE.iter().any(|t| selector.contains(t))
+        });
         let rules = Rc::new(SvgPaintRules {
             inline,
             external: Rc::downgrade(external),
@@ -16642,6 +16709,7 @@ impl layout_ctx::LayoutCtx {
             paint,
             root_vars,
             local,
+            reads_state,
         });
         self.svg_prepass.borrow_mut().paint_rules = Some(rules.clone());
         rules
@@ -16666,6 +16734,8 @@ pub(crate) struct SvgPaintRules {
     root_vars: HashMap<String, String>,
     /// No paint rule reads more than the element and its ancestors.
     pub(crate) local: bool,
+    /// A paint rule reads element state (CH2.E19).
+    pub(crate) reads_state: bool,
 }
 
 impl Engine {
@@ -18358,7 +18428,16 @@ impl SelectorMatcher {
             }
             _ => None,
         };
-        let live_own = live(node.id.raw(), attributes);
+        let mut live_own = live(node.id.raw(), attributes);
+        // The element state of the scope (CH2.E19: the inline svg paint
+        // pass), as the build marks it (`live_attributes`).
+        let own_marks = walk_marks(node.id.raw());
+        if !own_marks.is_empty() {
+            let marked = live_own.get_or_insert_with(|| attributes.clone());
+            for mark in own_marks {
+                marked.insert(mark.to_string(), String::new());
+            }
+        }
         let attributes = live_own.as_ref().unwrap_or(attributes);
         let _relational = RelationalNodeScope::enter(Some(node.clone()));
         // A selector that reads neither the ancestors nor the siblings (`.a`,
@@ -18387,6 +18466,12 @@ impl SelectorMatcher {
                 .map(|c| c.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default()
         };
+        // An ancestor's or an earlier sibling's classes, with its marks.
+        let marked_classes = |raw: usize, attributes: &HashMap<String, String>| -> Vec<String> {
+            let mut out = classes(attributes);
+            out.extend(walk_marks(raw).into_iter().map(str::to_string));
+            out
+        };
 
         // ancestors[0] is the parent, as in the cascade.
         let mut ancestors = Vec::new();
@@ -18399,7 +18484,7 @@ impl SelectorMatcher {
             let root = n.parent().is_none_or(|p| !matches!(p.node_type, NodeType::Element { .. }));
             ancestors.push(Rc::new((
                 tag_name.to_lowercase(),
-                classes(attributes),
+                marked_classes(n.id.raw(), attributes),
                 attributes.get("id").cloned(),
                 root.then(|| Rc::new(attributes.clone())),
             )));
@@ -18431,7 +18516,7 @@ impl SelectorMatcher {
                     if before {
                         let live = live(c.id.raw(), attributes);
                         let state = ElementState::of(&t, live.as_ref().unwrap_or(attributes));
-                        siblings_before.push((t, classes(attributes), attributes.get("id").cloned(), state));
+                        siblings_before.push((t, marked_classes(c.id.raw(), attributes), attributes.get("id").cloned(), state));
                     }
                 }
                 SiblingContext {
@@ -19422,6 +19507,11 @@ impl SelectorMatcher {
             // above it (`Engine::live_attributes`).
             "hover" => attributes.contains_key(HOVER_MARK),
             "active" => attributes.contains_key(ACTIVE_MARK),
+            // CH2.E19: only the inline svg paint pass marks the focused
+            // element and its ancestors (`WalkState::focus`); the cascade
+            // does not yet, so there they stay false.
+            "focus" => attributes.contains_key(FOCUS_MARK),
+            "focus-within" => attributes.contains_key(FOCUS_WITHIN_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -38183,6 +38273,13 @@ impl SubjectCompound {
 /// class or an attribute name, and then styles that element as hovered.
 const HOVER_MARK: &str = "\u{1}hover";
 const ACTIVE_MARK: &str = "\u{1}active";
+/// CH2.E19: the focused element (`:focus`) and it and its ancestors
+/// (`:focus-within`), marked like the two above. Only the inline svg paint
+/// pass sets them (`WalkState::focus`).
+const FOCUS_MARK: &str = "\u{1}focus";
+const FOCUS_WITHIN_MARK: &str = "\u{1}focus-within";
+/// Every element-state mark.
+const STATE_MARKS: [&str; 4] = [HOVER_MARK, ACTIVE_MARK, FOCUS_MARK, FOCUS_WITHIN_MARK];
 
 thread_local! {
     /// The DOM element the compound under test is matched against, for
@@ -38234,6 +38331,10 @@ struct WalkState {
     /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
     hover: Vec<usize>,
     active: Vec<usize>,
+    /// CH2.E19: the focused element and the elements above it, marked only
+    /// for the inline svg paint pass (`WalkCheckedScope::enter_for_svg_paint`).
+    focus: Option<usize>,
+    focus_within: Vec<usize>,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -38260,8 +38361,70 @@ impl WalkCheckedScope {
                 let w = w.borrow();
                 (w.hover.clone(), w.active.clone())
             });
-            w.replace(WalkState { checked, hover, active, memo: Some(HashMap::new()) })
+            let (focus, focus_within) = {
+                let w = w.borrow();
+                (w.focus, w.focus_within.clone())
+            };
+            w.replace(WalkState { checked, hover, active, focus, focus_within, memo: Some(HashMap::new()) })
         }))
+    }
+
+    /// CH2.E19: the scope of the inline svg paint pass, with the view's
+    /// element state: checkedness, the pointer chains and the focus.
+    pub(crate) fn enter_for_svg_paint(state: &SvgElementState) -> Self {
+        WalkCheckedScope(WALK.with(|w| {
+            w.replace(WalkState {
+                checked: state.checked.clone(),
+                hover: state.hover.clone(),
+                active: state.active.clone(),
+                focus: state.focus,
+                focus_within: state.focus_within.clone(),
+                memo: Some(HashMap::new()),
+            })
+        }))
+    }
+}
+
+/// The marks the scope's element state puts on element `raw`.
+fn walk_marks(raw: usize) -> Vec<&'static str> {
+    WALK.with(|w| {
+        let w = w.borrow();
+        let mut marks = Vec::new();
+        if w.hover.contains(&raw) {
+            marks.push(HOVER_MARK);
+        }
+        if w.active.contains(&raw) {
+            marks.push(ACTIVE_MARK);
+        }
+        if w.focus == Some(raw) {
+            marks.push(FOCUS_MARK);
+        }
+        if w.focus_within.contains(&raw) {
+            marks.push(FOCUS_WITHIN_MARK);
+        }
+        marks
+    })
+}
+
+/// CH2.E19: a view's element state as the inline svg paint pass matches
+/// its rules against it (`cache_svg_paint_styles`).
+#[derive(Default, Clone, PartialEq, Debug)]
+pub(crate) struct SvgElementState {
+    pub(crate) checked: HashMap<usize, bool>,
+    pub(crate) hover: Vec<usize>,
+    pub(crate) active: Vec<usize>,
+    pub(crate) focus: Option<usize>,
+    /// The focused element and the elements above it.
+    pub(crate) focus_within: Vec<usize>,
+}
+
+impl SvgElementState {
+    /// The marks this state puts on element `raw`, as bits.
+    pub(crate) fn mark_bits(&self, raw: usize) -> u8 {
+        u8::from(self.hover.contains(&raw))
+            | u8::from(self.active.contains(&raw)) << 1
+            | u8::from(self.focus == Some(raw)) << 2
+            | u8::from(self.focus_within.contains(&raw)) << 3
     }
 }
 
@@ -38307,14 +38470,11 @@ fn dom_sibling_key(node: &Rc<Node>) -> Option<SiblingKey> {
         _ => ElementState::of(&tag, attributes),
     };
     let mut classes = element_classes(attributes);
-    WALK.with(|w| {
-        let w = w.borrow();
-        for (chain, mark) in [(&w.hover, HOVER_MARK), (&w.active, ACTIVE_MARK)] {
-            if chain.contains(&node.id.raw()) {
-                classes.push(mark.to_string());
-            }
+    for mark in walk_marks(node.id.raw()) {
+        if !classes.iter().any(|c| c == mark) {
+            classes.push(mark.to_string());
         }
-    });
+    }
     Some((tag, classes, attributes.get("id").cloned(), state))
 }
 
@@ -38578,7 +38738,7 @@ fn element_classes(attributes: &HashMap<String, String>) -> Vec<String> {
         .get("class")
         .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
         .unwrap_or_default();
-    for mark in [HOVER_MARK, ACTIVE_MARK] {
+    for mark in STATE_MARKS {
         if attributes.contains_key(mark) {
             classes.push(mark.to_string());
         }
@@ -38832,6 +38992,8 @@ impl AncestorCompound {
                             // mark among its classes (`element_classes`).
                             ("hover", None) => out.classes.push(HOVER_MARK.to_string()),
                             ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
+                            ("focus", None) => out.classes.push(FOCUS_MARK.to_string()),
+                            ("focus-within", None) => out.classes.push(FOCUS_WITHIN_MARK.to_string()),
                             // The root of an HTML document is its `html`
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
@@ -39050,7 +39212,7 @@ fn key_attributes(classes: &[String], id: Option<&String>) -> HashMap<String, St
     let mut attributes = HashMap::new();
     let mut class = String::new();
     for c in classes {
-        if c == HOVER_MARK || c == ACTIVE_MARK {
+        if STATE_MARKS.contains(&c.as_str()) {
             attributes.insert(c.clone(), String::new());
             continue;
         }
@@ -40124,7 +40286,7 @@ impl PointerReads {
     fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
         let mut classes: Vec<String> = Vec::new();
         for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
-            if !matches!(c.as_str(), HOVER_MARK | ACTIVE_MARK) && !classes.contains(c) {
+            if !STATE_MARKS.contains(&c.as_str()) && !classes.contains(c) {
                 classes.push(c.clone());
             }
         }
@@ -40986,11 +41148,20 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 
 /// What the build gives a box besides its style and its children.
 fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
+    // CH2.E19: an inline svg whose markup changed only in author paint
+    // (another key, the same natural size) is the same box: the new icon
+    // is a paint change (`copy_changed_paint` takes its key).
+    let box_type = |x: &LayoutBox| match &x.box_type {
+        BoxType::Image { url, natural_width, natural_height } if url.starts_with("inline-svg:") => {
+            format!("InlineSvg {natural_width:?} {natural_height:?}")
+        }
+        other => format!("{other:?}"),
+    };
     let rest = |x: &LayoutBox| {
         format!(
             "{:?}",
             (
-                &x.box_type,
+                box_type(x),
                 &x.offsets,
                 &x.stacking_context,
                 &x.root_element_height,
@@ -41061,6 +41232,14 @@ fn same_shape(laid: &LayoutBox, fresh: &LayoutBox) -> bool {
 /// custom property set. Layout writes resolved values into a laid-out
 /// box's style, so the style is not replaced whole.
 fn copy_changed_paint(laid: &mut LayoutBox, kept: &LayoutBox, fresh: &LayoutBox) {
+    // An inline svg painted from another key (CH2.E19, `built_alike`).
+    if let (BoxType::Image { url: was, .. }, BoxType::Image { url: is, .. }) = (&kept.box_type, &fresh.box_type) {
+        if was != is {
+            if let BoxType::Image { url, .. } = &mut laid.box_type {
+                *url = is.clone();
+            }
+        }
+    }
     if kept.style.same_paint(&fresh.style) {
         laid.style.custom_properties = fresh.style.custom_properties.clone();
     } else {
