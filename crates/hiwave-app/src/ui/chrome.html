@@ -5866,9 +5866,10 @@
                 // navigation. Skip while the user is typing, and show empty
                 // for internal pages so placeholder text stays useful.
                 try {
-                    const active = tabs.find(t => t.active);
+                    const active = tabs.find(t => t.is_active);
                     if (active && document.activeElement !== urlInput && !urlInputWasFocused) {
-                        urlInput.value = (active.url && !active.url.startsWith('hiwave://')) ? active.url : '';
+                        const shown = (active.url && !active.url.startsWith('hiwave://')) ? active.url : '';
+                        if (urlInput.value !== shown) urlInput.value = shown;
                     }
                 } catch (e) { console.log('[UrlBar] sync skipped:', e); }
                 currentTabs = tabs;
