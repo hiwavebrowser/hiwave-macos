@@ -1089,9 +1089,10 @@
             // The console's rows (CH3.A4c). Lines arrive one task at a
             // time while a page logs; each used to rebuild every row with
             // innerHTML and read scrollHeight to scroll, a forced layout
-            // per line. Now a line only marks the console due: once per
-            // frame the new rows are appended in one fragment, and the
-            // scroll (the one geometry read) happens only while the
+            // per line. Now the first lines are appended at once in one
+            // fragment, later ones once per frame in one fragment, and
+            // the scroll (the one geometry read, in the frame) happens
+            // only while the
             // Console tab is showing and the view was at the bottom.
             //
             // Whatever replaces the rows wholesale (a clear, another
@@ -1100,7 +1101,8 @@
             // than the one its rows were built in builds them again from
             // the buffer. A count cannot see a clear followed by as many
             // new lines before the frame.
-            let consoleDue = false;
+            let consoleFramePending = false; // a frame is scheduled
+            let consoleDue = false;     // lines came while it was
             let consoleGeneration = 0;  // bumped when the rows are replaced
             let renderedGeneration = -1; // the generation the rows were built in
             let renderedRows = 0;       // rows of `consoleRows` now in the output
@@ -1110,11 +1112,26 @@
             let consoleScrollDue = false; // rows came since the last scroll
             let ownScrollTop = -1;      // where we last scrolled it; -1: no scroll to tell apart
 
+            // The first lines show in the task that brings them (a frame
+            // taken before the next animation frame already has them):
+            // appending rows reads no geometry. Lines that arrive while a
+            // frame is scheduled wait for it, and the frame does the one
+            // geometry read, the scroll to the newest line.
             function scheduleConsole() {
-                if (consoleDue) return;
-                consoleDue = true;
+                if (consoleFramePending) { consoleDue = true; return; }
+                consoleFramePending = true;
+                renderConsole();
                 const frame = window.requestAnimationFrame || (cb => setTimeout(cb, 16));
-                frame(renderConsole);
+                frame(consoleFrame);
+            }
+
+            function consoleFrame() {
+                consoleFramePending = false;
+                if (consoleDue) {
+                    consoleDue = false;
+                    renderConsole();
+                }
+                if (!document.hidden) followConsole();
             }
 
             function rowsFragment(rows) {
@@ -1126,7 +1143,6 @@
             }
 
             function renderConsole() {
-                consoleDue = false;
                 // Hidden (the panel closed, or the window hidden): nothing
                 // to show; the next line or the panel's return renders.
                 if (document.hidden) return;
@@ -1165,7 +1181,6 @@
                     added = true;
                 }
                 if (added) consoleScrollDue = true;
-                followConsole();
 
                 let errors = 0, warnings = 0;
                 for (const e of consoleEntries) {
