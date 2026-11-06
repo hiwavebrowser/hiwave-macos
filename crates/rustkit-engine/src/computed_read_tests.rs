@@ -152,6 +152,7 @@ fn a_style_write_reads_back_serialized() {
 fn r1_cases() {
     const R1: &str = include_str!("../../../tools/parity_oracle/computed_read_r1_cases.json");
     let doc: serde_json::Value = serde_json::from_str(R1).expect("r1 cases");
+    let started = std::time::Instant::now();
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let mut wrong = Vec::new();
     let mut counts = std::collections::BTreeMap::new();
@@ -178,4 +179,20 @@ fn r1_cases() {
     }
     eprintln!("r1 reads: {counts:?}");
     assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+    within_half_the_gpu_guard("r1_cases", started);
+}
+
+/// A test holds the GPU guard from its first engine to its end, and every GPU
+/// test queued behind it times out after [`crate::test_gpu::MAX_WAIT`]. A
+/// test here must finish inside half of that, so a loaded machine still has
+/// headroom (T23: `r1_cases` held it 131 s and 11 unrelated tests failed).
+fn within_half_the_gpu_guard(name: &str, started: std::time::Instant) {
+    let held = started.elapsed();
+    let limit = crate::test_gpu::MAX_WAIT / 2;
+    assert!(
+        held < limit,
+        "{name} held the GPU test guard {:.1}s, over half its {}s limit; split it",
+        held.as_secs_f64(),
+        crate::test_gpu::MAX_WAIT.as_secs()
+    );
 }
