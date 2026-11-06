@@ -436,6 +436,8 @@ mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
 #[cfg(all(test, feature = "headless"))]
+mod forced_layout_cause_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
