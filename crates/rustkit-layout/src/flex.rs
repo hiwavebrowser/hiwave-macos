@@ -1813,8 +1813,27 @@ fn create_flex_item<'a>(
     let main_pb = main_pb_start + main_pb_end;
     let cross_pb = cross_pb_start + cross_pb_end;
     let is_border_box = layout_box.style.box_sizing == rustkit_css::BoxSizing::BorderBox;
-    let spec_main_to_border_box = |v: f32| if is_border_box { v } else { v + main_pb };
-    let spec_cross_to_border_box = |v: f32| if is_border_box { v } else { v + cross_pb };
+    // A text input / textarea keeps its UA padding and border folded into
+    // its border box (`dimensions` has none), so a content-box author size
+    // gains them here as in block flow (CH2.B17).
+    let (control_main_pb, control_cross_pb) = match &layout_box.box_type {
+        crate::BoxType::FormControl(control) => {
+            let cb_width = match main_axis {
+                Axis::Horizontal => container_main,
+                Axis::Vertical => container_cross,
+            };
+            let (w, h) = layout_box.content_box_control_extra(control, cb_width);
+            match main_axis {
+                Axis::Horizontal => (w, h),
+                Axis::Vertical => (h, w),
+            }
+        }
+        _ => (0.0, 0.0),
+    };
+    let spec_main_to_border_box =
+        |v: f32| if is_border_box { v } else { v + main_pb + control_main_pb };
+    let spec_cross_to_border_box =
+        |v: f32| if is_border_box { v } else { v + cross_pb + control_cross_pb };
 
     // Calculate flex basis (border-box)
     let content_sized_box = matches!(
@@ -4532,6 +4551,9 @@ mod tests {
         let mut item = LayoutBox::new(BoxType::Block, ComputedStyle::new());
         let mut control_style = ComputedStyle::new();
         control_style.width = Length::Px(200.0);
+        // Border-box, so 200 is the border box (a content-box text input
+        // adds its UA padding and border, CH2.B17).
+        control_style.box_sizing = rustkit_css::BoxSizing::BorderBox;
         item.children.push(LayoutBox::new(
             BoxType::FormControl(crate::FormControlType::TextInput {
                 value: String::new(),

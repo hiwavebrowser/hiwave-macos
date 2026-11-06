@@ -51,9 +51,9 @@
    "chrome_boxes": "text:0:0:48:26 password:0:26:48:26 email:0:52:48:26 url:0:78:48:26 tel:0:104:48:26 number:0:130:48:26 search:0:156:40:20"
   },
   {
-   "name": "an-inline-input-and-its-neighbour",
-   "html": "<!doctype html><body style=\"margin:0\"><div style=\"font:16px/20px Arial\"><input id=a style=\"width:40px;height:20px\"><span id=b>x</span></div>",
-   "chrome_boxes": "a:0:0:48:26 b:48:4:8:17"
+   "name": "a-flex-row-input-and-its-neighbour",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start\"><input id=a style=\"width:40px;height:20px\"><textarea id=t style=\"width:40px;height:20px\"></textarea><span id=b style=\"width:8px;height:10px\"></span></div>",
+   "chrome_boxes": "a:0:0:48:26 t:48:0:46:26 b:94:0:8:10"
   }
  ],
  "chrome": "143.0.7499.4"

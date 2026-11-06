@@ -107,7 +107,7 @@ pub use text::{
 };
 pub use text::{FaceIdentity, FaceSynthesis, GlyphRun, RunGlyph};
 
-use rustkit_css::{BoxSizing, Color, ComputedStyle, Length, TextAlign};
+use rustkit_css::{BorderStyle, BoxSizing, Color, ComputedStyle, Length, TextAlign};
 use std::collections::HashMap;
 use std::cmp::Ordering;
 
@@ -3541,6 +3541,56 @@ impl LayoutBox {
     /// Layout a form control. `percent_height_base` is the containing block's
     /// definite content height, as for `layout_image_in`: the height of
     /// `containing_block` itself is the parent's flow cursor on the flow path.
+    /// The padding + border (horizontal, vertical) a content-box text
+    /// control adds around an author width/height (CH2.B17); `(0, 0)` for
+    /// `box-sizing: border-box` and every other control. Chrome 143 UA:
+    /// text input `padding: 1px 2px; border: 2px inset`, textarea
+    /// `padding: 2px; border: 1px solid`, `type=search` border-box. A side
+    /// the author left unset (`Length::Zero`) takes the UA value; a side
+    /// whose border style is `none` has no border.
+    pub(crate) fn content_box_control_extra(&self, control: &FormControlType, cb_width: f32) -> (f32, f32) {
+        if self.style.box_sizing == BoxSizing::BorderBox {
+            return (0.0, 0.0);
+        }
+        let (ua_pad_v, ua_pad_h, ua_border) = match control {
+            FormControlType::TextInput { input_type, .. } => {
+                let t = input_type.to_ascii_lowercase();
+                if !matches!(t.as_str(), "" | "text" | "password" | "email" | "url" | "tel" | "number") {
+                    return (0.0, 0.0);
+                }
+                (1.0, 2.0, 2.0)
+            }
+            FormControlType::TextArea { .. } => (2.0, 2.0, 1.0),
+            _ => return (0.0, 0.0),
+        };
+        let pad = |l: &Length, ua: f32| match l {
+            Length::Zero => ua,
+            other => self.length_to_px(other, cb_width),
+        };
+        // `border: none` / `border-style: none` is the only way the style
+        // is None (the computed default is Solid), so test it first.
+        let border = |w: &Length, s: BorderStyle| {
+            if s == BorderStyle::None {
+                0.0
+            } else if matches!(w, Length::Zero) {
+                ua_border
+            } else {
+                self.length_to_px(w, cb_width)
+            }
+        };
+        let st = &self.style;
+        (
+            pad(&st.padding_left, ua_pad_h)
+                + pad(&st.padding_right, ua_pad_h)
+                + border(&st.border_left_width, st.border_left_style)
+                + border(&st.border_right_width, st.border_right_style),
+            pad(&st.padding_top, ua_pad_v)
+                + pad(&st.padding_bottom, ua_pad_v)
+                + border(&st.border_top_width, st.border_top_style)
+                + border(&st.border_bottom_width, st.border_bottom_style),
+        )
+    }
+
     fn layout_form_control(
         &mut self,
         control: FormControlType,
@@ -3556,22 +3606,28 @@ impl LayoutBox {
 
         // Override with explicit CSS dimensions if specified, but always fall back to intrinsic
         // if the explicit value resolves to zero (e.g., percent of zero-height container)
+        // CH2.B17: Chrome's UA sheet leaves text inputs and textareas
+        // `box-sizing: content-box`, so an author width/height sizes the
+        // content box and the border box adds padding and border; the
+        // content rect here IS the border box, so add them.
+        let (extra_w, extra_h) = self.content_box_control_extra(&control, containing_block.content.width);
+
         let width = match self.style.width {
-            Length::Px(px) if px > 0.0 => px,
+            Length::Px(px) if px > 0.0 => px + extra_w,
             Length::Percent(pct) => {
                 let resolved = pct / 100.0 * containing_block.content.width;
                 if resolved > 0.0 {
-                    resolved
+                    resolved + extra_w
                 } else {
                     intrinsic_width
                 }
             }
-            Length::Em(em) if em > 0.0 => em * font_size,
+            Length::Em(em) if em > 0.0 => em * font_size + extra_w,
             _ => intrinsic_width,
         };
 
         let height = match self.style.height {
-            Length::Px(px) if px > 0.0 => px,
+            Length::Px(px) if px > 0.0 => px + extra_h,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
             Length::Percent(_) if self.percent_height_computes_to_auto() => intrinsic_height,
             Length::Percent(pct) => {
@@ -3585,12 +3641,12 @@ impl LayoutBox {
                 // CRITICAL: Fall back to intrinsic height if percent resolves to 0
                 // This fixes form controls in flex containers before flex layout runs
                 if resolved > 0.0 {
-                    resolved
+                    resolved + extra_h
                 } else {
                     intrinsic_height
                 }
             }
-            Length::Em(em) if em > 0.0 => em * font_size,
+            Length::Em(em) if em > 0.0 => em * font_size + extra_h,
             _ => intrinsic_height,
         };
 
