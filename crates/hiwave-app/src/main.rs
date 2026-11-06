@@ -2250,6 +2250,9 @@ fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
 }
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod inspector_page_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
     use super::*;
     use rustkit_viewhost::ViewId;

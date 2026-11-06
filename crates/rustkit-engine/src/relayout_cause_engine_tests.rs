@@ -352,7 +352,7 @@ impl std::io::Write for Captured {
 }
 
 /// Log lines that contain `needle` while `run` ran on this thread.
-fn capture_lines(needle: &str, run: impl FnOnce()) -> Vec<String> {
+pub(crate) fn capture_lines(needle: &str, run: impl FnOnce()) -> Vec<String> {
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
