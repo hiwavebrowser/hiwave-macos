@@ -144,6 +144,71 @@
    "name": "textarea-shorthand-style",
    "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><textarea id=a style=\"display:block;border:solid;padding:0;width:20px;height:10px\"></textarea><div id=b style=\"width:10px;height:10px\"></div></body></html>",
    "chrome_boxes": "a:0:0:26:16 b:0:16:10:10"
+  },
+  {
+   "name": "width-thin-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thin\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-medium-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:medium\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-four-keywords-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thin medium thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "top-width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top-width:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "left-width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-left-width:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "color-and-width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-color:red;border-width:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-length-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "top-width-length-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top-width:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-then-side-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thick;border-top-style:solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:15 b:0:15:10:10"
+  },
+  {
+   "name": "pseudo-width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px}#a::after{content:\"\";display:block;width:4px;height:4px;border-width:thick}#c::after{content:\"\";display:block;width:4px;height:4px;border-width:thick;border-style:solid}</style></head><body><div id=a></div><div id=c></div></body></html>",
+   "chrome_boxes": "a:0:0:10:4 c:0:4:10:14"
+  },
+  {
+   "name": "input-width-length-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-width:5px;padding:0;width:20px;height:10px\"></body></html>",
+   "chrome_boxes": "a:0:0:30:20"
+  },
+  {
+   "name": "input-width-thick-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-width:thick;padding:0;width:20px;height:10px\"></body></html>",
+   "chrome_boxes": "a:0:0:30:20"
   }
  ],
  "chrome": "143.0.7499.4"
