@@ -361,7 +361,8 @@ impl BrowserShell {
     /// Update a tab's URL
     pub fn update_tab_url(&mut self, id: TabId, url: url::Url) -> HiWaveResult<()> {
         if let Some(tab) = self.tabs.get_mut(&id) {
-            log::info!("Updating tab {:?} URL to: {}", id, url);
+            log::info!("Updating tab {:?} URL to: {}", id, url_for_log(&url));
+            log::debug!("Updating tab {:?} URL to (whole): {}", id, url);
             tab.url = url;
             Ok(())
         } else {
@@ -618,6 +619,36 @@ impl CommandPalette {
         results.sort_by(|a, b| b.0.cmp(&a.0));
 
         results.into_iter().map(|(_, cmd)| cmd).take(10).collect()
+    }
+}
+
+/// `url` for an info line (CH3.A6): scheme, host and path — no userinfo,
+/// query or fragment; a `data:` URL only up to its media type. The whole
+/// URL goes to the debug line beside it.
+fn url_for_log(url: &url::Url) -> String {
+    if url.scheme() == "data" {
+        let path = url.path();
+        return format!("data:{}", &path[..path.find(',').unwrap_or(path.len())]);
+    }
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+#[cfg(test)]
+mod url_for_log_tests {
+    use super::url_for_log;
+
+    #[test]
+    fn a_url_on_an_info_line_is_scheme_host_and_path() {
+        let s = "a6-secret";
+        let u = |t: &str| url::Url::parse(t).unwrap();
+        assert_eq!(url_for_log(&u(&format!("https://u:{s}@a.test:8080/p/q?t={s}#{s}"))), "https://a.test:8080/p/q");
+        assert_eq!(url_for_log(&u(&format!("data:text/html,<p>{s}</p>"))), "data:text/html");
+        assert_eq!(url_for_log(&u("about:blank")), "about:blank");
     }
 }
 

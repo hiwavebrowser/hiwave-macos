@@ -34,6 +34,10 @@ pub(crate) const SIBLING: u8 = 4;
 pub(crate) const ANYWHERE: u8 = 8;
 /// Some rule naming the token also reads position among siblings.
 pub(crate) const POSITIONAL: u8 = 16;
+/// In a `:has()` argument the index can scope (LAT6): a change to the token
+/// can change the `:has()` subjects above the element
+/// ([`InvalidationIndex::has_subjects`]).
+pub(crate) const IN_HAS: u8 = 32;
 
 /// Pseudo-classes whose selector argument is a compound list matched
 /// against the element itself.
@@ -77,6 +81,16 @@ pub(crate) struct InvalidationIndex {
     pub(crate) positional: bool,
     /// Some rule uses `:has()`: a structure change can restyle ancestors.
     pub(crate) has: bool,
+    /// The compounds that carry a `:has()`, as tag, classes, id and
+    /// attribute selectors only (every pseudo-class dropped: a wider
+    /// match), each with where it sits (`SUBJECT`, `ANCESTOR`, `SIBLING`).
+    /// A write under one of their elements, or to a token an argument
+    /// names, restyles that element as its place says (LAT6).
+    pub(crate) has_subjects: Vec<(String, u8)>,
+    /// Some `:has()` these cannot scope: its argument starts with `+` or
+    /// `~` (the subject is beside an ancestor), or it sits where the index
+    /// places nothing. Every write `has` covers is then full.
+    pub(crate) has_anywhere: bool,
 }
 
 impl InvalidationIndex {
@@ -112,6 +126,12 @@ impl InvalidationIndex {
                 "+" | "~" => SIBLING,
                 _ => ANYWHERE,
             });
+            if compound.to_ascii_lowercase().contains(":has(") {
+                match forced.is_none() && at != ANYWHERE {
+                    true => self.has_subjects.push((plain_compound(compound), at)),
+                    false => self.has_anywhere = true,
+                }
+            }
             self.note_compound(compound, at, positional);
         }
     }
@@ -186,8 +206,18 @@ impl InvalidationIndex {
                         ("has", argument) => {
                             self.has = true;
                             for member in SelectorMatcher::split_top_level_commas(&argument.unwrap_or_default()) {
-                                let member = member.trim().trim_start_matches(['>', '+', '~']).trim();
-                                self.note_complex(member, Some(ANYWHERE), false);
+                                let member = member.trim();
+                                // `:has(+ .x)` / `:has(~ .x)`: the subject is an
+                                // earlier sibling, not an ancestor.
+                                let place = match member.starts_with(['+', '~']) {
+                                    true => {
+                                        self.has_anywhere = true;
+                                        ANYWHERE
+                                    }
+                                    false => IN_HAS,
+                                };
+                                let member = member.trim_start_matches(['>', '+', '~']).trim();
+                                self.note_complex(member, Some(place), false);
                             }
                         }
                         ("nth-child" | "nth-last-child", Some(argument)) => {
@@ -225,6 +255,40 @@ impl InvalidationIndex {
             .filter(|(name, _)| !NOT_ATTRIBUTE_STATE.contains(&name.as_str()) && !STRUCTURAL.contains(&name.as_str()))
             .fold(0, |acc, (_, flags)| acc | flags)
     }
+}
+
+/// `compound` with every pseudo-class and pseudo-element (and its
+/// argument) dropped: the tag, classes, id and attribute selectors, which
+/// an element must carry for the compound to match it.
+fn plain_compound(compound: &str) -> String {
+    let chars: Vec<char> = compound.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ':' => {
+                let start = if chars.get(i + 1) == Some(&':') { i + 2 } else { i + 1 };
+                i = ident_end(&chars, start);
+                if chars.get(i) == Some(&'(') {
+                    i = block_end(&chars, i, '(', ')') + 1;
+                }
+            }
+            '[' => {
+                let end = block_end(&chars, i, '[', ']').min(chars.len() - 1);
+                out.extend(&chars[i..=end]);
+                i = end + 1;
+            }
+            '\\' => {
+                out.extend(chars[i..(i + 2).min(chars.len())].iter());
+                i += 2;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// `text` without its quoted strings, for counting brackets.
@@ -371,9 +435,12 @@ impl DirtySet {
 
     /// Restyle what `flags` (an [`InvalidationIndex`] entry) says a change
     /// to a token on `node` can reach.
-    fn apply(&mut self, node: &Rc<Node>, flags: u8) {
+    fn apply(&mut self, index: &InvalidationIndex, node: &Rc<Node>, flags: u8) {
         if flags & ANYWHERE != 0 {
             self.set_full("anywhere");
+        }
+        if flags & IN_HAS != 0 {
+            self.has_subjects_from(index, node.parent());
         }
         if flags & SUBJECT != 0 {
             self.mark(node, STYLE);
@@ -389,6 +456,36 @@ impl DirtySet {
                 }
                 next = sibling.next_sibling();
             }
+        }
+    }
+
+    /// The `:has()` subjects at `from` and above it, restyled as their
+    /// places say: what a change under them (or to a token an argument
+    /// names) can change (LAT6). Root and body are the full path (`mark`).
+    fn has_subjects_from(&mut self, index: &InvalidationIndex, from: Option<Rc<Node>>) {
+        if index.has_anywhere {
+            self.set_full("has");
+            return;
+        }
+        let subjects: Vec<(super::AncestorCompound, u8)> = index
+            .has_subjects
+            .iter()
+            .map(|(compound, at)| (super::AncestorCompound::parse(compound), *at))
+            .collect();
+        let mut at = from;
+        while let Some(node) = at {
+            if self.full.is_some() {
+                return;
+            }
+            if let rustkit_dom::NodeType::Element { tag_name, attributes, .. } = &node.node_type {
+                let classes = super::element_classes(attributes);
+                for (compound, place) in &subjects {
+                    if compound.matches_carried(tag_name, &classes, attributes.get("id"), Some(attributes)) {
+                        self.apply(index, &node, *place);
+                    }
+                }
+            }
+            at = node.parent();
         }
     }
 
@@ -424,7 +521,7 @@ impl DirtySet {
                         set.set_full("sheet");
                     }
                     set.mark(&node, STYLE | PAINT);
-                    set.apply(&node, index.attributes.get("style").copied().unwrap_or(0));
+                    set.apply(index, &node, index.attributes.get("style").copied().unwrap_or(0));
                 }
                 MutationKind::Attribute => {
                     let name = record.attr.as_deref().unwrap_or("");
@@ -438,7 +535,7 @@ impl DirtySet {
                         set.set_full("sheet");
                     }
                     set.mark(&parent, LAYOUT);
-                    set.apply(&parent, index.pseudos.get("empty").copied().unwrap_or(0));
+                    set.apply(index, &parent, index.pseudos.get("empty").copied().unwrap_or(0));
                 }
                 MutationKind::ChildList => {
                     set.child_list(index, &node, record.child, &mut siblings_done, document);
@@ -449,7 +546,7 @@ impl DirtySet {
                         _ => STYLE | BOX | LAYOUT,
                     };
                     set.mark(&node, bits);
-                    set.apply(&node, index.attribute_state_flags());
+                    set.apply(index, &node, index.attribute_state_flags());
                     // An option's selectedness is drawn by its select (the
                     // label a drop-down shows, the rows a list box marks):
                     // the select's box is built again.
@@ -483,7 +580,7 @@ impl DirtySet {
         let read = |map: &HashMap<String, u8>, key: &str| map.get(key).copied().unwrap_or(0);
         // The index holds names lowercased; an SVG attribute keeps its case.
         let name = name.to_ascii_lowercase();
-        self.apply(node, read(&index.attributes, &name));
+        self.apply(index, node, read(&index.attributes, &name));
         match name.as_str() {
             "class" => {
                 let split = |v: Option<&str>| -> HashSet<String> {
@@ -491,12 +588,12 @@ impl DirtySet {
                 };
                 let (before, after) = (split(old), split(node.get_attribute("class")));
                 for class in before.symmetric_difference(&after) {
-                    self.apply(node, read(&index.classes, class));
+                    self.apply(index, node, read(&index.classes, class));
                 }
             }
             "id" => {
                 for id in [old, node.get_attribute("id")].into_iter().flatten() {
-                    self.apply(node, read(&index.ids, id));
+                    self.apply(index, node, read(&index.ids, id));
                 }
             }
             // No pseudo-class, presentational hint or box decision reads
@@ -506,7 +603,7 @@ impl DirtySet {
                 // A presentational hint, a UA rule (`[hidden]`, `<details
                 // open>`) or a state pseudo-class can read any other name.
                 self.mark(node, STYLE | BOX);
-                self.apply(node, index.attribute_state_flags());
+                self.apply(index, node, index.attribute_state_flags());
                 if matches!(name.as_str(), "lang" | "dir") {
                     self.mark(node, SUBTREE_STYLE);
                 }
@@ -522,9 +619,10 @@ impl DirtySet {
         siblings_done: &mut HashSet<usize>,
         document: &Document,
     ) {
+        // The `:has()` subjects above the parent: an argument can match in
+        // what was added or taken away.
         if index.has {
-            self.set_full("has");
-            return;
+            self.has_subjects_from(index, Some(parent.clone()));
         }
         let child = child.and_then(|c| document.get_node(NodeId::new(c)));
         let replaced = child.is_none();
@@ -550,7 +648,7 @@ impl DirtySet {
                 self.mark(sibling, STYLE | SUBTREE_STYLE);
             }
         }
-        self.apply(parent, index.pseudos.get("empty").copied().unwrap_or(0));
+        self.apply(index, parent, index.pseudos.get("empty").copied().unwrap_or(0));
     }
 }
 

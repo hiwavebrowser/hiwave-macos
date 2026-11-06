@@ -4185,7 +4185,7 @@ impl LayoutBox {
 
         // Handle float
         if self.float != Float::None {
-            self.layout_float(containing_block, float_context);
+            self.layout_float(containing_block, float_context, percent_height_base);
         }
 
         // Apply positioning offsets after normal layout
@@ -4594,7 +4594,15 @@ impl LayoutBox {
     }
 
     /// Layout a floated box.
-    fn layout_float(&mut self, containing_block: &Dimensions, float_context: &mut FloatContext) {
+    /// `percent_height_base` is the containing block's definite height, as
+    /// the caller resolved it for this box; `containing_block.content.height`
+    /// is only the parent's flow cursor here (CH2.B16).
+    fn layout_float(
+        &mut self,
+        containing_block: &Dimensions,
+        float_context: &mut FloatContext,
+        percent_height_base: Option<f32>,
+    ) {
         // Calculate dimensions
         self.calculate_block_width(containing_block);
         self.calculate_block_vertical_box_model(containing_block);
@@ -4634,13 +4642,19 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        // Layout children
-        let definite_for_children =
-            self.definite_content_height_for_children(containing_block.content.height, false);
-        self.layout_block_children(definite_for_children);
-        self.calculate_block_height(
-            (containing_block.content.height > 0.0).then_some(containing_block.content.height),
+        // Layout children. A percentage height resolves against the
+        // containing block's definite height (`percent_height_base`), exactly
+        // as the block path does. The flow cursor is not a height: with it
+        // the first float of a box (cursor 0) fell back to the viewport, so
+        // `height: 50%` in a 200px parent was 300 at a 600px viewport (CH2.B16).
+        let definite_for_children = self.definite_content_height_for_children(
+            percent_height_base.unwrap_or(containing_block.content.height),
+            percent_height_base.is_some(),
         );
+        self.layout_block_children(definite_for_children);
+        self.calculate_block_height(percent_height_base.or_else(|| {
+            (containing_block.content.height > 0.0).then_some(containing_block.content.height)
+        }));
     }
 
     /// Offsets with percent values resolved against the containing block.
