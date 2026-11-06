@@ -47,6 +47,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 PAGES = HERE / "pages"
 NEW_TAB_URL = "hiwave://newtab"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# The RustKit chrome is the app's default on macOS (CH3.A5a); a check that
+# covers the WebKit chrome (the escape hatch) launches with this.
+WEBKIT_CHROME = {"HIWAVE_RUSTKIT_CHROME": "0"}
 
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
 MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
@@ -168,7 +171,9 @@ class App:
         # HIWAVE_TEST_HOOKS=1: the app runs HIWAVE_RUSTKIT_CHROME_EVAL and
         # logs IPC bodies whole, which the checks read (#907 R1 nits 1, 2).
         # A RustKit panel's IPC is never logged whole (#910 R1).
-        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1", **self.env)
+        # A check may turn the hooks off (a6_url_log reads the default log).
+        env = dict(os.environ, HOME=str(self.profile), HIWAVE_TEST_HOOKS="1")
+        env.update(self.env)
         self.log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([str(self.binary)], env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, cwd=str(self.profile))
@@ -992,8 +997,14 @@ class Driver:
 
     def e9_redirect(self):
         """CH2.E9: after a redirect the tab (which feeds the address bar) holds the committed URL and the title."""
-        c = "e9_redirect"
-        if not self.open_page(c, "e9_start"):
+        self.e9_redirect_on("e9_redirect")
+
+    def e9_redirect_webkit(self):
+        """CH2.E9 with HIWAVE_RUSTKIT_CHROME=0 (the WebKit chrome, CH3.A5a's escape hatch): the tab holds the committed URL and the title."""
+        self.e9_redirect_on("e9_redirect_webkit", WEBKIT_CHROME)
+
+    def e9_redirect_on(self, c, env=None):
+        if not self.open_page(c, "e9_start", env=env):
             return
         self.expect(c, "the app followed the redirect", self.fixture.wait("/e9_final.html", 15, self.since))
         start = "%s/e9_start" % self.fixture.base
@@ -1013,13 +1024,33 @@ class Driver:
                     final in urls and start not in urls, "tab urls %s" % urls)
         self.expect(c, "the saved tab holds the page's title", "E9 final" in text)
 
+    A6_SECRET = "a6-secret-4Kp"
+
+    def a6_url_log(self):
+        """CH3.A6: without HIWAVE_DEBUG/HIWAVE_TEST_HOOKS a page URL's query and fragment never reach the app log; its path does."""
+        c = "a6_url_log"
+        secret = self.A6_SECRET
+        page = "e9_final.html?token=%s#%s" % (secret, secret)
+        if not self.open_page(c, page, env={"HIWAVE_TEST_HOOKS": "0"}):
+            return
+        path = "%s/e9_final.html" % self.fixture.base
+        nav = self.app.wait_log(r"Navigating content to: [^\n]*e9_final\.html[^\n]*", 10)
+        self.expect(c, "the navigation line names the page's path",
+                    bool(nav) and nav.group(0).rstrip().endswith(path), nav.group(0) if nav else "")
+        time.sleep(1.0)
+        log = self.app.log_text()
+        self.expect(c, "the query and fragment are nowhere in the log", secret not in log,
+                    "; ".join(l.strip()[-160:] for l in log.splitlines() if secret in l)[:600])
+
     def a2_chrome_boots(self):
-        """CH3.A2: with HIWAVE_RUSTKIT_CHROME=1 the chrome is a RustKit view whose script reaches the app."""
+        """CH3.A2/A5a: by default the chrome is a RustKit view whose script reaches the app."""
         c = "a2_chrome_boots"
-        if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+        if not self.open_page(c, "e9_final.html"):
             return
         m = self.app.wait_log(r"the chrome is a RustKit view", 10)
         self.expect(c, "the app built the chrome as a RustKit view", bool(m))
+        self.expect(c, "the startup line names the RustKit chrome",
+                    bool(self.app.wait_log(r"Chrome: RustKit \(default", 1)))
         # What the WebKit chrome posts at boot: its sidebar width, its workspaces.
         tabs = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
         self.expect(c, "the chrome's script posted get_sidebar_width and the app's handler took it", bool(tabs),
@@ -1030,9 +1061,9 @@ class Driver:
         self.expect(c, "the app is still running 3 s later", self.app.alive())
 
     def a7_no_bridge_in_content(self):
-        """CH3.A7: a web page in the content view has no window.ipc / window.hiwaveChrome, flag off and flag on."""
+        """CH3.A7: a web page in the content view has no window.ipc / window.hiwaveChrome, with HIWAVE_RUSTKIT_CHROME=0 (flag off) and by default (flag on)."""
         c = "a7_no_bridge_in_content"
-        for label, env in (("flag off", None), ("flag on", {"HIWAVE_RUSTKIT_CHROME": "1"})):
+        for label, env in (("flag off", WEBKIT_CHROME), ("flag on", None)):
             if not self.open_page(c, "a7_bridge.html", env=env):
                 self.close_page()
                 continue
@@ -1041,7 +1072,7 @@ class Driver:
             self.expect(c, "%s: the page's script ran and reported" % label, bool(got))
             self.expect(c, "%s: the page sees typeof window.ipc, window.hiwaveChrome = undefined,undefined" % label,
                         any("a7-bridge=undefined%2Cundefined" in r for r in seen), str(seen))
-            if env:
+            if label == "flag on":
                 # The chrome, an app-owned view, keeps its bridge meanwhile.
                 ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
                 self.expect(c, "%s: the chrome still posts get_sidebar_width" % label, bool(ipc))
@@ -1053,8 +1084,7 @@ class Driver:
         target = "%s/h16_b.html?from=a2" % self.fixture.base
         # The call the address bar's Enter handler makes. Not hiwave.navigate():
         # chrome.html replaces the bridge's window.hiwave with its own object.
-        env = {"HIWAVE_RUSTKIT_CHROME": "1",
-               "HIWAVE_RUSTKIT_CHROME_EVAL": "sendIpc('navigate', { url: %s })" % json.dumps(target)}
+        env = {"HIWAVE_RUSTKIT_CHROME_EVAL": "sendIpc('navigate', { url: %s })" % json.dumps(target)}
         if not self.open_page(c, "e9_final.html", env=env):
             return
         ran = self.app.wait_log(r"running HIWAVE_RUSTKIT_CHROME_EVAL", 20)
@@ -1078,9 +1108,9 @@ class Driver:
         self.expect(c, "the saved tab holds the URL the chrome asked for", target in urls, "tab urls %s" % urls)
 
     def a2_chrome_typed_url(self):
-        """CH3.A2 granted gate: flag on, the tab strip and toolbar are painted, and a URL typed in the address bar navigates."""
+        """CH3.A2 granted gate: RustKit chrome (the default), the tab strip and toolbar are painted, and a URL typed in the address bar navigates."""
         c = "a2_chrome_typed_url"
-        if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+        if not self.open_page(c, "e9_final.html"):
             return
         self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
         time.sleep(1.0)
@@ -1351,11 +1381,11 @@ class Driver:
             self.close_page()
 
     def e3_chrome_paste_url(self):
-        """CH2.E3, flag on: Cmd+V pastes a URL into the RustKit chrome's address bar and Return navigates."""
+        """CH2.E3, RustKit chrome (the default): Cmd+V pastes a URL into the RustKit chrome's address bar and Return navigates."""
         c = "e3_chrome_paste_url"
         saved = self.pasteboard()
         try:
-            if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+            if not self.open_page(c, "e9_final.html"):
                 return
             if not self.can_input:
                 return self.not_run(c, "a pasted URL navigates", self.why_not("Accessibility"))
@@ -1390,8 +1420,7 @@ class Driver:
     TITLE_BAR = 32  # the window's own title bar, above the chrome view
 
     def a3_open(self, c, env=None):
-        """A fresh app, flag on, on a3_page.html, with the chrome booted and stacked."""
-        env = dict({"HIWAVE_RUSTKIT_CHROME": "1"}, **(env or {}))
+        """A fresh app, RustKit chrome (the default), on a3_page.html, with the chrome booted and stacked."""
         if not self.open_page(c, "a3_page.html", env=env):
             return False
         self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
@@ -1867,9 +1896,9 @@ class Driver:
     E4_TAB = (440, 56)
 
     def e4_chrome_tab(self):
-        """CH2.E4, flag on: over a tab of the RustKit chrome the cursor is the hand; a right press there reaches the chrome's contextmenu handler (no native menu)."""
+        """CH2.E4, RustKit chrome (the default): over a tab of the RustKit chrome the cursor is the hand; a right press there reaches the chrome's contextmenu handler (no native menu)."""
         c = "e4_chrome_tab"
-        env = dict(self.E4_LOG, HIWAVE_RUSTKIT_CHROME="1")
+        env = dict(self.E4_LOG)
         if not self.open_page(c, "e4_mouse.html", env=env):
             return
         self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
@@ -1911,7 +1940,7 @@ class Driver:
     ])
 
     def a4_open(self, c, env=None):
-        """A fresh app, flag on, panels probed, on a3_page.html (green, beacons on click/key)."""
+        """A fresh app, RustKit chrome (the default), panels probed, on a3_page.html (green, beacons on click/key)."""
         env = dict({"HIWAVE_RUSTKIT_PANEL_PROBE": self.A4_PROBE}, **(env or {}))
         if not self.a3_open(c, env):
             return False
@@ -1968,7 +1997,7 @@ class Driver:
         return len(band.getcolors(maxcolors=band.width * band.height + 1) or [])
 
     def a4_shelf(self):
-        """CH3.A4: flag on, the shelf (command palette) is a RustKit view: opens, renders its commands, runs one typed command, closes."""
+        """CH3.A4: RustKit chrome (the default), the shelf (command palette) is a RustKit view: opens, renders its commands, runs one typed command, closes."""
         c = "a4_shelf"
         # Nothing in the app sends expand_shelf (the chrome has its own
         # command palette on Cmd+K), so the check posts it from the chrome,
@@ -2046,7 +2075,7 @@ class Driver:
         self.expect(c, "after it closed, keys go to the page", self.fixture.wait("beacon?a3-key-q", 5, mark))
 
     def a4_inspector(self):
-        """CH3.A4: flag on, the Inspector is a RustKit view: Cmd+Opt+I opens it, it renders the page's tree, shows a page console line, evaluates a typed line, and closes."""
+        """CH3.A4: RustKit chrome (the default), the Inspector is a RustKit view: Cmd+Opt+I opens it, it renders the page's tree, shows a page console line, evaluates a typed line, and closes."""
         c = "a4_inspector"
         if not self.a4_open(c):
             return
@@ -2146,7 +2175,7 @@ class Driver:
         return self.app.state_file.parent / "settings.json"
 
     def a4_settings_window(self, c):
-        """A fresh app, flag on, its settings window opened from the sidebar's button and rendered:
+        """A fresh app, RustKit chrome (the default), its settings window opened from the sidebar's button and rendered:
         {pid, shown (the first probe), at (a page point to hwdrive's), page_h}, or None."""
         if not self.a4_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A4_SETTINGS_BTN_JS}):
             return None
@@ -2211,7 +2240,7 @@ class Driver:
         return p
 
     def a4_settings(self):
-        """CH3.A4: flag on, the settings window's page is a RustKit view: the sidebar's button opens it, it shows the saved settings, takes clicks, the wheel and typing, saves a focus-blocklist domain to focus_mode.json, posts save_settings and shows the reply, and Escape closes it."""
+        """CH3.A4: RustKit chrome (the default), the settings window's page is a RustKit view: the sidebar's button opens it, it shows the saved settings, takes clicks, the wheel and typing, saves a focus-blocklist domain to focus_mode.json, posts save_settings and shows the reply, and Escape closes it."""
         c = "a4_settings"
         w = self.a4_settings_window(c)
         if w is None:
@@ -2304,7 +2333,7 @@ class Driver:
     A4_SECRET = "a4-secret-7Q2"
 
     def a4_private(self):
-        """#910 R1: flag on, what the RustKit panels are given stays out of the app log: a line typed in the Inspector's console, a vault master password and a saved credential (URL with a query, username, password) are never in it; the log names their cmds only."""
+        """#910 R1: RustKit chrome (the default), what the RustKit panels are given stays out of the app log: a line typed in the Inspector's console, a vault master password and a saved credential (URL with a query, username, password) are never in it; the log names their cmds only."""
         c = "a4_private"
         secret = self.A4_SECRET
         w = self.a4_settings_window(c)
@@ -2640,7 +2669,7 @@ class Driver:
                     self.fixture.wait("beacon?a3-click-", 5, mark))
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots", "a7_no_bridge_in_content",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "e9_redirect_webkit", "a6_url_log", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
               "a3c_shadow_over_page", "a3c_rounded_corner", "a3c_find_dims_page", "a3c_chrome_band",
