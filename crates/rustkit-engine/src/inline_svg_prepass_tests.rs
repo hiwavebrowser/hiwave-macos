@@ -226,3 +226,44 @@ fn current_color_follows_the_parents_colour() {
     let got = fills(&engine, view);
     assert!(got.contains(&BLUE) && !got.contains(&RED), "currentColor follows: {got:?}");
 }
+
+/// A DOM change away from the icons (a script writes a text node) checks
+/// each icon's own subtrees and serializes none of them.
+#[test]
+fn a_dom_change_elsewhere_serializes_no_icon() {
+    let html = reduced_page().replace("<body>", "<body><p id=\"t\">0</p>");
+    let (mut engine, view) = view_with(&html, 800, 600);
+    engine.relayout(view).expect("relayout");
+    let before = markup_builds();
+    let relayouts = engine.relayout_stats(view).expect("view").relayouts;
+    let mut svg_ms = Vec::new();
+    for i in 1..4 {
+        engine
+            .execute_script(view, &format!("document.getElementById('t').textContent = '{i}'"))
+            .expect("script");
+        // The script's flush laid the page out.
+        svg_ms.push(engine.relayout_stats(view).expect("view").last_svg_ms);
+    }
+    eprintln!("LAT4b reduced page, text change elsewhere: svg_ms per relayout {svg_ms:?}");
+    assert_eq!(markup_builds() - before, 0, "no icon is serialized again");
+    assert_eq!(engine.relayout_stats(view).expect("view").relayouts, relayouts + 3, "one relayout per script");
+}
+
+/// A paint rule keyed on an HTML ancestor's class (the kept per-element
+/// styles must see the ancestor change), and one keyed on a sibling (no
+/// per-element styles are kept then).
+#[test]
+fn paint_rules_on_an_ancestor_and_on_a_sibling_follow_changes() {
+    let (mut engine, view) = view_with(
+        r##"<!DOCTYPE html><style>.on rect{fill:#0000ff} .mark + svg rect{fill:#00ff00}</style><body><div id="a"><svg width="20" height="20"><rect width="10" height="10" fill="#ff0000"/></svg></div><div><i id="m"></i><svg width="20" height="20"><rect width="10" height="10" fill="#ff0000"/></svg></div></body>"##,
+        200,
+        100,
+    );
+    assert!(!fills(&engine, view).contains(&BLUE));
+    run(&mut engine, view, "document.getElementById('a').className = 'on'");
+    assert!(fills(&engine, view).contains(&BLUE), "ancestor class: {:?}", fills(&engine, view));
+    run(&mut engine, view, "document.getElementById('a').className = ''");
+    assert!(!fills(&engine, view).contains(&BLUE), "ancestor class removed: {:?}", fills(&engine, view));
+    run(&mut engine, view, "document.getElementById('m').className = 'mark'");
+    assert!(fills(&engine, view).contains(&(0, 255, 0)), "sibling class: {:?}", fills(&engine, view));
+}
