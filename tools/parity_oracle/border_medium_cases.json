@@ -209,6 +209,51 @@
    "name": "input-width-thick-no-style",
    "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-width:thick;padding:0;width:20px;height:10px\"></body></html>",
    "chrome_boxes": "a:0:0:30:20"
+  },
+  {
+   "name": "width-thick-style-hidden",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thick;border-style:hidden\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "width-length-style-hidden",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:5px;border-style:hidden\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "top-width-length-top-style-hidden",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top-width:5px;border-top-style:hidden\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "script-adds-style-to-thick",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:thick\"></div><script>document.getElementById(\"a\").offsetWidth;document.getElementById(\"a\").style.borderStyle=\"solid\"</script><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "script-adds-top-style-to-length",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top-width:5px\"></div><script>document.getElementById(\"a\").offsetWidth;document.getElementById(\"a\").style.borderTopStyle=\"dashed\"</script><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:15 b:0:15:10:10"
+  },
+  {
+   "name": "script-adds-class-with-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><style>.on{border-style:solid}</style><div id=a style=\"border-color:red;border-width:thin medium\"></div><script>document.getElementById(\"a\").offsetWidth;document.getElementById(\"a\").className=\"on\"</script><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:12 b:0:12:10:10"
+  },
+  {
+   "name": "border-style-initial",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-style:initial\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-width-initial-after-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-width:initial\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  },
+  {
+   "name": "border-left-width-initial-after-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-left-width:initial\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:18:20 b:0:20:10:10"
   }
  ],
  "chrome": "143.0.7499.4"
