@@ -55,7 +55,7 @@ function collectViewportText() {
 
 async function captureChrome(url, pngPath, textPath, width, height, settleMs) {
   const started = Date.now();
-  // Headed and off-screen by default (A1); see realsite_launch.mjs.
+  // Headless unless the board opted in to headed under the real-window lock (A1); see realsite_launch.mjs.
   const launch = oracleLaunchOptions(width, height);
   const browser = await chromium.launch(launch);
   const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: launch.headless };
