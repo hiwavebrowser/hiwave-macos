@@ -84,6 +84,7 @@ mod content_webview_trait;
 #[cfg(target_os = "macos")]
 mod content_webview_enum;
 mod chrome_webview_enum;
+mod chrome_state;
 
 use content_webview_trait::ContentWebViewOps;
 #[cfg(target_os = "macos")]
@@ -340,6 +341,18 @@ trait ChromeUi {
     /// Stay the frontmost of the window's views, over panels built after
     /// it (CH3.A3b). The WebKit view: nothing, as before.
     fn keep_on_top(&self) {}
+    /// Tell the chrome one piece of its state (CH3.A10): `key` is what
+    /// chrome.html's `__hiwaveApplyState` applies (`tabs`, `url`, ...),
+    /// `json` its value. A view that does not coalesce sends it at once.
+    fn send_state(&self, key: &'static str, json: String) {
+        let _ = self.eval(&chrome_state::bridge_script(&format!(
+            "{{{}:{}}}",
+            serde_json::to_string(key).unwrap_or_default(),
+            json
+        )));
+    }
+    /// Send the state coalesced this turn, as one script (CH3.A10).
+    fn flush_state(&self) {}
 }
 
 impl ChromeUi for WebView {
@@ -1023,6 +1036,14 @@ impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
 
     fn keep_on_top(&self) {
         (**self).keep_on_top()
+    }
+
+    fn send_state(&self, key: &'static str, json: String) {
+        (**self).send_state(key, json)
+    }
+
+    fn flush_state(&self) {
+        (**self).flush_state()
     }
 }
 
@@ -1762,6 +1783,26 @@ fn handle_settings_ipc(body: &str, settings_proxy: &tao::event_loop::EventLoopPr
 }
 
 
+/// The address bar's URL (CH3.A10: coalesced per turn, see `chrome_state`).
+fn chrome_url(chrome: &impl ChromeUi, url: &str) {
+    chrome.send_state("url", serde_json::to_string(url).unwrap_or_default());
+}
+
+/// The active tab's title.
+fn chrome_title(chrome: &impl ChromeUi, title: &str) {
+    chrome.send_state("title", serde_json::to_string(title).unwrap_or_default());
+}
+
+/// The back and forward buttons.
+fn chrome_nav_state(chrome: &impl ChromeUi, can_go_back: bool, can_go_forward: bool) {
+    chrome.send_state("nav", format!("[{can_go_back},{can_go_forward}]"));
+}
+
+/// The loading bar.
+fn chrome_loading(chrome: &impl ChromeUi, loading: bool) {
+    chrome.send_state("loading", loading.to_string());
+}
+
 fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
     if let Ok(s) = state.lock() {
         let active_tab_id = s.shell.get_active_tab().map(|t| t.id);
@@ -1789,11 +1830,7 @@ fn sync_tabs_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
             .collect();
 
         let tabs_json = serde_json::to_string(&tabs).unwrap_or_else(|_| "[]".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.renderTabs({}); }}",
-            tabs_json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("tabs", tabs_json);
     }
 }
 
@@ -1834,11 +1871,7 @@ fn sync_workspaces_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeU
             .collect();
 
         let ws_json = serde_json::to_string(&workspaces).unwrap_or_else(|_| "[]".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.renderWorkspaces({}); }}",
-            ws_json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("workspaces", ws_json);
     }
 }
 
@@ -1851,11 +1884,7 @@ fn sync_shield_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) {
             "trackers_blocked": stats.trackers_blocked
         });
         let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.updateShieldStats({}); }}",
-            json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("shield", json);
     }
 }
 
@@ -1876,11 +1905,7 @@ fn sync_shelf_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi, sc
             "global_count": s.shelf_count_all(),
         });
         let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.renderShelf({}); }}",
-            json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("shelf", json);
     }
 }
 
@@ -1888,11 +1913,7 @@ fn sync_blocklist_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi
     if let Ok(s) = state.lock() {
         let domains: Vec<&String> = s.user_blocklist.domains.iter().collect();
         let json = serde_json::to_string(&domains).unwrap_or_else(|_| "[]".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.updateBlocklist({}); }}",
-            json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("blocklist", json);
     }
 }
 
@@ -1903,11 +1924,7 @@ fn sync_downloads_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi
             "active_count": s.active_download_count(),
         });
         let json = serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.updateDownloads({}); }}",
-            json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("downloads", json);
     }
 }
 
@@ -1915,11 +1932,7 @@ fn sync_history_to_chrome(state: &Arc<Mutex<AppState>>, chrome: &impl ChromeUi) 
     if let Ok(s) = state.lock() {
         let history = s.visit_history_snapshot();
         let json = serde_json::to_string(&history).unwrap_or_else(|_| "[]".to_string());
-        let script = format!(
-            "if(window.hiwaveChrome) {{ hiwaveChrome.updateHistory({}); }}",
-            json
-        );
-        let _ = chrome.eval(&script);
+        chrome.send_state("history", json);
     }
 }
 
@@ -3579,7 +3592,12 @@ fn main() {
     }
 
     // Store WebViews in Arcs for event loop access
-    let chrome_webview = Arc::new(chrome_webview);
+    // CH3.A10: its state updates coalesced per turn; the RustKit event
+    // loop flushes them at `MainEventsCleared`.
+    let chrome_webview = Arc::new(chrome_state::CoalescedChrome::new(
+        chrome_webview,
+        cfg!(all(target_os = "macos", feature = "rustkit")),
+    ));
     #[cfg(target_os = "macos")]
     let content_webview = Arc::new(content_webview);
     #[cfg(not(target_os = "macos"))]
@@ -3594,7 +3612,7 @@ fn main() {
     // the first layout sets it again.
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
     if let (ChromeView::RustKit(ref chrome), UnifiedContentWebView::RustKit(ref page)) =
-        (&*chrome_webview, &*content_webview)
+        (&**chrome_webview, &*content_webview)
     {
         rustkit_viewhost::raise_raw_view_above(chrome.host_view_raw(), page.host_view_raw());
         // CH3.A3c: a transparent surface, so its shadows, rounded corners
@@ -4007,9 +4025,12 @@ fn main() {
             }
             #[cfg(all(target_os = "macos", feature = "rustkit"))]
             Event::MainEventsCleared => {
+                // CH3.A10: the chrome state this turn's events changed goes
+                // as one script, before the chrome's own turn.
+                chrome_for_events.flush_state();
                 // The RustKit chrome (CH3.A2): its page's messages go to the
                 // chrome's command handler, as the WebKit view's do.
-                let chrome_input = if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
+                let chrome_input = if let ChromeView::RustKit(ref chrome) = **chrome_for_events {
                     chrome.process_events();
                     // Its input (step 3b), through the page's dispatch. Taken
                     // whatever the page is doing: the address bar answers
@@ -4149,7 +4170,7 @@ fn main() {
                                 continue;
                             }
                             if route == InputRoute::Chrome {
-                                if let ChromeView::RustKit(ref chrome) = *chrome_for_events {
+                                if let ChromeView::RustKit(ref chrome) = **chrome_for_events {
                                     chrome.note_input(event.at, event.seq);
                                     dispatch_view_input(
                                         chrome,
@@ -4246,8 +4267,7 @@ fn main() {
                             load_new_tab(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_new_tab(&*content_for_events);
-                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
-                            );
+                            chrome_url(&*chrome_for_events, "");
                             sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                         } else if is_about_url(&url) {
                             // Update tab URL BEFORE loading the about page
@@ -4263,8 +4283,7 @@ fn main() {
                             load_about_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_about_page(&*content_for_events);
-                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://about'); }",
-                            );
+                            chrome_url(&*chrome_for_events, "hiwave://about");
                         } else if is_report_url(&url) {
                             // Update tab URL BEFORE loading the report page
                             if let Ok(mut s) = state_for_events.lock() {
@@ -4278,8 +4297,7 @@ fn main() {
                             load_report_page(&*content_for_events);
                             #[cfg(not(target_os = "macos"))]
                             load_report_page(&*content_for_events);
-                            let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl('hiwave://report'); }",
-                            );
+                            chrome_url(&*chrome_for_events, "hiwave://report");
                         } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
                             // Skip about: URLs (about:blank, about:srcdoc, etc.)
                             // Skip hiwave:// protocol URLs (handled above if recognized, otherwise ignore)
@@ -4316,11 +4334,7 @@ fn main() {
                                     error!("Failed to navigate: {}", e);
                                 }
                             }
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                                full_url.replace("'", "\\'")
-                            );
-                            let _ = chrome_for_events.eval(&script);
+                            chrome_url(&*chrome_for_events, &full_url);
                         }
                     }
                     UserEvent::GoBack => {
@@ -4417,8 +4431,7 @@ fn main() {
                         load_new_tab(&*content_for_events);
                         #[cfg(not(target_os = "macos"))]
                         load_new_tab(&*content_for_events);
-                        let _ = chrome_for_events.eval("if(window.hiwaveChrome) { hiwaveChrome.updateUrl(''); }",
-                        );
+                        chrome_url(&*chrome_for_events, "");
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
                     UserEvent::UpdateTitle(title) => {
@@ -4437,22 +4450,14 @@ fn main() {
                                     error!("Failed to persist workspace state: {}", e);
                                 }
                             }
-                            let script = format!(
-                                "if(window.hiwaveChrome) {{ hiwaveChrome.updateTitle('{}'); }}",
-                                title.replace("'", "\\'")
-                            );
-                            let _ = chrome_for_events.eval(&script);
+                            chrome_title(&*chrome_for_events, &title);
                             sync_tabs_to_chrome(&state_for_events, &chrome_for_events);
                             // Also sync workspaces so sidebar tab info updates
                             sync_workspaces_to_chrome(&state_for_events, &chrome_for_events);
                         }
                     }
                     UserEvent::UpdateUrl(url) => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.updateUrl('{}'); }}",
-                            url.replace("'", "\\'")
-                        );
-                        let _ = chrome_for_events.eval(&script);
+                        chrome_url(&*chrome_for_events, &url);
                         sync_shield_to_chrome(&state_for_events, &chrome_for_events);
                     }
                     UserEvent::UpdateActiveTabUrl(url) => {
@@ -4477,18 +4482,10 @@ fn main() {
                         sync_workspaces_to_chrome(&state_for_events, &chrome_for_events);
                     }
                     UserEvent::NavigationStateChanged { can_go_back, can_go_forward } => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.updateNavState({}, {}); }}",
-                            can_go_back, can_go_forward
-                        );
-                        let _ = chrome_for_events.eval(&script);
+                        chrome_nav_state(&*chrome_for_events, can_go_back, can_go_forward);
                     }
                     UserEvent::SetLoading(loading) => {
-                        let script = format!(
-                            "if(window.hiwaveChrome) {{ hiwaveChrome.setLoading({}); }}",
-                            loading
-                        );
-                        let _ = chrome_for_events.eval(&script);
+                        chrome_loading(&*chrome_for_events, loading);
                         // Inject context menu handler and audio detector when page finishes loading.
                         // Not on macOS: the content view is RustKit, which never
                         // ran these WebKit helpers (no SetLoading was sent there
