@@ -416,6 +416,8 @@ mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
 #[cfg(all(test, feature = "headless"))]
+mod pseudo_custom_props_var_tests;
+#[cfg(all(test, feature = "headless"))]
 mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_margin_tests;
@@ -11888,7 +11890,7 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
-                self.note_pseudo_style(node.id.raw(), "::before", before_style.as_ref());
+                self.note_pseudo_style(node.id.raw(), "::before", before_style.as_ref(), &layout_box.style);
                 if let Some(before_box) = before_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
@@ -12196,7 +12198,7 @@ impl layout_ctx::LayoutCtx {
                         Some(&layout_box.style),
                     )
                 });
-                self.note_pseudo_style(node.id.raw(), "::after", after_style.as_ref());
+                self.note_pseudo_style(node.id.raw(), "::after", after_style.as_ref(), &layout_box.style);
                 if let Some(after_box) = after_style
                 .inspect(container_query::note_pseudo)
                 .and_then(Engine::pseudo_element_box)
@@ -12836,6 +12838,35 @@ impl layout_ctx::LayoutCtx {
         let mut important_rules = matching_rules.clone();
         important_rules.sort_by_key(|(spec, rule)| (std::cmp::Reverse(rule.layer_order), *spec));
 
+        // Custom properties first, as for an element: the pseudo inherits its
+        // originating element's set (which already carries every ancestor's
+        // and the root's), its own `--*` winners go over it, and every
+        // `var()` below resolves against the result. The pseudo cascade
+        // used to hand `var(--c)` to the value parser as text, which dropped
+        // it: chrome.html's `::before`/`::after` lost every colour.
+        let inherited_vars = parent.map(|p| p.custom_properties.clone()).unwrap_or_default();
+        let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
+        for important_pass in [false, true] {
+            let rules = if important_pass { &important_rules } else { &matching_rules };
+            for (_, rule) in rules {
+                for decl in &rule.declarations {
+                    if decl.important != important_pass || !decl.property.starts_with("--") {
+                        continue;
+                    }
+                    match &decl.value {
+                        rustkit_css::PropertyValue::Specified(s) => {
+                            declared_vars.push((decl.property.as_str(), Some(s.as_str())))
+                        }
+                        rustkit_css::PropertyValue::Initial => {
+                            declared_vars.push((decl.property.as_str(), None))
+                        }
+                        rustkit_css::PropertyValue::Inherit => {}
+                    }
+                }
+            }
+        }
+        let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
+
         // Apply matching rules: normal declarations, then `!important` ones
         // (CSS Cascade 4 §6.1), specificity order within each.
         for important_pass in [false, true] {
@@ -12860,15 +12891,26 @@ impl layout_ctx::LayoutCtx {
                         rustkit_css::PropertyValue::Inherit => continue,
                         rustkit_css::PropertyValue::Initial => continue,
                     };
+                    if declaration.property.starts_with("--") {
+                        // Already applied to `vars` above.
+                        continue;
+                    }
                     // `inherit` takes the generating element's value, as an
                     // element's does its parent's: `:before, :after
                     // { box-sizing: inherit }` is half of the common reset.
-                    self.apply_cascaded(
-                        &mut pseudo_style,
-                        parent,
-                        &declaration.property,
-                        value_str,
-                    );
+                    match self.resolve_css_variables_or_invalid(value_str, &*vars) {
+                        Some(resolved) => self.apply_cascaded(
+                            &mut pseudo_style,
+                            parent,
+                            &declaration.property,
+                            &resolved,
+                        ),
+                        None => self.apply_invalid_at_computed_value_time(
+                            &mut pseudo_style,
+                            parent,
+                            &declaration.property,
+                        ),
+                    }
                 }
             }
         }
@@ -12904,6 +12946,8 @@ impl layout_ctx::LayoutCtx {
         };
 
         pseudo_style.settle_animation_opacity(stylesheets);
+
+        pseudo_style.custom_properties = vars;
 
         // Without `content` there is no box, so there is nothing to keep:
         // `*::before, *::after { box-sizing: … }` matches on every element.
@@ -17784,6 +17828,45 @@ impl layout_ctx::LayoutCtx {
     /// the first style pass. Fallbacks are delimited by balanced parentheses,
     /// and the expanded length is capped so fan-out chains cannot grow without
     /// bound.
+    /// `resolve_css_variables`, or `None` when the value is invalid at
+    /// computed-value time: a `var()` whose variable is unset, invalid or in
+    /// a cycle, with no fallback (CSS Variables 1 §3).
+    fn resolve_css_variables_or_invalid(
+        &self,
+        value: &str,
+        css_vars: &dyn VarSource,
+    ) -> Option<String> {
+        if !value.contains("var(") {
+            return Some(resolve_light_dark(value.to_string()));
+        }
+        let mut stack: Vec<&str> = Vec::new();
+        let mut budget = VAR_EXPANSION_BUDGET;
+        let mut invalid = false;
+        let out = substitute_css_vars(
+            value,
+            &[css_vars],
+            &mut stack,
+            &mut budget,
+            &mut false,
+            &mut invalid,
+        );
+        (!invalid).then(|| resolve_light_dark(out))
+    }
+
+    /// A declaration invalid at computed-value time computes as `unset`
+    /// (CSS Variables 1 §3): the parent's value for an inherited property,
+    /// the initial value otherwise. It still wins the cascade, so an
+    /// earlier `width: 50px` does not survive `width: var(--missing)`.
+    fn apply_invalid_at_computed_value_time(
+        &self,
+        style: &mut ComputedStyle,
+        parent: Option<&ComputedStyle>,
+        property: &str,
+    ) {
+        let keyword = if is_inherited_property(property) { "inherit" } else { "initial" };
+        self.apply_cascaded(style, parent, property, keyword);
+    }
+
     fn resolve_css_variables(&self, value: &str, css_vars: &dyn VarSource) -> String {
         if !value.contains("var(") {
             return resolve_light_dark(value.to_string());
@@ -24818,6 +24901,11 @@ fn geometry_with_root(
             for row in pseudo_style_lines(style).lines() {
                 lines.push_str(&format!("\n{pseudo} {row}"));
             }
+            // Its own custom properties (`note_pseudo_style` empties an
+            // inherited set), the whole set, as an element publishes it.
+            for row in custom_property_lines(&style.custom_properties).lines().skip(2) {
+                lines.push_str(&format!("\n{pseudo} {row}"));
+            }
         }
     }
     snapshot
@@ -24887,12 +24975,25 @@ impl layout_ctx::LayoutCtx {
     /// `getComputedStyle(el, pseudo)`, in the map of the view being built. A
     /// `display: none` pseudo has no box to read it from, and that is the
     /// usual shape of the breakpoint idiom. `None` drops what a restyle left.
-    fn note_pseudo_style(&self, node: usize, pseudo: &'static str, style: Option<&ComputedStyle>) {
+    /// A pseudo that declares no `--*` of its own is noted with an empty
+    /// custom-property set: script reads its element's (inherited) set then,
+    /// and only a pseudo with its own publishes rows for it.
+    fn note_pseudo_style(
+        &self,
+        node: usize,
+        pseudo: &'static str,
+        style: Option<&ComputedStyle>,
+        element: &ComputedStyle,
+    ) {
         self.with_building_lay(|lay| {
             let mut styles = lay.pseudo_styles.borrow_mut();
             match style {
                 Some(style) => {
-                    styles.insert((node, pseudo), style.clone());
+                    let mut noted = style.clone();
+                    if Arc::ptr_eq(&noted.custom_properties, &element.custom_properties) {
+                        noted.custom_properties = Default::default();
+                    }
+                    styles.insert((node, pseudo), noted);
                 }
                 None if !styles.is_empty() => {
                     styles.remove(&(node, pseudo));
