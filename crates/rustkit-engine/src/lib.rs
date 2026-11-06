@@ -20855,6 +20855,8 @@ impl Engine {
         let Some(bindings) = view.bindings.as_ref() else {
             return Ok(false);
         };
+        // Read before the take, which clears it.
+        let beyond_layer = bindings.dirty_beyond_animation_layer();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
         Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
@@ -20865,8 +20867,12 @@ impl Engine {
         let canvas_painted = bindings.take_canvas_painted();
         // LAT2: script's animated-style layer is all that was written (a
         // Web Animations frame): a frame that moves only paint keeps the
-        // laid-out boxes.
+        // laid-out boxes. The dirty mark, not the log, decides: some writes
+        // dirty the page with no log record (`adoptedStyleSheets`,
+        // `attachShadow`, `customElements.define`, a CSS animation control,
+        // the embedder's own marks), and the log is checked as well.
         let layer_only = dirty != DomDirty::Clean
+            && !beyond_layer
             && !log.full
             && !log.records.is_empty()
             && log
