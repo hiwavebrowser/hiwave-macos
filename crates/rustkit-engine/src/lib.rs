@@ -14553,21 +14553,27 @@ impl layout_ctx::LayoutCtx {
                 style.border_right_style = r;
                 style.border_bottom_style = b;
                 style.border_left_style = l;
+                medium_if_unset(&mut style.border_top_width, t);
+                medium_if_unset(&mut style.border_right_width, r);
+                medium_if_unset(&mut style.border_bottom_width, b);
+                medium_if_unset(&mut style.border_left_width, l);
             }
             "border-top-style" | "border-right-style" | "border-bottom-style"
             | "border-left-style" => {
                 if let Some(s) = rustkit_css::BorderStyle::from_keyword(value.trim()) {
-                    match property {
-                        "border-top-style" => style.border_top_style = s,
-                        "border-right-style" => style.border_right_style = s,
-                        "border-bottom-style" => style.border_bottom_style = s,
-                        _ => style.border_left_style = s,
-                    }
+                    let (side_style, width) = match property {
+                        "border-top-style" => (&mut style.border_top_style, &mut style.border_top_width),
+                        "border-right-style" => (&mut style.border_right_style, &mut style.border_right_width),
+                        "border-bottom-style" => (&mut style.border_bottom_style, &mut style.border_bottom_width),
+                        _ => (&mut style.border_left_style, &mut style.border_left_width),
+                    };
+                    *side_style = s;
+                    medium_if_unset(width, s);
                 }
             }
             "border-width" => {
-                // 1–4 length values, standard sides expansion
-                if let Some((t, r, b, l)) = parse_shorthand_4(value) {
+                // 1–4 widths (lengths or thin/medium/thick), standard sides expansion
+                if let Some((t, r, b, l)) = parse_border_widths(value) {
                     style.border_top_width = t;
                     style.border_right_width = r;
                     style.border_bottom_width = b;
@@ -15381,22 +15387,22 @@ impl layout_ctx::LayoutCtx {
                 };
             }
             "border-top-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_top_width = length;
                 }
             }
             "border-right-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_right_width = length;
                 }
             }
             "border-bottom-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_bottom_width = length;
                 }
             }
             "border-left-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_left_width = length;
                 }
             }
@@ -22646,6 +22652,45 @@ fn parse_outline_shorthand(value: &str) -> Option<rustkit_css::Outline> {
         }
     }
     (style || width || color).then_some(parsed)
+}
+
+/// A `border-*-width` value: a length or `thin`/`medium`/`thick`
+/// (1/3/5 px, as Chromium).
+fn parse_border_width(value: &str) -> Option<rustkit_css::Length> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "thin" => Some(rustkit_css::Length::Px(1.0)),
+        "medium" => Some(rustkit_css::Length::Px(3.0)),
+        "thick" => Some(rustkit_css::Length::Px(5.0)),
+        other => parse_length(other),
+    }
+}
+
+/// `border-width`: 1–4 [`parse_border_width`] values, sides expanded.
+fn parse_border_widths(
+    value: &str,
+) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+    let parts = value
+        .split_whitespace()
+        .map(parse_border_width)
+        .collect::<Option<Vec<_>>>()?;
+    match parts.as_slice() {
+        [a] => Some((a.clone(), a.clone(), a.clone(), a.clone())),
+        [a, b] => Some((a.clone(), b.clone(), a.clone(), b.clone())),
+        [a, b, c] => Some((a.clone(), b.clone(), c.clone(), b.clone())),
+        [a, b, c, d] => Some((a.clone(), b.clone(), c.clone(), d.clone())),
+        _ => None,
+    }
+}
+
+/// CH2.B18 (1): a side given a style keeps its width, or takes `medium`
+/// (3px, the initial `border-width`) when no width was declared. The
+/// initial `BorderStyle` is `Solid`, so the unset width (`Length::Zero`;
+/// an authored `0` is `Px(0.0)`) can't start at 3px itself. `none` sides
+/// are zeroed after the cascade (`zero_width_of_borderless_sides`).
+fn medium_if_unset(width: &mut rustkit_css::Length, side_style: rustkit_css::BorderStyle) {
+    if side_style != rustkit_css::BorderStyle::None && *width == rustkit_css::Length::Zero {
+        *width = rustkit_css::Length::Px(3.0);
+    }
 }
 
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
