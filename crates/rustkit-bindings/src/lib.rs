@@ -758,15 +758,34 @@ pub enum DomDirty {
 pub(crate) struct DirtyMark {
     bucket: Cell<DomDirty>,
     since_layout: Cell<bool>,
+    /// The kind of the write that first dirtied the published layout
+    /// (`attribute`, `class`, `style`, `text`, `html`, `insert`, `remove`,
+    /// `animation`, `form`, `sheet`, `shadow`): the forced-layout log's
+    /// cause. `None` while the layout is current.
+    cause: Cell<Option<&'static str>>,
 }
 
 impl DirtyMark {
-    /// A script write that invalidated `bucket`.
-    pub(crate) fn mark(&self, bucket: DomDirty) {
+    /// A script write of kind `kind` that invalidated `bucket`.
+    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
             self.bucket.set(self.bucket.get().max(bucket));
-            self.since_layout.set(true);
+            if !self.since_layout.replace(true) {
+                self.cause.set(Some(kind));
+            }
         }
+    }
+
+    /// A script write the engine must lay out when script settles, but that
+    /// no box of the published layout can see (it is inside a `display:
+    /// none` subtree): a geometry read before then needs no forced layout.
+    pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
+        self.bucket.set(self.bucket.get().max(bucket));
+    }
+
+    /// What first dirtied the published layout (see `cause`).
+    pub(crate) fn cause(&self) -> Option<&'static str> {
+        self.cause.get()
     }
 
     pub(crate) fn get(&self) -> DomDirty {
@@ -785,6 +804,49 @@ impl DirtyMark {
     /// A layout of the DOM as it is now was published.
     pub(crate) fn laid_out(&self) {
         self.since_layout.set(false);
+        self.cause.set(None);
+    }
+}
+
+/// A script task's forced layouts (`DomBindings::take_forced_report`): how
+/// many, their time, and per cause how many, as `(write, read, count)` in
+/// the order first seen. The write is the one that first dirtied the
+/// layout the read found stale (`attribute`, `class`, `style`, `text`,
+/// `html`, `insert`, `remove`, `animation`, `form`, `sheet`, `shadow`);
+/// the read is what asked (`offset`, `rect`, `client`, `scroll_size`,
+/// `computed_style`, `element_scroll`, `scroll_chain`, `inner_text`,
+/// `laid_out`, `hit_test`, `window_scroll`, `scroll_to`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForcedLayoutReport {
+    pub count: u64,
+    pub ms: f64,
+    pub causes: Vec<(&'static str, &'static str, u64)>,
+}
+
+impl ForcedLayoutReport {
+    pub(crate) fn note(&mut self, write: &'static str, read: &'static str, ms: f64) {
+        self.ms += ms;
+        match self.causes.iter_mut().find(|(w, r, _)| *w == write && *r == read) {
+            Some(entry) => entry.2 += 1,
+            None => self.causes.push((write, read, 1)),
+        }
+    }
+
+    /// The most frequent cause as `write:read` (the first seen on a tie).
+    pub fn top_cause(&self) -> Option<String> {
+        let mut top: Option<&(&str, &str, u64)> = None;
+        for entry in &self.causes {
+            if top.is_none_or(|t| entry.2 > t.2) {
+                top = Some(entry);
+            }
+        }
+        top.map(|(w, r, _)| format!("{w}:{r}"))
+    }
+
+    /// Every cause, as `{write:read:n,...}`.
+    pub fn causes_field(&self) -> String {
+        let parts: Vec<String> = self.causes.iter().map(|(w, r, n)| format!("{w}:{r}:{n}")).collect();
+        format!("{{{}}}", parts.join(","))
     }
 }
 
@@ -1860,6 +1922,20 @@ impl DomBindings {
     /// per-task budget (the engine calls this when a script task settles).
     pub fn take_forced_layouts(&self) -> u64 {
         self.dom_host.borrow_mut().take_forced_layouts()
+    }
+
+    /// `take_forced_layouts`, with each forced layout's cause and the time
+    /// they took (the engine's per-task log line).
+    pub fn take_forced_report(&self) -> ForcedLayoutReport {
+        self.dom_host.borrow_mut().take_forced_report()
+    }
+
+    /// Whether the page's sheets have a `:has()` rule, asked when a write
+    /// lands inside a `display: none` subtree: with one, the write may show
+    /// it, and a geometry read after it lays the page out. Without a probe
+    /// the answer is yes.
+    pub fn set_has_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().has_rules = probe;
     }
 
     /// How many times a source from `set_geometry_source` was built.

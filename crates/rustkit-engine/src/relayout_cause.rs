@@ -240,6 +240,8 @@ pub struct RelayoutStats {
     /// Forced layouts: script read geometry after a DOM write in the same
     /// task, so the page was laid out (not painted) for the read.
     pub forced_layouts: u64,
+    /// Their time in milliseconds (LAT7; LAT1's sizing input).
+    pub forced_ms: f64,
     /// Time spent in them, layout and the paint it ends with.
     pub total_ms: f64,
     /// The most recent relayout's first cause.
