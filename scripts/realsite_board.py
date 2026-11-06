@@ -252,7 +252,8 @@ class OracleLockBusy(RuntimeError):
 
 
 class RealWindowLock:
-    """mkdir lock with a pid file; a lock whose pid is dead is recovered.
+    """mkdir lock with a pid file; a lock whose pid is dead is recovered
+    (rename-then-mkdir, so two recoverers never both hold it).
 
     A lock without a pid file (the shell recipe's bare mkdir) is never
     treated as stale: its holder is waited for like any other.
@@ -285,9 +286,41 @@ class RealWindowLock:
             return True
         pid = self.holder()
         if pid is not None and pid != os.getpid() and not _pid_alive(pid):
-            shutil.rmtree(self.path, ignore_errors=True)  # stale holder
-            return self._mkdir()
+            return self._recover(pid)
         return False
+
+    def _recover(self, dead_pid):
+        """Take over a lock whose holder `dead_pid` is gone; at most one runner wins.
+
+        The stale directory is renamed to a unique name first. rename() of one
+        source succeeds for exactly one caller; a second recoverer gets ENOENT
+        and goes back to waiting. Only then is the lock mkdir'd (still the
+        arbiter if a fresh runner races in). If what we renamed away turns out
+        not to be the dead holder's lock (another runner recovered and re-took
+        it between our pid read and our rename), it is put back untouched.
+        """
+        stale = self.path.with_name("%s.stale-%d-%d-%d" % (
+            self.path.name, dead_pid, time.time_ns(), os.getpid()))
+        try:
+            os.rename(self.path, stale)
+        except OSError:  # ENOENT: another recoverer renamed it first
+            return False
+        try:
+            got = int((stale / "pid").read_text().strip())
+        except (OSError, ValueError):
+            got = None
+        if got != dead_pid:
+            # Not the dead lock: a live holder's. Restore it unless the path was
+            # re-taken meanwhile (then the live holder keeps its directory under
+            # the stale name and we leave it alone rather than delete it).
+            if not os.path.lexists(self.path):
+                try:
+                    os.rename(stale, self.path)
+                except OSError:
+                    pass
+            return False
+        shutil.rmtree(stale, ignore_errors=True)
+        return self._mkdir()
 
     def acquire(self):
         deadline = self.clock() + self.wait_s
@@ -366,11 +399,14 @@ class OracleSession:
     def apply(self, env):
         """Set the oracle env for the next capture (strips a stray headed request)."""
         env = dict(env)
-        for k in ("REALSITE_ORACLE_HEADED", "REALSITE_ORACLE_HEADLESS", "REALSITE_REALWINDOW_LOCK"):
+        for k in ("REALSITE_ORACLE_HEADED", "REALSITE_ORACLE_HEADLESS", "REALSITE_REALWINDOW_LOCK",
+                  "REALSITE_LOCK_OWNER"):
             env.pop(k, None)
         if self.headed:
             env["REALSITE_ORACLE_HEADED"] = "1"
             env["REALSITE_REALWINDOW_LOCK"] = str(self.lock.path)
+            # The launcher goes headed only if the lock's pid file names this owner.
+            env["REALSITE_LOCK_OWNER"] = str(os.getpid())
         else:
             env["REALSITE_ORACLE_HEADLESS"] = "1"
         return env
