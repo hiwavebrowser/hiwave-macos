@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::restyle_invalidation::{
-    DirtySet, InvalidationIndex, ANCESTOR, ANYWHERE, BOX, LAYOUT, PAINT, POSITIONAL, SIBLING, STYLE, SUBJECT,
-    SUBTREE_STYLE,
+    DirtySet, InvalidationIndex, ANCESTOR, ANYWHERE, BOX, IN_HAS, LAYOUT, PAINT, POSITIONAL, SIBLING, STYLE,
+    SUBJECT, SUBTREE_STYLE,
 };
 
 fn index(selectors: &[&str]) -> InvalidationIndex {
@@ -70,8 +70,10 @@ fn index_reads_into_functional_pseudo_classes() {
     assert_eq!(flags(&ix.classes, "g"), ANCESTOR, "a complex member of the subject's list places as a rule");
     assert_eq!(flags(&ix.classes, "h"), SUBJECT);
     assert_eq!(flags(&ix.classes, "i"), SUBJECT);
-    assert_eq!(flags(&ix.classes, "j") & ANYWHERE, ANYWHERE, ":has() reaches ancestors");
+    assert_eq!(flags(&ix.classes, "j"), IN_HAS, ":has() reaches the subjects above (LAT6)");
     assert!(ix.has);
+    assert_eq!(ix.has_subjects, vec![(".i".to_string(), SUBJECT)]);
+    assert!(!ix.has_anywhere);
     assert_eq!(flags(&ix.classes, "k") & ANYWHERE, ANYWHERE);
     assert_eq!(flags(&ix.classes, "l") & ANYWHERE, ANYWHERE);
     assert_eq!(flags(&ix.classes, "n") & ANYWHERE, ANYWHERE);
@@ -346,7 +348,8 @@ fn inner_html_restyles_the_new_children() {
 
 #[test]
 fn writes_the_index_cannot_place_are_full() {
-    let has = PAGE.replace(".on{color:red}", ".on{color:red} .card:has(.hot){color:red}");
+    // A `:has()` whose subject is an earlier sibling (LAT6 scopes the rest).
+    let has = PAGE.replace(".on{color:red}", ".on{color:red} .title:has(+ .hot){color:red}");
     let (set, _) = check(&has, "document.getElementById('p1').classList.add('hot');");
     assert_eq!(set.full, Some("anywhere"));
     let (set, _) = check(PAGE, "document.body.classList.add('on');");
@@ -361,19 +364,19 @@ fn writes_the_index_cannot_place_are_full() {
     assert_eq!(set.full, Some("sheet"));
 }
 
-/// `:has()` now matches, so the anchor's style really changes when a child
-/// is added under it or removed from it: the set (full, for a child-list
-/// write once a `:has()` rule exists, or for writing a class `:has()`
-/// names) must cover it, both ways.
+/// `:has()` matches, so the anchor's style really changes when a child is
+/// added under it or removed from it: the set covers it both ways, scoped
+/// to the anchor since LAT6 (it was full).
 #[test]
-fn a_child_list_write_under_a_has_anchor_is_full() {
+fn a_child_list_write_under_a_has_anchor_covers_the_anchor() {
     let has = PAGE.replace(".on{color:red}", ".on{color:red} .card:has(.hot){color:red}");
     let add = "var e = document.createElement('b'); e.className = 'hot'; e.id = 'hot'; \
                document.getElementById('p1').appendChild(e);";
-    let (set, _) = check(&has, add);
-    assert!(set.full.is_some(), "{set:?}");
+    let (set, ids) = check(&has, add);
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE);
     let (set, _) = check_after(&has, add, "document.getElementById('hot').remove();");
-    assert_eq!(set.full, Some("has"));
+    assert_eq!(set.full, None, "{set:?}");
     // Without a `:has()` rule the same write stays a subtree restyle.
     let (set, _) = check(PAGE, add);
     assert_eq!(set.full, None);
@@ -439,7 +442,8 @@ fn a_child_list_write_under_a_has_subject_restyles_the_subject() {
     assert_eq!(set.full, None, "{set:?}");
     assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE, "the card is the subject above the write");
     assert_eq!(set.bits(ids["wrap"]), 0, "#wrap is no .card");
-    assert!(style_bits(&set) <= 2, "the card and the new element: {set:?}");
+    // The card, the new element and the parent (the sheet reads `:empty`).
+    assert!(style_bits(&set) <= 3, "{set:?}");
     let (set, ids) = check_after(&has, ADD_HOT, "document.getElementById('hot').remove();");
     assert_eq!(set.full, None, "{set:?}");
     assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE);
