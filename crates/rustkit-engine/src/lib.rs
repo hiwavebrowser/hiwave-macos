@@ -443,6 +443,8 @@ mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
 #[cfg(all(test, feature = "headless"))]
+mod forced_layout_cause_tests;
+#[cfg(all(test, feature = "headless"))]
 mod flex_item_paint_order_tests;
 #[cfg(all(test, feature = "headless"))]
 mod range_hit_tests;
@@ -1279,7 +1281,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1289,7 +1291,9 @@ impl ViewState {
             stats.total_ms,
             stats.layouts_skipped,
             stats.animation_frames_painted,
-            stats.animation_paint_ms
+            stats.animation_paint_ms,
+            stats.forced_layouts,
+            stats.forced_ms
         );
     }
 
@@ -21507,11 +21511,22 @@ impl Engine {
 
     /// The forced layouts of the script task that just settled: one log
     /// line per task that had any, and the view's running count.
+    /// Each line names the most frequent cause, `write:read` (what first
+    /// dirtied the layout, and the read that found it stale), every cause
+    /// with its count, and the layouts' time (LAT7).
     fn note_forced_layouts(id: EngineViewId, stats: &mut RelayoutStats, bindings: &DomBindings) {
-        let forced = bindings.take_forced_layouts();
-        if forced > 0 {
-            info!(?id, forced_layouts = forced, "Forced layouts in the script task");
-            stats.forced_layouts = stats.forced_layouts.saturating_add(forced);
+        let report = bindings.take_forced_report();
+        if report.count > 0 {
+            info!(
+                ?id,
+                forced_layouts = report.count,
+                ms = %format!("{:.1}", report.ms),
+                cause = %report.top_cause().unwrap_or_default(),
+                causes = %report.causes_field(),
+                "Forced layouts in the script task"
+            );
+            stats.forced_layouts = stats.forced_layouts.saturating_add(report.count);
+            stats.forced_ms += report.ms;
         }
     }
 
@@ -25255,6 +25270,19 @@ fn publish_geometry(
         animated.css_props = anims.animated_props();
     }
     bindings.share_animated_styles(lay.animated.clone());
+    // LAT7: whether a write inside a hidden subtree can show it through a
+    // `:has()` rule. The rule index a build left, live (a forced layout
+    // rebuilds it); unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_has_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| index.as_ref().map(|ix| ix.reads.invalidation.has))
+                .unwrap_or(true)
+        })
+    })));
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
