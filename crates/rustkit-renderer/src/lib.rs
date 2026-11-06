@@ -5144,10 +5144,9 @@ impl Renderer {
             );
         }
 
-        // Draw focus ring if focused
-        if focused {
-            self.draw_focus_ring(border_rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
-        }
+        // The focus ring is the box's outline now: the UA's
+        // `:focus-visible { outline: auto }`, which an author `outline:
+        // none` turns off (CH2.E22).
 
         // Draw caret if focused and position is set: after the measured
         // width of the value's first `pos` chars, spanning the text line.
@@ -5316,10 +5315,6 @@ impl Renderer {
             );
         }
         
-        // Draw focus ring if focused
-        if focused {
-            self.draw_focus_ring(rect, Color::new(0, 122, 255, 1.0), 2.0, 2.0);
-        }
     }
     
     /// Draw a focus ring around an element.

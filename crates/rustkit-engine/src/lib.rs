@@ -289,6 +289,7 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+mod focus_pseudo;
 mod text_input;
 pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
@@ -1144,6 +1145,12 @@ struct ViewState {
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
+    /// CH2.E22: the last focus the user moved was moved by the pointer
+    /// (Chromium's last focus type): script's focus then matches
+    /// `:focus-visible` only on a control that takes typed text. False
+    /// until the first, and after a focus moved from the keyboard. Kept
+    /// across documents, as Chromium keeps it per page.
+    focus_by_pointer: bool,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -1333,6 +1340,8 @@ impl ViewState {
         self.hovered_node = None;
         self.lay.hover_chain.borrow_mut().clear();
         self.lay.active_chain.borrow_mut().clear();
+        self.lay.focus_chain.borrow_mut().clear();
+        self.lay.focus_visible.set(false);
         self.lay.rule_reads.borrow_mut().take();
         self.pending_dirty = None;
         self.last_dirty = None;
@@ -2931,6 +2940,7 @@ impl Engine {
             pending_dirty: None,
             last_dirty: None,
             pointer_restyle: false,
+            focus_by_pointer: false,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3044,6 +3054,7 @@ impl Engine {
             pending_dirty: None,
             last_dirty: None,
             pointer_restyle: false,
+            focus_by_pointer: false,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3174,6 +3185,7 @@ impl Engine {
             pending_dirty: None,
             last_dirty: None,
             pointer_restyle: false,
+            focus_by_pointer: false,
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
@@ -3838,7 +3850,7 @@ impl Engine {
         // Resolve focusability against the DOM, not the layout box: a
         // FormControl box type would miss `contenteditable` and tabindex
         // later, and the tag name is what callers want reported.
-        let (control, labeled) = hit_node
+        let (control, labeled, pointed) = hit_node
             .and_then(|raw| {
                 let view = self.views.get(&id)?;
                 let doc = view.document.as_ref()?;
@@ -3850,9 +3862,12 @@ impl Engine {
                     Some(_) => None,
                     None => Self::labeled_control(doc, &node).as_ref().and_then(Self::form_control),
                 };
-                Some((control, labeled))
+                // CH2.E22: the page's focus also goes to a focusable
+                // element that takes no keys (a button, a link), as the
+                // oracle's Chrome focuses a clicked button.
+                Some((control, labeled, Self::pointer_focus_target(&node)))
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         let focusable = match why {
             PointFocus::Press => control,
             PointFocus::Click => control.or(labeled),
@@ -3864,11 +3879,23 @@ impl Engine {
         };
 
         self.set_focus(id, focusable.clone());
+        let target = match focusable.as_ref() {
+            Some((raw, _)) => Some(*raw),
+            None if matches!(why, PointFocus::Label) => None,
+            None => pointed,
+        };
+        // The pointer moved the focus: script's next focus shows the ring
+        // only on a control that takes typed text (CH2.E22).
+        if target.is_some() {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.focus_by_pointer = true;
+            }
+        }
         // The page's focus follows, and has the last word: it refuses a
         // disabled control, and a `focus` or `blur` listener may move the
         // focus again.
         let told = self.views.get(&id).and_then(|v| v.bindings.as_ref()).map(|bindings| {
-            if let Err(e) = bindings.set_focus(focusable.as_ref().map(|(raw, _)| *raw)) {
+            if let Err(e) = bindings.set_focus(target) {
                 debug!(?id, error = %e, "focus listener threw");
             }
         });
@@ -3876,6 +3903,8 @@ impl Engine {
             if let Err(e) = self.flush_script_dom_writes(id, Some(RelayoutCause::HoverOrFocus)) {
                 debug!(?id, error = %e, "relayout after focus events failed");
             }
+        } else {
+            self.note_page_focus(id, target);
         }
         self.focused_tag(id)
     }
@@ -3963,7 +3992,9 @@ impl Engine {
         });
         let before = self.views.get(&id).and_then(|v| v.lay.focused_node.get());
         self.set_focus(id, control);
-        before != self.views.get(&id).and_then(|v| v.lay.focused_node.get())
+        // The cascade follows the page's focus, a button's too (CH2.E22).
+        let restyles = self.note_page_focus(id, moved);
+        restyles || before != self.views.get(&id).and_then(|v| v.lay.focused_node.get())
     }
 
     /// Make a form control (raw NodeId and tag) the focused node, or
@@ -6013,6 +6044,15 @@ impl Engine {
             return changed;
         }
 
+        // CH2.E22: Tab and Shift+Tab move the focus once the page let the
+        // keydown through (sequential focus navigation).
+        if key_code == 0x09 && !ctrl && !alt {
+            let at = self.views.get(&id).and_then(|v| v.lay.focused_node.get()).map(|n| n.raw());
+            if self.fire_key(id, at, "keydown", key_code, key, ctrl, shift, alt) {
+                self.sequential_focus(id, shift);
+            }
+            return true;
+        }
         let Some(focused) = self.views.get(&id).and_then(|v| v.lay.focused_node.get()) else {
             return !self.fire_key(id, None, "keydown", key_code, key, ctrl, shift, alt);
         };
@@ -6541,12 +6581,25 @@ impl layout_ctx::LayoutCtx {
             };
             let hovered = lay.hover_chain.borrow().contains(&node_raw);
             let active = lay.active_chain.borrow().contains(&node_raw);
-            (checked, hovered, active)
+            // CH2.E22: the focused element (`:focus`, `:focus-visible`) and
+            // the elements above it (`:focus-within`).
+            let focus = {
+                let chain = lay.focus_chain.borrow();
+                match chain.iter().position(|raw| *raw == node_raw) {
+                    None => FocusMarks::default(),
+                    Some(at) => FocusMarks {
+                        focus: at == 0,
+                        within: true,
+                        visible: at == 0 && lay.focus_visible.get(),
+                    },
+                }
+            };
+            (checked, hovered, active, focus)
         });
-        let Some((checked, hovered, active)) = read else {
+        let Some((checked, hovered, active, focus)) = read else {
             return std::borrow::Cow::Borrowed(attributes);
         };
-        if checked.is_none() && !hovered && !active {
+        if checked.is_none() && !hovered && !active && !focus.within {
             return std::borrow::Cow::Borrowed(attributes);
         }
         let mut attributes = attributes.clone();
@@ -6565,8 +6618,25 @@ impl layout_ctx::LayoutCtx {
         if active {
             attributes.insert(ACTIVE_MARK.to_string(), String::new());
         }
+        for (on, mark) in [
+            (focus.focus, FOCUS_MARK),
+            (focus.within, FOCUS_WITHIN_MARK),
+            (focus.visible, FOCUS_VISIBLE_MARK),
+        ] {
+            if on {
+                attributes.insert(mark.to_string(), String::new());
+            }
+        }
         std::borrow::Cow::Owned(attributes)
     }
+}
+
+/// The focus pseudo-classes one element matches (CH2.E22).
+#[derive(Default, Clone, Copy)]
+struct FocusMarks {
+    focus: bool,
+    within: bool,
+    visible: bool,
 }
 
 impl Engine {
@@ -8273,7 +8343,13 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+            // Script's `matches(':focus')` reads the view's focus as the
+            // cascade does (CH2.E22).
+            let lay = self.views.get(&id).map(|view| view.lay.clone());
+            bindings.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                let _focus = lay
+                    .as_ref()
+                    .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
@@ -8719,7 +8795,13 @@ impl Engine {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
-            bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
+            // Script's `matches(':focus')` reads the view's focus as the
+            // cascade does (CH2.E22).
+            let lay = self.views.get(&id).map(|view| view.lay.clone());
+            bindings.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                let _focus = lay
+                    .as_ref()
+                    .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
@@ -9246,6 +9328,8 @@ impl Engine {
             hover: view.lay.hover_chain.borrow().clone(),
             active: view.lay.active_chain.borrow().clone(),
             focused: view.lay.focused_node.get().map(|node| node.raw()),
+            focus_chain: view.lay.focus_chain.borrow().clone(),
+            focus_visible: view.lay.focus_visible.get(),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -9464,19 +9548,31 @@ impl Engine {
         if with.size != size {
             return miss("resized");
         }
-        // A press or a click moved the focus since the page was painted:
-        // both builds below would read the focus as it is now, and the
-        // patch copies paint properties only, so the caret and the focus
-        // state would never be drawn (or a blurred field would keep them).
-        if with.focused != view.lay.focused_node.get().map(|node| node.raw()) {
-            return miss("focus moved");
-        }
+        // CH2.E22: the focus moved since the page was painted. The builds
+        // below read it as it was and as it is (the control that has the
+        // keys, the chain the focus pseudo-classes match), and the old and
+        // the new focused control are built again: their caret is drawn
+        // from the patched boxes (`copy_changed_paint`).
+        let focus_before = Focused {
+            control: with.focused,
+            chain: with.focus_chain.clone(),
+            visible: with.focus_visible,
+        };
+        let focus_now = Focused {
+            control: view.lay.focused_node.get().map(|node| node.raw()),
+            chain: view.lay.focus_chain.borrow().clone(),
+            visible: view.lay.focus_visible.get(),
+        };
         let index = view.lay.rule_reads.borrow();
         let Some(reads) = index.as_ref().map(|index| &index.reads) else {
             return miss("no rule index");
         };
         if reads.hover.anywhere || reads.active.anywhere {
             return miss("a rule reads the pseudo-class where no compound shows it");
+        }
+        let focus_moved = focus_before != focus_now;
+        if focus_moved && (reads.focus.anywhere || reads.focus_within.anywhere || reads.focus_visible.anywhere) {
+            return miss("a rule reads a focus pseudo-class where no compound shows it");
         }
         let before = (with.hover.clone(), with.active.clone());
         let now = (view.lay.hover_chain.borrow().clone(), view.lay.active_chain.borrow().clone());
@@ -9492,6 +9588,17 @@ impl Engine {
                 .into_iter()
                 .flat_map(|raw| Self::pointer_changes(view, &reads.active, raw)),
         );
+        if focus_moved {
+            changed.extend(Self::focus_changes(
+                view,
+                reads,
+                (&focus_before.chain, focus_before.visible),
+                (&focus_now.chain, focus_now.visible),
+            ));
+            if focus_before.control != focus_now.control {
+                changed.extend([focus_before.control, focus_now.control].into_iter().flatten().map(|raw| (raw, 0)));
+            }
+        }
         drop(index);
         changed.sort_unstable();
         changed.dedup_by(|later, kept| {
@@ -9502,9 +9609,11 @@ impl Engine {
             same
         });
         if changed.is_empty() {
-            // The pointer went and came back between two layouts.
+            // The pointer went and came back between two layouts (or the
+            // focus moved where no rule sees it, and no control's caret).
             if let Some(with) = self.views.get_mut(&id).and_then(|view| view.laid_with.as_mut()) {
                 (with.hover, with.active) = now;
+                focus_now.store(with);
             }
             return Ok(true);
         }
@@ -9579,10 +9688,13 @@ impl Engine {
         let started = std::time::Instant::now();
         let mut built = Vec::with_capacity(2);
         let mut walked = 0;
-        for chains in [before, now.clone()] {
+        for (chains, focus) in [(before, &focus_before), (now.clone(), &focus_now)] {
             let _build_time = time_stage(Stage::Build);
             if let Some(view) = self.views.get_mut(&id) {
                 (*view.lay.hover_chain.borrow_mut(), *view.lay.active_chain.borrow_mut()) = chains;
+                view.lay.focused_node.set(focus.control.map(rustkit_dom::NodeId::new));
+                *view.lay.focus_chain.borrow_mut() = focus.chain.clone();
+                view.lay.focus_visible.set(focus.visible);
             }
             // CH2.E19: the inline svgs' author paint follows the chains
             // (`button:hover svg path`): the map and the parsed icons of
@@ -9647,6 +9759,7 @@ impl Engine {
         view.layout = Some(laid);
         if let Some(with) = view.laid_with.as_mut() {
             (with.hover, with.active) = now;
+            focus_now.store(with);
         }
         // Script reads of computed style answer from the restyled boxes.
         if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
@@ -10510,6 +10623,9 @@ impl layout_ctx::LayoutCtx {
             external_sheets: external_stylesheets.len(),
             viewport,
             focus: self.building_focus(),
+            page_focus: self
+                .building_lay()
+                .and_then(|lay| lay.focus_chain.borrow().first().map(|raw| (*raw, lay.focus_visible.get()))),
             hover: self.building_lay().and_then(|lay| lay.hover_chain.borrow().first().copied()),
             active: self.building_lay().and_then(|lay| lay.active_chain.borrow().first().copied()),
             fonts: self.web_font_count(),
@@ -13709,6 +13825,20 @@ impl layout_ctx::LayoutCtx {
             _ => {}
         }
 
+        // Chromium html.css: `:focus-visible { outline: auto 1px
+        // -webkit-focus-ring-color }`, a link's 1px out (CH2.E22; the
+        // oracle's colour, `tools/parity_oracle/focus_pseudo_log.mjs`). The
+        // focused control's ring was the renderer's own until then.
+        if attributes.contains_key(FOCUS_VISIBLE_MARK) {
+            let link = matches!(&*lower_tag(tag_name), "a" | "area") && attributes.contains_key("href");
+            style.outline = rustkit_css::Outline {
+                style: rustkit_css::OutlineStyle::Auto,
+                width: Some(rustkit_css::Length::Px(1.0)),
+                color: Some(rustkit_css::Color::new(0, 95, 204, 1.0)),
+                offset: if link { rustkit_css::Length::Px(1.0) } else { rustkit_css::Length::Zero },
+            };
+        }
+
         // HTML rendering section / Chromium html.css, applied before the
         // author cascade so an author `display` still wins (the same origin
         // as Chrome: the popover `display: none` rule is not `!important`).
@@ -16825,25 +16955,19 @@ impl layout_ctx::LayoutCtx {
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
     /// against: checkedness, the hovered and pressed chains, and the
     /// focused element with the elements above it.
-    fn svg_element_state(document: &Document, lay: Option<&layout_ctx::ViewLayout>) -> SvgElementState {
+    fn svg_element_state(_document: &Document, lay: Option<&layout_ctx::ViewLayout>) -> SvgElementState {
         let Some(lay) = lay else {
             return SvgElementState::default();
         };
-        let focus = lay.focused_node.get();
-        let mut focus_within = Vec::new();
-        let mut at = focus.and_then(|node| document.get_node(node));
-        while let Some(node) = at {
-            if node.is_element() {
-                focus_within.push(node.id.raw());
-            }
-            at = node.parent();
-        }
+        // The page's focus, as the cascade matches it (CH2.E22).
+        let focus_within = lay.focus_chain.borrow().clone();
         SvgElementState {
             checked: lay.checked_states.borrow().clone(),
             hover: lay.hover_chain.borrow().clone(),
             active: lay.active_chain.borrow().clone(),
-            focus: focus.map(|node| node.raw()),
+            focus: focus_within.first().copied(),
             focus_within,
+            focus_visible: lay.focus_visible.get(),
         }
     }
 
@@ -18438,6 +18562,9 @@ impl layout_ctx::LayoutCtx {
                 let prepared = SelectorMatcher.prepared_selector(rule.selector.trim());
                 ix.reads.hover.note(rule.selector.trim(), ":hover", HOVER_MARK);
                 ix.reads.active.note(rule.selector.trim(), ":active", ACTIVE_MARK);
+                ix.reads.focus.note(rule.selector.trim(), ":focus", FOCUS_MARK);
+                ix.reads.focus_within.note(rule.selector.trim(), ":focus-within", FOCUS_WITHIN_MARK);
+                ix.reads.focus_visible.note(rule.selector.trim(), ":focus-visible", FOCUS_VISIBLE_MARK);
                 ix.reads.invalidation.note_selector(rule.selector.trim());
                 let positional = ix.reads.note(&prepared);
                 ix.reads.positional.push(positional);
@@ -19893,6 +20020,7 @@ impl SelectorMatcher {
             // does not yet, so there they stay false.
             "focus" => attributes.contains_key(FOCUS_MARK),
             "focus-within" => attributes.contains_key(FOCUS_WITHIN_MARK),
+            "focus-visible" => attributes.contains_key(FOCUS_VISIBLE_MARK),
             n if SelectorMatcher::pseudo_class_is_static_false(n) => false,
             // Link pseudo-classes: an <a>/<area> with an href.
             "link" | "any-link" => matches!(tag, "a" | "area") && attributes.contains_key("href"),
@@ -21295,10 +21423,14 @@ impl Engine {
             self.note_relayout_cause(id, RelayoutCause::ObserverCallback);
             laid |= self.flush_script_dom_writes_once(id, None)?;
         }
-        // The focused control paints its caret, so a focus script moved is
-        // a relayout.
+        // The focused control paints its caret, and focus rules restyle,
+        // so a focus script moved is a restyle: a pointer one, which keeps
+        // the layout when only paint changed (CH2.E22).
         if self.follow_script_focus(id) {
-            self.relayout_for(id, RelayoutCause::HoverOrFocus)?;
+            if let Some(view) = self.views.get_mut(&id) {
+                view.pointer_restyle = true;
+            }
+            self.relayout(id)?;
             laid = true;
         }
         // A selection script moved is painted again over the same boxes.
@@ -33921,9 +34053,11 @@ mod node_identity_tests {
         let outcome = engine.click_at_point(id, 12.0, 92.0);
         assert_eq!(outcome.focused.as_deref(), Some("input"));
         assert_eq!(engine.focused_node(id), Some(q));
+        // The press focuses the button first, as the oracle's Chrome does
+        // (CH2.E22; Chromium 143 logs exactly this).
         assert_eq!(
             js(&mut engine, id, "log.join(' ')"),
-            js_string("click:find focus:q focusin:q")
+            js_string("focus:find focusin:find click:find blur:find focusout:find focus:q focusin:q")
         );
         assert!(engine.handle_text_key(id, 0, "c", false, false, false));
         assert_eq!(js(&mut engine, id, "$('q').value"), js_string("ac"));
@@ -38714,8 +38848,10 @@ const ACTIVE_MARK: &str = "\u{1}active";
 /// pass sets them (`WalkState::focus`).
 const FOCUS_MARK: &str = "\u{1}focus";
 const FOCUS_WITHIN_MARK: &str = "\u{1}focus-within";
+/// CH2.E22: the focused element when it matches `:focus-visible`.
+const FOCUS_VISIBLE_MARK: &str = "\u{1}focus-visible";
 /// Every element-state mark.
-const STATE_MARKS: [&str; 4] = [HOVER_MARK, ACTIVE_MARK, FOCUS_MARK, FOCUS_WITHIN_MARK];
+const STATE_MARKS: [&str; 5] = [HOVER_MARK, ACTIVE_MARK, FOCUS_MARK, FOCUS_WITHIN_MARK, FOCUS_VISIBLE_MARK];
 
 thread_local! {
     /// The DOM element the compound under test is matched against, for
@@ -38767,10 +38903,13 @@ struct WalkState {
     /// classes as one from the build does (`.a:hover ~ .b .c`, S22).
     hover: Vec<usize>,
     active: Vec<usize>,
-    /// CH2.E19: the focused element and the elements above it, marked only
-    /// for the inline svg paint pass (`WalkCheckedScope::enter_for_svg_paint`).
+    /// The focused element and the elements above it: the build's
+    /// (`WalkFocusScope`, CH2.E22) and the inline svg paint pass's
+    /// (`WalkCheckedScope::enter_for_svg_paint`, CH2.E19).
     focus: Option<usize>,
     focus_within: Vec<usize>,
+    /// The focused element matches `:focus-visible` (CH2.E22).
+    focus_visible: bool,
     /// `nearest_earlier_sibling_matching` by (compound address, raw NodeId
     /// it looks back from, inclusive): the nearest element at or before it
     /// that matches. Valid for one scope: the DOM, checkedness and the
@@ -38797,11 +38936,19 @@ impl WalkCheckedScope {
                 let w = w.borrow();
                 (w.hover.clone(), w.active.clone())
             });
-            let (focus, focus_within) = {
+            let (focus, focus_within, focus_visible) = {
                 let w = w.borrow();
-                (w.focus, w.focus_within.clone())
+                (w.focus, w.focus_within.clone(), w.focus_visible)
             };
-            w.replace(WalkState { checked, hover, active, focus, focus_within, memo: Some(HashMap::new()) })
+            w.replace(WalkState {
+                checked,
+                hover,
+                active,
+                focus,
+                focus_within,
+                focus_visible,
+                memo: Some(HashMap::new()),
+            })
         }))
     }
 
@@ -38815,6 +38962,7 @@ impl WalkCheckedScope {
                 active: state.active.clone(),
                 focus: state.focus,
                 focus_within: state.focus_within.clone(),
+                focus_visible: state.focus_visible,
                 memo: Some(HashMap::new()),
             })
         }))
@@ -38838,6 +38986,9 @@ fn walk_marks(raw: usize) -> Vec<&'static str> {
         if w.focus_within.contains(&raw) {
             marks.push(FOCUS_WITHIN_MARK);
         }
+        if w.focus_visible && w.focus == Some(raw) {
+            marks.push(FOCUS_VISIBLE_MARK);
+        }
         marks
     })
 }
@@ -38852,6 +39003,8 @@ pub(crate) struct SvgElementState {
     pub(crate) focus: Option<usize>,
     /// The focused element and the elements above it.
     pub(crate) focus_within: Vec<usize>,
+    /// The focused element matches `:focus-visible` (CH2.E22).
+    pub(crate) focus_visible: bool,
 }
 
 impl SvgElementState {
@@ -38861,6 +39014,7 @@ impl SvgElementState {
             | u8::from(self.active.contains(&raw)) << 1
             | u8::from(self.focus == Some(raw)) << 2
             | u8::from(self.focus_within.contains(&raw)) << 3
+            | u8::from(self.focus_visible && self.focus == Some(raw)) << 4
     }
 }
 
@@ -38868,6 +39022,34 @@ impl Drop for WalkCheckedScope {
     fn drop(&mut self) {
         let previous = std::mem::take(&mut self.0);
         WALK.with(|w| *w.borrow_mut() = previous);
+    }
+}
+
+/// CH2.E22: sets the focus of [`WALK`] for a view's build (its
+/// `focus_chain`, innermost first, and whether the focused element matches
+/// `:focus-visible`), and puts the previous focus back.
+pub(crate) struct WalkFocusScope(Option<usize>, Vec<usize>, bool);
+
+impl WalkFocusScope {
+    pub(crate) fn enter(chain: Vec<usize>, visible: bool) -> Self {
+        WALK.with(|w| {
+            let mut w = w.borrow_mut();
+            let focus = std::mem::replace(&mut w.focus, chain.first().copied());
+            let within = std::mem::replace(&mut w.focus_within, chain);
+            let was_visible = std::mem::replace(&mut w.focus_visible, visible);
+            WalkFocusScope(focus, within, was_visible)
+        })
+    }
+}
+
+impl Drop for WalkFocusScope {
+    fn drop(&mut self) {
+        WALK.with(|w| {
+            let mut w = w.borrow_mut();
+            w.focus = self.0;
+            w.focus_within = std::mem::take(&mut self.1);
+            w.focus_visible = self.2;
+        });
     }
 }
 
@@ -39112,21 +39294,15 @@ fn has_compound_matches(node: &Rc<Node>, compound: &str) -> bool {
     let prepared = SelectorMatcher.prepared_selector(compound);
     // The hovered and pressed elements carry their marks here as they do
     // in the build (`live_attributes`): `.post:has(.btn:hover)` (LAT3).
-    let (hovered, active) = WALK.with(|w| {
-        let w = w.borrow();
-        let raw = node.id.raw();
-        (w.hover.contains(&raw), w.active.contains(&raw))
-    });
+    // The focus marks likewise (CH2.E22: `form:has(input:focus)`).
+    let marks = walk_marks(node.id.raw());
     let marked;
-    let attributes = match (hovered, active) {
-        (false, false) => attributes,
-        _ => {
+    let attributes = match marks.is_empty() {
+        true => attributes,
+        false => {
             let mut live = attributes.clone();
-            if hovered {
-                live.insert(HOVER_MARK.to_string(), String::new());
-            }
-            if active {
-                live.insert(ACTIVE_MARK.to_string(), String::new());
+            for mark in marks {
+                live.insert(mark.to_string(), String::new());
             }
             marked = live;
             &marked
@@ -39459,6 +39635,7 @@ impl AncestorCompound {
                             ("active", None) => out.classes.push(ACTIVE_MARK.to_string()),
                             ("focus", None) => out.classes.push(FOCUS_MARK.to_string()),
                             ("focus-within", None) => out.classes.push(FOCUS_WITHIN_MARK.to_string()),
+                            ("focus-visible", None) => out.classes.push(FOCUS_VISIBLE_MARK.to_string()),
                             // The root of an HTML document is its `html`
                             // element, and the chain holds it by that tag.
                             ("root", None) if out.tag.is_none() => out.tag = Some("html".to_string()),
@@ -40702,6 +40879,11 @@ struct SelectorReads {
     /// Where the sheets read `:hover` and `:active`.
     hover: PointerReads,
     active: PointerReads,
+    /// Where they read `:focus`, `:focus-within` and `:focus-visible`
+    /// (CH2.E22), filed the same way.
+    focus: PointerReads,
+    focus_within: PointerReads,
+    focus_visible: PointerReads,
     /// Where each class, id, attribute and pseudo-class is read, for the
     /// script writes' dirty set (incremental restyle).
     invalidation: restyle_invalidation::InvalidationIndex,
@@ -40746,11 +40928,26 @@ struct HasPointer {
 
 /// The pseudo-class a mark stands for (`HOVER_MARK` is `:hover`).
 fn pointer_mark_name(mark: &str) -> &'static str {
-    if mark == ACTIVE_MARK {
-        ":active"
-    } else {
-        ":hover"
+    match mark {
+        ACTIVE_MARK => ":active",
+        FOCUS_MARK => ":focus",
+        FOCUS_WITHIN_MARK => ":focus-within",
+        FOCUS_VISIBLE_MARK => ":focus-visible",
+        _ => ":hover",
     }
+}
+
+/// How many times `text` names the pseudo-class `name` (`":focus"`): not
+/// counting a longer name it starts (`:focus-within`, `:hovered`).
+fn pseudo_named(text: &str, name: &str) -> usize {
+    text.match_indices(name)
+        .filter(|(at, _)| {
+            !text[at + name.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '-' || c == '_' || c.is_ascii_alphanumeric())
+        })
+        .count()
 }
 
 /// One compound a pointer pseudo-class is read on (S22, reddit: one
@@ -40769,12 +40966,12 @@ impl PointerReads {
     /// Record where `selector` reads `name` (`":hover"`), which the
     /// compound parser turns into the class `mark`.
     fn note(&mut self, selector: &str, name: &str, mark: &str) {
-        if !selector.contains(name) {
+        if pseudo_named(selector, name) == 0 {
             return;
         }
         for member in SelectorMatcher::split_top_level_commas(selector) {
             let member = member.trim();
-            let named = member.matches(name).count();
+            let named = pseudo_named(member, name);
             if named == 0 {
                 continue;
             }
@@ -40848,7 +41045,7 @@ impl PointerReads {
         // read like a complex `:is()` member, from its own compounds (the
         // element is not merged into them: a wider set of elements).
         let name = pointer_mark_name(mark);
-        for member in compound.not_dropped.iter().filter(|m| m.contains(name)) {
+        for member in compound.not_dropped.iter().filter(|m| pseudo_named(m, name) > 0) {
             found += self.note_prepared(&SelectorMatcher.prepared_selector(member), mark, reach);
         }
         if compound.none_of.is_empty() && compound.any_of.is_empty() {
@@ -40883,7 +41080,7 @@ impl PointerReads {
         let mut found = 0;
         for member in SelectorMatcher::split_top_level_commas(arg) {
             let member = member.trim();
-            let named = member.matches(name).count();
+            let named = pseudo_named(member, name);
             if named == 0 {
                 continue;
             }
@@ -41722,8 +41919,28 @@ struct LaidWith {
     /// moves the focus with no relayout of its own, and the next relayout
     /// must paint the caret and the focus state.
     focused: Option<usize>,
+    /// The page's focus chain and `:focus-visible` at that build (CH2.E22).
+    focus_chain: Vec<usize>,
+    focus_visible: bool,
     /// The view's width and height at that layout.
     size: (u32, u32),
+}
+
+/// The focus a build reads (CH2.E22): the control with the keys, and the
+/// page's focus chain with its `:focus-visible`.
+#[derive(Clone, PartialEq)]
+struct Focused {
+    control: Option<usize>,
+    chain: Vec<usize>,
+    visible: bool,
+}
+
+impl Focused {
+    fn store(&self, with: &mut LaidWith) {
+        with.focused = self.control;
+        with.focus_chain = self.chain.clone();
+        with.focus_visible = self.visible;
+    }
 }
 
 /// A build of only the subtrees under `roots` (raw NodeIds), reached by
@@ -41934,8 +42151,8 @@ fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
         && a.element_id == b.element_id
         && a.identity == b.identity
         && a.link_href == b.link_href
-        && a.focused_caret == b.focused_caret
-        && a.focused_selection == b.focused_selection
+        // The caret and selection of a focused control are painted, not
+        // laid out (CH2.E22): `copy_changed_paint` takes them.
         && a.text_sources == b.text_sources
         && rest(a) == rest(b)
 }
@@ -42001,6 +42218,8 @@ fn copy_changed_paint(laid: &mut LayoutBox, kept: &LayoutBox, fresh: &LayoutBox)
     } else {
         laid.style.copy_paint_only(&fresh.style);
     }
+    laid.focused_caret = fresh.focused_caret;
+    laid.focused_selection = fresh.focused_selection.clone();
     for ((laid, kept), fresh) in laid.children.iter_mut().zip(&kept.children).zip(&fresh.children) {
         copy_changed_paint(laid, kept, fresh);
     }
@@ -42049,6 +42268,10 @@ struct StyleMemoKey {
     external_sheets: usize,
     viewport: Option<(f32, f32)>,
     focus: Option<rustkit_dom::NodeId>,
+    /// CH2.E22: the page's focused element and whether it matches
+    /// `:focus-visible`: the focus pseudo-classes style it and the
+    /// elements above it.
+    page_focus: Option<(usize, bool)>,
     /// The hovered and the pressed element: `:hover` and `:active` style
     /// them and the elements above them.
     hover: Option<usize>,
@@ -42934,6 +43157,7 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                page_focus: None,
                 hover: None,
                 active: None,
                 fonts: 0,
@@ -42961,6 +43185,7 @@ mod incremental_restyle_tests {
         assert_restarts("focus", |key| {
             key.focus = Some(rustkit_dom::NodeId::new(1))
         });
+        assert_restarts("page focus", |key| key.page_focus = Some((1, false)));
         assert_restarts("hover", |key| key.hover = Some(1));
         assert_restarts("active", |key| key.active = Some(1));
         assert_restarts("web fonts", |key| key.fonts = 1);
@@ -43219,6 +43444,7 @@ mod incremental_restyle_tests {
             external_sheets: 0,
             viewport: None,
             focus: None,
+            page_focus: None,
             hover: None,
             active: None,
             fonts: 0,
@@ -43276,6 +43502,7 @@ mod incremental_restyle_tests {
                 external_sheets: 0,
                 viewport: None,
                 focus: None,
+                page_focus: None,
                 hover: None,
                 active: None,
                 fonts: 0,

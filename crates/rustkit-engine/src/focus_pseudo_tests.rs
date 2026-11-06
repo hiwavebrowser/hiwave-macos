@@ -207,3 +207,31 @@ fn the_short_path_paints_as_a_full_relayout_does() {
         assert_eq!(short, painted(&engine), "after {script}");
     }
 }
+
+#[test]
+fn the_ua_focus_visible_outline_is_chromiums() {
+    // Chromium 143 (`focus_pseudo_log.mjs`'s ring probe): every focused
+    // element matching `:focus-visible` has `outline: auto 1px
+    // rgb(0, 95, 204)`, offset 0 (a link's 1px); an author `outline: none`
+    // turns it off.
+    let (mut engine, id) = page_with(
+        "<body style='margin:20px'><input id=i><input id=n style='outline:none'><a id=a href='#x'>link</a><button id=b>B</button></body>",
+    );
+    assert_eq!(css(&mut engine, id, "i", "outline-style"), "none", "at rest");
+    click(&mut engine, id, "i");
+    assert_eq!(css(&mut engine, id, "i", "outline-style"), "auto", "a clicked field: :focus-visible");
+    assert_eq!(css(&mut engine, id, "i", "outline-color"), "rgb(0, 95, 204)");
+    assert_eq!(css(&mut engine, id, "i", "outline-offset"), "0px");
+    click(&mut engine, id, "n");
+    assert_eq!(css(&mut engine, id, "n", "outline-style"), "none", "the author's none wins");
+    assert_eq!(css(&mut engine, id, "i", "outline-style"), "none", "blurred");
+    click(&mut engine, id, "b");
+    assert_eq!(css(&mut engine, id, "b", "outline-style"), "none", "a clicked button: no ring");
+    tab(&mut engine, id, true);
+    tab(&mut engine, id, false);
+    assert_eq!(active(&mut engine, id), "b");
+    assert_eq!(css(&mut engine, id, "b", "outline-style"), "auto", "a tabbed button: the ring");
+    tab(&mut engine, id, true);
+    assert_eq!(active(&mut engine, id), "a");
+    assert_eq!(css(&mut engine, id, "a", "outline-offset"), "1px", "a link's ring is 1px out");
+}
