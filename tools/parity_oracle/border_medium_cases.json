@@ -74,6 +74,76 @@
    "name": "shorthand-style-only",
    "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:solid\"></div><div id=b></div></body></html>",
    "chrome_boxes": "a:0:0:16:16 b:0:16:10:10"
+  },
+  {
+   "name": "input-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-style:solid;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:3:24:14 b:0:18:10:10"
+  },
+  {
+   "name": "input-style-dashed",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-style:dashed;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:3:24:14 b:0:18:10:10"
+  },
+  {
+   "name": "input-side-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"border-top-style:solid;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:3:24:14 b:0:18:10:10"
+  },
+  {
+   "name": "input-style-block",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"display:block;border-style:solid;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:24:14 b:0:14:10:10"
+  },
+  {
+   "name": "input-style-none",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"display:block;border-style:none;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:20:10 b:0:10:10:10"
+  },
+  {
+   "name": "input-style-medium",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"display:block;border-style:solid;border-width:medium;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:26:16 b:0:16:10:10"
+  },
+  {
+   "name": "textarea-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><textarea id=a style=\"border-style:solid;padding:0;width:20px;height:10px\"></textarea><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:2:22:12 b:0:18:10:10"
+  },
+  {
+   "name": "textarea-style-block",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><textarea id=a style=\"display:block;border-style:solid;padding:0;width:20px;height:10px\"></textarea><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:22:12 b:0:12:10:10"
+  },
+  {
+   "name": "button-style-border-box",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><button id=a style=\"display:block;border-style:solid;padding:0;width:20px;height:10px\"></button><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:20:10 b:0:10:10:10"
+  },
+  {
+   "name": "hr",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><hr id=a><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:8:400:2 b:0:18:10:10"
+  },
+  {
+   "name": "hr-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}hr{border-style:solid}</style></head><body><hr id=a><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:8:400:2 b:0:18:10:10"
+  },
+  {
+   "name": "hr-side-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}hr{border-bottom-style:solid;margin:0}</style></head><body><hr id=a><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:400:2 b:0:2:10:10"
+  },
+  {
+   "name": "input-shorthand-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><input id=a style=\"display:block;border:solid;padding:0;width:20px;height:10px\"><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:26:16 b:0:16:10:10"
+  },
+  {
+   "name": "textarea-shorthand-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}</style></head><body><textarea id=a style=\"display:block;border:solid;padding:0;width:20px;height:10px\"></textarea><div id=b style=\"width:10px;height:10px\"></div></body></html>",
+   "chrome_boxes": "a:0:0:26:16 b:0:16:10:10"
   }
  ],
  "chrome": "143.0.7499.4"
