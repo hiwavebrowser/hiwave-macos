@@ -292,7 +292,7 @@ fn getcomputedstyle_reads_the_published_style() {
     // The published rows, the unset radii and the initial values of every
     // longhand the engine serializes (`COMPUTED_INITIAL`); shorthands and
     // empty values are not listed, `-webkit-` names come last, as in Chromium.
-    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "124,align-content,function");
+    assert_eq!(ev(&b, "var c = getComputedStyle(document.getElementById('outer')); [c.length, c.item(0), typeof c.getPropertyPriority].join()"), "125,align-content,function");
     assert_eq!(
         ev(&b, "var c = getComputedStyle(document.getElementById('outer')); try { c.setProperty('color', 'red'); 'no throw' } catch (e) { e.name }"),
         "NoModificationAllowedError"

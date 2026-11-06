@@ -34,6 +34,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -52,6 +53,10 @@ MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
 
 
 # ── fixture server ──────────────────────────────────────────────────────────
+
+class HidUnsafe(Exception):
+    """The seat is not safe to drive: the app is not frontmost, or a person is using it."""
+
 
 def flat_png(rgb, width=120, height=60):
     """A flat-colour PNG, built by hand so the fixture needs no image library."""
@@ -283,8 +288,67 @@ class Driver:
             sys.exit("hwdrive did not compile:\n" + r.stderr[-2000:])
         return exe
 
+    # HID events go to whatever window is under the pointer or has the
+    # keyboard, not to a pid: before each one, the app must be frontmost and
+    # nobody else must be using the machine (11-05 HID-safety rule).
+    HID_COMMANDS = {"move", "click", "press", "release", "dblclick", "rightclick", "rightpress", "drag",
+                    "scroll", "key", "type"}
+    MIN_IDLE_S = 30
+
+    @staticmethod
+    def frontmost_pid():
+        r = subprocess.run(["lsappinfo", "info", "-only", "pid", subprocess.run(
+            ["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()], capture_output=True, text=True)
+        m = re.search(r"=(\d+)", r.stdout)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def hid_idle_seconds():
+        r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
+        m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
+        return int(m.group(1)) / 1e9 if m else 0.0
+
+    def hid_guard(self, argv):
+        """Raise HidUnsafe unless the target pid is frontmost and the seat is idle."""
+        pid = int(argv[1])
+        # Our own events reset the idle clock: the seat is someone else's when
+        # it went idle more recently than our last event (or than the floor).
+        idle = self.hid_idle_seconds()
+        since_ours = time.time() - self.last_hid()
+        if idle + 1.0 < min(self.MIN_IDLE_S, since_ours):
+            raise HidUnsafe("someone is using this Mac (HID idle %.1f s, our last event %.1f s ago)"
+                            % (idle, since_ours))
+        if self.frontmost_pid() != pid:
+            subprocess.run([str(self.hwdrive), "activate", str(pid)], capture_output=True, text=True)
+            if self.frontmost_pid() != pid:
+                raise HidUnsafe("pid %d is not frontmost (frontmost %s)" % (pid, self.frontmost_pid()))
+
+    # Our last event's time is kept beside the real-window lock (outside it,
+    # so the lock stays an empty directory), so the next
+    # run's first event does not read our own as a person's.
+    LAST_HID = pathlib.Path.home() / ".claude" / "realwindow.last_hid"
+
+    def last_hid(self):
+        try:
+            return float(self.LAST_HID.read_text())
+        except (OSError, ValueError):
+            return getattr(self, "_last_hid", 0.0)
+
+    def note_hid(self):
+        self._last_hid = time.time()
+        try:
+            self.LAST_HID.write_text(str(self._last_hid))
+        except OSError:
+            pass
+
     def hw(self, *argv):
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.hid_guard(argv)
         r = subprocess.run([str(self.hwdrive)] + [str(a) for a in argv], capture_output=True, text=True)
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.note_hid()
+            if r.returncode == 5:
+                raise HidUnsafe(r.stdout.strip()[-300:])
         try:
             return r.returncode, json.loads(r.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -321,10 +385,20 @@ class Driver:
     def open_page(self, check, page, env=None):
         """A fresh app on `page`. Returns once the engine has started the load
         (or failed to), with the outcome recorded."""
-        profile = self.out / "profile"
+        profile, seed = self.out / "profile", self.out / "profile-seed"
         if self.template is None:
+            shutil.rmtree(profile, ignore_errors=True)
             profile.mkdir(parents=True, exist_ok=True)
             self.seed_profile(profile)
+            shutil.rmtree(seed, ignore_errors=True)
+            shutil.copytree(profile, seed, symlinks=True)
+        # Every check starts on the profile as the seed launch left it, not on
+        # what an earlier check saved: a4_settings saves 'sidebar open by
+        # default' unticked, and a later check on that profile launched with
+        # no sidebar and clicked where its button or a tab would have been
+        # (CH3.A4b).
+        shutil.rmtree(profile, ignore_errors=True)
+        shutil.copytree(seed, profile, symlinks=True)
         url = "%s/%s" % (self.fixture.base, page)
         state = json.loads(self.template)
         set_tab_urls(state, url)
@@ -955,6 +1029,24 @@ class Driver:
         time.sleep(3)
         self.expect(c, "the app is still running 3 s later", self.app.alive())
 
+    def a7_no_bridge_in_content(self):
+        """CH3.A7: a web page in the content view has no window.ipc / window.hiwaveChrome, flag off and flag on."""
+        c = "a7_no_bridge_in_content"
+        for label, env in (("flag off", None), ("flag on", {"HIWAVE_RUSTKIT_CHROME": "1"})):
+            if not self.open_page(c, "a7_bridge.html", env=env):
+                self.close_page()
+                continue
+            got = self.fixture.wait("beacon?a7-bridge=", 15, self.since)
+            seen = self.fixture.seen("a7-bridge=", self.since)
+            self.expect(c, "%s: the page's script ran and reported" % label, bool(got))
+            self.expect(c, "%s: the page sees typeof window.ipc, window.hiwaveChrome = undefined,undefined" % label,
+                        any("a7-bridge=undefined%2Cundefined" in r for r in seen), str(seen))
+            if env:
+                # The chrome, an app-owned view, keeps its bridge meanwhile.
+                ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
+                self.expect(c, "%s: the chrome still posts get_sidebar_width" % label, bool(ipc))
+            self.close_page()
+
     def a2_chrome_navigate(self):
         """CH3.A2 3c: the address bar's navigate, run in the RustKit chrome, reaches the app and the page loads it."""
         c = "a2_chrome_navigate"
@@ -1041,6 +1133,257 @@ class Driver:
             return self.not_run(c, "the window shows the typed page's green", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the typed page's green", frame[GREEN] > 100000, str(frame))
 
+    # ── CH2.E3: text input, the Edit menu, Cmd chords ───────────────────────
+
+    def e3_start(self, c, page="e3_text.html", env=None):
+        """A fresh app on the E3 page with input granted: (pid, w, h), or None."""
+        if not self.open_page(c, page, env=env):
+            return None
+        if not self.can_input:
+            self.not_run(c, "keys and menu items reach the page", self.why_not("Accessibility"))
+            return None
+        self.fixture.wait("beacon?e3-ready" if page.startswith("e3_text") else "beacon?e3n-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        # HID keys go to the frontmost app: never type into another one.
+        # macOS may refuse `activate`; a click on the page's blank bottom
+        # edge brings the window forward as a user's would.
+        code, front = self.hw("activate", pid)
+        if not front.get("frontmost"):
+            self.hw("click", pid, win["w"] * 0.5, win["h"] - 12)
+            time.sleep(0.4)
+            code, front = self.hw("activate", pid)
+        if not front.get("frontmost"):
+            self.not_run(c, "keys reach the app", "the app is not frontmost: " + json.dumps(front))
+            return None
+        code, win = self.hw("window", pid)
+        return pid, win["w"], win["h"]
+
+    def e3_value(self, field, mark):
+        """The value the page last reported for `field` since `mark`."""
+        seen = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-%s-v=" % field, mark)]
+        return seen[-1].split("-v=", 1)[1].rsplit("-c=", 1)[0] if seen else None
+
+    def e3_wait_value(self, field, mark, want, timeout=3):
+        end = time.time() + timeout
+        while time.time() < end and self.e3_value(field, mark) != want:
+            time.sleep(0.1)
+        return self.e3_value(field, mark)
+
+    def e3_focus(self, c, pid, w, h, field="a"):
+        mark = self.fixture.mark()
+        self.hw("click", pid, w * 0.7, h * (0.35 if field == "a" else 0.75))
+        ok = self.fixture.wait("beacon?e3-%s-focus" % field, 4, mark)
+        self.expect(c, "#%s took the focus" % field, ok)
+        time.sleep(0.4)
+        return ok
+
+    def pasteboard(self, text=None):
+        """Read the general pasteboard, or replace it with `text`."""
+        if text is None:
+            return subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+        subprocess.run(["pbcopy"], input=text, text=True)
+
+    def e3_dead_key(self):
+        """CH2.E3: Option+e then e in a content <input> composes é (compositionstart, compositionend é)."""
+        c = "e3_dead_key"
+        started = self.e3_start(c)
+        if not started:
+            return
+        pid, w, h = started
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark = self.fixture.mark()
+        self.hw("key", pid, 14, "alt")  # kVK_ANSI_E with Option: the dead acute
+        time.sleep(0.5)
+        start = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-a-compositionstart", mark)]
+        self.expect(c, "Option+e starts a composition (compositionstart)", bool(start), str(start))
+        self.hw("key", pid, 14)
+        value = self.e3_wait_value("a", mark, "é")
+        self.expect(c, "then e commits é (Chrome: é)", value == "é", repr(value))
+        end = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-a-compositionend", mark)]
+        self.expect(c, "compositionend carries é", end[-1:] == ["/beacon?e3-a-compositionend=é"], str(end))
+
+    def e3_dead_key_no_field(self):
+        """CH2.E3 (#918 R1): with nothing editable focused, Option+e, e and j are plain keydowns; nothing composes or is inserted."""
+        c = "e3_dead_key_no_field"
+        started = self.e3_start(c, page="e3_no_field.html")
+        if not started:
+            return
+        pid, w, h = started
+        mark = self.fixture.mark()
+        self.hw("key", pid, 14, "alt")  # Option+e: the dead acute on a US layout
+        time.sleep(0.3)
+        self.hw("key", pid, 14)  # e
+        time.sleep(0.3)
+        self.hw("key", pid, 38)  # j, a shortcut key
+        time.sleep(1.0)
+        seen = lambda kind: [urllib.parse.unquote(p).split("=", 1)[1]
+                             for p in self.fixture.seen("beacon?e3n-%s=" % kind, mark)]
+        downs, ups = seen("keydown"), seen("keyup")
+        keys = [d.split("-", 1)[1] for d in downs]
+        # Every key is a keydown the page hears, none swallowed by an input
+        # method. Not pinned (#918 nit 5, no OS-key Chromium oracle on this
+        # seat): Chromium's key values for the dead key itself ("Dead") and
+        # the composed key, and keyCode (the engine reports 0 for character
+        # keys); keyup with nothing focused is not delivered (as before E3).
+        self.expect(c, "the page hears a keydown for each of Option+e, e, j", len(keys) == 3 and keys[-1] == "j",
+                    str(downs))
+        self.note(c, "keyups heard", "INFO", str(ups))
+        composed = sum((seen(k) for k in ("compositionstart", "compositionupdate", "compositionend")), [])
+        self.expect(c, "nothing composes", not composed, str(composed))
+        inserted = seen("beforeinput") + seen("input")
+        self.expect(c, "nothing is inserted", not inserted, str(inserted))
+
+    def e3_paste(self):
+        """CH2.E3: Cmd+V and Edit > Paste put the pasteboard's text in a content <input>."""
+        c = "e3_paste"
+        saved = self.pasteboard()
+        try:
+            started = self.e3_start(c)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            self.pasteboard("e3-pasted")
+            mark = self.fixture.mark()
+            self.hw("key", pid, 9, "cmd")  # V
+            value = self.e3_wait_value("a", mark, "e3-pasted")
+            self.expect(c, "Cmd+V pastes the pasteboard's text", value == "e3-pasted", repr(value))
+            code, out = self.hw("menu", pid, "Edit", "Paste")
+            value = self.e3_wait_value("a", mark, "e3-pastede3-pasted")
+            self.expect(c, "Edit > Paste pastes it again", value == "e3-pastede3-pasted",
+                        "%r %s" % (value, json.dumps(out)))
+        finally:
+            self.pasteboard(saved)
+
+    def e3_cut_copy(self):
+        """CH2.E3: Cmd+A/C/X and Edit > Select All/Copy/Cut put the field's text on the pasteboard."""
+        c = "e3_cut_copy"
+        saved = self.pasteboard()
+        try:
+            started = self.e3_start(c)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            mark = self.fixture.mark()
+            self.hw("type", pid, "hello")
+            self.e3_wait_value("a", mark, "hello")
+            self.pasteboard("before")
+            self.hw("key", pid, 0, "cmd")  # A
+            time.sleep(0.3)
+            self.hw("key", pid, 8, "cmd")  # C
+            time.sleep(0.6)
+            self.expect(c, "Cmd+A, Cmd+C copies the value", self.pasteboard() == "hello", repr(self.pasteboard()))
+            self.hw("key", pid, 7, "cmd")  # X
+            value = self.e3_wait_value("a", mark, "")
+            self.expect(c, "Cmd+X empties the field", value == "", repr(value))
+            mark = self.fixture.mark()
+            self.hw("type", pid, "world")
+            self.e3_wait_value("a", mark, "world")
+            self.pasteboard("before")
+            self.hw("menu", pid, "Edit", "Select All")
+            time.sleep(0.3)
+            self.hw("menu", pid, "Edit", "Copy")
+            time.sleep(0.6)
+            self.expect(c, "Edit > Select All, Edit > Copy copies the value", self.pasteboard() == "world",
+                        repr(self.pasteboard()))
+            self.hw("menu", pid, "Edit", "Cut")
+            value = self.e3_wait_value("a", mark, "")
+            self.expect(c, "Edit > Cut empties the field", value == "", repr(value))
+        finally:
+            self.pasteboard(saved)
+
+    def e3_undo(self):
+        """CH2.E3: Cmd+Z, Cmd+Shift+Z and Edit > Undo in a content <input>."""
+        c = "e3_undo"
+        started = self.e3_start(c)
+        if not started:
+            return
+        pid, w, h = started
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark = self.fixture.mark()
+        self.hw("type", pid, "abc")
+        self.e3_wait_value("a", mark, "abc")
+        self.hw("key", pid, 6, "cmd")  # Z
+        value = self.e3_wait_value("a", mark, "")
+        self.expect(c, "Cmd+Z undoes the typing", value == "", repr(value))
+        self.hw("key", pid, 6, "cmd", "shift")
+        value = self.e3_wait_value("a", mark, "abc")
+        self.expect(c, "Cmd+Shift+Z redoes it", value == "abc", repr(value))
+        self.hw("menu", pid, "Edit", "Undo")
+        value = self.e3_wait_value("a", mark, "")
+        self.expect(c, "Edit > Undo undoes it", value == "", repr(value))
+
+    def e3_cmd_key_to_page(self):
+        """CH2.E3: a Cmd chord reaches the page's keydown before the menu; a cancelled one stays the page's. Cmd+T is Chromium-reserved: the page never hears it and the tab opens."""
+        c = "e3_cmd_key_to_page"
+        for prevent in (True, False):
+            page = "e3_text.html" + ("?prevent" if prevent else "")
+            started = self.e3_start(c, page)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            label = "cancelled" if prevent else "not cancelled"
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 3, "cmd")  # F
+            heard = self.fixture.wait("beacon?e3-cmd=f", 3, mark)
+            self.expect(c, "%s: the page hears Cmd+F's keydown (metaKey)" % label, heard)
+            find = self.app.wait_log(r'menu event id="?find', 2, log_from)
+            if prevent:
+                self.expect(c, "cancelled: the menu does not open Find", not find)
+            else:
+                self.expect(c, "not cancelled: the menu opens Find", bool(find))
+            self.hw("key", pid, 53)  # Escape closes the find bar
+            time.sleep(0.4)
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")  # T
+            tab = self.app.wait_log(r'menu event id="?new_tab', 3, log_from)
+            self.expect(c, "%s: Cmd+T opens a tab (Chrome 143: reserved)" % label, bool(tab))
+            heard = self.fixture.seen("beacon?e3-cmd=t", mark)
+            self.expect(c, "%s: the page hears no Cmd+T keydown (Chrome 143)" % label, not heard, str(heard))
+            self.close_page()
+
+    def e3_chrome_paste_url(self):
+        """CH2.E3, flag on: Cmd+V pastes a URL into the RustKit chrome's address bar and Return navigates."""
+        c = "e3_chrome_paste_url"
+        saved = self.pasteboard()
+        try:
+            if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+                return
+            if not self.can_input:
+                return self.not_run(c, "a pasted URL navigates", self.why_not("Accessibility"))
+            self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+            time.sleep(1.0)
+            pid = self.app.proc.pid
+            log_from = len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")  # a new tab: an empty address bar
+            made = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"create_tab"', 5, log_from)
+            self.expect(c, "Cmd+T made a tab through the chrome", bool(made))
+            time.sleep(1.0)
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, int(win["w"] * 0.55), 100)
+            clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+            self.expect(c, "the click reached the RustKit chrome", bool(clicked))
+            time.sleep(0.5)
+            target = "%s/h16_b.html?from=pasted" % self.fixture.base
+            self.pasteboard(target)
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 9, "cmd")  # V
+            time.sleep(0.5)
+            self.hw("key", pid, 36)
+            ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"navigate","url":"([^"]*)"', 10, log_from)
+            self.expect(c, "Return after Cmd+V posted navigate with the pasted URL",
+                        bool(ipc) and ipc.group(1) == target, ipc.group(1) if ipc else "no navigate")
+            self.expect(c, "the page's script ran", self.fixture.wait("beacon?h16-b-ran-from=pasted", 10, mark))
+        finally:
+            self.pasteboard(saved)
 
     # ── CH3.A3: the RustKit chrome over the page ───────────────────────────
 
@@ -1152,8 +1495,13 @@ class Driver:
                         "at %d,%d" % (px, py))
             self.expect(c, "after: the page still shows beside and below the menu",
                         self.green_at(after, x + w + 40, py) and self.green_at(after, px, self.TITLE_BAR + y + h + 30))
-            g0 = sum(n for (n, p) in before[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
-            g1 = sum(n for (n, p) in after[0].getcolors(maxcolors=1 << 24) if self.is_green(p))
+            # The page's pixels: its green, or (CH3.A3c, the transparent
+            # chrome) that green under the menu's shadow, which now reaches
+            # the page outside the menu's box.
+            def page_px(p):
+                return self.is_green(p) or (p[1] > 60 and p[1] > p[0] + 40 and p[1] > p[2] + 40)
+            g0 = sum(n for (n, p) in before[0].getcolors(maxcolors=1 << 24) if page_px(p))
+            g1 = sum(n for (n, p) in after[0].getcolors(maxcolors=1 << 24) if page_px(p))
             scale = after[1]
             self.expect(c, "the page did not move: it lost about the menu's area only",
                         0 < g0 - g1 < w * h * scale * scale * 1.2,
@@ -1183,6 +1531,97 @@ class Driver:
         self.expect(c, "with the menu open, a click on the page beside it reaches the page",
                     self.fixture.wait("beacon?a3-click-", 5, mark))
         self.expect(c, "and closes the menu",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+
+    def a3b_context_menu_over_page(self):
+        """CH3.A3b: a right click in the tab strip off any tab opens the chrome's own context menu, which paints over the page and takes a click on its item there."""
+        c = "a3b_context_menu_over_page"
+        if not self.a3_open(c):
+            return
+        if not self.can_input:
+            return self.not_run(c, "a right click in the tab strip", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        # The tab strip right of the tabs: no tab under the pointer, so the
+        # chrome shows its page menu (showPageContextMenu), not the tab panel.
+        at = (int(win["w"] * 0.8), self.TITLE_BAR + 22)
+        before = self.capture(c, "before")
+        log_from = len(self.app.log_text())
+        self.hw("rightclick", pid, *at)
+        m = self.app.wait_log(self.OVERLAY, 5, log_from)
+        self.expect(c, "the menu's paint over the page is in the chrome's region", bool(m),
+                    m.group(0) if m else "no overlay")
+        if not m:
+            return
+        time.sleep(0.8)  # the menu's opening transition
+        last = None
+        for last in re.finditer(self.OVERLAY, self.app.log_text()[log_from:]):
+            pass
+        x, y, w, h = (float(last.group(i)) for i in range(2, 6))
+        self.expect(c, "the menu opened at the pointer and reaches over the page",
+                    abs(x - at[0]) <= 2 and y + h > 150, "box %s, pointer %s" % ([x, y, w, h], at))
+        after = self.capture(c, "after")
+        if before is None or after is None:
+            self.not_run(c, "the menu paints over the page", self.why_not("Screen Recording"))
+        else:
+            px, py = x + w / 2, self.TITLE_BAR + y + h - 24
+            self.expect(c, "before: the page is where the menu opens", self.green_at(before, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "after: the menu paints over the page there (not clipped at the strip)",
+                        not self.green_at(after, px, py), "at %d,%d" % (px, py))
+            self.expect(c, "after: the page still shows beside the menu",
+                        self.green_at(after, x - 40, py))
+        # Its last item lies over the page: the click is the chrome's, the
+        # item runs (an IPC from the chrome) and the menu closes.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x + w / 2), int(self.TITLE_BAR + y + h - 22))
+        self.expect(c, "a click on the menu's item over the page reaches the chrome",
+                    bool(self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)))
+        self.expect(c, "the item ran (the chrome posted its command)",
+                    bool(self.app.wait_log(r"RustKit chrome IPC body=\{\"cmd\"", 3, log_from)))
+        self.expect(c, "the menu closed and left the region",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+
+    # A box no popup selector names, over the page column, opened 6 s after
+    # boot: what a new chrome popup or tooltip looks like to the region.
+    A3B_PROBE_JS = ("setTimeout(function () { var d = document.createElement('div'); d.id = 'a3bProbe'; "
+                    "d.style.cssText = 'position:absolute;z-index:9999;left:640px;top:260px;width:160px;"
+                    "height:90px;background:#0000ff'; d.addEventListener('click', function () { "
+                    "d.remove(); sendIpc('a3b_probe_clicked', {}); }); document.body.appendChild(d); }, 6000);")
+
+    def a3b_unlisted_popup_over_page(self):
+        """CH3.A3b: a chrome box no selector names (a new popup or tooltip) paints over the page and takes clicks there."""
+        c = "a3b_unlisted_popup_over_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A3B_PROBE_JS}):
+            return
+        # Opened 6 s after the chrome booted; a3_open waits about 3 s of that.
+        time.sleep(5.0)
+        shot = self.capture(c, "open")
+        if shot is None:
+            self.not_run(c, "the box paints over the page", self.why_not("Screen Recording"))
+        else:
+            img, scale, win = shot
+            px, py = 720, self.TITLE_BAR + 305
+            rgb = img.getpixel((int(px * scale), int(py * scale)))
+            self.expect(c, "the box's blue shows over the page", all(abs(rgb[i] - BLUE[i]) <= 48 for i in range(3)),
+                        "at %d,%d: %s" % (px, py, rgb))
+            self.expect(c, "the page shows beside it", self.green_at(shot, 600, py))
+        if not self.can_input:
+            return self.not_run(c, "a click on the box", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, 720, self.TITLE_BAR + 305)
+        self.expect(c, "a click on the box over the page reaches the chrome's handler",
+                    bool(self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"a3b_probe_clicked"', 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+        self.expect(c, "the removed box left the region",
                     bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
 
     def a3_cmd_l_from_page(self):
@@ -1833,10 +2272,9 @@ class Driver:
             self.expect(c, "the page lists the added domain (one more item, the domain's)", bool(shown_list),
                         str(self.el(self.last_probe("settings", log_from), ".blocklist-item")))
         # Save at the end of the page: the app takes save_settings and its
-        # reply reaches the page (a postMessage). settings.json is not
-        # written: the page's settings lack focus_duration_minutes and
-        # focus_break_minutes, so the app's UserSettings does not parse
-        # them (both backends; the PR lists it).
+        # reply reaches the page (a postMessage). Since B11 settings.json is
+        # written, with the checkbox flipped; the next check starts on the
+        # seeded profile again (open_page), not on this one.
         cur = scroll_to("#saveBtn", cur)
         self.expect(c, "the wheel over the settings window scrolls it to the Save button", in_view(cur, "#saveBtn"),
                     str(box_of(cur, "#saveBtn")))
@@ -2016,14 +2454,203 @@ class Driver:
                     said_saved == written and said_saved,
                     "page said saved: %s, file written: %s" % (said_saved, written))
 
+    # ── CH3.A3c: the alpha route (a transparent chrome surface) ─────────────
+
+    # A rounded popup with a wide shadow over the page column, 6 s after boot.
+    A3C_PROBE_JS = ("setTimeout(function () { var d = document.createElement('div'); d.id = 'a3cProbe'; "
+                    "d.style.cssText = 'position:absolute;z-index:9999;left:640px;top:260px;width:160px;"
+                    "height:90px;background:#0000ff;border-radius:24px;box-shadow:0 12px 32px rgba(0,0,0,0.6)'; "
+                    "document.body.appendChild(d); }, 6000);")
+
+    def a3c_probe_shot(self, c):
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A3C_PROBE_JS}):
+            return None
+        time.sleep(5.0)
+        shot = self.capture(c, "probe")
+        if shot is None:
+            self.not_run(c, "the probe popup over the page", self.why_not("Screen Recording"))
+            return None
+        img, scale, win = shot
+        mid = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 305) * scale)))
+        self.expect(c, "the probe popup's blue shows over the page",
+                    all(abs(mid[i] - BLUE[i]) <= 48 for i in range(3)), str(mid))
+        return shot
+
+    def a3c_shadow_over_page(self):
+        """CH3.A3c: just outside a chrome popup's box, its shadow darkens the page (page colour blended with the shadow, not the body colour)."""
+        c = "a3c_shadow_over_page"
+        shot = self.a3c_probe_shot(c)
+        if shot is None:
+            return
+        img, scale, win = shot
+        # 14 px below the box's bottom edge, mid-width: inside the shadow.
+        rgb = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 350 + 14) * scale)))
+        self.expect(c, "the pixel below the box is the page's green darkened by the shadow",
+                    rgb[1] < 235 and rgb[1] > rgb[0] + 40 and rgb[1] > rgb[2] + 40, "at 720,%d: %s" % (350 + 14, rgb))
+        far = img.getpixel((int(720 * scale), int((self.TITLE_BAR + 470) * scale)))
+        self.expect(c, "past the shadow's reach the page is plain green", self.is_green(far, 24), str(far))
+
+    def a3c_rounded_corner(self):
+        """CH3.A3c: the pixel at a rounded chrome popup's corner shows the page, not the body colour."""
+        c = "a3c_rounded_corner"
+        shot = self.a3c_probe_shot(c)
+        if shot is None:
+            return
+        img, scale, win = shot
+        # One point inside the box's top-left corner: outside its 24 px curve.
+        rgb = img.getpixel((int(641 * scale), int((self.TITLE_BAR + 261) * scale)))
+        self.expect(c, "the corner pixel is the page's green (under the shadow), not blue or the body colour",
+                    rgb[1] > rgb[0] + 60 and rgb[1] > rgb[2] + 60, "at 641,261: %s" % (rgb,))
+
+    def a3c_find_dims_page(self):
+        """CH3.A3c: with the chrome's find modal open, its translucent overlay dims the page."""
+        c = "a3c_find_dims_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": "setTimeout(function () { openFindModal(); }, 6000);"}):
+            return
+        before = self.capture(c, "before")
+        time.sleep(5.0)
+        after = self.capture(c, "find_open")
+        if before is None or after is None:
+            return self.not_run(c, "the page dims under the find modal", self.why_not("Screen Recording"))
+        img0, scale, win = before
+        img1 = after[0]
+        at = (int(win["w"] * 0.5 * scale), int(win["h"] * 0.7 * scale))
+        p0, p1 = img0.getpixel(at), img1.getpixel(at)
+        self.expect(c, "before: the page is green there", self.is_green(p0, 24), str(p0))
+        self.expect(c, "with the modal open the same page pixel is darker green (0.3 black over it)",
+                    p1[1] < p0[1] - 40 and p1[1] > 120 and p1[1] > p1[0] + 60, "%s -> %s" % (p0, p1))
+
+    def a3c_chrome_band(self):
+        """CH3.A3c: with the chrome's body unpainted, the strip between the toolbar and the page column still shows the body's colour (default and tab-actions heights), not the window behind the chrome."""
+        c = "a3c_chrome_band"
+        js = ("setTimeout(function () { var t = currentTabs && currentTabs[0]; "
+              "if (t) showTabActionsPanel(t.id); }, 8000);")
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": js}):
+            return
+        shots = [("default", self.capture(c, "default"), 98)]
+        log_from = len(self.app.log_text())
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"expand_chrome_small"', 10, log_from)
+        time.sleep(1.5)
+        # With the tab-actions panel open the page column starts at 148; the
+        # panel ends at 144, and the rows between are the body's colour.
+        shots.append(("tab_actions", self.capture(c, "tab_actions"), 145))
+        for name, shot, y in shots:
+            if shot is None:
+                self.not_run(c, "the band is the body colour (%s)" % name, self.why_not("Screen Recording"))
+                continue
+            img, scale, win = shot
+            # The toolbar's own background at its right end is --bg-primary,
+            # the body's colour.
+            ref = img.getpixel((int((win["w"] - 6) * scale), int((self.TITLE_BAR + 60) * scale)))
+            row = [img.getpixel((int(x * scale), int((self.TITLE_BAR + y) * scale))) for x in range(300, int(win["w"]) - 20, 97)]
+            bad = [p for p in row if max(abs(p[i] - ref[i]) for i in range(3)) > 12]
+            self.expect(c, "%s: the band above the page column is the body colour %s" % (name, ref), not bad,
+                        "y %d: %s" % (y, row))
+
+    # ── CH2.E6b: the Mode <select>'s drop-down over the page ───────────────
+
+    # 4 s after boot: open the left sidebar as its toggle does, give the
+    # Mode select's options long labels (values kept) so its drop-down is
+    # wider than the sidebar and reaches over the page column, and report
+    # the select's box and value (an IPC the driver reads from the log).
+    E6B_JS = ("setTimeout(function () { if (!sidebarOpen) toggleSidebar(); "
+              "var s = document.getElementById('modeSelector'); "
+              "Array.prototype.forEach.call(s.options, function (o) { "
+              "o.textContent = o.textContent + ' with a label long enough to reach over the page'; }); "
+              "setTimeout(function () { var r = s.getBoundingClientRect(); "
+              "sendIpc('e6b_select', { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), "
+              "h: Math.round(r.height), i: s.selectedIndex }); }, 1500); }, 4000);")
+    E6B_SELECT = (r'RustKit chrome IPC body=\{"cmd":"e6b_select","x":(-?\d+),"y":(-?\d+),"w":(\d+),"h":(\d+),"i":(\d+)')
+
+    def e6b_select_over_page(self):
+        """CH2.E6b: the RustKit chrome's Mode <select> drops down over the page column, a click on an option there picks it (set_mode), and a click on the page while it is open closes it without reaching the page."""
+        c = "e6b_select_over_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.E6B_JS}):
+            return
+        sel = self.app.wait_log(self.E6B_SELECT, 12)
+        self.expect(c, "the chrome reported the Mode select's box", bool(sel), sel.group(0) if sel else "no report")
+        if not sel:
+            return
+        sx, sy, sw, sh, shown = (int(sel.group(i)) for i in range(1, 6))
+        if not self.can_input:
+            return self.not_run(c, "open the Mode select", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        time.sleep(0.8)
+        before = self.capture(c, "before")
+        # Open it.
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, sx + sw // 2, self.TITLE_BAR + sy + sh // 2)
+        m = self.app.wait_log(self.OVERLAY, 5, log_from)
+        self.expect(c, "the open drop-down is in the chrome's region over the page column", bool(m),
+                    m.group(0) if m else "no overlay")
+        if not m:
+            return
+        x, y, w, h = (float(m.group(i)) for i in range(2, 6))
+        # The overlay is the popup cut to the page column: its top is the
+        # select's bottom, or the column's top when the popup starts above.
+        top = sy + sh
+        self.expect(c, "it hangs under the select and reaches past the sidebar",
+                    y >= top - 2 and x + w > sx + sw + 20, "box %s, select %s" % ([x, y, w, h], [sx, sy, sw, sh]))
+        time.sleep(0.5)
+        after = self.capture(c, "open")
+        if before is None or after is None:
+            self.not_run(c, "the drop-down paints over the page", self.why_not("Screen Recording"))
+        else:
+            px, py = x + min(w / 2, 60), self.TITLE_BAR + y + 4
+            self.expect(c, "before: the page is where the drop-down opens", self.green_at(before, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "open: the drop-down paints over the page there", not self.green_at(after, px, py),
+                        "at %d,%d: %s" % (px, py, after[0].getpixel((int(px * after[1]), int(py * after[1])))))
+            self.expect(c, "open: the page still shows beside it", self.green_at(after, x + w + 40, py))
+        # Pick another option on its row over the page column: rows are
+        # round(13 * 1.2 + 4) = 20 px under a 1 px border.
+        pick = 1 if shown != 1 else 0
+        value = ["essentials", "balanced", "zen"][pick]
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x + min(w / 2, 60)), int(self.TITLE_BAR + top + 1 + 20 * pick + 10))
+        ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"set_mode","mode":"(\w+)"', 3, log_from)
+        self.expect(c, "a click on an option over the page picks it (set_mode)", bool(ipc) and ipc.group(1) == value,
+                    ipc.group(0) if ipc else "no set_mode")
+        self.expect(c, "the pick closed the drop-down",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+        # Open it again, then click on the page away from it.
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, sx + sw // 2, self.TITLE_BAR + sy + sh // 2)
+        if not self.app.wait_log(self.OVERLAY, 5, log_from):
+            return self.expect(c, "the drop-down opened again", False)
+        time.sleep(0.3)
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        code, win = self.hw("window", pid)
+        self.hw("click", pid, int(win["w"] * 0.7), int(win["h"] * 0.75))
+        self.expect(c, "a click on the page while it is open closes it",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(1.0)
+        self.expect(c, "and the page does not get that click (Chromium: the press only dismisses the popup)",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark), str(self.page_clicks(mark)))
+        self.expect(c, "the mode did not change", not self.app.wait_log(r'"cmd":"set_mode"', 0.2, log_from))
+        # The next click on the page is the page's again.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(win["w"] * 0.7), int(win["h"] * 0.75))
+        self.expect(c, "once it is closed, a click on the page reaches the page",
+                    self.fixture.wait("beacon?a3-click-", 5, mark))
+
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
+              "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
+              "a3c_shadow_over_page", "a3c_rounded_corner", "a3c_find_dims_page", "a3c_chrome_band",
+              "e6b_select_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
               "e4_chrome_tab",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
-              "b11_settings_save"]
+              "b11_settings_save",
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
@@ -2033,6 +2660,11 @@ class Driver:
             print("%s: %s" % (name, check.__doc__.strip()), flush=True)
             try:
                 check()
+            except HidUnsafe as e:
+                self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                print("  STOP (HID safety): %s" % e, flush=True)
+                self.close_page()
+                break
             finally:
                 self.close_page()
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}

@@ -21,6 +21,7 @@ pub use rustkit_bindings::IpcMessage;
 /// The clipboard edit commands use (CH2.E1); a platform one plugs in with
 /// [`Engine::set_clipboard`].
 pub use rustkit_dom::clipboard::{self, Clipboard, MemoryClipboard, SharedClipboard};
+pub use rustkit_dom::forms::EditCommand;
 #[cfg(test)]
 use rustkit_compositor::Compositor;
 
@@ -288,6 +289,8 @@ mod inspector_glue;
 mod console_log;
 mod relayout_cause;
 mod selection;
+mod text_input;
+pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
@@ -299,11 +302,21 @@ mod select_popup;
 mod select_popup_engine;
 #[cfg(test)]
 mod select_popup_engine_tests;
+#[cfg(test)]
+mod select_popup_overlay_tests;
 mod restyle_invalidation;
 #[cfg(test)]
 mod restyle_invalidation_tests;
 mod presenter;
 pub use presenter::FrameCommit;
+mod painted_region;
+pub use painted_region::{painted_boxes, BACKDROP_COVER};
+/// The display list's rect, for `painted_boxes` (CH3.A3b).
+pub use rustkit_layout::Rect as PaintRect;
+#[cfg(test)]
+mod painted_region_tests;
+#[cfg(test)]
+mod transparent_frame_tests;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use presenter::WindowSurface;
 mod page_protocol;
@@ -444,6 +457,12 @@ mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
+mod flex_cross_size_tests;
+#[cfg(test)]
+mod inner_text_style_tests;
+#[cfg(test)]
+mod control_percent_height_tests;
+#[cfg(test)]
 mod flex_hidden_gap_tests;
 #[cfg(test)]
 mod flex_column_definite_height_tests;
@@ -511,6 +530,10 @@ mod live_turn_budget_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clipboard_edit_tests;
 #[cfg(all(test, feature = "headless"))]
+mod app_bridge_tests;
+#[cfg(all(test, feature = "headless"))]
+mod text_input_tests;
+#[cfg(all(test, feature = "headless"))]
 mod text_control_select_tests;
 #[cfg(all(test, feature = "headless"))]
 mod leaving_input_tests;
@@ -563,6 +586,8 @@ mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;
 #[cfg(all(test, feature = "headless"))]
+mod unitless_zero_tests;
+#[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
@@ -612,6 +637,8 @@ mod flex_shorthand_tests;
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod backdrop_filter_tests;
 use rustkit_net::policy::FetchPolicy;
 use rustkit_net::{LoaderConfig, NetError, ReferrerPolicy, Request, RequestDestination, ResourceLoader};
 pub use rustkit_renderer::RenderStats;
@@ -986,6 +1013,10 @@ struct ViewState {
     /// plan's per-view frame count; the tests read it to see how many draws
     /// one input cost).
     frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
     viewhost_id: ViewId,
     url: Option<Url>,
     title: Option<String>,
@@ -1361,6 +1392,10 @@ pub struct EngineConfig {
     /// watchdog is armed once per execution, and script still running when
     /// its allowance is spent is stopped.
     pub live_turn_budget_ms: u64,
+    /// Copy, cut and paste use the system clipboard (macOS `NSPasteboard`,
+    /// CH2.E3) instead of an in-memory one. Off by default: tests and
+    /// captures must not touch the user's clipboard. The app turns it on.
+    pub system_clipboard: bool,
     /// The embedder loads the URL a page's script asks for
     /// ([`Engine::take_script_navigation`]), as the live app does. A load
     /// whose scripts have asked to leave then does not wait for the images
@@ -1406,6 +1441,7 @@ impl Default for EngineConfig {
             follows_script_navigation: false,
             post_load_requests_live: false,
             inspector: InspectorConfig::tab(),
+            system_clipboard: false,
         }
     }
 }
@@ -2727,13 +2763,18 @@ impl Engine {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         console_log::install_console_diag();
+        let system_clipboard = config.system_clipboard;
         Ok(Self {
             config,
             presenter,
             page_commits: HashMap::new(),
             nav_seq,
             host_reentry_override: None,
-            clipboard: MemoryClipboard::shared(),
+            clipboard: if system_clipboard {
+                text_input::system_clipboard()
+            } else {
+                MemoryClipboard::shared()
+            },
             clipboard_readers: Default::default(),
             loader,
             views: HashMap::new(),
@@ -2801,6 +2842,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -2912,6 +2954,7 @@ impl Engine {
             lay: Rc::default(),
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -3040,6 +3083,7 @@ impl Engine {
             lay: Rc::default(),
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
+            app_owned: false,
             viewhost_id,
             url: None,
             title: None,
@@ -5762,6 +5806,20 @@ impl Engine {
         self.clipboard.clone()
     }
 
+    /// CH3.A7: mark view `id` as one the app owns (the chrome, the shelf,
+    /// the Inspector, the settings page). Documents the app loads into it
+    /// from then on get the app bridge; a web view (the default) never does.
+    pub fn set_app_owned(&mut self, id: EngineViewId, owned: bool) {
+        if let Some(view) = self.views.get_mut(&id) {
+            view.app_owned = owned;
+        }
+    }
+
+    /// Whether the app owns view `id` (see [`Self::set_app_owned`]).
+    pub fn is_app_owned(&self, id: EngineViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.app_owned)
+    }
+
     /// Let script in view `id` read the clipboard
     /// (`navigator.clipboard.readText`, `execCommand('paste')`), for this
     /// and later documents. Off by default: a web page must not read what
@@ -5810,7 +5868,6 @@ impl Engine {
         alt: bool,
     ) -> bool {
         let _hold = wgate::hold("key");
-        use rustkit_dom::forms::{keyboard, KeyHandleResult};
 
         // An open `<select>` drop-down takes the keys; the page hears none.
         if let Some(changed) = self.select_popup_key(id, key_code, key, ctrl, alt) {
@@ -5828,12 +5885,29 @@ impl Engine {
         {
             return false;
         }
+        self.text_key_default(id, focused.raw(), key_code, key, ctrl, shift, alt)
+    }
+
+    /// What a key does in the focused element `focused` once its keydown
+    /// was not cancelled: edit a contenteditable host, a drop-down or a
+    /// text control. Whether a value or caret changed.
+    pub(crate) fn text_key_default(
+        &mut self,
+        id: EngineViewId,
+        focused: usize,
+        key_code: u32,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> bool {
+        use rustkit_dom::forms::{keyboard, KeyHandleResult};
         // A contenteditable host: the page's DOM is what is edited.
-        if self.is_editing_host(id, focused.raw()) {
-            return self.editable_key(id, focused.raw(), key_code, key, ctrl);
+        if self.is_editing_host(id, focused) {
+            return self.editable_key(id, focused, key_code, key, ctrl);
         }
         // A focused, closed drop-down: keys open it or change its value.
-        if let Some(changed) = self.closed_select_key(id, focused.raw(), key_code, key, ctrl, alt) {
+        if let Some(changed) = self.closed_select_key(id, focused, key_code, key, ctrl, alt) {
             return changed;
         }
         let Some(lay) = self.views.get(&id).map(|v| v.lay.clone()) else {
@@ -5842,7 +5916,7 @@ impl Engine {
         // `ctrl` is the command modifier: the window passes Ctrl-or-Cmd.
         let platform = rustkit_dom::forms::KeyPlatform::current();
         if let Some(command) = keyboard::command_for_key(platform, key_code, key, ctrl, shift, alt) {
-            if let Some(changed) = self.user_edit_command(id, focused.raw(), &command) {
+            if let Some(changed) = self.user_edit_command(id, focused, &command) {
                 return changed;
             }
         }
@@ -5850,7 +5924,7 @@ impl Engine {
         // writes script's control values into the same map.
         let (result, value) = {
             let edit_states = lay.edit_states.borrow();
-            let Some(state) = edit_states.get(&focused.raw()) else {
+            let Some(state) = edit_states.get(&focused) else {
                 return false;
             };
             let result = keyboard::handle_key(
@@ -5864,7 +5938,7 @@ impl Engine {
             let mut stopped = None;
             if let Some(view) = self.views.get(&id) {
                 if let Some(bindings) = view.bindings.as_ref() {
-                    bindings.sync_control_value(focused.raw(), value);
+                    bindings.sync_control_value(focused, value);
                     // As `fire_mouse`: a document being left hears no
                     // `input`; its control's value is kept current all the
                     // same.
@@ -5872,7 +5946,7 @@ impl Engine {
                         let typed = (!key.is_empty() && !ctrl).then_some(key);
                         let _turn = rustkit_js::DiagTurn::enter("live");
                         let armed = arm_live_turn(&self.config, bindings);
-                        if let Err(e) = bindings.fire_input_event(focused.raw(), typed) {
+                        if let Err(e) = bindings.fire_input_event(focused, typed) {
                             debug!(?id, error = %e, "input listener threw");
                         }
                         stopped = end_live_turn(&self.config, armed, bindings, "event:input");
@@ -6037,6 +6111,21 @@ impl Engine {
         shift: bool,
         alt: bool,
     ) -> bool {
+        self.fire_key_mods(id, node, event_type, key_code, text, (ctrl, shift, alt, false))
+    }
+
+    /// [`Self::fire_key`] with the Meta key as well: `mods` is
+    /// (ctrl, shift, alt, meta). A macOS Cmd chord is `metaKey` (CH2.E3).
+    pub(crate) fn fire_key_mods(
+        &mut self,
+        id: EngineViewId,
+        node: Option<usize>,
+        event_type: &str,
+        key_code: u32,
+        text: &str,
+        mods: (bool, bool, bool, bool),
+    ) -> bool {
+        let (ctrl, shift, alt, meta) = mods;
         let key = match key_code {
             0x08 => "Backspace",
             0x09 => "Tab",
@@ -6072,6 +6161,7 @@ impl Engine {
             ctrl_key: ctrl,
             alt_key: alt,
             shift_key: shift,
+            meta_key: meta,
             ..Default::default()
         };
         let _turn = rustkit_js::DiagTurn::enter("live");
@@ -8479,8 +8569,16 @@ impl Engine {
             .map_err(|e| EngineError::JsError(e.to_string()))?;
             self.apply_host_reentry_limit(&mut js_runtime);
 
-            let bindings =
-                DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            // CH3.A7: the app bridge only for a document the app itself
+            // loads into a view it owns (the chrome, a panel). A URL load
+            // (`load_url_for_nav`) never gets it.
+            let app_owned = self.views.get(&id).is_some_and(|view| view.app_owned);
+            let bindings = if app_owned {
+                DomBindings::new_app_owned(js_runtime)
+            } else {
+                DomBindings::new(js_runtime)
+            }
+            .map_err(|e| EngineError::JsError(e.to_string()))?;
             bindings.set_selector_matcher(Rc::new(|node, selector, checked| {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
@@ -14927,7 +15025,17 @@ impl layout_ctx::LayoutCtx {
                     set_stacks(style, rustkit_css::STACKS_WILL_CHANGE, will_change_stacks(value));
                 }
             }
-            "isolation" | "mix-blend-mode" | "perspective" | "transform-style" | "backdrop-filter"
+            "backdrop-filter" => {
+                // A list the paint reads, or nothing: an invalid value
+                // leaves the earlier declaration (Filter Effects 2 §3).
+                let value = value.trim().to_ascii_lowercase();
+                if rustkit_layout::filter_steps(&value, 16.0, 16.0).is_some() {
+                    let none = value == "none";
+                    style.backdrop_filter = if none { String::new() } else { value };
+                    set_stacks(style, rustkit_css::STACKS_BACKDROP, !none);
+                }
+            }
+            "isolation" | "mix-blend-mode" | "perspective" | "transform-style"
             | "content-visibility" | "view-transition-name" => {
                 if let Some((bit, on)) = stacks_declaration(property, value) {
                     set_stacks(style, bit, on);
@@ -15633,7 +15741,10 @@ impl layout_ctx::LayoutCtx {
             "mix-blend-mode" => style.stacks &= !rustkit_css::STACKS_BLEND,
             "perspective" => style.stacks &= !rustkit_css::STACKS_PERSPECTIVE,
             "transform-style" => style.stacks &= !rustkit_css::STACKS_PRESERVE_3D,
-            "backdrop-filter" => style.stacks &= !rustkit_css::STACKS_BACKDROP,
+            "backdrop-filter" => {
+                style.backdrop_filter.clear();
+                style.stacks &= !rustkit_css::STACKS_BACKDROP;
+            }
             "content-visibility" => style.stacks &= !rustkit_css::STACKS_CONTENT_VISIBILITY,
             "view-transition-name" => style.stacks &= !rustkit_css::STACKS_VIEW_TRANSITION,
             "contain" => style.contain_holds_fixed = false,
@@ -19688,6 +19799,29 @@ impl Engine {
         drawn
     }
 
+    /// Draw view `id` as a transparent surface (CH3.A3c): its frames clear
+    /// to (0, 0, 0, 0), not to the page's canvas, so whatever its document
+    /// does not paint shows the views below it; colour is premultiplied.
+    /// The RustKit chrome stacked over the page sets this. Off by default.
+    pub fn set_view_transparent(&mut self, id: EngineViewId, transparent: bool) -> Result<(), EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let viewhost_id = view.viewhost_id;
+        view.presented = None;
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.set_transparent(viewhost_id, transparent);
+        }
+        Ok(())
+    }
+
+    /// Render view `id` and read its headless texture back as RGBA, alpha
+    /// kept (tests).
+    #[cfg(test)]
+    pub(crate) fn frame_rgba(&mut self, id: EngineViewId) -> Result<(u32, u32, Vec<u8>), EngineError> {
+        self.render(id)?;
+        let viewhost_id = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?.viewhost_id;
+        self.presenter.as_ref().unwrap().read_headless_rgba(viewhost_id)
+    }
+
     /// Capture a frame from a view to a PPM file.
     ///
     /// This renders the current display list to an offscreen texture and saves it.
@@ -20422,6 +20556,7 @@ impl Engine {
                 laid_out_for: view.laid_with.as_ref().map_or((0, 0), |w| w.size),
                 input: view.input_pending.take(),
                 canvas,
+                modal_popup: view.lay.select_popup.borrow().is_some(),
             };
             (view.viewhost_id, view.headless_bounds.is_some(), commit)
         };
@@ -21359,7 +21494,12 @@ impl Engine {
 
         for (&view_id, view_state) in &self.views {
             if let Some(ref bindings) = view_state.bindings {
-                for ipc_msg in bindings.drain_ipc_queue() {
+                let drained = bindings.drain_ipc_queue();
+                if !view_state.app_owned {
+                    log_ignored_ipc(view_id, &drained);
+                    continue;
+                }
+                for ipc_msg in drained {
                     messages.push((view_id, ipc_msg));
                 }
             }
@@ -21371,11 +21511,19 @@ impl Engine {
     /// What `id`'s page posted with `window.ipc.postMessage` since the
     /// last drain.
     pub fn drain_view_ipc(&self, id: EngineViewId) -> Vec<IpcMessage> {
-        self.views
-            .get(&id)
-            .and_then(|view| view.bindings.as_ref())
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let drained = view
+            .bindings
+            .as_ref()
             .map(|bindings| bindings.drain_ipc_queue())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !view.app_owned {
+            log_ignored_ipc(id, &drained);
+            return Vec::new();
+        }
+        drained
     }
 
     /// Check if any view has pending IPC messages.
@@ -21386,6 +21534,39 @@ impl Engine {
                 .map(|b| b.has_pending_ipc())
                 .unwrap_or(false)
         })
+    }
+}
+
+/// CH3.A7: IPC from a view the app does not own is dropped. The log names
+/// each message's `cmd` (when it is a plain identifier) and its size,
+/// never the body: a page's text must not reach the log.
+fn log_ignored_ipc(view: EngineViewId, messages: &[IpcMessage]) {
+    for message in messages {
+        warn!(
+            ?view,
+            cmd = %ipc_cmd_shape(&message.payload),
+            bytes = message.payload.len(),
+            "IPC from a view the app does not own ignored"
+        );
+    }
+}
+
+/// The `cmd` of an IPC body when it is a short `[a-z0-9_]` name, else a
+/// placeholder; nothing else of the body.
+fn ipc_cmd_shape(payload: &str) -> String {
+    let cmd = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_owned));
+    match cmd {
+        Some(c)
+            if !c.is_empty()
+                && c.len() <= 48
+                && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') =>
+        {
+            c
+        }
+        Some(_) => "<non-identifier>".to_string(),
+        None => "<no cmd>".to_string(),
     }
 }
 
@@ -21464,6 +21645,13 @@ impl EngineBuilder {
     /// (`EngineConfig::live_turn_budget_ms`).
     pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
         self.config.live_turn_budget_ms = ms;
+        self
+    }
+
+    /// Copy, cut and paste use the system clipboard
+    /// (`EngineConfig::system_clipboard`).
+    pub fn system_clipboard(mut self, on: bool) -> Self {
+        self.config.system_clipboard = on;
         self
     }
 
@@ -23155,15 +23343,6 @@ fn stacks_declaration(property: &str, value: &str) -> Option<(u8, bool)> {
             "flat" => Some((rustkit_css::STACKS_PRESERVE_3D, false)),
             _ => None,
         },
-        "backdrop-filter" => {
-            if value == "none" {
-                Some((rustkit_css::STACKS_BACKDROP, false))
-            } else if value.ends_with(')') {
-                Some((rustkit_css::STACKS_BACKDROP, true))
-            } else {
-                None
-            }
-        }
         "content-visibility" => match value.as_str() {
             "auto" | "hidden" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, true)),
             "visible" => Some((rustkit_css::STACKS_CONTENT_VISIBILITY, false)),
@@ -23923,6 +24102,8 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
     // wikipedia's `minmax(0,1fr)` and `12.25rem` columns never parsed. `rem`
     // assumes the 16px root, as `fit-content()` and `flex-basis` do.
     match parse_length(value)? {
+        // A bare `0` parses to `Px(0.0)` (CH2.B14); `Zero` kept for safety.
+        rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
         rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
         _ => None,
@@ -24695,6 +24876,7 @@ fn geometry_snapshot(
         let held = scrollers.held || (b.position == Position::Fixed && !scrollers.holds_fixed);
         let holds_fixed = transformed
             || !b.style.filter.is_empty()
+            || !b.style.backdrop_filter.is_empty()
             || b.style.will_change_holds_fixed
             || b.style.contain_holds_fixed;
         let under = Scrollers {
@@ -28276,7 +28458,8 @@ mod tests {
 
     #[test]
     fn test_parse_length() {
-        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Zero));
+        // An authored `0` is `0px`; `Length::Zero` is the unset default (CH2.B14).
+        assert_eq!(parse_length("0"), Some(rustkit_css::Length::Px(0.0)));
         assert_eq!(parse_length("auto"), Some(rustkit_css::Length::Auto));
         assert_eq!(parse_length("10px"), Some(rustkit_css::Length::Px(10.0)));
         assert_eq!(parse_length("1.5em"), Some(rustkit_css::Length::Em(1.5)));
@@ -28663,7 +28846,7 @@ mod tests {
 
     #[test]
     fn border_radius_shorthand_expands_one_to_four_values() {
-        use rustkit_css::Length::{Percent, Px, Zero};
+        use rustkit_css::Length::{Percent, Px};
         let circular = |value: &str| {
             parse_border_radius_shorthand(value).map(|corners| {
                 corners.map(|c| {
@@ -28678,7 +28861,7 @@ mod tests {
         assert_eq!(circular("8px"), Some([Px(8.0), Px(8.0), Px(8.0), Px(8.0)]));
         assert_eq!(
             circular("8px 8px 0 0"),
-            Some([Px(8.0), Px(8.0), Zero, Zero])
+            Some([Px(8.0), Px(8.0), Px(0.0), Px(0.0)])
         );
         assert_eq!(
             circular("1px 2px"),
@@ -45951,7 +46134,8 @@ mod individual_transform_tests {
         assert_eq!(
             s.effective_transform().ops,
             vec![
-                TransformOp::Translate(Length::Px(10.0), Length::Zero),
+                // An authored `0` is `0px` (CH2.B14).
+                TransformOp::Translate(Length::Px(10.0), Length::Px(0.0)),
                 TransformOp::Rotate(90.0),
                 TransformOp::Scale(2.0, 2.0),
                 TransformOp::TranslateX(Length::Px(1.0)),

@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>A7 bridge probe</title>
+<!-- CH3.A7: a web page in the content view sees no app bridge. Writes what
+     it sees into the page and reports it by a beacon. Chromium 143:
+     "undefined,undefined". -->
+<p id="out"></p>
+<script>
+  var seen = typeof window.ipc + ',' + typeof window.hiwaveChrome;
+  document.getElementById('out').textContent = seen;
+  fetch('/beacon?a7-bridge=' + encodeURIComponent(seen)).catch(function () {});
+</script>

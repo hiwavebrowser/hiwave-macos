@@ -646,38 +646,6 @@ pub const STACKS_CONTENT_VISIBILITY: u8 = 64;
 /// `ComputedStyle::stacks`: a `view-transition-name` other than `none` or `auto`.
 pub const STACKS_VIEW_TRANSITION: u8 = 128;
 
-/// A filter function that can be applied to the backdrop.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BackdropFilter {
-    /// No backdrop filter.
-    #[default]
-    None,
-    /// Gaussian blur with the specified radius in pixels.
-    Blur(f32),
-    /// Grayscale filter (0.0 = no effect, 1.0 = fully grayscale).
-    Grayscale(f32),
-    /// Brightness adjustment (1.0 = no change).
-    Brightness(f32),
-    /// Contrast adjustment (1.0 = no change).
-    Contrast(f32),
-    /// Saturate adjustment (1.0 = no change, 0.0 = grayscale, >1 = oversaturated).
-    Saturate(f32),
-    /// Sepia filter (0.0 = no effect, 1.0 = fully sepia).
-    Sepia(f32),
-}
-
-impl BackdropFilter {
-    /// Check if this filter has any effect.
-    pub fn is_none(&self) -> bool {
-        matches!(self, BackdropFilter::None)
-    }
-
-    /// Check if this filter requires blur (most expensive operation).
-    pub fn needs_blur(&self) -> bool {
-        matches!(self, BackdropFilter::Blur(r) if *r > 0.0)
-    }
-}
-
 /// Position along a gradient stop.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StopPosition {
@@ -3246,8 +3214,11 @@ pub struct ComputedStyle {
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
 
-    // Backdrop filter (blur, grayscale, etc.)
-    pub backdrop_filter: BackdropFilter,
+    /// `backdrop-filter` (Filter Effects 2 §3) as declared, lowercased;
+    /// empty is `none`. Only a valid list is kept (an invalid declaration
+    /// leaves the earlier one). Paint reads its steps through
+    /// `rustkit_layout::filter_steps`. Not inherited.
+    pub backdrop_filter: String,
     /// `filter` (Filter Effects 1 §5) as declared, lowercased; empty is
     /// `none`. Paint reads the colour-matrix functions from it
     /// (`rustkit_layout::filter_color_matrix`). Not inherited.
@@ -4048,8 +4019,13 @@ pub fn parse_length(value: &str) -> Option<Length> {
     if value == "fit-content" {
         return Some(Length::FitContent);
     }
+    // An authored unitless `0` is a definite zero length, exactly `0px`
+    // (css-values-4 §6.1.1), NOT `Length::Zero`: `Zero` is the `#[default]`,
+    // the value an unset property holds, and code that tells "not set" from
+    // "set to zero" by that variant (multicol's `column-gap: normal` = 1em,
+    // the getComputedStyle gap read) read a bare `0` as unset (CH2.B14).
     if value == "0" {
-        return Some(Length::Zero);
+        return Some(Length::Px(0.0));
     }
 
     // Handle min(), max(), clamp() CSS math functions
@@ -4952,10 +4928,11 @@ mod tests {
             parse_border_spacing("10px 4px"),
             Some((Length::Px(10.0), Length::Px(4.0)))
         );
-        assert_eq!(parse_border_spacing("0"), Some((Length::Zero, Length::Zero)));
+        // A bare `0` is `0px` (CH2.B14).
+        assert_eq!(parse_border_spacing("0"), Some((Length::Px(0.0), Length::Px(0.0))));
         assert_eq!(
             parse_border_spacing(" 0.2em 0 "),
-            Some((Length::Em(0.2), Length::Zero))
+            Some((Length::Em(0.2), Length::Px(0.0)))
         );
         // Negative lengths, percentages, keywords and three values are invalid.
         for bad in ["-1px", "10%", "auto", "1px 2px 3px", "", "red"] {

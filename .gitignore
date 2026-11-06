@@ -102,3 +102,5 @@ websuite/captures/*.ppm
 # trench/forensics or docs/ instead. (scratch_n41/ and scratch_n42/ are still
 # tracked because trench/forensics cites them.)
 /scratch_*/
+# Batch/agent scratch inside a checkout (batch 24 landed 452 of these by accident).
+/scratch/

@@ -51,6 +51,84 @@ pub fn filter_color_matrix(value: &str) -> Option<ColorMatrix> {
     (total != IDENTITY).then_some(total)
 }
 
+/// One step of a filter list painted on pixels (`backdrop-filter`): a
+/// Gaussian blur of that standard deviation in CSS px (Filter Effects 1
+/// §13 `blur()`), or one colour function's matrix. Each colour function is
+/// its own step because Chromium clamps to [0, 1] after each one:
+/// `brightness(2) saturate(0)` greys a clamped colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterStep {
+    Blur(f32),
+    ColorMatrix(ColorMatrix),
+}
+
+/// The steps of a filter list in order, for `backdrop-filter`. Empty for
+/// `none` and for a valid list with nothing to paint (`blur(0)`, identity
+/// colour functions, `drop-shadow()` and `url()`, which are not painted);
+/// `None` when the value is invalid (an unknown function, a negative
+/// amount or blur, a percentage blur), which the cascade drops whole.
+/// `font_px` and `root_px` resolve `em` and `rem` blur lengths.
+pub fn filter_steps(value: &str, font_px: f32, root_px: f32) -> Option<Vec<FilterStep>> {
+    let mut steps = Vec::new();
+    let mut rest = value.trim();
+    if rest.is_empty() || rest.eq_ignore_ascii_case("none") {
+        return Some(steps);
+    }
+    while !rest.is_empty() {
+        let open = rest.find('(')?;
+        let name = &rest[..open];
+        if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == ',') {
+            return None;
+        }
+        let name = name.to_ascii_lowercase();
+        let close = matching_paren(rest, open)?;
+        let arg = rest[open + 1..close].trim();
+        rest = rest[close + 1..].trim_start();
+        if name == "blur" {
+            let sigma = if arg.is_empty() { 0.0 } else { blur_length(arg, font_px, root_px)? };
+            if sigma > 0.0 {
+                steps.push(FilterStep::Blur(sigma));
+            }
+            continue;
+        }
+        if let Some(m) = function_matrix(&name, arg)? {
+            if m != IDENTITY {
+                steps.push(FilterStep::ColorMatrix(m));
+            }
+        }
+    }
+    Some(steps)
+}
+
+/// A `blur()` `<length>` in px: non-negative, no percentage; a bare `0`.
+fn blur_length(arg: &str, font_px: f32, root_px: f32) -> Option<f32> {
+    let split = arg
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')))
+        .unwrap_or(arg.len());
+    // `e` belongs to the number only when a digit or sign follows it.
+    let (num, unit) = match arg[..split].rfind(['e', 'E']) {
+        Some(i) if !arg[i + 1..split].starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+') => {
+            arg.split_at(i)
+        }
+        _ => arg.split_at(split),
+    };
+    let v = number(num)?;
+    let per = match unit.to_ascii_lowercase().as_str() {
+        "" if v == 0.0 => 0.0,
+        "px" => 1.0,
+        "em" => font_px,
+        "rem" => root_px,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        _ => return None,
+    };
+    (v >= 0.0).then_some(v * per)
+}
+
 fn matching_paren(s: &str, open: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, c) in s.char_indices().skip_while(|&(i, _)| i < open) {
@@ -303,5 +381,20 @@ mod tests {
             assert_eq!(filter_color_matrix(value), gray, "{value}");
         }
         assert_eq!(filter_color_matrix("url(#missing)"), None);
+    }
+
+    #[test]
+    fn filter_steps_keep_the_order_and_void_unknown_functions() {
+        let steps = filter_steps("saturate(180%) blur(20px)", 16.0, 16.0).unwrap();
+        assert!(matches!(steps[..], [FilterStep::ColorMatrix(_), FilterStep::Blur(b)] if b == 20.0), "{steps:?}");
+        assert_eq!(filter_steps("blur(0.5em)", 16.0, 10.0), Some(vec![FilterStep::Blur(8.0)]));
+        assert_eq!(filter_steps("blur(2rem)", 16.0, 10.0), Some(vec![FilterStep::Blur(20.0)]));
+        assert_eq!(filter_steps("blur(2px)blur(3px)", 16.0, 16.0).map(|s| s.len()), Some(2));
+        for empty in ["none", "", "blur()", "blur(0)", "blur(0px)", "saturate(1)", "drop-shadow(1px 1px red)", "url(#x)"] {
+            assert_eq!(filter_steps(empty, 16.0, 16.0), Some(vec![]), "{empty}");
+        }
+        for invalid in ["blur(2px) foo(1)", "blur(-1px)", "blur(10%)", "blur(2)", "saturate(-1)", "blur (2px)", "blur(2px", "inherit"] {
+            assert_eq!(filter_steps(invalid, 16.0, 16.0), None, "{invalid}");
+        }
     }
 }
