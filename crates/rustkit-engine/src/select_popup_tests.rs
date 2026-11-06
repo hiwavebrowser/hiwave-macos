@@ -19,7 +19,7 @@ fn opts(labels: &[&str]) -> Vec<SelectOption> {
 }
 
 fn font() -> PopupFont {
-    PopupFont { size: 13.0, family: "sans-serif".into(), weight: 400, color: Color::new(0, 0, 0, 1.0) }
+    PopupFont { size: 13.0, family: "sans-serif".into(), weight: 400, color: Color::new(0, 0, 0, 1.0), background: Color::new(255, 255, 255, 1.0) }
 }
 
 fn popup(options: Vec<SelectOption>, selected: Option<usize>, anchor: Rect) -> SelectPopup {
