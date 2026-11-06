@@ -337,6 +337,9 @@ trait ChromeUi {
     /// leave to the page below it, in a `width` x `height` window (CH3.A3).
     /// The WebKit view: nothing, as before.
     fn compose(&self, _width: f64, _height: f64, _hole: (f64, f64, f64, f64)) {}
+    /// Stay the frontmost of the window's views, over panels built after
+    /// it (CH3.A3b). The WebKit view: nothing, as before.
+    fn keep_on_top(&self) {}
 }
 
 impl ChromeUi for WebView {
@@ -527,130 +530,50 @@ impl ChromeUi for ChromeView {
     fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
         #[cfg(all(target_os = "macos", feature = "rustkit"))]
         if let ChromeView::RustKit(view) = self {
-            CHROME_COMPOSITION.with(|c| {
-                let mut c = c.borrow_mut();
-                c.size = (width, height);
-                c.hole = Some(rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
-                c.apply(view);
-            });
+            view.compose_region(width, height, rustkit_viewhost::RegionRect::new(hole.0, hole.1, hole.2, hole.3));
         }
         #[cfg(not(all(target_os = "macos", feature = "rustkit")))]
         let _ = (width, height, hole);
     }
-}
 
-/// The RustKit chrome's composition over the page (CH3.A3, see
-/// `trench/chrome/A3-composition.md`): the window's size, the page column
-/// it leaves open, and the boxes of its popups that are showing, as the
-/// chrome document last reported them (`chrome_overlays`).
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-#[derive(Default)]
-struct ChromeComposition {
-    size: (f64, f64),
-    hole: Option<rustkit_viewhost::RegionRect>,
-    overlays: Vec<rustkit_viewhost::RegionRect>,
-}
-
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-impl ChromeComposition {
-    fn apply(&self, view: &webview_rustkit::RustKitView) {
-        let region = rustkit_viewhost::compose_region(self.size.0, self.size.1, self.hole, &self.overlays);
-        tracing::debug!(size = ?self.size, hole = ?self.hole, ?region, "RustKit chrome region");
-        rustkit_viewhost::set_raw_view_region(view.host_view_raw(), Some(region));
-    }
-}
-
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-thread_local! {
-    static CHROME_COMPOSITION: std::cell::RefCell<ChromeComposition> =
-        std::cell::RefCell::new(ChromeComposition::default());
-}
-
-/// `{"cmd":"chrome_overlays","rects":[[x,y,w,h],...]}` from the RustKit
-/// chrome: the boxes of its open popups (CH3.A3). Taken before
-/// `handle_chrome_ipc`, which never sees it. True when `body` was one.
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-fn take_chrome_overlays(body: &str, view: &webview_rustkit::RustKitView) -> bool {
-    if !body.contains("\"chrome_overlays\"") {
-        return false;
-    }
-    let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
-    };
-    if msg.get("cmd").and_then(|c| c.as_str()) != Some("chrome_overlays") {
-        return false;
-    }
-    let rects: Vec<rustkit_viewhost::RegionRect> = msg
-        .get("rects")
-        .and_then(|r| r.as_array())
-        .map(|list| {
-            list.iter()
-                .filter_map(|r| {
-                    let n: Vec<f64> = r.as_array()?.iter().filter_map(|v| v.as_f64()).collect();
-                    (n.len() == 4).then(|| rustkit_viewhost::RegionRect::new(n[0], n[1], n[2], n[3]))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    info!(count = rects.len(), ?rects, "RustKit chrome overlays");
-    CHROME_COMPOSITION.with(|c| {
-        let mut c = c.borrow_mut();
-        c.overlays = rects;
-        // Before the first layout there is no size to compose in.
-        if c.hole.is_some() {
-            c.apply(view);
+    /// Keep the RustKit chrome the frontmost of the window's views (CH3.A3b,
+    /// #909 R1 nit 2): a panel (shelf, Inspector) built later is added on
+    /// top, and a chrome popup reaching into its rect was drawn under it.
+    /// The panels are inside the chrome's hole, so they still show and
+    /// take the pointer wherever the chrome paints nothing.
+    fn keep_on_top(&self) {
+        #[cfg(all(target_os = "macos", feature = "rustkit"))]
+        if let ChromeView::RustKit(view) = self {
+            if rustkit_viewhost::raise_raw_view_to_front(view.host_view_raw()) {
+                info!("RustKit chrome raised over a panel");
+            }
         }
-    });
-    true
-}
-
-/// Whether the RustKit chrome has a popup open over the page (CH3.A3).
-#[cfg(all(target_os = "macos", feature = "rustkit"))]
-fn chrome_has_overlays() -> bool {
-    CHROME_COMPOSITION.with(|c| !c.borrow().overlays.is_empty())
-}
-
-/// Appended to the RustKit chrome's bridge (CH3.A3): reports the boxes of
-/// the chrome's popups that are showing, so the app can let them over the
-/// page and leave the rest of the page column to the page.
-const CHROME_OVERLAY_REPORTER: &str = r#"
-(function () {
-    var SELECTORS = '.downloads-panel, .history-panel, .toolbar-action-panel, .help-panel, '
-        + '.context-menu, .blocklist-dropdown, .find-modal, .command-palette';
-    var last = null;
-    function shown(el) {
-        var cs = window.getComputedStyle ? getComputedStyle(el) : null;
-        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')) return false;
-        return true;
     }
-    function report() {
-        var out = [];
-        var list = document.querySelectorAll(SELECTORS);
-        for (var i = 0; i < list.length; i++) {
-            var el = list[i];
-            if (!shown(el)) continue;
-            var r = el.getBoundingClientRect();
-            if (!(r.width > 0 && r.height > 0)) continue;
-            out.push([Math.floor(r.left), Math.floor(r.top), Math.ceil(r.width) + 1, Math.ceil(r.height) + 1]);
+}
+
+impl ChromeView {
+    /// Whether the RustKit chrome's frame on screen paints over the page
+    /// column (an open popup; CH3.A3b). Always false for the WebKit chrome.
+    #[cfg(all(target_os = "macos", feature = "rustkit"))]
+    fn has_overlays(&self) -> bool {
+        match self {
+            ChromeView::RustKit(view) => view.region_has_overlays(),
+            ChromeView::WebKit(_) => false,
         }
-        var s = JSON.stringify(out);
-        if (s === last) return;
-        last = s;
-        window.ipc.postMessage(JSON.stringify({ cmd: 'chrome_overlays', rects: out }));
     }
-    function soon() { setTimeout(report, 0); setTimeout(report, 250); }
-    window.__hiwaveReportOverlays = report;
-    window.__hiwaveOutsideClick = function () {
-        var target = document.body;
-        var ev;
-        try { ev = new MouseEvent('click', { bubbles: true }); } catch (e) { ev = new Event('click', { bubbles: true }); }
-        target.dispatchEvent(ev);
-        soon();
-    };
-    ['click', 'mouseup', 'keyup'].forEach(function (t) { document.addEventListener(t, soon, true); });
-    setInterval(report, 1000);
-    soon();
-})();
+
+}
+
+/// The chrome document's helper for a click on the page while one of its
+/// popups is open (CH3.A3): the app tells the chrome, which closes the
+/// popup on its own outside-click handler. The chrome no longer reports its
+/// popups' boxes (CH3.A3b): the region comes from its frames.
+const CHROME_OUTSIDE_CLICK: &str = r#"
+window.__hiwaveOutsideClick = function () {
+    var ev;
+    try { ev = new MouseEvent('click', { bubbles: true }); } catch (e) { ev = new Event('click', { bubbles: true }); }
+    document.body.dispatchEvent(ev);
+};
 "#;
 
 /// `HIWAVE_RUSTKIT_CHROME=1`: the chrome is a RustKit view (CH3.A2). Needs
@@ -661,10 +584,10 @@ fn rustkit_chrome_enabled() -> bool {
         && rustkit_engine::content_thread_enabled()
 }
 
-/// The chrome document for a RustKit view: the bridge and the overlay
-/// reporter (CH3.A3), which needs the body, so it runs at the document's end.
+/// The chrome document for a RustKit view: the bridge and the outside-click
+/// helper (CH3.A3), which needs the body, so it runs at the document's end.
 fn chrome_html_with_bridge() -> String {
-    html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER)
+    html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK)
 }
 
 /// Load one of the app's own documents (the chrome, a panel; built with
@@ -967,6 +890,10 @@ impl<T: ChromeUi + ?Sized> ChromeUi for Arc<T> {
     fn compose(&self, width: f64, height: f64, hole: (f64, f64, f64, f64)) {
         (**self).compose(width, height, hole)
     }
+
+    fn keep_on_top(&self) {
+        (**self).keep_on_top()
+    }
 }
 
 fn apply_layout(
@@ -1028,6 +955,7 @@ fn apply_layout(
     let build = |rect: Rect, html: &'static str, name: &'static str| rustkit_panel(window, rect, html, name);
     inspector.lay_out(inspector_rect, build);
     shelf.lay_out(shelf_rect, build);
+    chrome.keep_on_top();
 }
 
 /// The chrome's `window.ipc` messages, as the WebKit chrome view hands
@@ -2200,8 +2128,10 @@ mod panel_tests {
     }
 
     #[test]
-    fn the_chrome_document_is_the_bridge_and_the_overlay_reporter() {
-        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OVERLAY_REPORTER));
+    fn the_chrome_document_is_the_bridge_and_the_outside_click_helper() {
+        assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK));
+        // CH3.A3b: no popup reporter; the region comes from the frames.
+        assert!(!chrome_html_with_bridge().contains("chrome_overlays"));
     }
 
     /// CH3.A7: the chrome is loaded into an app-owned view and keeps its
@@ -3920,9 +3850,6 @@ fn main() {
                     }
                     let mut booted = false;
                     for body in chrome.take_ipc_messages() {
-                        if take_chrome_overlays(&body, chrome) {
-                            continue;
-                        }
                         log_ipc("RustKit chrome IPC", &body);
                         handle_chrome_ipc(&body, &chrome_ipc_proxy, &chrome_ipc_state);
                         booted = true;
@@ -4064,7 +3991,7 @@ fn main() {
                             if let rustkit_viewhost::InputKind::Pointer(click) = &event.kind {
                                 if click.down
                                     && click.input == rustkit_viewhost::PointerInput::Button
-                                    && chrome_has_overlays()
+                                    && chrome_for_events.has_overlays()
                                 {
                                     let _ = chrome_for_events.eval("window.__hiwaveOutsideClick && __hiwaveOutsideClick();");
                                 }
@@ -4491,8 +4418,8 @@ fn main() {
                     }
                     UserEvent::ExpandChrome if rustkit_chrome_enabled() => {
                         // CH3.A3: the RustKit chrome is over the page; its
-                        // panel is drawn over it and reports its box.
-                        let _ = chrome_for_events.eval("window.__hiwaveReportOverlays && __hiwaveReportOverlays();");
+                        // panel is drawn over it, and the frame that shows
+                        // the panel brings it into the region (CH3.A3b).
                     }
                     UserEvent::ExpandChrome => {
                         // Update chrome height
