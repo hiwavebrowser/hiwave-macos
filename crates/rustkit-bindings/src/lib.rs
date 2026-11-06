@@ -88,6 +88,8 @@ mod geometry_tests;
 #[cfg(test)]
 mod forced_layout_budget_tests;
 #[cfg(test)]
+mod dirty_mark_animation_tests;
+#[cfg(test)]
 mod range_tests;
 #[cfg(test)]
 mod selection_tests;

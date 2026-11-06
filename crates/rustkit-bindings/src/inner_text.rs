@@ -391,6 +391,77 @@ mod tests {
         );
     }
 
+    /// CH2.E13: when the last layout published computed styles, `display:none`
+    /// and `visibility` drive the walk (the engine oracle is macOS+headless).
+    #[test]
+    fn inner_text_honours_published_display_none_and_visibility() {
+        use super::{inner_text, Computed};
+        use rustkit_dom::Node;
+        use std::collections::HashMap;
+
+        assert_eq!(
+            Computed::from_lines("color\tred\ndisplay\tnone\nvisibility\thidden")
+                .map(|c| (c.display, c.visible)),
+            Some(("none".into(), false))
+        );
+        assert!(Computed::from_lines("color\tred").is_none());
+
+        let document = Document::parse_html(
+            "<div id=t><span id=h>hid</span><span id=v>vis</span>\
+             <span id=i>invis<span id=r>ok</span></span></div>",
+        )
+        .unwrap();
+        let t = document.get_element_by_id("t").unwrap();
+        let ids: HashMap<&str, usize> = ["h", "v", "i", "r", "t"]
+            .into_iter()
+            .map(|id| (id, document.get_element_by_id(id).unwrap().id.raw()))
+            .collect();
+        let style = |n: &Node| -> Option<Computed> {
+            let id = n.id.raw();
+            if id == ids["h"] {
+                Some(Computed {
+                    display: "none".into(),
+                    visible: true,
+                })
+            } else if id == ids["i"] {
+                Some(Computed {
+                    display: "inline".into(),
+                    visible: false,
+                })
+            } else if id == ids["r"] || id == ids["v"] {
+                Some(Computed {
+                    display: "inline".into(),
+                    visible: true,
+                })
+            } else if id == ids["t"] {
+                Some(Computed {
+                    display: "block".into(),
+                    visible: true,
+                })
+            } else {
+                None
+            }
+        };
+        assert_eq!(inner_text(&t, &style), "visok");
+
+        // Through DomBindings: published rows are what the getter reads.
+        let doc = Rc::new(
+            Document::parse_html("<div id=t><span id=h>hid</span>keep</div>").unwrap(),
+        );
+        let hid_id = doc.get_element_by_id("h").unwrap().id.raw();
+        let t_id = doc.get_element_by_id("t").unwrap().id.raw();
+        let b = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
+        b.set_document(doc).unwrap();
+        let mut styles = HashMap::new();
+        styles.insert(t_id, "display\tblock\nvisibility\tvisible".into());
+        styles.insert(hid_id, "display\tnone\nvisibility\tvisible".into());
+        b.set_computed_styles(styles);
+        assert_eq!(
+            eval_string(&b, "document.getElementById('t').innerText"),
+            "keep"
+        );
+    }
+
     #[test]
     fn inner_text_lays_out_table_cells_and_rows() {
         assert_eq!(
