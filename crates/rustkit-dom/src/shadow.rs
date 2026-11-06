@@ -311,6 +311,7 @@ impl Document {
         declarative: bool,
     ) -> Result<Rc<Node>, DomError> {
         let not_supported = || DomError::InvalidOperation("NotSupportedError".into());
+        crate::note_mutation();
         if !host.tag_name().is_some_and(is_valid_shadow_host_name) {
             return Err(not_supported());
         }
@@ -377,6 +378,7 @@ impl Document {
 /// `replace_node_data` built `new` to stand for `old`: the shadow link
 /// moves to it, and the other side of the pair points at it.
 pub(crate) fn move_link(old: &Rc<Node>, new: &Rc<Node>) {
+    crate::note_mutation();
     let link = old.shadow.borrow_mut().take();
     match &link {
         Some(ShadowLink::Root(root)) => {

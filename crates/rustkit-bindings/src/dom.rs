@@ -1844,7 +1844,7 @@ pub(crate) fn install(
             };
             if changed {
                 layer.generation += 1;
-                d.mark(crate::DomDirty::Layout);
+                d.mark_animation_layer(crate::DomDirty::Layout);
                 // The element restyles as if its inline style changed, so
                 // the next build walks it rather than keep its box.
                 l.borrow_mut().push(MutationRecord {
@@ -3450,7 +3450,17 @@ const WRAPPERS_JS: &str = r#"
                 // The element's rows, then its pseudo-elements' (`::before name`).
                 if (name.charAt(0) !== ':') m[name] = line.slice(i + 1);
                 else if (prefix && name.indexOf(prefix) === 0) {
-                    (own = own || {})[name.slice(prefix.length)] = line.slice(i + 1);
+                    var key = name.slice(prefix.length), val = line.slice(i + 1);
+                    own = own || {};
+                    if (key === 'custom') {
+                        // The pseudo's own custom properties (`--c\tvalue`):
+                        // only a pseudo that declares some publishes them.
+                        var j = val.indexOf('\t');
+                        if (j > 0) {
+                            if (!own.__vars) Object.defineProperty(own, '__vars', { value: {}, enumerable: false });
+                            own.__vars[val.slice(0, j)] = val.slice(j + 1);
+                        }
+                    } else own[key] = val;
                 }
             });
             markFill(m, true);
@@ -3578,7 +3588,7 @@ const WRAPPERS_JS: &str = r#"
         // A custom property not set inline: the cascaded (inherited) value.
         function customValue(n) {
             if (pseudo === null || n.indexOf('--') !== 0) return '';
-            var vars = customVars(el);
+            var vars = m.__vars || customVars(el);
             return vars && Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : '';
         }
         var own = {

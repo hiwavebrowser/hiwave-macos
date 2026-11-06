@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::restyle_invalidation::{
-    DirtySet, InvalidationIndex, ANCESTOR, ANYWHERE, BOX, LAYOUT, PAINT, POSITIONAL, SIBLING, STYLE, SUBJECT,
-    SUBTREE_STYLE,
+    DirtySet, InvalidationIndex, ANCESTOR, ANYWHERE, BOX, IN_HAS, LAYOUT, PAINT, POSITIONAL, SIBLING, STYLE,
+    SUBJECT, SUBTREE_STYLE,
 };
 
 fn index(selectors: &[&str]) -> InvalidationIndex {
@@ -70,8 +70,10 @@ fn index_reads_into_functional_pseudo_classes() {
     assert_eq!(flags(&ix.classes, "g"), ANCESTOR, "a complex member of the subject's list places as a rule");
     assert_eq!(flags(&ix.classes, "h"), SUBJECT);
     assert_eq!(flags(&ix.classes, "i"), SUBJECT);
-    assert_eq!(flags(&ix.classes, "j") & ANYWHERE, ANYWHERE, ":has() reaches ancestors");
+    assert_eq!(flags(&ix.classes, "j"), IN_HAS, ":has() reaches the subjects above (LAT6)");
     assert!(ix.has);
+    assert_eq!(ix.has_subjects, vec![(".i".to_string(), SUBJECT)]);
+    assert!(!ix.has_anywhere);
     assert_eq!(flags(&ix.classes, "k") & ANYWHERE, ANYWHERE);
     assert_eq!(flags(&ix.classes, "l") & ANYWHERE, ANYWHERE);
     assert_eq!(flags(&ix.classes, "n") & ANYWHERE, ANYWHERE);
@@ -346,7 +348,8 @@ fn inner_html_restyles_the_new_children() {
 
 #[test]
 fn writes_the_index_cannot_place_are_full() {
-    let has = PAGE.replace(".on{color:red}", ".on{color:red} .card:has(.hot){color:red}");
+    // A `:has()` whose subject is an earlier sibling (LAT6 scopes the rest).
+    let has = PAGE.replace(".on{color:red}", ".on{color:red} .title:has(+ .hot){color:red}");
     let (set, _) = check(&has, "document.getElementById('p1').classList.add('hot');");
     assert_eq!(set.full, Some("anywhere"));
     let (set, _) = check(PAGE, "document.body.classList.add('on');");
@@ -361,19 +364,19 @@ fn writes_the_index_cannot_place_are_full() {
     assert_eq!(set.full, Some("sheet"));
 }
 
-/// `:has()` now matches, so the anchor's style really changes when a child
-/// is added under it or removed from it: the set (full, for a child-list
-/// write once a `:has()` rule exists, or for writing a class `:has()`
-/// names) must cover it, both ways.
+/// `:has()` matches, so the anchor's style really changes when a child is
+/// added under it or removed from it: the set covers it both ways, scoped
+/// to the anchor since LAT6 (it was full).
 #[test]
-fn a_child_list_write_under_a_has_anchor_is_full() {
+fn a_child_list_write_under_a_has_anchor_covers_the_anchor() {
     let has = PAGE.replace(".on{color:red}", ".on{color:red} .card:has(.hot){color:red}");
     let add = "var e = document.createElement('b'); e.className = 'hot'; e.id = 'hot'; \
                document.getElementById('p1').appendChild(e);";
-    let (set, _) = check(&has, add);
-    assert!(set.full.is_some(), "{set:?}");
+    let (set, ids) = check(&has, add);
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE);
     let (set, _) = check_after(&has, add, "document.getElementById('hot').remove();");
-    assert_eq!(set.full, Some("has"));
+    assert_eq!(set.full, None, "{set:?}");
     // Without a `:has()` rule the same write stays a subtree restyle.
     let (set, _) = check(PAGE, add);
     assert_eq!(set.full, None);
@@ -414,4 +417,112 @@ fn synthetic_timer_page_ticks_dirty_a_handful_of_nodes() {
     assert_eq!(set.would_path(), "subtree", "{set:?}");
     assert!((4..=8).contains(&set.nodes.len()), "a tick writes 4-8 rows: {set:?}");
     assert!(set.nodes.values().all(|bits| *bits == STYLE | PAINT), "{set:?}");
+}
+
+// ---------------------------------------------------------------------------
+// LAT6 (Pete's flag-on log, 11-05): walmart inserts or removes one element
+// every ~280 ms, and each of those writes was `would_path=full
+// full_reason=has` because some `:has()` rule was in the sheets. A
+// child-list write, or a write to a token a `:has()` argument names, can
+// change only the `:has()` subjects above the written node: those
+// ancestors the compound carrying the `:has()` can match.
+// ---------------------------------------------------------------------------
+
+fn with_rule(rule: &str) -> String {
+    PAGE.replace(".on{color:red}", &format!(".on{{color:red}} {rule}"))
+}
+
+const ADD_HOT: &str = "var e = document.createElement('b'); e.className = 'hot'; e.id = 'hot'; \
+                       document.getElementById('p1').appendChild(e);";
+
+#[test]
+fn a_child_list_write_under_a_has_subject_restyles_the_subject() {
+    let has = with_rule(".card:has(.hot){color:red}");
+    let (set, ids) = check(&has, ADD_HOT);
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE, "the card is the subject above the write");
+    assert_eq!(set.bits(ids["wrap"]), 0, "#wrap is no .card");
+    // The card, the new element and the parent (the sheet reads `:empty`).
+    assert!(style_bits(&set) <= 3, "{set:?}");
+    let (set, ids) = check_after(&has, ADD_HOT, "document.getElementById('hot').remove();");
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE);
+}
+
+#[test]
+fn a_class_a_has_argument_names_restyles_the_subjects_above_it() {
+    let has = with_rule(".card:has(.hot){color:red}");
+    let (set, ids) = check(&has, "document.getElementById('p1').classList.add('hot');");
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & STYLE, STYLE);
+    // Off a card, nothing a `:has()` reads changed.
+    let (set, ids) = check(&has, "document.getElementById('other').classList.add('hot');");
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]), 0);
+}
+
+/// The subject sits left of a combinator: what is under it is restyled.
+#[test]
+fn a_has_subject_left_of_a_combinator_restyles_its_subtree() {
+    let has = with_rule(".card:has(.hot) .title{color:red} .card:has(.hot) + .item{color:blue}");
+    let (set, ids) = check(&has, ADD_HOT);
+    assert_eq!(set.full, None, "{set:?}");
+    assert_eq!(set.bits(ids["s1"]) & SUBTREE_STYLE, SUBTREE_STYLE, "the title under the card");
+    assert_eq!(set.bits(ids["s2"]) & STYLE, STYLE, "the item after the card");
+    check_after(&has, ADD_HOT, "document.getElementById('hot').remove();");
+}
+
+/// A relative selector that starts with `+` or `~` names a subject beside
+/// the ancestors: still the full path.
+#[test]
+fn a_sibling_relative_has_stays_full() {
+    let has = with_rule(".title:has(+ .hot){color:red}");
+    let (set, _) = check(&has, "document.getElementById('p1').classList.add('hot');");
+    assert!(set.full.is_some(), "{set:?}");
+    let (set, _) = check(&has, ADD_HOT);
+    assert!(set.full.is_some(), "{set:?}");
+    // And a `:has()` rule like that makes the scoped ones full too.
+    let both = with_rule(".title:has(+ .hot){color:red} .card:has(.hot){color:red}");
+    let (set, _) = check(&both, "document.getElementById('other').classList.add('hot');");
+    assert!(set.full.is_some(), "{set:?}");
+}
+
+/// Walmart's shape: a 280 ms timer inserts and removes one badge on one of
+/// 200 cards whose sheet has a `:has()` rule. Each tick's relayout is a
+/// subtree restyle of the card and the badge, and the rule follows it.
+#[test]
+fn a_timer_toggling_one_node_under_a_has_rule_dirties_its_card() {
+    let mut html = String::from(
+        "<!DOCTYPE html><html><head><style>body{margin:0;font:14px/18px sans-serif}\
+         .card{padding:4px;border:1px solid #ccc;color:black} .card:has(.badge){color:rgb(200, 0, 0)}\
+         </style></head><body><div id=grid>",
+    );
+    for i in 0..200 {
+        html.push_str(&format!("<div class=card id=c{i}><span>card {i}</span></div>"));
+    }
+    html.push_str(
+        "</div><script>setInterval(function () { var c = document.getElementById('c7'); \
+         var b = c.querySelector('.badge'); if (b) { b.remove(); } else { b = document.createElement('i'); \
+         b.className = 'badge'; b.textContent = 'new'; c.appendChild(b); } }, 280);</script></body></html>",
+    );
+    let (mut engine, view) = load(&html);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let colour = |engine: &mut Engine| {
+        engine.execute_script(view, "String(getComputedStyle(document.getElementById('c7')).color)").expect("script")
+    };
+    let card = {
+        let document = engine.views[&view].document.clone().expect("document");
+        document.get_element_by_id("c7").expect("c7").id.raw()
+    };
+    for (tick, want) in [(1, "rgb(200, 0, 0)"), (2, "rgb(0, 0, 0)"), (3, "rgb(200, 0, 0)")] {
+        let timers = |engine: &Engine| engine.relayout_stats(view).expect("view").by_first_cause.get("timer");
+        let before = timers(&engine);
+        rt.block_on(engine.pump_live(view, 300));
+        assert_eq!(timers(&engine), before + 1, "tick {tick}: one timer relayout");
+        let set = engine.views[&view].last_dirty.clone().expect("a set");
+        assert_eq!(set.would_path(), "subtree", "tick {tick}: {set:?}");
+        assert_eq!(set.bits(card) & STYLE, STYLE, "tick {tick}: the card is the subject");
+        assert!(style_bits(&set) <= 2, "tick {tick}: the card and the badge, not the page: {set:?}");
+        assert!(colour(&mut engine).contains(want), "tick {tick}: {}", colour(&mut engine));
+    }
 }

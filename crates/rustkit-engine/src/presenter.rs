@@ -705,7 +705,7 @@ impl Presenter {
 
             // Try to parse as URL
             let Ok(parsed_url) = url::Url::parse(url) else {
-                tracing::warn!(%url, "Invalid URL for image");
+                tracing::warn!(url = %rustkit_net::str_url_for_log(url), "Invalid URL for image");
                 continue;
             };
 
@@ -717,7 +717,7 @@ impl Presenter {
                 match images.load_blocking(parsed_url.clone()) {
                     Ok(img) => Some(img),
                     Err(e) => {
-                        tracing::warn!(?e, %url, "Failed to decode data URL image");
+                        tracing::warn!(?e, url = %rustkit_net::url_for_log(&parsed_url), "Failed to decode data URL image");
                         None
                     }
                 }
@@ -742,7 +742,7 @@ impl Presenter {
                 renderer.upload_image(&url_str, frame.width(), frame.height(), frame.data())
             };
             if let Err(e) = uploaded {
-                tracing::warn!(?e, %url_str, "Failed to upload image to renderer");
+                tracing::warn!(?e, url = %rustkit_net::str_url_for_log(&url_str), "Failed to upload image to renderer");
             } else {
                 uploaded_count += 1;
                 tracing::debug!(%url_str, "Uploaded image to renderer");
