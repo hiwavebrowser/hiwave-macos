@@ -4329,7 +4329,46 @@ impl Engine {
         if reads.anywhere {
             return !changed.is_empty();
         }
-        changed.iter().any(|raw| Self::change_reach(view, reads, *raw).is_some())
+        changed.iter().any(|raw| !Self::pointer_changes(view, reads, *raw).is_empty())
+    }
+
+    /// The elements a rule can restyle from `raw` (raw NodeId) gaining or
+    /// losing the pseudo-class `reads` is of, each with how many of its
+    /// later siblings the rule reaches: the element itself
+    /// ([`Self::change_reach`]) and, for a `:has()` whose argument reads it
+    /// on a compound the element matches, every ancestor its subject
+    /// compound matches (with the element itself, for a subject between it
+    /// and the argument's subject: `:has(.a:hover .b)`).
+    fn pointer_changes(view: &ViewState, reads: &PointerReads, raw: usize) -> Vec<(usize, usize)> {
+        let mut changes: Vec<(usize, usize)> =
+            Self::change_reach(view, reads, raw).map(|reach| (raw, reach)).into_iter().collect();
+        if reads.has.is_empty() {
+            return changes;
+        }
+        let Some(node) = view.document.as_ref().and_then(|d| d.get_node(rustkit_dom::NodeId::new(raw))) else {
+            return changes;
+        };
+        let carried = |node: &Rc<Node>, compound: &AncestorCompound| {
+            let NodeType::Element { tag_name, attributes, .. } = &node.node_type else {
+                return false;
+            };
+            let classes = element_classes(attributes);
+            compound.matches_carried(tag_name, &classes, attributes.get("id"), Some(attributes))
+        };
+        for has in &reads.has {
+            if !has.inner.iter().any(|inner| carried(&node, inner)) {
+                continue;
+            }
+            changes.push((raw, 0));
+            let mut up = node.parent();
+            while let Some(ancestor) = up {
+                if carried(&ancestor, &has.subject) {
+                    changes.push((ancestor.id.raw(), has.reach));
+                }
+                up = ancestor.parent();
+            }
+        }
+        changes
     }
 
     /// How far a rule can restyle from the element `raw` (raw NodeId)
@@ -4355,7 +4394,9 @@ impl Engine {
         reads
             .compounds
             .iter()
-            .filter(|filed| filed.compound.matches(tag_name, &classes, attributes.get("id")))
+            // With its attribute selectors (`[data-x]:hover`, LAT3): an
+            // element without the attribute is not one the rule can match.
+            .filter(|filed| filed.compound.matches_carried(tag_name, &classes, attributes.get("id"), Some(attributes)))
             .map(|filed| filed.reach)
             .max()
     }
@@ -9339,12 +9380,12 @@ impl Engine {
         // can style from it: no rule sees the others change.
         let mut changed: Vec<(usize, usize)> = Self::in_one_chain(&before.0, &now.0)
             .into_iter()
-            .filter_map(|raw| Self::change_reach(view, &reads.hover, raw).map(|reach| (raw, reach)))
+            .flat_map(|raw| Self::pointer_changes(view, &reads.hover, raw))
             .collect();
         changed.extend(
             Self::in_one_chain(&before.1, &now.1)
                 .into_iter()
-                .filter_map(|raw| Self::change_reach(view, &reads.active, raw).map(|reach| (raw, reach))),
+                .flat_map(|raw| Self::pointer_changes(view, &reads.active, raw)),
         );
         drop(index);
         changed.sort_unstable();
@@ -38377,6 +38418,28 @@ fn has_compound_matches(node: &Rc<Node>, compound: &str) -> bool {
         return false;
     };
     let prepared = SelectorMatcher.prepared_selector(compound);
+    // The hovered and pressed elements carry their marks here as they do
+    // in the build (`live_attributes`): `.post:has(.btn:hover)` (LAT3).
+    let (hovered, active) = WALK.with(|w| {
+        let w = w.borrow();
+        let raw = node.id.raw();
+        (w.hover.contains(&raw), w.active.contains(&raw))
+    });
+    let marked;
+    let attributes = match (hovered, active) {
+        (false, false) => attributes,
+        _ => {
+            let mut live = attributes.clone();
+            if hovered {
+                live.insert(HOVER_MARK.to_string(), String::new());
+            }
+            if active {
+                live.insert(ACTIVE_MARK.to_string(), String::new());
+            }
+            marked = live;
+            &marked
+        }
+    };
     let tag = tag_name.to_lowercase();
     let has_children = Engine::node_has_children(node);
     let sib = match prepared.is_context_free() {
@@ -38525,6 +38588,10 @@ struct AncestorCompound {
     /// no part that is left permissive). As `attrs`: tested only against an
     /// ancestor that carries its attributes.
     none_of: Vec<AncestorCompound>,
+    /// The `:not()` members left out of `none_of` (a combinator, a part
+    /// left permissive), as written: the pointer index reads the
+    /// pseudo-classes in them (`PointerReads::note_compound`).
+    not_dropped: Vec<String>,
     /// Some part of the compound is left permissive (a structural or other
     /// pseudo-class, form state, a dropped `:is()` or `:not()` member), so
     /// a match is "maybe". Inside `:not()` a maybe must exclude nothing.
@@ -38680,7 +38747,10 @@ impl AncestorCompound {
                                             out.relational |= m.relational;
                                             out.none_of.push(m)
                                         }
-                                        _ => out.undecided = true,
+                                        _ => {
+                                            out.undecided = true;
+                                            out.not_dropped.push(member.trim().to_string());
+                                        }
                                     }
                                 }
                             }
@@ -39863,16 +39933,42 @@ struct PointerReads {
     /// of them matches by tag, classes and id gains or loses the
     /// pseudo-class without any rule noticing.
     compounds: Vec<PointerCompound>,
-    /// Index into `compounds` by tag, classes and id.
+    /// Index into `compounds` by tag, classes, id and attributes.
     seen: HashMap<PointerCompoundKey, usize>,
-    /// Some selector names it where `compounds` does not show it (inside
-    /// `:has()`, or a `:not()` / `:is()` member the compound parser leaves
-    /// permissive): any element may count.
+    /// Each `:has()` whose argument reads it (LAT3, ebay's
+    /// `[data-x]:not(:has([data-x]:hover)):hover::after`).
+    has: Vec<HasPointer>,
+    /// Some selector names it where neither `compounds` nor `has` shows it
+    /// (a `:has()` argument that starts with `+` or `~`, a member the
+    /// selector parser rejects): any element may count.
     anywhere: bool,
 }
 
-/// A [`PointerCompound`]'s tag, classes and id.
-type PointerCompoundKey = (Option<String>, Vec<String>, Option<String>);
+/// A [`PointerCompound`]'s tag, classes, id and attribute selectors.
+type PointerCompoundKey = (Option<String>, Vec<String>, Option<String>, Vec<String>);
+
+/// One `:has()` whose argument reads a pointer pseudo-class. An element
+/// that gains or loses it and matches one of `inner` can change the match
+/// of every ancestor `subject` matches (and, when the pseudo-class sits left
+/// of a combinator in the argument, of elements under it).
+struct HasPointer {
+    /// The compound carrying the `:has()`, with the compounds it sits in
+    /// (`:not()`, `:is()`) and its attribute selectors, marks left out.
+    subject: AncestorCompound,
+    /// The argument's compounds that carry the pseudo-class, marks left out.
+    inner: Vec<AncestorCompound>,
+    /// How many later siblings of a subject the rule can style.
+    reach: usize,
+}
+
+/// The pseudo-class a mark stands for (`HOVER_MARK` is `:hover`).
+fn pointer_mark_name(mark: &str) -> &'static str {
+    if mark == ACTIVE_MARK {
+        ":active"
+    } else {
+        ":hover"
+    }
+}
 
 /// One compound a pointer pseudo-class is read on (S22, reddit: one
 /// `:hover` rule with a sibling combinator anywhere in the sheets made
@@ -39961,6 +40057,17 @@ impl PointerReads {
         if own > 0 {
             self.file(Self::merged(None, &merged), reach);
         }
+        // `.a:has(.b:hover)`: the `.a` above an element that changed.
+        for arg in &compound.has {
+            found += self.note_has(arg, &merged, mark, reach);
+        }
+        // `:not(.a:hover .b)`: a member the compound parser leaves out is
+        // read like a complex `:is()` member, from its own compounds (the
+        // element is not merged into them: a wider set of elements).
+        let name = pointer_mark_name(mark);
+        for member in compound.not_dropped.iter().filter(|m| m.contains(name)) {
+            found += self.note_prepared(&SelectorMatcher.prepared_selector(member), mark, reach);
+        }
         if compound.none_of.is_empty() && compound.any_of.is_empty() {
             return found;
         }
@@ -39982,8 +40089,44 @@ impl PointerReads {
         found
     }
 
-    /// The tag, classes (marks left out) and id of `outer` and `inner`
-    /// together: what an element must be for both to match it.
+    /// The `:has(arg)` of `subject` (merged with the compounds it sits in):
+    /// files it under `has` when its argument reads `mark`. Returns how
+    /// many marks the argument holds, or 0 where they are not filed: a
+    /// relative selector that starts with `+` or `~` names a subject beside
+    /// the element's ancestors, which the restyle does not walk.
+    fn note_has(&mut self, arg: &str, subject: &AncestorCompound, mark: &str, reach: usize) -> usize {
+        let name = pointer_mark_name(mark);
+        let mut inner = PointerReads::default();
+        let mut found = 0;
+        for member in SelectorMatcher::split_top_level_commas(arg) {
+            let member = member.trim();
+            let named = member.matches(name).count();
+            if named == 0 {
+                continue;
+            }
+            let relative = member.strip_prefix('>').unwrap_or(member).trim_start();
+            if relative.starts_with(['+', '~']) || relative.to_ascii_lowercase().contains(":has(") {
+                continue;
+            }
+            let prepared = SelectorMatcher.prepared_selector(relative);
+            let filed = inner.note_prepared(&prepared, mark, 0);
+            if filed == named && inner.has.is_empty() {
+                found += filed;
+            }
+        }
+        if found > 0 {
+            self.has.push(HasPointer {
+                subject: Self::merged(None, subject),
+                inner: inner.compounds.into_iter().map(|c| c.compound).collect(),
+                reach,
+            });
+        }
+        found
+    }
+
+    /// The tag, classes (marks left out), id and attribute selectors of
+    /// `outer` and `inner` together: what an element must be for both to
+    /// match it.
     fn merged(outer: Option<&AncestorCompound>, inner: &AncestorCompound) -> AncestorCompound {
         let mut classes: Vec<String> = Vec::new();
         for c in outer.map_or(&[][..], |o| &o.classes).iter().chain(&inner.classes) {
@@ -39991,17 +40134,24 @@ impl PointerReads {
                 classes.push(c.clone());
             }
         }
+        let mut attrs: Vec<String> = Vec::new();
+        for a in outer.map_or(&[][..], |o| &o.attrs).iter().chain(&inner.attrs) {
+            if !attrs.contains(a) {
+                attrs.push(a.clone());
+            }
+        }
         AncestorCompound {
             never: inner.never || outer.is_some_and(|o| o.never),
             tag: inner.tag.clone().or_else(|| outer.and_then(|o| o.tag.clone())),
             classes,
             id: inner.id.clone().or_else(|| outer.and_then(|o| o.id.clone())),
+            attrs,
             ..Default::default()
         }
     }
 
     fn file(&mut self, compound: AncestorCompound, reach: usize) {
-        let key = (compound.tag.clone(), compound.classes.clone(), compound.id.clone());
+        let key = (compound.tag.clone(), compound.classes.clone(), compound.id.clone(), compound.attrs.clone());
         match self.seen.get(&key) {
             Some(&at) => {
                 let filed = &mut self.compounds[at].reach;
