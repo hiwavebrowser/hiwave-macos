@@ -587,6 +587,8 @@ mod grid_item_lone_text_tests;
 mod grid_item_min_max_tests;
 #[cfg(all(test, feature = "headless"))]
 mod unitless_zero_tests;
+#[cfg(all(test, feature = "headless"))]
+mod float_percent_height_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
