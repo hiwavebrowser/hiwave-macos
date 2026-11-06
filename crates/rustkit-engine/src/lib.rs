@@ -577,6 +577,8 @@ mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_paint_state_tests;
 #[cfg(all(test, feature = "headless"))]
+mod focus_pseudo_tests;
+#[cfg(all(test, feature = "headless"))]
 mod hover_after_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inline_svg_prepass_tests;
