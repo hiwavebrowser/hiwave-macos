@@ -266,6 +266,7 @@ impl LayoutCtx {
                 lay.checked_states.try_borrow_mut().is_ok(),
             ),
             ("sheet_cache", lay.sheet_cache.try_borrow_mut().is_ok()),
+            ("prepared_sheets", lay.prepared_sheets.try_borrow_mut().is_ok()),
             ("rule_reads", lay.rule_reads.try_borrow_mut().is_ok()),
             (
                 "boxless_styles",
@@ -363,6 +364,11 @@ pub(crate) struct ViewLayout {
     pub(crate) element_scrolls: rustkit_bindings::SharedElementScrolls,
     /// The parsed `<style>` sheets of this view's document, by text.
     pub(crate) sheet_cache: RefCell<crate::SheetCache>,
+    /// The sheets this view's last full build cascaded with, prepared
+    /// (kept for the viewport, ranked by `@layer`) with their custom
+    /// properties, under the identity of what they were made from. The
+    /// next build takes them unless a sheet or the viewport changed.
+    pub(crate) prepared_sheets: RefCell<Option<crate::PreparedSheets>>,
     /// The rule index this view was last built with: its `reads` say
     /// which elements a `:hover` or `:active` rule can match, so which
     /// changes of the two chains are a restyle.

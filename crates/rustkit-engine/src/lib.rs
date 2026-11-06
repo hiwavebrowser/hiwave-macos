@@ -432,6 +432,8 @@ mod outline_apply_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
+mod sheet_reuse_tests;
+#[cfg(all(test, feature = "headless"))]
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
@@ -1350,6 +1352,7 @@ impl ViewState {
         // And the parsed `<style>` sheets: correct to keep (they are keyed
         // by text), but the new document is unlikely to share them.
         self.lay.sheet_cache.borrow_mut().clear();
+        self.lay.prepared_sheets.borrow_mut().take();
         self.initial_layout_deferred = false;
         self.images_attempted.clear();
     }
@@ -10312,70 +10315,104 @@ impl layout_ctx::LayoutCtx {
 
         // Extract stylesheets from <style> elements: parsed, or taken from
         // the view's sheet cache when their text is one it has seen.
+        let extract_started = std::time::Instant::now();
         let inline_sheets = self.inline_sheets(document, self.building_lay().as_deref(), javascript_enabled);
-        let adopted = document.root().adopted_styles();
-        // The fingerprint vouches for the `<style>` and `<link>` sheets
-        // only. Adopted sheets are parsed fresh below, so with any the rule
-        // index compares selectors instead; reused by fingerprint, it
-        // indexed none of their rules.
-        let fingerprint = match adopted.iter().all(String::is_empty) {
-            true => self.sheets_fingerprint(&inline_sheets, external_stylesheets, viewport),
-            false => None,
+        let mut parsed = match sheet_cache_enabled() {
+            true => self.take_sheets_parsed(),
+            false => inline_sheets.len(),
         };
-        // Copies: the steps below filter and rank the rules in place, and
-        // must not reach the cached sheets.
-        let mut stylesheets: Vec<Stylesheet> =
-            inline_sheets.into_iter().map(Rc::unwrap_or_clone).collect();
+        // `document.adoptedStyleSheets` follows the document's `<style>`
+        // and `<link>` sheets. The document node holds the text.
+        let adopted: Vec<String> =
+            document.root().adopted_styles().into_iter().filter(|text| !text.is_empty()).collect();
+        // What the prepared sheets are made of, by identity (see
+        // `SheetsFingerprint`); `None` when the build cannot vouch for it.
+        let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport);
 
         // Everything from here to the finished box tree is what Chrome's
         // `UpdateLayoutTree` covers; stylesheet parsing above is its `parse`.
         let cascade_started = parse_started.map(|t| (t.elapsed(), std::time::Instant::now()));
+        // Sub-phase marks for the "Cascade timing" line: sheet copy and
+        // `@media` filter, custom-property extraction, rule index, walk.
+        let mark = || cascade_started.map(|_| std::time::Instant::now());
 
-        // Add external stylesheets (loaded from <link> elements)
-        stylesheets.extend(external_stylesheets.iter().cloned());
-        // `document.adoptedStyleSheets` follows the document's `<style>`
-        // and `<link>` sheets. The document node holds the text.
-        for text in adopted {
-            if text.is_empty() {
-                continue;
+        // LAT4: the view's last prepared sheets, while nothing they were
+        // made from changed. A `<style>` whose text changed is a new sheet
+        // from the sheet cache (only it parsed), a late or replaced
+        // `<link>` list a new `Rc`, an adopted sheet's edit new text, a
+        // resize another viewport: each a different fingerprint.
+        let lay = self.building_lay();
+        let prepared = match (&fingerprint, &lay) {
+            (Some(now), Some(lay)) => lay
+                .prepared_sheets
+                .borrow()
+                .as_ref()
+                .filter(|prepared| prepared.from.as_ref().is_some_and(|from| from.same_as(now)))
+                .cloned(),
+            _ => None,
+        };
+        let prepared_reused = prepared.is_some();
+        let (vars_started, prepared) = match prepared {
+            Some(prepared) => (mark(), prepared),
+            None => {
+                // Copies: the steps below filter and rank the rules in
+                // place, and must not reach the cached sheets.
+                let mut stylesheets: Vec<Stylesheet> =
+                    inline_sheets.iter().map(|sheet| Stylesheet::clone(sheet)).collect();
+                // Add external stylesheets (loaded from <link> elements)
+                stylesheets.extend(external_stylesheets.iter().cloned());
+                for text in &adopted {
+                    parsed += 1;
+                    match Stylesheet::parse(text) {
+                        Ok(stylesheet) => stylesheets.push(stylesheet),
+                        Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
+                    }
+                }
+                Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
+                // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
+                rustkit_css::assign_layer_order(&mut stylesheets);
+                let vars_started = mark();
+                let css_vars = Rc::new(self.extract_css_variables(&stylesheets));
+                // The `::first-letter` scan runs only on a page with some
+                // `@container` rule (#782 R2 nit).
+                let any_container_rule =
+                    stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
+                let container_first_letter = any_container_rule
+                    && stylesheets
+                        .iter()
+                        .any(|s| s.rules.iter().any(container_query::floats_first_letter));
+                let prepared = PreparedSheets {
+                    from: fingerprint.clone(),
+                    // The document tree's sheets. Shared, so the build can
+                    // hand them back to nodes slotted from the document
+                    // (`shadow_tree`); the rules stay where they are, so
+                    // the rule index still recognizes them.
+                    sheets: Rc::new(stylesheets),
+                    css_vars,
+                    any_container_rule,
+                    container_first_letter,
+                };
+                if let (Some(_), Some(lay)) = (&prepared.from, &lay) {
+                    *lay.prepared_sheets.borrow_mut() = Some(prepared.clone());
+                }
+                (vars_started, prepared)
             }
-            match Stylesheet::parse(&text) {
-                Ok(stylesheet) => stylesheets.push(stylesheet),
-                Err(e) => warn!(?e, "Failed to parse an adopted stylesheet"),
-            }
-        }
-
-        Engine::keep_rules_for_viewport(&mut stylesheets, viewport);
-        // CSS Cascade 5 §6.4: rank each rule's `@layer` in document order.
-        rustkit_css::assign_layer_order(&mut stylesheets);
-        // The document tree's sheets. Shared, so the build can hand them
-        // back to nodes slotted from the document (`shadow_tree`); the
-        // rules stay where they are, so the rule index still recognizes them.
-        let stylesheets = Rc::new(stylesheets);
+        };
+        drop(lay);
+        drop(inline_sheets);
+        let stylesheets = prepared.sheets;
+        let css_vars = prepared.css_vars;
         let _tree_scopes = shadow_tree::BuildScope::install(
             document,
             &stylesheets,
             viewport,
             javascript_enabled,
         );
-
-        // Sub-phase marks for the "Cascade timing" line: sheet copy and
-        // `@media` filter, custom-property extraction, rule index, walk.
-        let mark = || cascade_started.map(|_| std::time::Instant::now());
-        let vars_started = mark();
-        let css_vars = self.extract_css_variables(&stylesheets);
         let index_started = mark();
-        // The `::first-letter` scan runs only on a page with some
-        // `@container` rule (#782 R2 nit).
-        let any_container_rule =
-            stylesheets.iter().any(|s| s.rules.iter().any(|r| !r.container.is_empty()));
         let _container_queries = container_query::DocumentScope::install(
             viewport,
-            any_container_rule,
-            any_container_rule
-                && stylesheets
-                    .iter()
-                    .any(|s| s.rules.iter().any(container_query::floats_first_letter)),
+            prepared.any_container_rule,
+            prepared.container_first_letter,
         );
 
         // A replayed style records no trace entries, so a traced build
@@ -10418,10 +10455,24 @@ impl layout_ctx::LayoutCtx {
             trace.clear();
         }
 
+        let reused = stylesheets.len().saturating_sub(parsed);
+        let extract_ms = extract_started.elapsed().as_secs_f64() * 1000.0;
+        SheetExtract::add(SheetExtract {
+            builds: 1,
+            parsed,
+            reused,
+            prepared_built: usize::from(!prepared_reused),
+            prepared_reused: usize::from(prepared_reused),
+            extract_us: (extract_ms * 1000.0) as u64,
+        });
         info!(
             inline_count = stylesheets.len() - external_stylesheets.len(),
             external_count = external_stylesheets.len(),
             css_var_count = css_vars.len(),
+            reused,
+            parsed,
+            prepared = if prepared_reused { "reused" } else { "built" },
+            extract_ms = format_args!("{extract_ms:.1}"),
             "Extracted stylesheets and CSS variables"
         );
 
@@ -16166,6 +16217,13 @@ impl layout_ctx::LayoutCtx {
             None => ADHOC_SHEET_CACHE.with(|cache| lookup(&mut cache.borrow_mut())),
         }
     }
+
+    /// The `<style>` sheets the building view's sheet cache (or the ad-hoc
+    /// one) parsed since the last build asked.
+    fn take_sheets_parsed(&self) -> usize {
+        self.with_building_lay(|lay| lay.sheet_cache.borrow_mut().take_parsed())
+            .unwrap_or_else(|| ADHOC_SHEET_CACHE.with(|cache| cache.borrow_mut().take_parsed()))
+    }
 }
 
 /// [`Engine::sheet_element_counts`] for a given scripting setting.
@@ -17935,14 +17993,15 @@ impl layout_ctx::LayoutCtx {
 impl layout_ctx::LayoutCtx {
     /// The identity of the sheets a build is about to index, when it can
     /// vouch for them: the cached `<style>` sheets (immutable while shared)
-    /// and the view's external list (likewise), plus the viewport the
-    /// `@media` filter will use. `None` when the external sheets are not
+    /// and the view's external list (likewise), the adopted sheets' text,
+    /// plus the viewport the `@media` filter will use. `None` when the external sheets are not
     /// the building view's own list or the cache is off; the rule index
     /// then compares selectors.
     fn sheets_fingerprint(
         &self,
         inline: &[Rc<Stylesheet>],
         external: &[Stylesheet],
+        adopted: &[String],
         viewport: Option<(f32, f32)>,
     ) -> Option<SheetsFingerprint> {
         if !sheet_cache_enabled() {
@@ -17963,6 +18022,7 @@ impl layout_ctx::LayoutCtx {
             viewport,
             inline: inline.to_vec(),
             external,
+            adopted: adopted.to_vec(),
         })
     }
 }
@@ -39264,6 +39324,62 @@ thread_local! {
     /// The `<style>` sheet cache of builds that have no view.
     static ADHOC_SHEET_CACHE: std::cell::RefCell<SheetCache> =
         std::cell::RefCell::new(SheetCache::default());
+    /// What the builds on this thread did with their sheets, summed.
+    static SHEET_EXTRACT_TOTALS: Cell<SheetExtract> = const {
+        Cell::new(SheetExtract { builds: 0, parsed: 0, reused: 0, prepared_built: 0, prepared_reused: 0, extract_us: 0 })
+    };
+}
+
+/// What layout builds did with their sheets (the "Extracted stylesheets"
+/// line), summed over builds: how many sheets each parsed and how many it
+/// took as already parsed, and whether its prepared set (the copies kept
+/// for the viewport, ranked by `@layer`, and the custom properties) was
+/// built or taken from the view's cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SheetExtract {
+    pub builds: usize,
+    pub parsed: usize,
+    pub reused: usize,
+    pub prepared_built: usize,
+    pub prepared_reused: usize,
+    /// Time from the start of the sheet extraction to the start of the
+    /// element walk, microseconds.
+    pub extract_us: u64,
+}
+
+impl SheetExtract {
+    /// The totals since `earlier`.
+    #[cfg(test)]
+    pub(crate) fn since(self, earlier: SheetExtract) -> SheetExtract {
+        SheetExtract {
+            builds: self.builds - earlier.builds,
+            parsed: self.parsed - earlier.parsed,
+            reused: self.reused - earlier.reused,
+            prepared_built: self.prepared_built - earlier.prepared_built,
+            prepared_reused: self.prepared_reused - earlier.prepared_reused,
+            extract_us: self.extract_us - earlier.extract_us,
+        }
+    }
+
+    fn add(one: SheetExtract) {
+        SHEET_EXTRACT_TOTALS.with(|t| {
+            let sum = t.get();
+            t.set(SheetExtract {
+                builds: sum.builds + one.builds,
+                parsed: sum.parsed + one.parsed,
+                reused: sum.reused + one.reused,
+                prepared_built: sum.prepared_built + one.prepared_built,
+                prepared_reused: sum.prepared_reused + one.prepared_reused,
+                extract_us: sum.extract_us + one.extract_us,
+            })
+        });
+    }
+
+    /// The totals of this thread's builds so far.
+    #[cfg(test)]
+    pub(crate) fn totals() -> SheetExtract {
+        SHEET_EXTRACT_TOTALS.with(Cell::get)
+    }
 }
 
 /// The index `shared_rule_index` last built or reused, with the selectors
@@ -39276,8 +39392,9 @@ struct LastRuleIndex {
 }
 
 /// What a layout build's sheet list is made of, by identity: the `<style>`
-/// sheets as the sheet cache holds them, the view's external list, and
-/// the viewport that decides which `@media` rules stay. The build's sheets
+/// sheets as the sheet cache holds them, the view's external list, the
+/// adopted sheets' text, and the viewport that decides which `@media`
+/// rules stay. The build's sheets
 /// are a pure function of these (copies, filtered by the viewport), so two
 /// equal fingerprints mean the same selectors in the same places.
 ///
@@ -39290,6 +39407,27 @@ struct SheetsFingerprint {
     inline: Vec<Rc<Stylesheet>>,
     /// `None` when the build has no external sheets.
     external: Option<Rc<Vec<Stylesheet>>>,
+    /// The text of each adopted sheet (`document.adoptedStyleSheets`),
+    /// which the build parses after the others.
+    adopted: Vec<String>,
+}
+
+/// A build's sheets as the cascade reads them, kept on the view
+/// (`ViewLayout::prepared_sheets`) for the next build made `from` the same
+/// sheets: copies of the `<style>`, `<link>` and adopted sheets with the
+/// `@media` rules the viewport rejects dropped and the `@layer`s ranked,
+/// the custom properties declared on the root, and whether any rule is an
+/// `@container` one. Immutable once made; a build that changes a sheet
+/// makes a new one.
+#[derive(Clone)]
+pub(crate) struct PreparedSheets {
+    /// `None`: made by a build that could not vouch for its sheets (not
+    /// kept).
+    from: Option<SheetsFingerprint>,
+    sheets: Rc<Vec<Stylesheet>>,
+    css_vars: Rc<HashMap<String, String>>,
+    any_container_rule: bool,
+    container_first_letter: bool,
 }
 
 impl SheetsFingerprint {
@@ -39302,6 +39440,7 @@ impl SheetsFingerprint {
                 (Some(a), Some(b)) => Rc::ptr_eq(a, b),
                 _ => false,
             }
+            && self.adopted == other.adopted
     }
 }
 
@@ -39322,6 +39461,8 @@ struct SheetCache {
     /// Lookups answered from the cache and parsed, for tests.
     hits: usize,
     misses: usize,
+    /// `misses` as the last build's `take_parsed` saw it.
+    reported: usize,
 }
 
 impl SheetCache {
@@ -39355,6 +39496,14 @@ impl SheetCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+    }
+
+    /// The sheets parsed since the last call: by this build, or for it by
+    /// the steps of its relayout that ran first (the svg paint styles).
+    fn take_parsed(&mut self) -> usize {
+        let parsed = self.misses - self.reported;
+        self.reported = self.misses;
+        parsed
     }
 }
 
