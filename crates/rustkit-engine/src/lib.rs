@@ -656,6 +656,8 @@ mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
 #[cfg(all(test, feature = "headless"))]
+mod snapshot_stage_tests;
+#[cfg(all(test, feature = "headless"))]
 mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
@@ -25717,7 +25719,21 @@ fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
 /// used values from the laid-out box (what `getComputedStyle` reports for
 /// `width`, `height`, `margin-*`, `padding-*`, `border-*-width`); `display`
 /// is the engine's own set, so `li` reads `block`, not `list-item`.
+thread_local! {
+    /// How many elements' computed-style rows this thread formatted for
+    /// script reads (LAT8), never reset.
+    static STYLE_ROWS_FORMATTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// LAT8's counters on this thread: element style rows formatted for the
+/// snapshot, and the snapshot stage's ms.
+#[cfg(test)]
+pub(crate) fn snapshot_counters() -> (u64, f64) {
+    (STYLE_ROWS_FORMATTED.with(|c| c.get()), relayout_cause::snapshot_total_ms())
+}
+
 fn computed_style_lines(b: &LayoutBox) -> String {
+    STYLE_ROWS_FORMATTED.with(|c| c.set(c.get() + 1));
     let s = &*b.style;
     let d = &b.dimensions;
     // The border widths as CSS reports them. A styled scrollbar's space
