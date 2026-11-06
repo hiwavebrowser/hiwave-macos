@@ -1018,6 +1018,24 @@ class Driver:
         time.sleep(3)
         self.expect(c, "the app is still running 3 s later", self.app.alive())
 
+    def a7_no_bridge_in_content(self):
+        """CH3.A7: a web page in the content view has no window.ipc / window.hiwaveChrome, flag off and flag on."""
+        c = "a7_no_bridge_in_content"
+        for label, env in (("flag off", None), ("flag on", {"HIWAVE_RUSTKIT_CHROME": "1"})):
+            if not self.open_page(c, "a7_bridge.html", env=env):
+                self.close_page()
+                continue
+            got = self.fixture.wait("beacon?a7-bridge=", 15, self.since)
+            seen = self.fixture.seen("a7-bridge=", self.since)
+            self.expect(c, "%s: the page's script ran and reported" % label, bool(got))
+            self.expect(c, "%s: the page sees typeof window.ipc, window.hiwaveChrome = undefined,undefined" % label,
+                        any("a7-bridge=undefined%2Cundefined" in r for r in seen), str(seen))
+            if env:
+                # The chrome, an app-owned view, keeps its bridge meanwhile.
+                ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
+                self.expect(c, "%s: the chrome still posts get_sidebar_width" % label, bool(ipc))
+            self.close_page()
+
     def a2_chrome_navigate(self):
         """CH3.A2 3c: the address bar's navigate, run in the RustKit chrome, reaches the app and the page loads it."""
         c = "a2_chrome_navigate"
@@ -1104,6 +1122,257 @@ class Driver:
             return self.not_run(c, "the window shows the typed page's green", self.why_not("Screen Recording"))
         self.expect(c, "the window shows the typed page's green", frame[GREEN] > 100000, str(frame))
 
+    # ── CH2.E3: text input, the Edit menu, Cmd chords ───────────────────────
+
+    def e3_start(self, c, page="e3_text.html", env=None):
+        """A fresh app on the E3 page with input granted: (pid, w, h), or None."""
+        if not self.open_page(c, page, env=env):
+            return None
+        if not self.can_input:
+            self.not_run(c, "keys and menu items reach the page", self.why_not("Accessibility"))
+            return None
+        self.fixture.wait("beacon?e3-ready" if page.startswith("e3_text") else "beacon?e3n-ready", 10, self.since)
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        # HID keys go to the frontmost app: never type into another one.
+        # macOS may refuse `activate`; a click on the page's blank bottom
+        # edge brings the window forward as a user's would.
+        code, front = self.hw("activate", pid)
+        if not front.get("frontmost"):
+            self.hw("click", pid, win["w"] * 0.5, win["h"] - 12)
+            time.sleep(0.4)
+            code, front = self.hw("activate", pid)
+        if not front.get("frontmost"):
+            self.not_run(c, "keys reach the app", "the app is not frontmost: " + json.dumps(front))
+            return None
+        code, win = self.hw("window", pid)
+        return pid, win["w"], win["h"]
+
+    def e3_value(self, field, mark):
+        """The value the page last reported for `field` since `mark`."""
+        seen = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-%s-v=" % field, mark)]
+        return seen[-1].split("-v=", 1)[1].rsplit("-c=", 1)[0] if seen else None
+
+    def e3_wait_value(self, field, mark, want, timeout=3):
+        end = time.time() + timeout
+        while time.time() < end and self.e3_value(field, mark) != want:
+            time.sleep(0.1)
+        return self.e3_value(field, mark)
+
+    def e3_focus(self, c, pid, w, h, field="a"):
+        mark = self.fixture.mark()
+        self.hw("click", pid, w * 0.7, h * (0.35 if field == "a" else 0.75))
+        ok = self.fixture.wait("beacon?e3-%s-focus" % field, 4, mark)
+        self.expect(c, "#%s took the focus" % field, ok)
+        time.sleep(0.4)
+        return ok
+
+    def pasteboard(self, text=None):
+        """Read the general pasteboard, or replace it with `text`."""
+        if text is None:
+            return subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+        subprocess.run(["pbcopy"], input=text, text=True)
+
+    def e3_dead_key(self):
+        """CH2.E3: Option+e then e in a content <input> composes é (compositionstart, compositionend é)."""
+        c = "e3_dead_key"
+        started = self.e3_start(c)
+        if not started:
+            return
+        pid, w, h = started
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark = self.fixture.mark()
+        self.hw("key", pid, 14, "alt")  # kVK_ANSI_E with Option: the dead acute
+        time.sleep(0.5)
+        start = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-a-compositionstart", mark)]
+        self.expect(c, "Option+e starts a composition (compositionstart)", bool(start), str(start))
+        self.hw("key", pid, 14)
+        value = self.e3_wait_value("a", mark, "é")
+        self.expect(c, "then e commits é (Chrome: é)", value == "é", repr(value))
+        end = [urllib.parse.unquote(p) for p in self.fixture.seen("beacon?e3-a-compositionend", mark)]
+        self.expect(c, "compositionend carries é", end[-1:] == ["/beacon?e3-a-compositionend=é"], str(end))
+
+    def e3_dead_key_no_field(self):
+        """CH2.E3 (#918 R1): with nothing editable focused, Option+e, e and j are plain keydowns; nothing composes or is inserted."""
+        c = "e3_dead_key_no_field"
+        started = self.e3_start(c, page="e3_no_field.html")
+        if not started:
+            return
+        pid, w, h = started
+        mark = self.fixture.mark()
+        self.hw("key", pid, 14, "alt")  # Option+e: the dead acute on a US layout
+        time.sleep(0.3)
+        self.hw("key", pid, 14)  # e
+        time.sleep(0.3)
+        self.hw("key", pid, 38)  # j, a shortcut key
+        time.sleep(1.0)
+        seen = lambda kind: [urllib.parse.unquote(p).split("=", 1)[1]
+                             for p in self.fixture.seen("beacon?e3n-%s=" % kind, mark)]
+        downs, ups = seen("keydown"), seen("keyup")
+        keys = [d.split("-", 1)[1] for d in downs]
+        # Every key is a keydown the page hears, none swallowed by an input
+        # method. Not pinned (#918 nit 5, no OS-key Chromium oracle on this
+        # seat): Chromium's key values for the dead key itself ("Dead") and
+        # the composed key, and keyCode (the engine reports 0 for character
+        # keys); keyup with nothing focused is not delivered (as before E3).
+        self.expect(c, "the page hears a keydown for each of Option+e, e, j", len(keys) == 3 and keys[-1] == "j",
+                    str(downs))
+        self.note(c, "keyups heard", "INFO", str(ups))
+        composed = sum((seen(k) for k in ("compositionstart", "compositionupdate", "compositionend")), [])
+        self.expect(c, "nothing composes", not composed, str(composed))
+        inserted = seen("beforeinput") + seen("input")
+        self.expect(c, "nothing is inserted", not inserted, str(inserted))
+
+    def e3_paste(self):
+        """CH2.E3: Cmd+V and Edit > Paste put the pasteboard's text in a content <input>."""
+        c = "e3_paste"
+        saved = self.pasteboard()
+        try:
+            started = self.e3_start(c)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            self.pasteboard("e3-pasted")
+            mark = self.fixture.mark()
+            self.hw("key", pid, 9, "cmd")  # V
+            value = self.e3_wait_value("a", mark, "e3-pasted")
+            self.expect(c, "Cmd+V pastes the pasteboard's text", value == "e3-pasted", repr(value))
+            code, out = self.hw("menu", pid, "Edit", "Paste")
+            value = self.e3_wait_value("a", mark, "e3-pastede3-pasted")
+            self.expect(c, "Edit > Paste pastes it again", value == "e3-pastede3-pasted",
+                        "%r %s" % (value, json.dumps(out)))
+        finally:
+            self.pasteboard(saved)
+
+    def e3_cut_copy(self):
+        """CH2.E3: Cmd+A/C/X and Edit > Select All/Copy/Cut put the field's text on the pasteboard."""
+        c = "e3_cut_copy"
+        saved = self.pasteboard()
+        try:
+            started = self.e3_start(c)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            mark = self.fixture.mark()
+            self.hw("type", pid, "hello")
+            self.e3_wait_value("a", mark, "hello")
+            self.pasteboard("before")
+            self.hw("key", pid, 0, "cmd")  # A
+            time.sleep(0.3)
+            self.hw("key", pid, 8, "cmd")  # C
+            time.sleep(0.6)
+            self.expect(c, "Cmd+A, Cmd+C copies the value", self.pasteboard() == "hello", repr(self.pasteboard()))
+            self.hw("key", pid, 7, "cmd")  # X
+            value = self.e3_wait_value("a", mark, "")
+            self.expect(c, "Cmd+X empties the field", value == "", repr(value))
+            mark = self.fixture.mark()
+            self.hw("type", pid, "world")
+            self.e3_wait_value("a", mark, "world")
+            self.pasteboard("before")
+            self.hw("menu", pid, "Edit", "Select All")
+            time.sleep(0.3)
+            self.hw("menu", pid, "Edit", "Copy")
+            time.sleep(0.6)
+            self.expect(c, "Edit > Select All, Edit > Copy copies the value", self.pasteboard() == "world",
+                        repr(self.pasteboard()))
+            self.hw("menu", pid, "Edit", "Cut")
+            value = self.e3_wait_value("a", mark, "")
+            self.expect(c, "Edit > Cut empties the field", value == "", repr(value))
+        finally:
+            self.pasteboard(saved)
+
+    def e3_undo(self):
+        """CH2.E3: Cmd+Z, Cmd+Shift+Z and Edit > Undo in a content <input>."""
+        c = "e3_undo"
+        started = self.e3_start(c)
+        if not started:
+            return
+        pid, w, h = started
+        if not self.e3_focus(c, pid, w, h):
+            return
+        mark = self.fixture.mark()
+        self.hw("type", pid, "abc")
+        self.e3_wait_value("a", mark, "abc")
+        self.hw("key", pid, 6, "cmd")  # Z
+        value = self.e3_wait_value("a", mark, "")
+        self.expect(c, "Cmd+Z undoes the typing", value == "", repr(value))
+        self.hw("key", pid, 6, "cmd", "shift")
+        value = self.e3_wait_value("a", mark, "abc")
+        self.expect(c, "Cmd+Shift+Z redoes it", value == "abc", repr(value))
+        self.hw("menu", pid, "Edit", "Undo")
+        value = self.e3_wait_value("a", mark, "")
+        self.expect(c, "Edit > Undo undoes it", value == "", repr(value))
+
+    def e3_cmd_key_to_page(self):
+        """CH2.E3: a Cmd chord reaches the page's keydown before the menu; a cancelled one stays the page's. Cmd+T is Chromium-reserved: the page never hears it and the tab opens."""
+        c = "e3_cmd_key_to_page"
+        for prevent in (True, False):
+            page = "e3_text.html" + ("?prevent" if prevent else "")
+            started = self.e3_start(c, page)
+            if not started:
+                return
+            pid, w, h = started
+            if not self.e3_focus(c, pid, w, h):
+                return
+            label = "cancelled" if prevent else "not cancelled"
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 3, "cmd")  # F
+            heard = self.fixture.wait("beacon?e3-cmd=f", 3, mark)
+            self.expect(c, "%s: the page hears Cmd+F's keydown (metaKey)" % label, heard)
+            find = self.app.wait_log(r'menu event id="?find', 2, log_from)
+            if prevent:
+                self.expect(c, "cancelled: the menu does not open Find", not find)
+            else:
+                self.expect(c, "not cancelled: the menu opens Find", bool(find))
+            self.hw("key", pid, 53)  # Escape closes the find bar
+            time.sleep(0.4)
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")  # T
+            tab = self.app.wait_log(r'menu event id="?new_tab', 3, log_from)
+            self.expect(c, "%s: Cmd+T opens a tab (Chrome 143: reserved)" % label, bool(tab))
+            heard = self.fixture.seen("beacon?e3-cmd=t", mark)
+            self.expect(c, "%s: the page hears no Cmd+T keydown (Chrome 143)" % label, not heard, str(heard))
+            self.close_page()
+
+    def e3_chrome_paste_url(self):
+        """CH2.E3, flag on: Cmd+V pastes a URL into the RustKit chrome's address bar and Return navigates."""
+        c = "e3_chrome_paste_url"
+        saved = self.pasteboard()
+        try:
+            if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME": "1"}):
+                return
+            if not self.can_input:
+                return self.not_run(c, "a pasted URL navigates", self.why_not("Accessibility"))
+            self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+            time.sleep(1.0)
+            pid = self.app.proc.pid
+            log_from = len(self.app.log_text())
+            self.hw("key", pid, 17, "cmd")  # a new tab: an empty address bar
+            made = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"create_tab"', 5, log_from)
+            self.expect(c, "Cmd+T made a tab through the chrome", bool(made))
+            time.sleep(1.0)
+            code, win = self.hw("window", pid)
+            self.hw("click", pid, int(win["w"] * 0.55), 100)
+            clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+            self.expect(c, "the click reached the RustKit chrome", bool(clicked))
+            time.sleep(0.5)
+            target = "%s/h16_b.html?from=pasted" % self.fixture.base
+            self.pasteboard(target)
+            mark, log_from = self.fixture.mark(), len(self.app.log_text())
+            self.hw("key", pid, 9, "cmd")  # V
+            time.sleep(0.5)
+            self.hw("key", pid, 36)
+            ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"navigate","url":"([^"]*)"', 10, log_from)
+            self.expect(c, "Return after Cmd+V posted navigate with the pasted URL",
+                        bool(ipc) and ipc.group(1) == target, ipc.group(1) if ipc else "no navigate")
+            self.expect(c, "the page's script ran", self.fixture.wait("beacon?h16-b-ran-from=pasted", 10, mark))
+        finally:
+            self.pasteboard(saved)
 
     # ── CH3.A3: the RustKit chrome over the page ───────────────────────────
 
@@ -2269,7 +2538,7 @@ class Driver:
                         "y %d: %s" % (y, row))
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
               "a3c_shadow_over_page", "a3c_rounded_corner", "a3c_find_dims_page", "a3c_chrome_band",
@@ -2277,7 +2546,8 @@ class Driver:
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
               "e4_chrome_tab",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
-              "b11_settings_save"]
+              "b11_settings_save",
+              "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
 
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()

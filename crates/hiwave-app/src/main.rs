@@ -606,6 +606,16 @@ fn chrome_html_with_bridge() -> String {
     html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK)
 }
 
+/// Load one of the app's own documents (the chrome, a panel; built with
+/// [`html_with_bridge`]) into `view`, and make it an app-owned view first (CH3.A7): only
+/// these documents get `window.ipc` / `window.hiwaveChrome`. The content
+/// view is never passed here, so web pages have none of it.
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn load_app_document(view: &webview_rustkit::RustKitView, document: &str) -> hiwave_core::HiWaveResult<()> {
+    view.set_app_owned();
+    view.load_html_internal(document)
+}
+
 /// The alpha route of the RustKit chrome over the page (CH3.A3c,
 /// `trench/chrome/A3-composition.md`): the chrome's surface is transparent
 /// and its pixels decide what covers the page. On with
@@ -729,6 +739,24 @@ fn panel_ipc_log_line(panel: &str, body: &str) -> String {
     format!("panel={panel:?} cmd={} len={}", ipc_cmd(body), body.len())
 }
 
+/// Input method text as the log carries it (CH2.E3, #918 R1 must-fix 2):
+/// the variant and the text's size, never the text, whatever the log
+/// level. A dead key's, an IME's, the accent popover's and the emoji
+/// picker's commits are typed text, password fields included; the same
+/// shapes-only rule as the panel IPC lines (#910).
+#[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
+#[cfg(target_os = "macos")]
+fn ime_input_log_line(input: &rustkit_viewhost::ImeInput) -> String {
+    use rustkit_viewhost::ImeInput;
+    match input {
+        ImeInput::SetMarked(text) => format!("ime=SetMarked len={}", text.len()),
+        ImeInput::Insert { text, replace } => {
+            format!("ime=Insert len={} replace={}", text.len(), replace.is_some())
+        }
+        ImeInput::Unmark => "ime=Unmark".to_string(),
+    }
+}
+
 /// A panel probe report as the log carries it (#910 R1 blocker 2), or
 /// `None` for one that is not a report: rebuilt from its shapes only (the
 /// size, and for each of `selectors` the box, the match count, `checked`
@@ -826,7 +854,7 @@ fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &st
         );
         let view = webview_rustkit::RustKitView::new(window, bounds)
             .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
-        view.load_html_internal(&html_with_bridge(html, &panel_probe_script()))
+        load_app_document(&view, &html_with_bridge(html, &panel_probe_script()))
             .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
         info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
         let panel = PanelView::RustKit(view);
@@ -2007,6 +2035,38 @@ fn dispatch_view_input(
                 trace!(dx = scroll.dx, dy = scroll.dy, "content scrolled");
             }
         }
+        // A Cmd chord the content view took before the menu (CH2.E3): the
+        // page hears its keydown (metaKey) first, as in Chromium; the page
+        // answers whether it claimed it, and one it did not goes on to the
+        // menu (`rustkit_viewhost::finish_key_equivalent`). Chromium's
+        // reserved chords (Cmd+T/N/W/Q, ...) never reach here.
+        rustkit_viewhost::InputKind::KeyEquivalent { key, token } => {
+            let (vk, text) = mac_key_to_vk(&key);
+            info!(keycode = key.mac_keycode, token, "Cmd chord to the page first");
+            view.handle_command_key(vk, text, key.shift, key.alt, token);
+        }
+        // Marked and committed text from the input method: a dead key, an
+        // IME, the accent popover, the emoji picker (CH2.E3).
+        rustkit_viewhost::InputKind::Ime(input) => {
+            tracing::debug!(input = %ime_input_log_line(&input), "input method text");
+            view.ime_input(input);
+            view.relayout();
+        }
+        // An Edit menu item (CH2.E3): the command in the focused text field.
+        rustkit_viewhost::InputKind::Edit(action) => {
+            use rustkit_engine::EditCommand;
+            let command = match action {
+                rustkit_viewhost::EditAction::Copy => EditCommand::Copy,
+                rustkit_viewhost::EditAction::Cut => EditCommand::Cut,
+                rustkit_viewhost::EditAction::Paste => EditCommand::Paste,
+                rustkit_viewhost::EditAction::Undo => EditCommand::Undo,
+                rustkit_viewhost::EditAction::Redo => EditCommand::Redo,
+                rustkit_viewhost::EditAction::SelectAll => EditCommand::SelectAll,
+            };
+            info!(?action, "Edit menu action");
+            view.edit_command(command);
+            view.relayout();
+        }
         rustkit_viewhost::InputKind::Key(key) => {
             // Cmd chords are menu shortcuts, except the editing
             // ones in a focused text field (CH2.E1): Cmd+A/C/V/X/Z
@@ -2030,24 +2090,7 @@ fn dispatch_view_input(
                 }
                 return;
             }
-            // macOS keyCodes -> the Win32 VK numbering the edit
-            // model speaks. Text keys carry their characters.
-            let (vk, text): (u32, &str) = match key.mac_keycode {
-                51 => (0x08, ""),      // delete (backspace)
-                117 => (0x2E, ""),     // forward delete
-                123 => (0x25, ""),     // left
-                124 => (0x27, ""),     // right
-                115 => (0x24, ""),     // home
-                119 => (0x23, ""),     // end
-                36 | 76 => (0x0D, ""), // return / keypad enter
-                48 => (0x09, ""),      // tab
-                53 => (0x1B, ""),      // escape
-                116 => (0x21, ""),     // page up
-                121 => (0x22, ""),     // page down
-                126 => (0x26, ""),     // up
-                125 => (0x28, ""),     // down
-                _ => (0, key.text.as_str()),
-            };
+            let (vk, text) = mac_key_to_vk(&key);
             if vk == 0 && text.is_empty() {
                 return;
             }
@@ -2086,6 +2129,27 @@ fn dispatch_view_input(
     }
 }
 
+/// macOS keyCodes -> the Win32 VK numbering the edit model speaks. Text
+/// keys carry their characters.
+fn mac_key_to_vk(key: &rustkit_viewhost::PendingKey) -> (u32, &str) {
+    match key.mac_keycode {
+        51 => (0x08, ""),      // delete (backspace)
+        117 => (0x2E, ""),     // forward delete
+        123 => (0x25, ""),     // left
+        124 => (0x27, ""),     // right
+        115 => (0x24, ""),     // home
+        119 => (0x23, ""),     // end
+        36 | 76 => (0x0D, ""), // return / keypad enter
+        48 => (0x09, ""),      // tab
+        53 => (0x1B, ""),      // escape
+        116 => (0x21, ""),     // page up
+        121 => (0x22, ""),     // page down
+        126 => (0x26, ""),     // up
+        125 => (0x28, ""),     // down
+        _ => (0, key.text.as_str()),
+    }
+}
+
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
     use super::*;
@@ -2112,6 +2176,29 @@ mod panel_tests {
         assert_eq!(chrome_html_with_bridge(), html_with_bridge(CHROME_HTML, CHROME_OUTSIDE_CLICK));
         // CH3.A3b: no popup reporter; the region comes from the frames.
         assert!(!chrome_html_with_bridge().contains("chrome_overlays"));
+    }
+
+    /// CH3.A7: the chrome is loaded into an app-owned view and keeps its
+    /// bridge (its startup `get_sidebar_width` reaches the window); a
+    /// content view, built as the app builds it, is not app-owned.
+    #[test]
+    fn the_chrome_loads_into_an_app_owned_view_and_round_trips_get_sidebar_width() {
+        use std::time::{Duration, Instant};
+        let content = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 800, 600));
+        assert!(!content.is_app_owned(), "a content view must not be app-owned");
+        let chrome = webview_rustkit::RustKitView::headless_content(rustkit_viewhost::Bounds::new(0, 0, 1200, 120));
+        load_app_document(&chrome, &chrome_html_with_bridge()).unwrap();
+        assert!(chrome.is_app_owned());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut got = Vec::new();
+        while !got.iter().any(|m: &String| m.contains(r#""cmd":"get_sidebar_width""#)) {
+            assert!(Instant::now() < deadline, "the chrome posted {got:?}");
+            if !chrome.step_load() {
+                chrome.process_events();
+            }
+            got.extend(chrome.take_ipc_messages());
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// CH3.A3c: only the RustKit chrome on the alpha route marks its root
@@ -2198,6 +2285,28 @@ mod panel_log_tests {
         assert_eq!(url_for_log(&format!("https://a.test/p/q?x={SECRET}#{SECRET}")), "https://a.test/p/q");
         assert_eq!(url_for_log(&format!("https://a.test/p#{SECRET}")), "https://a.test/p");
         assert_eq!(url_for_log("about:blank"), "about:blank");
+    }
+}
+
+// #918 R1 HOLD must-fix 2: input method text (a dead key's, an IME's, the
+// accent popover's, the emoji picker's; in a password field too) is never
+// logged, at any level: the variant and the size only.
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod ime_log_tests {
+    use super::ime_input_log_line;
+    use rustkit_viewhost::ImeInput;
+
+    const SECRET: &str = "hunter2-e3-secret";
+
+    #[test]
+    fn an_input_method_line_names_the_variant_and_size_never_the_text() {
+        let marked = ime_input_log_line(&ImeInput::SetMarked(SECRET.to_string()));
+        assert!(!marked.contains(SECRET), "{marked}");
+        assert_eq!(marked, format!("ime=SetMarked len={}", SECRET.len()));
+        let insert = ime_input_log_line(&ImeInput::Insert { text: SECRET.to_string(), replace: Some((1, 1)) });
+        assert!(!insert.contains(SECRET), "{insert}");
+        assert_eq!(insert, format!("ime=Insert len={} replace=true", SECRET.len()));
+        assert_eq!(ime_input_log_line(&ImeInput::Unmark), "ime=Unmark");
     }
 }
 
@@ -2694,7 +2803,7 @@ fn main() {
         );
         let view = webview_rustkit::RustKitView::new(&window, bounds)
             .expect("Failed to create the RustKit chrome view");
-        view.load_html_internal(&rustkit_chrome_html(rustkit_chrome_alpha()))
+        load_app_document(&view, &rustkit_chrome_html(rustkit_chrome_alpha()))
             .expect("Failed to load the chrome into RustKit");
         Some(ChromeView::RustKit(view))
     } else {
@@ -6121,6 +6230,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id().0.as_str();
+            // The real-window driver reads which shortcut the menu took.
+            info!(id, "menu event");
             match id {
                 id if id == menu_ids::NEW_TAB => {
                     // Send create_tab IPC to properly create tab in shell and sync

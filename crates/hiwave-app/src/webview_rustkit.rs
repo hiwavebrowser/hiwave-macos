@@ -99,6 +99,10 @@ pub struct RustKitView {
     chrome_updates: RefCell<ChromeUpdates>,
     /// What the page posted on `window.ipc`, in order (CH2.E9).
     ipc_inbox: RefCell<Vec<String>>,
+    /// CH3.A7: the app owns this view (its chrome, a panel), so the
+    /// documents it loads with `load_html_internal` get the app bridge.
+    /// A content view never does.
+    app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -233,6 +237,8 @@ fn content_engine_builder() -> EngineBuilder {
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
         .follows_script_navigation(true)
+        // Copy, cut and paste use the system clipboard (CH2.E3).
+        .system_clipboard(!cfg!(test))
         // What a page asks of the network after its `load` event (beacons,
         // pixels, metrics fetches that may never stop) is the live loop's:
         // it neither holds the window thread inside the load nor delays
@@ -348,7 +354,7 @@ impl RustKitView {
     /// A content view on the content thread, with no window (tests). There
     /// is no surface, so nothing is presented.
     #[cfg(test)]
-    fn headless_content(bounds: Bounds) -> Self {
+    pub(crate) fn headless_content(bounds: Bounds) -> Self {
         let thread = ContentThread::spawn(content_engine_builder(), bounds).expect("content thread");
         Self::from_parts(None, None, Some(thread), None, None, None, 0)
     }
@@ -381,6 +387,7 @@ impl RustKitView {
             current_title: RefCell::new(None),
             chrome_updates: RefCell::new(ChromeUpdates::default()),
             ipc_inbox: RefCell::new(Vec::new()),
+            app_owned: Cell::new(false),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
@@ -447,6 +454,10 @@ impl RustKitView {
         let Some(handle) = self.handle.as_ref() else { return };
         let events = handle.drain_events();
         for event in &events {
+            // A Cmd chord the page did not claim goes on to the menu (CH2.E3).
+            if let PageEvent::KeyEquivalentDone { token, claimed } = event {
+                rustkit_viewhost::finish_key_equivalent(*token, *claimed);
+            }
             self.pointer_event(event);
         }
         #[cfg(test)]
@@ -643,6 +654,30 @@ impl RustKitView {
     }
 
     /// A key was released: the page hears `keyup`.
+    /// A macOS Cmd chord (CH2.E3): the page hears its keydown first. The
+    /// page answers whether it claimed `token`; one it did not goes on to
+    /// the main menu (`rustkit_viewhost::finish_key_equivalent`), when the
+    /// answer arrives.
+    pub fn handle_command_key(&self, key_code: u32, key: &str, shift: bool, alt: bool, token: u64) {
+        self.submit(PageCmd::Input(PageInput::CommandKey {
+            key_code,
+            key: key.to_string(),
+            shift,
+            alt,
+            token,
+        }));
+    }
+
+    /// The input method's marked or committed text (CH2.E3).
+    pub fn ime_input(&self, input: rustkit_viewhost::ImeInput) {
+        self.submit(PageCmd::Input(PageInput::Ime(input)));
+    }
+
+    /// An Edit menu item in the focused text field (CH2.E3).
+    pub fn edit_command(&self, command: rustkit_engine::EditCommand) {
+        self.submit(PageCmd::Input(PageInput::Edit(command)));
+    }
+
     pub fn handle_key_up(&self, key_code: u32, key: &str, ctrl: bool, shift: bool, alt: bool) {
         self.submit(PageCmd::Input(PageInput::KeyUp {
             key_code,
@@ -681,6 +716,24 @@ impl RustKitView {
     /// Content thread only (the flag-off engine owns its host view).
     pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
         self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
+    }
+
+    /// CH3.A7: make this an app-owned view (the chrome, the shelf, the
+    /// Inspector, the settings page): the documents the app loads into it
+    /// from now on get `window.ipc` and `window.hiwaveChrome`. Call it
+    /// before the first load. A web content view is never marked.
+    pub fn set_app_owned(&self) {
+        self.app_owned.set(true);
+        if let Some(thread) = &self.content {
+            thread.set_app_owned(true);
+        } else {
+            self.submit(PageCmd::SetAppOwned { owned: true });
+        }
+    }
+
+    /// Whether [`Self::set_app_owned`] made this an app-owned view.
+    pub fn is_app_owned(&self) -> bool {
+        self.app_owned.get()
     }
 
     /// The messages the page posted with `window.ipc.postMessage` since
@@ -1336,12 +1389,30 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::KeyEquivalentDone { token, claimed } => {
+                    rustkit_viewhost::finish_key_equivalent(token, claimed);
+                }
+                PageEvent::TextInput(state) => self.mirror_text_input(state),
                 PageEvent::Cursor(_) | PageEvent::Tooltip(_) | PageEvent::ContextMenu { .. } => {
                     self.pointer_event(&event)
                 }
                 PageEvent::Unresponsive | PageEvent::Closed => {}
             }
         }
+    }
+
+    /// Keep the page's text-input state where the content view's input
+    /// method can read it synchronously (CH2.E3).
+    fn mirror_text_input(&self, state: Option<rustkit_engine::TextInputState>) {
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        let mirror = state.map(|s| rustkit_viewhost::TextInputMirror {
+            marked: s.marked,
+            selected: s.selected,
+            caret: s.caret.map(|c| (c.x as f64, c.y as f64, c.height as f64)),
+        });
+        rustkit_viewhost::set_text_input_state(surface.borrow().viewhost_id(), mirror);
     }
 
     /// What the pointer is over (CH2.E4): the cursor and the tooltip go to
@@ -1490,6 +1561,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
         | PageEvent::TextFocused(_)
+        | PageEvent::KeyEquivalentDone { .. }
+        | PageEvent::TextInput(_)
         | PageEvent::Cursor(_)
         | PageEvent::Tooltip(_)
         | PageEvent::ContextMenu { .. }
@@ -2077,6 +2150,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     #[test]
     fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
         let view = content_view();
+        // The chrome's view is app-owned (CH3.A7).
+        view.set_app_owned();
         view.load_html_internal(
             "<p>chrome</p><script>window.ipc.postMessage(JSON.stringify({cmd: 'navigate', url: 'https://example.com/'}));\
              window.ipc.postMessage({cmd: 'get_version'});</script>",
@@ -2096,6 +2171,62 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
                 r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string(),
                 r#"{"cmd":"get_version"}"#.to_string(),
             ]
+        );
+    }
+
+    /// CH3.A7: a page is not told about the app bridge. Its own script
+    /// reads `typeof window.ipc` and `typeof window.hiwaveChrome` while it
+    /// loads; Chromium 143 answers `undefined,undefined`.
+    const BRIDGE_PROBE: &str = "<script>document.title = \
+        typeof window.ipc + ',' + typeof window.hiwaveChrome;</script>";
+
+    #[test]
+    fn content_thread_a_web_document_sees_no_app_bridge() {
+        let view = content_view();
+        assert!(!view.is_app_owned(), "a content view is not app-owned");
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.latest_commit.borrow().is_none() {
+            assert!(Instant::now() < deadline, "the document never committed");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut rx = view.devtools_eval("document.title", Instant::now() + Duration::from_secs(10));
+        let title = loop {
+            assert!(Instant::now() < deadline, "the page never answered");
+            if let Ok(answer) = rx.try_recv() {
+                break answer;
+            }
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            title.as_deref().is_ok_and(|t| t.contains("undefined,undefined")),
+            "{title:?}"
+        );
+        assert!(view.take_ipc_messages().is_empty());
+    }
+
+    #[test]
+    fn a_flag_off_web_document_sees_no_app_bridge() {
+        let view = view();
+        assert!(!view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("undefined,undefined")"#)
+        );
+    }
+
+    #[test]
+    fn a_flag_off_app_owned_view_keeps_the_bridge() {
+        let view = view();
+        view.set_app_owned();
+        assert!(view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("object,object")"#)
         );
     }
 

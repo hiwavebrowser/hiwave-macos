@@ -30,12 +30,15 @@ pub use traits::{ViewHostTrait, WindowHandle};
 #[cfg(target_os = "macos")]
 pub use macos::MacOSViewHost;
 #[cfg(target_os = "macos")]
-pub use macos::{drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, set_view_cursor, set_view_tooltip};
+pub use macos::{
+    drain_pending_clicks, drain_pending_keys, drain_pending_scrolls, finish_key_equivalent, is_reserved_chord, set_view_cursor,
+    set_view_tooltip,
+};
 #[cfg(target_os = "macos")]
 pub use macos::{raise_raw_view_above, raise_raw_view_to_front, set_raw_view_region, set_raw_view_transparent};
 pub use input_queue::{
-    drain_input, drain_input_view, retire_view_input, InputEvent, InputKind, PendingClick, PendingKey,
-    PendingScroll, PointerInput,
+    drain_input, drain_input_view, retire_view_input, set_text_input_state, text_input_state, EditAction,
+    ImeInput, InputEvent, InputKind, PendingClick, PendingKey, PendingScroll, PointerInput, TextInputMirror,
 };
 pub use region::{compose_region, region_contains, FrameRegion, RegionRect};
 
