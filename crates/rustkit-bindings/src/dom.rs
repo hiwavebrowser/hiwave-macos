@@ -1844,7 +1844,7 @@ pub(crate) fn install(
             };
             if changed {
                 layer.generation += 1;
-                d.mark(crate::DomDirty::Layout);
+                d.mark_animation_layer(crate::DomDirty::Layout);
                 // The element restyles as if its inline style changed, so
                 // the next build walks it rather than keep its box.
                 l.borrow_mut().push(MutationRecord {

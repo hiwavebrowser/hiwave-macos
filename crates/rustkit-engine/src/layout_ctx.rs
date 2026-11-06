@@ -215,36 +215,162 @@ impl LayoutCtx {
                 }
                 Some(frames)
             };
+        // LAT2: an element that animates, or may (it names an animation
+        // or a transition, or script animates it), keeps its cascaded
+        // style for the frames painted without a build.
+        let entries = lay.animated.borrow().script.get(&node).cloned();
+        let named = style
+            .animations
+            .iter()
+            .any(|item| !item.name.trim().is_empty() && !item.name.trim().eq_ignore_ascii_case("none"));
+        let cascaded = (named || !style.transitions.is_empty() || entries.is_some() || {
+            lay.animations.borrow().has_records(node)
+        })
+        .then(|| style.clone());
         lay.animations.borrow_mut().on_style(node, style, &resolve);
         // Script's animated values, above the CSS ones: each entry parsed
         // against the style as it stands and composed on it.
-        let entries = lay.animated.borrow().script.get(&node).cloned();
-        if let Some(entries) = entries {
-            for (property, value, composite) in &entries {
-                let property = property.to_ascii_lowercase();
-                let indices = crate::animations::prop_indices(&property);
-                if indices.is_empty() {
-                    self.apply_style_property(style, &property, value);
-                    continue;
-                }
-                let mut probe = style.clone();
-                self.apply_style_property(&mut probe, &property, value);
-                for i in indices {
-                    let under = crate::animations::prop_value(style, i);
-                    let new = crate::animations::prop_value(&probe, i);
-                    let composed = crate::animations::compose(&under, &new, composite);
-                    crate::animations::set_prop_value(style, i, &composed);
-                }
+        self.apply_script_layer(style, entries.as_deref());
+        let mut anims = lay.animations.borrow_mut();
+        match cascaded {
+            Some(cascaded) if entries.is_some() || anims.has_records(node) => {
+                anims.captured.insert(
+                    node,
+                    crate::animations::Captured {
+                        cascaded,
+                        values: crate::animations::all_values(style),
+                        settled_opacity: style.animation_settled_opacity,
+                        script: entries,
+                    },
+                );
             }
-            // Paint's `group_opacity` takes the settled frame for a box
-            // that names a CSS animation (the parity settle path, set in
-            // `Animations::on_style` above). The script layer composed
-            // over it just now, so the settled value is restated here or
-            // paint would show the CSS-only opacity under a script fade.
-            if !style.animation_name.trim().is_empty() && !style.animation_name.eq_ignore_ascii_case("none") {
-                style.animation_settled_opacity = Some(style.opacity);
+            _ => {
+                anims.captured.remove(&node);
             }
         }
+    }
+
+    /// Script's animated-style entries for one element (Web Animations),
+    /// composed on `style` in order.
+    fn apply_script_layer(&self, style: &mut crate::ComputedStyle, entries: Option<&[(String, String, String)]>) {
+        let Some(entries) = entries else {
+            return;
+        };
+        for (property, value, composite) in entries {
+            let property = property.to_ascii_lowercase();
+            let indices = crate::animations::prop_indices(&property);
+            if indices.is_empty() {
+                self.apply_style_property(style, &property, value);
+                continue;
+            }
+            let mut probe = style.clone();
+            self.apply_style_property(&mut probe, &property, value);
+            for i in indices {
+                let under = crate::animations::prop_value(style, i);
+                let new = crate::animations::prop_value(&probe, i);
+                let composed = crate::animations::compose(&under, &new, composite);
+                crate::animations::set_prop_value(style, i, &composed);
+            }
+        }
+        // Paint's `group_opacity` takes the settled frame for a box
+        // that names a CSS animation (the parity settle path, set in
+        // `Animations::on_style` above). The script layer composed
+        // over it just now, so the settled value is restated here or
+        // paint would show the CSS-only opacity under a script fade.
+        if !style.animation_name.trim().is_empty() && !style.animation_name.eq_ignore_ascii_case("none") {
+            style.animation_settled_opacity = Some(style.opacity);
+        }
+    }
+
+    /// LAT2: one animation frame of `view` without a build. Each captured
+    /// element is restyled from its cascaded style at the animation clock
+    /// (transitions, animations and script's layer, as a build would), and
+    /// its values are compared with the ones painted last. `Ok` lists what
+    /// moved when all of it is paint; `Err` says why the frame needs a
+    /// build and a layout. Either way the animations' state (phases,
+    /// events) has moved to the clock, as a build would have moved it.
+    pub(crate) fn animation_frame(&self, view: BuildView) -> Result<Vec<FrameChange>, String> {
+        let Some(lay) = view.lay.clone() else {
+            return Err("no view".into());
+        };
+        // Script's pause/play/cancel/finish, as a build takes them.
+        let controls = std::mem::take(&mut lay.animated.borrow_mut().controls);
+        let script: std::collections::HashMap<usize, Vec<(String, String, String)>> =
+            lay.animated.borrow().script.clone();
+        let nodes: Vec<usize> = {
+            let mut anims = lay.animations.borrow_mut();
+            for control in &controls {
+                anims.control(control);
+            }
+            if let Some(node) = anims
+                .record_nodes()
+                .into_iter()
+                .chain(script.keys().copied())
+                .find(|node| !anims.captured.contains_key(node))
+            {
+                return Err(format!("element {node} animates with no captured style"));
+            }
+            let mut nodes: Vec<usize> = anims.captured.keys().copied().collect();
+            nodes.sort_unstable();
+            nodes
+        };
+        // Values parsed from script's layer read the view (viewport units).
+        let prev = self.building.replace(Some(Rc::new(view)));
+        let result = (|| {
+            let mut changes = Vec::new();
+            for node in nodes {
+                let captured = lay.animations.borrow().captured.get(&node).cloned();
+                let Some(captured) = captured else { continue };
+                let mut style = captured.cascaded.clone();
+                // A `@keyframes` is resolved when its record is made, at a
+                // build; a name with none (no rule) resolves to nothing at
+                // every build, so nothing here either.
+                lay.animations.borrow_mut().on_style(node, &mut style, &|_, _| None);
+                let entries = script.get(&node).cloned();
+                if entries != captured.script {
+                    // An entry of a property the engine does not
+                    // interpolate is applied whole: what it sets is not
+                    // known to be paint.
+                    let opaque = |e: &Option<Vec<(String, String, String)>>| -> Vec<(String, String)> {
+                        e.iter()
+                            .flatten()
+                            .filter(|(p, _, _)| crate::animations::prop_indices(p).is_empty())
+                            .map(|(p, v, _)| (p.to_ascii_lowercase(), v.clone()))
+                            .collect()
+                    };
+                    if opaque(&entries) != opaque(&captured.script) {
+                        return Err(format!("script animates a property of element {node} the frame cannot place"));
+                    }
+                }
+                self.apply_script_layer(&mut style, entries.as_deref());
+                let values = crate::animations::all_values(&style);
+                let mut props = Vec::new();
+                for (index, (was, is)) in captured.values.iter().zip(&values).enumerate() {
+                    if was == is {
+                        continue;
+                    }
+                    if !crate::animations::is_paint_prop(index) {
+                        return Err(format!("`{}` animates", crate::animations::prop_name(index)));
+                    }
+                    props.push((index, was.clone(), is.clone()));
+                }
+                let settled = (captured.settled_opacity != style.animation_settled_opacity)
+                    .then_some((captured.settled_opacity, style.animation_settled_opacity));
+                if let Some(c) = lay.animations.borrow_mut().captured.get_mut(&node) {
+                    c.values = values;
+                    c.settled_opacity = style.animation_settled_opacity;
+                    c.script = entries;
+                }
+                if !props.is_empty() || settled.is_some() {
+                    changes.push(FrameChange { node, props, settled });
+                }
+            }
+            Ok(changes)
+        })();
+        *self.building.borrow_mut() = prev;
+        let mut anims = lay.animations.borrow_mut();
+        anims.last_build_clock = Some(anims.clock_ms);
+        result
     }
 
     /// What a forced layout of `lay`'s view would find borrowed, `None`
@@ -487,4 +613,15 @@ mod tests {
         });
         assert_eq!(ctx.busy_for_forced_layout(&lay), None);
     }
+}
+
+/// What an animation frame moved on one element (`LayoutCtx::animation_frame`).
+#[derive(Clone, Debug)]
+pub(crate) struct FrameChange {
+    pub(crate) node: usize,
+    /// Paint properties, by animatable index: the value painted last, and
+    /// the value now.
+    pub(crate) props: Vec<(usize, crate::animations::AnimValue, crate::animations::AnimValue)>,
+    /// `animation_settled_opacity`, painted last and now.
+    pub(crate) settled: Option<(Option<f32>, Option<f32>)>,
 }
