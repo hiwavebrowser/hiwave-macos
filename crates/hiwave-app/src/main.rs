@@ -596,8 +596,35 @@ window.__hiwaveOutsideClick = function () {
 /// the content thread, which is where a RustKit view's IPC arrives from.
 fn rustkit_chrome_enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "rustkit"))
-        && std::env::var("HIWAVE_RUSTKIT_CHROME").map(|v| v == "1").unwrap_or(false)
+        && rustkit_chrome_flag(std::env::var("HIWAVE_RUSTKIT_CHROME").ok().as_deref())
         && rustkit_engine::content_thread_enabled()
+}
+
+/// What `HIWAVE_RUSTKIT_CHROME` asks for (`None` when unset).
+fn rustkit_chrome_flag(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+#[cfg(test)]
+mod rustkit_chrome_flag_tests {
+    use super::rustkit_chrome_flag;
+
+    /// CH3.A5a: the RustKit chrome is the default; unset or empty is on.
+    #[test]
+    fn the_rustkit_chrome_is_on_when_the_variable_is_unset() {
+        assert!(rustkit_chrome_flag(None));
+        assert!(rustkit_chrome_flag(Some("")));
+        assert!(rustkit_chrome_flag(Some("1")));
+        assert!(rustkit_chrome_flag(Some("on")));
+    }
+
+    /// CH3.A5a: `0`, `false` or `off` keep the WebKit chrome (the escape hatch).
+    #[test]
+    fn zero_false_or_off_keep_the_webkit_chrome() {
+        for v in ["0", "false", "off", "FALSE", "Off", " 0 "] {
+            assert!(!rustkit_chrome_flag(Some(v)), "{v:?} must turn the RustKit chrome off");
+        }
+    }
 }
 
 /// The chrome document for a RustKit view: the bridge and the outside-click
