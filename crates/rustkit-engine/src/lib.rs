@@ -404,6 +404,8 @@ mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod error_page_script_tests;
 #[cfg(all(test, feature = "headless"))]
+mod resource_url_log_tests;
+#[cfg(all(test, feature = "headless"))]
 mod redirect_base_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_loading_tests;
