@@ -572,6 +572,8 @@ mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
+mod hover_after_layout_tests;
+#[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
 mod mouse_surface_tests;
@@ -1137,6 +1139,10 @@ struct ViewState {
     laid_with: Option<LaidWith>,
     /// Where the pointer was at its last move, in viewport coordinates.
     pointer_at: Option<(f32, f32)>,
+    /// The frame (`frame_generation`, scroll offset) the hovered chain was
+    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
+    /// moved since hit-tests the still pointer again.
+    hover_hit_at: Option<(u64, (f32, f32))>,
     /// The primary button is held: between a press and its release.
     primary_button_down: bool,
     /// The element the press in progress landed on (raw NodeId).
@@ -1318,6 +1324,7 @@ impl ViewState {
         self.restyle_only = false;
         self.laid_with = None;
         self.pointer_at = None;
+        self.hover_hit_at = None;
         self.primary_button_down = false;
         self.press_target = None;
         self.drag = drag_drop::DragState::default();
@@ -2911,6 +2918,7 @@ impl Engine {
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
+            hover_hit_at: None,
             primary_button_down: false,
             press_target: None,
             drag: drag_drop::DragState::default(),
@@ -3023,6 +3031,7 @@ impl Engine {
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
+            hover_hit_at: None,
             primary_button_down: false,
             press_target: None,
             drag: drag_drop::DragState::default(),
@@ -3152,6 +3161,7 @@ impl Engine {
             restyle_only: false,
             laid_with: None,
             pointer_at: None,
+            hover_hit_at: None,
             primary_button_down: false,
             press_target: None,
             drag: drag_drop::DragState::default(),
@@ -4105,7 +4115,7 @@ impl Engine {
             return;
         }
         self.scrollbar_pointer_moved(id, viewport_x, viewport_y);
-        self.pointer_moved(id, viewport_x, viewport_y, true);
+        self.pointer_moved(id, viewport_x, viewport_y, true, false);
         // With the button held, the selection the press started follows.
         self.drag_selects(id, viewport_x, viewport_y);
     }
@@ -4118,7 +4128,7 @@ impl Engine {
         self.drag_left_view(id);
         let last = self.views.get(&id).and_then(|view| view.pointer_at);
         if let Some((x, y)) = last {
-            self.pointer_moved(id, x, y, false);
+            self.pointer_moved(id, x, y, false, false);
         }
         if let Some(view) = self.views.get_mut(&id) {
             view.pointer_at = None;
@@ -4240,8 +4250,10 @@ impl Engine {
     }
 
     /// The pointer is at VIEWPORT coordinates, inside the view or (`inside`
-    /// false) just gone from it.
-    fn pointer_moved(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, inside: bool) {
+    /// false) just gone from it. `still`: it did not move, the boxes under
+    /// it did (`Self::update_hover_after_layout`): the boundary events of
+    /// a move when the element under it changed, and no move events.
+    fn pointer_moved(&mut self, id: EngineViewId, viewport_x: f32, viewport_y: f32, inside: bool, still: bool) {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
@@ -4249,6 +4261,7 @@ impl Engine {
             .pointer_at
             .map_or((0.0, 0.0), |(x, y)| (viewport_x - x, viewport_y - y));
         view.pointer_at = Some((viewport_x, viewport_y));
+        view.hover_hit_at = Some((view.frame_generation, view.scroll_offset));
         let buttons = u16::from(view.primary_button_down);
         // The compatibility `mousemove` of a press whose `pointerdown` was
         // cancelled is not fired; the boundary events always are (Pointer
@@ -4272,6 +4285,9 @@ impl Engine {
         let now = chain(hit.and_then(|hit| hit.node_id));
         let before = chain(view.hovered_node);
         let (over, out) = (now.first().copied(), before.first().copied());
+        if still && over == out {
+            return;
+        }
         view.hovered_node = over;
         // `:hover` follows the pointer: when a sheet names it, the page is
         // restyled once the listeners below have run.
@@ -4302,7 +4318,7 @@ impl Engine {
                 events.extend(entered.iter().map(|n| (*n, enter_type, out)));
             }
         }
-        if let Some(over) = over {
+        if let Some(over) = over.filter(|_| !still) {
             events.push((over, "pointermove", None));
             if mousemove {
                 events.push((over, "mousemove", None));
@@ -4406,6 +4422,34 @@ impl Engine {
                 debug!(?id, error = %e, "restyle after a pointer change failed");
             }
         }
+    }
+
+    /// Chromium's hover update after layout (CH2.E15): once a frame, when
+    /// the boxes or the scroll moved since the pointer was last hit-tested
+    /// and the pointer is still over the view, hit-test it again; when the
+    /// element under it changed, `:hover` follows (a pointer restyle, the
+    /// short path when it changes only paint) and the page hears the
+    /// boundary events of a move, with no `pointermove`/`mousemove`
+    /// (Chromium 143, `tools/parity_oracle/hover_after_layout_log.mjs`).
+    /// Nothing else is done when the same element is under it.
+    fn update_hover_after_layout(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some((x, y)) = view.pointer_at else {
+            return;
+        };
+        let frame = (view.frame_generation, view.scroll_offset);
+        // A drag's pointer is the drag's (drag_drop.rs); an open drop-down
+        // takes the pointer.
+        if view.hover_hit_at == Some(frame) || view.drag.dragging() || view.layout.is_none() {
+            return;
+        }
+        if self.select_popup_open(id) {
+            return;
+        }
+        let _hold = wgate::hold("hover_after_layout");
+        self.pointer_moved(id, x, y, true, true);
     }
 
     /// A node of the view's document, by raw NodeId.
@@ -5735,6 +5779,9 @@ impl Engine {
             Ok(relaid_out) => out.relaid_out |= relaid_out,
             Err(e) => debug!(?id, error = %e, "relayout for animations failed"),
         }
+        // The frame this turn publishes moved what is under a still
+        // pointer: `:hover` follows it (CH2.E15).
+        self.update_hover_after_layout(id);
         if self
             .views
             .get(&id)
@@ -19888,6 +19935,7 @@ impl Engine {
     /// app's other draws (`render_views`).
     pub fn render_view(&mut self, id: EngineViewId) -> Result<(), EngineError> {
         let _hold = wgate::hold("render_view");
+        self.update_hover_after_layout(id);
         self.render(id)
     }
 
@@ -19955,6 +20003,9 @@ impl Engine {
         let view_ids: Vec<_> = self.views.keys().copied().collect();
         let mut drawn = 0;
         for id in view_ids {
+            // The frame starts with the hover update (CH2.E15), which may
+            // restyle what it then draws.
+            self.update_hover_after_layout(id);
             if only_changed && self.frame_is_current(id) {
                 // The drain that noted an input is over and the frame did
                 // not move: that input is not charged to a later frame.
