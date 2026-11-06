@@ -515,6 +515,8 @@ mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
+mod paint_only_animation_tests;
+#[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
 mod animations;
 #[cfg(test)]

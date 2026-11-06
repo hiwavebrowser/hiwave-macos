@@ -237,6 +237,11 @@ pub struct RelayoutStats {
     /// Relayouts that kept the laid-out tree: the build changed only what
     /// is painted, so the layout pass was skipped.
     pub layouts_skipped: u32,
+    /// Animation frames painted without a relayout (LAT2): every value
+    /// the frame moved was paint, copied onto the laid-out boxes.
+    pub animation_frames_painted: u32,
+    /// Time spent in them: restyle, display list, paint.
+    pub animation_paint_ms: f64,
     /// Forced layouts: script read geometry after a DOM write in the same
     /// task, so the page was laid out (not painted) for the read.
     pub forced_layouts: u64,
