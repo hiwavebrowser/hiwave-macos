@@ -193,3 +193,42 @@ fn snapshot_stage_measure() {
         );
     }
 }
+
+/// Each element's lazily formatted style is the row set the whole-page
+/// snapshot built for it: boxes, an element split over lines, boxless
+/// elements (`display: contents`, `display: none`), custom properties
+/// (own and inherited) and pseudo-elements.
+#[test]
+fn lazily_formatted_styles_equal_the_whole_page_snapshot() {
+    let page = "<html><head><style>:root{--a:1px;font-size:12px} body{margin:0} .c{display:contents;color:red}\
+        .n{display:none} .v{--b:2em;width:var(--b)} p::before{content:'x';color:blue;--p:3} p::after{content:'y'}\
+        span{border-left:1px solid} li{margin-left:1rem}</style></head><body>\
+        <div class=c><p>in contents <span>a span that wraps over more than one line of the narrow block it is in, \
+        and more, and more</span></p></div><div class=n><b>hidden</b></div><div class=v><ul><li>one<li>two</ul></div>\
+        <table><tr><td>cell</td></tr></table><svg width=10 height=10><rect width=5 height=5></rect></svg></body></html>";
+    let (engine, view, _server) = load(page);
+    let state = &engine.views[&view];
+    let layout = state.layout.clone().expect("laid out");
+    let root = root_element_id(state);
+    let eager = geometry_with_root(&layout, root, &state.lay.boxless_styles.borrow(), &state.lay.pseudo_styles.borrow()).1;
+    let lazy_layout = layout.clone();
+    let lazy = computed_lines_source(move || Some(lazy_layout.clone()), root, state.lay.clone());
+    assert!(eager.len() >= 12, "{} elements", eager.len());
+    // The rows as a set: custom properties come out of a hash map, in no
+    // fixed order, in either snapshot (`custom_property_lines`).
+    let rows = |lines: &str| {
+        let mut rows: Vec<&str> = lines.lines().collect();
+        rows.sort_unstable();
+        rows.join("\n")
+    };
+    for (node, lines) in &eager {
+        let got = lazy(*node).unwrap_or_else(|| panic!("node {node} has no lazy style"));
+        assert_eq!(rows(&got), rows(lines), "node {node}");
+    }
+    let max = eager.keys().max().copied().unwrap_or(0);
+    for node in 0..max + 5 {
+        if !eager.contains_key(&node) {
+            assert_eq!(lazy(node), None, "node {node} has no style in the whole-page snapshot");
+        }
+    }
+}

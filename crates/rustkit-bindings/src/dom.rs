@@ -182,6 +182,11 @@ pub type SharedAnimatedStyles = Rc<std::cell::RefCell<AnimatedStyles>>;
 pub type GeometrySource =
     Box<dyn FnOnce() -> (HashMap<usize, BoxGeometry>, HashMap<usize, String>)>;
 
+/// One element's computed style as `name\tvalue` lines, formatted on the
+/// first read of that element (LAT8): a read of one element no longer
+/// formats every element's. `None` when the layout has no style for it.
+pub type ComputedLines = Rc<dyn Fn(usize) -> Option<String>>;
+
 /// The node under a viewport point, from the layout's hit test. `scroll`
 /// is the view's offset. `None` is a miss.
 pub type HitTester = Rc<dyn Fn(f32, f32, (f32, f32)) -> Option<usize>>;
@@ -201,6 +206,9 @@ pub struct ForcedGeometry {
     /// first read that needs them (as `DomBindings::set_geometry_source`).
     pub source: GeometrySource,
     pub hit_tester: Option<HitTester>,
+    /// Formats one element's computed style of this layout on its first
+    /// read (LAT8); `None` keeps whatever `source` returns.
+    pub computed_lines: Option<ComputedLines>,
     /// The furthest the view can scroll over this layout, as
     /// `DomBindings::set_scroll_state` takes it.
     pub max_scroll: (f32, f32),
@@ -231,8 +239,12 @@ pub(crate) struct DomHost {
     /// laid the page out (`DomBindings::set_geometry`).
     pub(crate) geometry: HashMap<usize, BoxGeometry>,
     /// The computed style of each laid-out element, by NodeId, as
-    /// `name\tvalue` lines (`DomBindings::set_computed_styles`).
-    pub(crate) computed: HashMap<usize, String>,
+    /// `name\tvalue` lines (`DomBindings::set_computed_styles`); with
+    /// `computed_lines`, the elements read so far.
+    pub(crate) computed: RefCell<HashMap<usize, String>>,
+    /// Formats an element's computed style of the last layout on its first
+    /// read (`DomBindings::set_computed_lines`, LAT8).
+    pub(crate) computed_lines: Option<ComputedLines>,
     /// What builds `geometry` and `computed` from the last layout, until
     /// script first reads either (`DomBindings::set_geometry_source`).
     pub(crate) geometry_source: Option<GeometrySource>,
@@ -304,9 +316,26 @@ impl DomHost {
     /// the layout changed since script last read them.
     pub(crate) fn ensure_geometry(&mut self) {
         if let Some(source) = self.geometry_source.take() {
-            (self.geometry, self.computed) = source();
+            let computed;
+            (self.geometry, computed) = source();
+            // A source with `computed_lines` returns no styles: what was
+            // formatted for this layout already stays.
+            if !computed.is_empty() {
+                *self.computed.borrow_mut() = computed;
+            }
             self.geometry_builds += 1;
         }
+    }
+
+    /// An element's computed-style lines from the last layout: formatted on
+    /// the first read when the layout publishes them lazily (LAT8).
+    pub(crate) fn computed_of(&self, node: usize) -> Option<String> {
+        if let Some(lines) = self.computed.borrow().get(&node) {
+            return Some(lines.clone());
+        }
+        let lines = (self.computed_lines.as_ref()?)(node)?;
+        self.computed.borrow_mut().insert(node, lines.clone());
+        Some(lines)
     }
 
     /// The rect of a box under a transform, its own or one above it, as x, y,
@@ -466,7 +495,8 @@ impl DomHost {
             return;
         };
         h.geometry.clear();
-        h.computed.clear();
+        h.computed.borrow_mut().clear();
+        h.computed_lines = laid.computed_lines;
         h.geometry_source = Some(laid.source);
         h.hit_tester = laid.hit_tester;
         // The document may have grown or shrunk: scrollTo clamps to the new
@@ -1726,7 +1756,7 @@ pub(crate) fn install(
                     JsValue::String(if host.geometry.is_empty() { String::new() } else { "1".into() })
                 }
                 (Some(node), Some("computed")) => JsValue::String(
-                    host.computed.get(&node.id.raw()).cloned().unwrap_or_default(),
+                    host.computed_of(node.id.raw()).unwrap_or_default(),
                 ),
                 (Some(node), Some("geom")) => match host.geometry.get(&node.id.raw()) {
                     Some(g) => {
@@ -1793,7 +1823,7 @@ pub(crate) fn install(
                 },
                 (Some(node), Some("innerText")) if node.is_element() => {
                     let style = |n: &rustkit_dom::Node| {
-                        host.computed.get(&n.id.raw()).and_then(|l| inner_text::Computed::from_lines(l))
+                        host.computed_of(n.id.raw()).and_then(|l| inner_text::Computed::from_lines(&l))
                     };
                     JsValue::String(inner_text::inner_text(&node, &style))
                 }
