@@ -41,6 +41,12 @@ fn chrome() -> (Engine, EngineViewId) {
     // bridge (`window.ipc`), which chrome.html's boot posts on.
     engine.set_app_owned(view, true);
     engine.load_html(view, CHROME).expect("load_html");
+    // The state applier's spacing is measured on a test clock that moves
+    // 16 ms with each frame (`__hiwaveStateClock`), not the wall clock:
+    // the tests do not depend on how fast the machine runs them.
+    engine
+        .execute_script(view, "window.__clockMs = 0; window.__hiwaveStateClock = function () { return window.__clockMs; };")
+        .expect("clock");
     // The chrome's own boot (entrance animations, its first IPC) settles.
     for _ in 0..40 {
         frame(&mut engine, view);
@@ -50,16 +56,19 @@ fn chrome() -> (Engine, EngineViewId) {
 
 /// Long enough for the chrome to apply what it was sent: its state waits
 /// at most 200 ms after the last apply (`STATE_MIN_INTERVAL_MS`), then a
-/// frame.
+/// frame. 16 frames are 256 ms on the page's clock and the test clock.
 fn settle(engine: &mut Engine, view: EngineViewId) {
-    std::thread::sleep(std::time::Duration::from_millis(210));
     for _ in 0..16 {
         frame(engine, view);
     }
 }
 
-/// One live turn of 16 ms: an animation frame.
+/// One live turn of 16 ms: an animation frame, with the test clock moved
+/// as far.
 fn frame(engine: &mut Engine, view: EngineViewId) {
+    engine
+        .execute_script(view, "window.__clockMs = (window.__clockMs || 0) + 16;")
+        .expect("clock");
     rt().block_on(engine.pump_live(view, 16));
 }
 
@@ -223,29 +232,72 @@ fn state_sent_before_the_chrome_booted_is_applied() {
 }
 
 /// A load's stream of changes (the shield counter climbing every frame
-/// for a second and more) lays the chrome out at most five times a second,
-/// and the last value is what it shows.
+/// for 1.2 s of the chrome's clock) lays the chrome out at most five times
+/// a second, and the last value is what it shows.
 #[test]
 fn a_stream_of_changes_is_at_most_five_relayouts_a_second() {
     let (mut engine, view) = chrome();
     run(&mut engine, view, &bridge(&full_state("Page", true, 0)));
     settle(&mut engine, view);
-    let (before, started) = (relayouts(&engine, view), std::time::Instant::now());
+    let before = relayouts(&engine, view);
+    let frames = 75; // 1,200 ms at 16 ms a frame
     let mut i = 0;
-    while started.elapsed() < std::time::Duration::from_millis(1200) {
+    for _ in 0..frames {
         i += 1;
         run(&mut engine, view, &bridge(&format!(
             r#"{{"shield":{{"enabled":true,"requests_blocked":{i},"trackers_blocked":0}}}}"#
         )));
         frame(&mut engine, view);
-        std::thread::sleep(std::time::Duration::from_millis(16));
     }
-    let wall = started.elapsed().as_millis() as u32;
     let laid = relayouts(&engine, view) - before;
-    assert!(laid <= wall / 200 + 1, "{laid} relayouts in {wall} ms of changes");
-    assert!(laid >= 2, "the changes were shown as they came, not only at the end: {laid}");
+    assert!(laid <= frames * 16 / 200 + 1, "{laid} relayouts in {} ms of changes", frames * 16);
+    assert!(laid >= 4, "the changes were shown as they came, not only at the end: {laid}");
     settle(&mut engine, view);
     assert_eq!(read(&mut engine, view, "document.getElementById('shieldCount').textContent"), i.to_string());
+}
+
+/// A URL the app sends while the person is typing in the address bar does
+/// not overwrite their text (#955 R1 nit 2); after Enter the committed URL
+/// shows (a redirect's final URL), and with the bar not focused it shows
+/// at once.
+#[test]
+fn a_url_sent_while_the_person_types_waits_for_enter() {
+    let (mut engine, view) = chrome();
+    run(&mut engine, view, &bridge(r#"{"url":"http://127.0.0.1/before"}"#));
+    settle(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.getElementById('urlInput').value"), "http://127.0.0.1/before");
+    // Cmd+L, then typing.
+    run(&mut engine, view, "var u = document.getElementById('urlInput'); u.focus(); u.value = 'exam'; u.dispatchEvent(new Event('input'));");
+    run(&mut engine, view, &bridge(r#"{"url":"http://127.0.0.1/loaded"}"#));
+    settle(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.getElementById('urlInput').value"), "exam", "the typed text stays");
+    // Enter: the navigation's committed URL shows.
+    run(&mut engine, view, "document.getElementById('urlInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));");
+    run(&mut engine, view, &bridge(r#"{"url":"http://127.0.0.1/final"}"#));
+    settle(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.getElementById('urlInput').value"), "http://127.0.0.1/final");
+    // Focused but not typed in (Cmd+L alone): the URL shows.
+    run(&mut engine, view, "document.getElementById('urlInput').blur(); document.getElementById('urlInput').focus();");
+    run(&mut engine, view, &bridge(r#"{"url":"http://127.0.0.1/next"}"#));
+    settle(&mut engine, view);
+    assert_eq!(read(&mut engine, view, "document.getElementById('urlInput').value"), "http://127.0.0.1/next");
+}
+
+/// escapeHtml is safe in quoted attributes (#955 R1 nit 3): a workspace
+/// name with quotes stays in its `data-name`.
+#[test]
+fn a_workspace_name_with_quotes_stays_in_its_attribute() {
+    let (mut engine, view) = chrome();
+    run(&mut engine, view, &bridge(r#"{"workspaces":[{"id":"w1","name":"a\" onclick=\"x' b","tab_count":0,"tabs":[],"is_active":true,"is_suspended":false,"locked_count":0}]}"#));
+    settle(&mut engine, view);
+    assert_eq!(
+        read(&mut engine, view, "document.querySelector('#sidebarWorkspaceList .workspace-item[data-id=w1]').dataset.name"),
+        "a\\\" onclick=\\\"x' b"
+    );
+    assert_eq!(
+        read(&mut engine, view, "document.querySelector('#sidebarWorkspaceList .workspace-item[data-id=w1]').hasAttribute('onclick')"),
+        "false"
+    );
 }
 
 /// The legacy per-call scripts the app sent for one navigation before

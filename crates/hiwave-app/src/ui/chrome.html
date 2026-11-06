@@ -6051,6 +6051,12 @@
             // Update URL in address bar
             updateUrl: function(url) {
                 const input = document.getElementById('urlInput');
+                // CH3.A10 (#955 R1): the app's URL can now land up to a
+                // frame-and-200-ms later; it does not overwrite what the
+                // person is typing in the bar (edited since it was focused
+                // or since Enter). After Enter the committed URL shows, as
+                // before (a redirect's final URL).
+                if (document.activeElement === input && urlInputEdited) return;
                 if (input.value !== url) input.value = url;
             },
 
@@ -6329,15 +6335,18 @@
             }
         };
 
-        // Helper to escape HTML: what a text node's innerHTML gives (&, <,
-        // >, no-break space), as a string. Until CH3.A10 it wrote the text
-        // into a scratch <div>, a DOM write for every tab title on every
-        // render.
+        // Helper to escape HTML for text and for double- or single-quoted
+        // attribute values (&, <, >, quotes, no-break space), as a string.
+        // Until CH3.A10 it wrote the text into a scratch <div>, a DOM write
+        // for every tab title on every render, and left quotes as they were
+        // (#955 R1: a workspace name with `"` broke out of `data-name`).
         function escapeHtml(text) {
             return String(text == null ? '' : text)
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;')
                 .replace(/\u00a0/g, '&nbsp;');
         }
 
@@ -6381,6 +6390,9 @@
                 blocklist: v => hiwaveChrome.updateBlocklist(v),
             };
             const STATE_MIN_INTERVAL_MS = 200;
+            // The clock the spacing is measured on: the wall clock, or a
+            // test's (`__hiwaveStateClock`, the engine's headless tests).
+            const now = () => (typeof window.__hiwaveStateClock === 'function' ? window.__hiwaveStateClock() : Date.now());
             let pending = null;
             let scheduled = false;
             let lastApplied = -Infinity;
@@ -6389,14 +6401,14 @@
             // once (`force`).
             function flush(force) {
                 scheduled = false;
-                if (force !== true && pending && Date.now() - lastApplied < STATE_MIN_INTERVAL_MS) {
+                if (force !== true && pending && now() - lastApplied < STATE_MIN_INTERVAL_MS) {
                     schedule();
                     return;
                 }
                 const batch = pending;
                 pending = null;
                 if (!batch) return;
-                lastApplied = Date.now();
+                lastApplied = now();
                 batch.keys.forEach(key => {
                     try {
                         appliers[key](batch.values[key]);
@@ -6427,7 +6439,7 @@
                             flush();
                         }
                     };
-                    const wait = lastApplied + STATE_MIN_INTERVAL_MS - Date.now();
+                    const wait = lastApplied + STATE_MIN_INTERVAL_MS - now();
                     if (wait > 0) {
                         setTimeout(onFrame, wait);
                     } else {
@@ -6449,8 +6461,14 @@
 
         // Address bar navigation
         const urlInput = document.getElementById('urlInput');
+        // Whether the person has typed in the bar since it was focused or
+        // since Enter: the app's URL waits until then (`updateUrl`).
+        var urlInputEdited = false;
+        urlInput.addEventListener('input', () => { urlInputEdited = true; });
+        urlInput.addEventListener('blur', () => { urlInputEdited = false; });
         urlInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
+                urlInputEdited = false;
                 const url = urlInput.value.trim();
                 if (url) {
                     sendIpc('navigate', { url });

@@ -65,20 +65,30 @@ impl<V: ChromeUi> CoalescedChrome<V> {
 
     /// The turn's state as one object, without the values the chrome has
     /// already been sent. Empty when nothing is left.
-    fn take_state(&self) -> Option<String> {
+    /// With the values to record as sent once the script has gone
+    /// (`note_sent`): a script that failed sends them again next time
+    /// (#955 R1 nit 1).
+    fn take_state(&self) -> Option<(String, Vec<(&'static str, String)>)> {
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        let mut sent = self.sent.borrow_mut();
-        let mut parts = Vec::new();
+        let sent = self.sent.borrow();
+        let (mut parts, mut deduped) = (Vec::new(), Vec::new());
         for (key, json) in pending {
             if DEDUPED.contains(&key) {
                 if sent.get(key) == Some(&json) {
                     continue;
                 }
-                sent.insert(key, json.clone());
+                deduped.push((key, json.clone()));
             }
             parts.push(format!("{}:{}", serde_json::to_string(key).unwrap_or_default(), json));
         }
-        (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(",")))
+        (!parts.is_empty()).then(|| (format!("{{{}}}", parts.join(",")), deduped))
+    }
+
+    /// Record what a script that reached the chrome carried.
+    fn note_sent(&self, result: &Result<(), String>, values: Vec<(&'static str, String)>) {
+        if result.is_ok() {
+            self.sent.borrow_mut().extend(values);
+        }
     }
 }
 
@@ -92,10 +102,15 @@ impl<V> std::ops::Deref for CoalescedChrome<V> {
 impl<V: ChromeUi> ChromeUi for CoalescedChrome<V> {
     fn eval(&self, js: &str) -> Result<(), String> {
         // One script: the pending state, the page's pending frame, then `js`.
-        let mut script = self.take_state().map(|state| bridge_script(&state) + ";").unwrap_or_default();
+        let (mut script, values) = match self.take_state() {
+            Some((state, values)) => (bridge_script(&state) + ";", values),
+            None => (String::new(), Vec::new()),
+        };
         script.push_str(FLUSH_PAGE_STATE);
         script.push_str(js);
-        self.view.eval(&script)
+        let result = self.view.eval(&script);
+        self.note_sent(&result, values);
+        result
     }
 
     fn send_state(&self, key: &'static str, json: String) {
@@ -110,8 +125,9 @@ impl<V: ChromeUi> ChromeUi for CoalescedChrome<V> {
     }
 
     fn flush_state(&self) {
-        if let Some(state) = self.take_state() {
-            let _ = self.view.eval(&bridge_script(&state));
+        if let Some((state, values)) = self.take_state() {
+            let result = self.view.eval(&bridge_script(&state));
+            self.note_sent(&result, values);
         }
     }
 
@@ -251,6 +267,31 @@ mod tests {
         assert!(state_at < flush_at && flush_at < cmd_at, "{script}");
         chrome.flush_state();
         assert_eq!(log.borrow().len(), 1, "the state went with the command");
+    }
+
+    /// A chrome script that failed is sent again with the next turn's
+    /// state: its values are not recorded as sent (#955 R1 nit 1).
+    #[test]
+    fn a_failed_script_is_not_counted_as_sent() {
+        struct Failing(Rc<RefCell<Vec<String>>>, std::cell::Cell<bool>);
+        impl ChromeUi for Failing {
+            fn eval(&self, js: &str) -> Result<(), String> {
+                self.0.borrow_mut().push(js.to_string());
+                if self.1.get() { Err("not up".into()) } else { Ok(()) }
+            }
+            fn place(&self, _rect: wry::Rect) {}
+        }
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let chrome = CoalescedChrome::new(Failing(Rc::clone(&log), std::cell::Cell::new(true)), true);
+        crate::chrome_loading(&chrome, true);
+        chrome.flush_state();
+        chrome.view.1.set(false);
+        crate::chrome_loading(&chrome, true);
+        chrome.flush_state();
+        assert_eq!(log.borrow().len(), 2, "the failed value went again");
+        crate::chrome_loading(&chrome, true);
+        chrome.flush_state();
+        assert_eq!(log.borrow().len(), 2, "and once it went, not again");
     }
 
     /// Without the RustKit loop's end-of-turn flush, each value goes at once.
