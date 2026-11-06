@@ -547,6 +547,8 @@ mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
+mod attribute_flag_tests;
+#[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
 mod container_query_tests;
