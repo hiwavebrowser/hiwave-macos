@@ -641,6 +641,33 @@ class Driver:
         self.expect(c, ":hover paints green", hover[GREEN] > hover[RED], str(hover))
         self.expect(c, ":active paints blue", active[BLUE] > active[RED], str(active))
 
+    def e19_icon_hover(self):
+        """CH2.E19: an inline svg icon whose fill an author `:hover` rule sets turns from red to green under the pointer."""
+        c = "e19_icon_hover"
+        if not self.open_page(c, "e19_icon_hover.html"):
+            return
+        if not self.can_input:
+            return self.not_run(c, "hover an icon: its svg fill follows `button:hover svg path`",
+                                self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        x, y = self.centre()
+        rest = self.frame(c, "rest", [RED, GREEN])
+        mark = self.fixture.mark()
+        self.hw("move", pid, x - 40, y - 40)
+        self.hw("move", pid, x, y)
+        self.expect(c, "script heard mouseover", self.fixture.wait("beacon?e19-mouseover", 4, mark))
+        time.sleep(0.6)
+        hover = self.frame(c, "hover", [RED, GREEN])
+        self.hw("move", pid, x, 12)
+        time.sleep(0.6)
+        left = self.frame(c, "left", [RED, GREEN])
+        if rest is None or hover is None or left is None:
+            return self.not_run(c, "the icon's fill", self.why_not("Screen Recording"))
+        self.expect(c, "at rest the icon is red", rest[RED] > 1000 and rest[GREEN] < rest[RED] / 10, str(rest))
+        self.expect(c, "under the pointer the icon is green", hover[GREEN] > 1000 and hover[RED] < hover[GREEN] / 10,
+                    str(hover))
+        self.expect(c, "off the button it is red again", left[RED] > left[GREEN], str(left))
+
     def h6(self):
         """H6: the wheel scrolls the page."""
         c = "h6"
@@ -2676,7 +2703,7 @@ class Driver:
               "e6b_select_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
-              "e4_chrome_tab",
+              "e4_chrome_tab", "e19_icon_hover",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]

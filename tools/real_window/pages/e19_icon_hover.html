@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>E19 icon hover</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; }
+  /* The button covers the viewport and its icon most of it, so any point
+     in the content area is over both and the driver needs no coordinates. */
+  #b { position: fixed; left: 0; top: 0; right: 0; bottom: 0; margin: 0; padding: 0; border: 0;
+       background: #ffffff; }
+  #b svg { position: absolute; left: 10%; top: 10%; width: 80%; height: 80%; }
+  /* CH2.E19: the icon's colour comes from an author rule on the button's
+     :hover, as a toolbar icon's does. */
+  #b svg path { fill: #ff0000; }
+  #b:hover svg path { fill: #00ff00; }
+</style>
+<button id="b"><svg viewBox="0 0 10 10" preserveAspectRatio="none"><path d="M0 0H10V10H0Z"/></svg></button>
+<script>
+  function beacon(name) { fetch('/beacon?' + name).catch(function () {}); }
+  document.getElementById('b').addEventListener('mouseover', function () { beacon('e19-mouseover'); });
+</script>
