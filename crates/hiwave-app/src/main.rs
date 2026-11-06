@@ -321,8 +321,8 @@ enum UserEvent {
     InspectorConsoleEval { code: String },
 }
 
-/// The browser chrome's view: the WebKit view today; a RustKit view behind
-/// `HIWAVE_RUSTKIT_CHROME` (CH3.A2). The app only runs script in it and
+/// The browser chrome's view: a RustKit view by default on macOS (CH3.A2,
+/// CH3.A5a); the WebKit view with `HIWAVE_RUSTKIT_CHROME=0`. The app only runs script in it and
 /// places it.
 trait ChromeUi {
     /// Run `js` in the chrome's document, without waiting for its value.
@@ -352,8 +352,8 @@ impl ChromeUi for WebView {
     }
 }
 
-/// The chrome's view as built: WebKit, or RustKit with
-/// `HIWAVE_RUSTKIT_CHROME=1` (macOS, content thread on; CH3.A2).
+/// The chrome's view as built: RustKit by default (macOS, content thread
+/// on; CH3.A2, CH3.A5a), or WebKit with `HIWAVE_RUSTKIT_CHROME=0`.
 enum ChromeView {
     WebKit(WebView),
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
@@ -371,10 +371,10 @@ type PanelView = ChromeView;
 const LAZY_PANEL_HELD_MAX: usize = 256;
 
 /// A panel's view, built when the panel first opens (CH3.A4b): with
-/// `HIWAVE_RUSTKIT_CHROME=1` the shelf and the Inspector were RustKit views
+/// the RustKit chrome the shelf and the Inspector were RustKit views
 /// from launch, two engine threads and ~40 MB for panels most sessions never
-/// open. Once built it stays, hidden when the panel closes. Flag off the
-/// WebKit view is built at launch, as before (`built`).
+/// open. Once built it stays, hidden when the panel closes. With
+/// `HIWAVE_RUSTKIT_CHROME=0` the WebKit view is built at launch (`built`).
 struct LazyPanel<V = PanelView> {
     view: std::cell::OnceCell<V>,
     /// Scripts run on it before it was built, oldest first.
@@ -490,7 +490,7 @@ fn log_ipc(what: &str, body: &str) {
 }
 
 /// `HIWAVE_RUSTKIT_CHROME_EVAL`, the script the real-window checks run in
-/// the RustKit chrome once it boots: only with the flag on and
+/// the RustKit chrome once it boots: only with the RustKit chrome and
 /// `HIWAVE_TEST_HOOKS=1` as well (#907 R1 nit 2), so a release build does
 /// not run a script from the environment in the privileged chrome.
 #[cfg_attr(not(all(target_os = "macos", feature = "rustkit")), allow(dead_code))]
@@ -592,17 +592,37 @@ window.__hiwaveOutsideClick = function () {
 };
 "#;
 
-/// `HIWAVE_RUSTKIT_CHROME=1`: the chrome is a RustKit view (CH3.A2). Needs
-/// the content thread, which is where a RustKit view's IPC arrives from.
+/// The chrome is a RustKit view (CH3.A2), the default on macOS since
+/// CH3.A5a; `HIWAVE_RUSTKIT_CHROME=0` keeps the WebKit chrome. Needs the
+/// content thread, which is where a RustKit view's IPC arrives from, so
+/// `HIWAVE_CONTENT_THREAD=0` also gives the WebKit chrome.
 fn rustkit_chrome_enabled() -> bool {
     cfg!(all(target_os = "macos", feature = "rustkit"))
         && rustkit_chrome_flag(std::env::var("HIWAVE_RUSTKIT_CHROME").ok().as_deref())
         && rustkit_engine::content_thread_enabled()
 }
 
-/// What `HIWAVE_RUSTKIT_CHROME` asks for (`None` when unset).
+/// What `HIWAVE_RUSTKIT_CHROME` asks for (`None` when unset): on unless
+/// it is `0`, `false` or `off` (CH3.A5a, the escape hatch).
 fn rustkit_chrome_flag(value: Option<&str>) -> bool {
-    value == Some("1")
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off")
+    )
+}
+
+/// The startup line naming the chrome backend (CH3.A5a).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn chrome_backend_line(rustkit_build: bool, flag: Option<&str>, content_thread: bool) -> String {
+    if !rustkit_build {
+        "Chrome: WebKit (no RustKit in this build)".to_string()
+    } else if !rustkit_chrome_flag(flag) {
+        "Chrome: WebKit (HIWAVE_RUSTKIT_CHROME=0)".to_string()
+    } else if !content_thread {
+        "Chrome: WebKit (the RustKit chrome needs the content thread; HIWAVE_CONTENT_THREAD is off)".to_string()
+    } else {
+        "Chrome: RustKit (default; HIWAVE_RUSTKIT_CHROME=0 for the WebKit chrome)".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +645,15 @@ mod rustkit_chrome_flag_tests {
             assert!(!rustkit_chrome_flag(Some(v)), "{v:?} must turn the RustKit chrome off");
         }
     }
+
+    #[test]
+    fn the_startup_line_names_the_chrome_backend() {
+        use super::chrome_backend_line;
+        assert!(chrome_backend_line(true, None, true).starts_with("Chrome: RustKit"));
+        assert!(chrome_backend_line(true, Some("0"), true).starts_with("Chrome: WebKit (HIWAVE_RUSTKIT_CHROME=0)"));
+        assert!(chrome_backend_line(true, None, false).contains("content thread"));
+        assert!(chrome_backend_line(false, None, true).starts_with("Chrome: WebKit"));
+    }
 }
 
 /// The chrome document for a RustKit view: the bridge and the outside-click
@@ -646,7 +675,7 @@ fn load_app_document(view: &webview_rustkit::RustKitView, document: &str) -> hiw
 /// The alpha route of the RustKit chrome over the page (CH3.A3c,
 /// `trench/chrome/A3-composition.md`): the chrome's surface is transparent
 /// and its pixels decide what covers the page. On with
-/// `HIWAVE_RUSTKIT_CHROME=1` unless `HIWAVE_RUSTKIT_CHROME_ALPHA=0`, which
+/// the RustKit chrome unless `HIWAVE_RUSTKIT_CHROME_ALPHA=0`, which
 /// keeps #925's opaque surface and mask (for comparison).
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 fn rustkit_chrome_alpha() -> bool {
@@ -862,7 +891,7 @@ fn panel_probe_script() -> String {
     String::new()
 }
 
-/// With `HIWAVE_RUSTKIT_CHROME=1`, a panel (the shelf, the Inspector, the
+/// With the RustKit chrome (the default; CH3.A5a), a panel (the shelf, the Inspector, the
 /// settings window's page; CH3.A4) is a RustKit view in `window` at `rect`,
 /// loading `html` with the bridge first, as the WebKit view ran it. `None`
 /// otherwise: the caller builds the WebKit view, as before.
@@ -883,7 +912,7 @@ fn rustkit_panel(window: &tao::window::Window, rect: Rect, html: &str, name: &st
             .unwrap_or_else(|e| panic!("Failed to create the RustKit {name} view: {e}"));
         load_app_document(&view, &html_with_bridge(html, &panel_probe_script()))
             .unwrap_or_else(|e| panic!("Failed to load the {name} into RustKit: {e}"));
-        info!("HIWAVE_RUSTKIT_CHROME=1: the {} is a RustKit view", name);
+        info!("RustKit chrome: the {} is a RustKit view", name);
         let panel = PanelView::RustKit(view);
         panel.place(rect);
         return Some(panel);
@@ -1936,7 +1965,7 @@ fn wheel_starts_burst(target: InputTarget) -> bool {
 }
 
 /// Which RustKit view an input event is for: the page, or the browser's
-/// own chrome (`HIWAVE_RUSTKIT_CHROME=1`, CH3.A2).
+/// own chrome (the RustKit chrome, CH3.A2; the default since CH3.A5a).
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputTarget {
@@ -2680,6 +2709,15 @@ fn main() {
             "off (HIWAVE_CONTENT_THREAD)"
         }
     );
+    #[cfg(target_os = "macos")]
+    info!(
+        "{}",
+        chrome_backend_line(
+            cfg!(all(target_os = "macos", feature = "rustkit")),
+            std::env::var("HIWAVE_RUSTKIT_CHROME").ok().as_deref(),
+            rustkit_engine::content_thread_enabled(),
+        )
+    );
 
     // Initialize application state
     let state = match AppState::with_defaults() {
@@ -2821,7 +2859,7 @@ fn main() {
 
     #[cfg(all(target_os = "macos", feature = "rustkit"))]
     let rustkit_chrome = if rustkit_chrome_enabled() {
-        info!("HIWAVE_RUSTKIT_CHROME=1: the chrome is a RustKit view");
+        info!("RustKit chrome: the chrome is a RustKit view");
         let bounds = rustkit_viewhost::Bounds::new(
             chrome_bounds.position.to_logical::<f64>(1.0).x as i32,
             chrome_bounds.position.to_logical::<f64>(1.0).y as i32,
@@ -3351,7 +3389,7 @@ fn main() {
     // === SHELF WEBVIEW (created third, at bottom) ===
     let shelf_proxy = proxy.clone();
     let shelf_state = Arc::clone(&state);
-    // With HIWAVE_RUSTKIT_CHROME=1 the shelf and the Inspector are RustKit
+    // With the RustKit chrome (the default) the shelf and the Inspector are RustKit
     // views built when they first open (CH3.A4b, `apply_layout`).
     let shelf_webview = if rustkit_chrome_enabled() { LazyPanel::deferred(SHELF_HTML, "shelf") } else { LazyPanel::built(PanelView::WebKit(WebViewBuilder::new()
         .with_html(SHELF_HTML)
