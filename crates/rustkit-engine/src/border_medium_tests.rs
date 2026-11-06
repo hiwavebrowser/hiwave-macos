@@ -6,6 +6,8 @@
 //! `BorderStyle` is `Solid` (so a bare `border: 2px` paints), so an unset
 //! width cannot start at 3px; an explicit style on a side whose width is
 //! still unset (`Length::Zero`; an authored `0` is `Px(0.0)`) takes medium.
+//! Not on input/textarea/button/select, whose UA border lives in layout
+//! (R1 hold): there `border-style` keeps the UA width, as in Chromium.
 //!
 //! `tools/parity_oracle/border_medium_cases.json`, Chromium 143.0.7499.4
 //! (`grid_flexible_row_log.mjs --file border_medium_cases.json --write`).

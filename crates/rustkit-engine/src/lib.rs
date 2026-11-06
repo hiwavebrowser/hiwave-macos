@@ -13215,6 +13215,7 @@ impl layout_ctx::LayoutCtx {
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
+        let _ua_control_border = UaControlBorderScope::enter(tag_name);
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
         // CSS Display 3: the initial value of `display` is `inline`.
@@ -13524,9 +13525,22 @@ impl layout_ctx::LayoutCtx {
             }
             // Horizontal rule
             "hr" => {
+                // Chromium's UA `hr { border-style: inset; border-width: 1px;
+                // color: gray }`: 1px on EVERY side (a bare hr is 2px tall in
+                // Chromium 143). Only the top was set, so the other sides were
+                // unset and `hr { border-style: solid }` took medium there
+                // (CH2.B18 R1: 1/3/3/3, height 4). Inset paints as solid here.
                 style.display = rustkit_css::Display::Block;
-                style.border_top_width = rustkit_css::Length::Px(1.0);
-                style.border_top_color = rustkit_css::Color::new(128, 128, 128, 1.0);
+                let one = rustkit_css::Length::Px(1.0);
+                let gray = rustkit_css::Color::new(128, 128, 128, 1.0);
+                style.border_top_width = one.clone();
+                style.border_right_width = one.clone();
+                style.border_bottom_width = one.clone();
+                style.border_left_width = one;
+                style.border_top_color = gray;
+                style.border_right_color = gray;
+                style.border_bottom_color = gray;
+                style.border_left_color = gray;
                 style.margin_top = rustkit_css::Length::Px(8.0); // 0.5em
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
             }
@@ -23190,12 +23204,45 @@ fn parse_border_widths(
     }
 }
 
+thread_local! {
+    /// Set while the element being cascaded is a form control whose UA
+    /// border lives in layout, not in its style (`medium_if_unset`).
+    static UA_CONTROL_BORDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds `UA_CONTROL_BORDER` for one element's cascade and restores the
+/// previous value on drop (every return path, and a nested cascade).
+struct UaControlBorderScope(bool);
+
+impl UaControlBorderScope {
+    fn enter(tag_name: &str) -> Self {
+        let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
+        Self(UA_CONTROL_BORDER.with(|c| c.replace(control)))
+    }
+}
+
+impl Drop for UaControlBorderScope {
+    fn drop(&mut self) {
+        UA_CONTROL_BORDER.with(|c| c.set(self.0));
+    }
+}
+
 /// CH2.B18 (1): a side given a style keeps its width, or takes `medium`
 /// (3px, the initial `border-width`) when no width was declared. The
 /// initial `BorderStyle` is `Solid`, so the unset width (`Length::Zero`;
 /// an authored `0` is `Px(0.0)`) can't start at 3px itself. `none` sides
 /// are zeroed after the cascade (`zero_width_of_borderless_sides`).
+///
+/// Not on `input`, `textarea`, `button` or `select` (R1 hold on #950): their
+/// UA border (2/1/2/1 px in Chromium 143) is not in the style. Layout reads
+/// an unset width on a control as "the UA border"
+/// (`form_control_intrinsic_size`'s calibrated blobs,
+/// `content_box_control_extra`), so `border-style: solid` keeps it, as in
+/// Chromium, instead of adding 3px on top.
 fn medium_if_unset(width: &mut rustkit_css::Length, side_style: rustkit_css::BorderStyle) {
+    if UA_CONTROL_BORDER.with(std::cell::Cell::get) {
+        return;
+    }
     if side_style != rustkit_css::BorderStyle::None && *width == rustkit_css::Length::Zero {
         *width = rustkit_css::Length::Px(3.0);
     }
