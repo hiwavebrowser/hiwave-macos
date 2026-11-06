@@ -104,44 +104,27 @@ pub struct GradientPipeline {
     pub max_stops: usize,
 }
 
-/// Filter parameters uniform structure (must match WGSL).
-/// Uses explicit padding to avoid vec3 alignment issues.
-/// Total size: 32 bytes (8 f32 values)
+/// One `backdrop_filter.wgsl` pass's parameters (its `Params`): read
+/// `size` pixels of the input from `origin`, blur by `sigma` out to
+/// `radius`, or run the matrix (rows of the first four columns, then the
+/// offsets). 112 bytes.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct FilterParams {
-    pub blur_radius: f32,
-    pub filter_type: u32,
-    pub filter_amount: f32,
-    pub texture_width: f32,
-    pub texture_height: f32,
-    pub _padding0: f32,
-    pub _padding1: f32,
-    pub _padding2: f32,
-}
-
-impl Default for FilterParams {
-    fn default() -> Self {
-        Self {
-            blur_radius: 0.0,
-            filter_type: 0,
-            filter_amount: 1.0,
-            texture_width: 0.0,
-            texture_height: 0.0,
-            _padding0: 0.0,
-            _padding1: 0.0,
-            _padding2: 0.0,
-        }
-    }
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BackdropParams {
+    pub origin: [i32; 2],
+    pub size: [i32; 2],
+    pub sigma: f32,
+    pub radius: i32,
+    pub _pad: [f32; 2],
+    pub rows: [[f32; 4]; 5],
 }
 
 /// Backdrop filter pipelines and resources.
 pub struct BackdropFilterPipelines {
     pub blur_h_pipeline: wgpu::ComputePipeline,
     pub blur_v_pipeline: wgpu::ComputePipeline,
-    pub color_filter_pipeline: wgpu::ComputePipeline,
+    pub color_matrix_pipeline: wgpu::ComputePipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
-    pub uniform_buffer: wgpu::Buffer,
 }
 
 /// Create the backdrop filter compute pipelines.
@@ -217,29 +200,20 @@ pub fn create_backdrop_filter_pipelines(device: &wgpu::Device) -> BackdropFilter
         cache: None,
     });
 
-    let color_filter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Color Filter Pipeline"),
+    let color_matrix_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Backdrop Color Matrix Pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: Some("apply_color_filter"),
+        entry_point: Some("color_matrix"),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
-    });
-
-    // Create uniform buffer for filter parameters
-    let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Filter Params Buffer"),
-        size: std::mem::size_of::<FilterParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     });
 
     BackdropFilterPipelines {
         blur_h_pipeline,
         blur_v_pipeline,
-        color_filter_pipeline,
+        color_matrix_pipeline,
         bind_group_layout,
-        uniform_buffer,
     }
 }
 

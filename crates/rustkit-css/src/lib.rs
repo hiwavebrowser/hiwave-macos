@@ -646,38 +646,6 @@ pub const STACKS_CONTENT_VISIBILITY: u8 = 64;
 /// `ComputedStyle::stacks`: a `view-transition-name` other than `none` or `auto`.
 pub const STACKS_VIEW_TRANSITION: u8 = 128;
 
-/// A filter function that can be applied to the backdrop.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BackdropFilter {
-    /// No backdrop filter.
-    #[default]
-    None,
-    /// Gaussian blur with the specified radius in pixels.
-    Blur(f32),
-    /// Grayscale filter (0.0 = no effect, 1.0 = fully grayscale).
-    Grayscale(f32),
-    /// Brightness adjustment (1.0 = no change).
-    Brightness(f32),
-    /// Contrast adjustment (1.0 = no change).
-    Contrast(f32),
-    /// Saturate adjustment (1.0 = no change, 0.0 = grayscale, >1 = oversaturated).
-    Saturate(f32),
-    /// Sepia filter (0.0 = no effect, 1.0 = fully sepia).
-    Sepia(f32),
-}
-
-impl BackdropFilter {
-    /// Check if this filter has any effect.
-    pub fn is_none(&self) -> bool {
-        matches!(self, BackdropFilter::None)
-    }
-
-    /// Check if this filter requires blur (most expensive operation).
-    pub fn needs_blur(&self) -> bool {
-        matches!(self, BackdropFilter::Blur(r) if *r > 0.0)
-    }
-}
-
 /// Position along a gradient stop.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StopPosition {
@@ -3246,8 +3214,11 @@ pub struct ComputedStyle {
     // Box shadows (multiple shadows supported)
     pub box_shadows: Vec<BoxShadow>,
 
-    // Backdrop filter (blur, grayscale, etc.)
-    pub backdrop_filter: BackdropFilter,
+    /// `backdrop-filter` (Filter Effects 2 §3) as declared, lowercased;
+    /// empty is `none`. Only a valid list is kept (an invalid declaration
+    /// leaves the earlier one). Paint reads its steps through
+    /// `rustkit_layout::filter_steps`. Not inherited.
+    pub backdrop_filter: String,
     /// `filter` (Filter Effects 1 §5) as declared, lowercased; empty is
     /// `none`. Paint reads the colour-matrix functions from it
     /// (`rustkit_layout::filter_color_matrix`). Not inherited.

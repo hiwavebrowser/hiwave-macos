@@ -28,7 +28,7 @@ pub mod table;
 pub mod text;
 
 mod filter;
-pub use filter::{filter_color_matrix, ColorMatrix as FilterColorMatrix};
+pub use filter::{filter_color_matrix, filter_steps, ColorMatrix as FilterColorMatrix, FilterStep};
 #[cfg(test)]
 mod box_opacity_tests;
 
@@ -8655,8 +8655,14 @@ pub enum DisplayCommand {
         rect: Rect,
         /// Border radius for clipping.
         border_radius: BorderRadius,
-        /// The filter to apply.
-        filter: rustkit_css::BackdropFilter,
+        /// The filter list's steps, in order; never empty.
+        steps: Vec<FilterStep>,
+        /// How many groups (`PushOpacity` / `PushFilter`) the box itself
+        /// opened before this command. The backdrop is what is painted
+        /// below them (Filter Effects 2 §3: up to the backdrop root); the
+        /// filtered backdrop is drawn inside them, so the box's opacity
+        /// fades it with the box, as in Chromium.
+        own_groups: u8,
     },
     /// Draw a linear gradient.
     LinearGradient {
@@ -10032,6 +10038,10 @@ impl DisplayList {
             .filter(|commands| !commands.is_empty())
             .map(|commands| PendingOutline { clips: self.escapable_clips.clone(), commands });
 
+        // `backdrop-filter`: the content behind the box is filtered within
+        // its border box before the box paints over it.
+        self.backdrop_filter(layout_box, fades as u8 + filter_matrix.is_some() as u8);
+
         // Render this box
         self.render_box_content(layout_box);
 
@@ -10561,6 +10571,35 @@ impl DisplayList {
         }
     }
 
+    /// The `BackdropFilter` command of a box with a `backdrop-filter`
+    /// that paints something. A hidden box and a text run paint none.
+    fn backdrop_filter(&mut self, layout_box: &LayoutBox, own_groups: u8) {
+        let s = &layout_box.style;
+        if s.backdrop_filter.is_empty()
+            || s.visibility != rustkit_css::Visibility::Visible
+            || matches!(layout_box.box_type, BoxType::Text(_))
+        {
+            return;
+        }
+        let font_px = match s.font_size {
+            Length::Px(px) => px,
+            _ => 16.0,
+        };
+        let Some(steps) = filter_steps(&s.backdrop_filter, font_px, self.root_font_size) else {
+            return;
+        };
+        let rect = layout_box.dimensions.border_box();
+        if steps.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        self.commands.push(DisplayCommand::BackdropFilter {
+            rect,
+            border_radius: self.border_radius_px(layout_box),
+            steps,
+            own_groups,
+        });
+    }
+
     /// Render box shadows (must be called before background).
     fn render_box_shadows(&mut self, layout_box: &LayoutBox) {
         if layout_box.style.box_shadows.is_empty() {
@@ -11063,16 +11102,6 @@ impl DisplayList {
 
         // Use clip_rect for painting (not border_rect) to ensure proper bounds
         let paint_rect = clip_rect;
-
-        // Step 0: Apply backdrop-filter if set (must be done BEFORE any background painting)
-        // Backdrop filter applies to pixels that are already rendered behind this element
-        if !s.backdrop_filter.is_none() {
-            self.commands.push(DisplayCommand::BackdropFilter {
-                rect: paint_rect,
-                border_radius: radius,
-                filter: s.backdrop_filter,
-            });
-        }
 
         // Step 1: Paint solid background color FIRST (bottom layer)
         // This must be painted even if there's a gradient, as the gradient may be semi-transparent
