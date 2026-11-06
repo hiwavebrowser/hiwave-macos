@@ -1479,6 +1479,22 @@ impl RustKitView {
         }
     }
 
+    /// Draw this view as a transparent surface (CH3.A3c, the alpha route):
+    /// its layer is not opaque, its frames clear to (0, 0, 0, 0) with
+    /// premultiplied colour, and its region (`compose_region`) is its hit
+    /// region only, not a mask, so its pixels decide what covers the view
+    /// below. The frame on screen is drawn again at once.
+    pub fn set_transparent(&self, transparent: bool) {
+        if let Some(surface) = &self.surface {
+            if let Err(error) = surface.borrow_mut().set_transparent(transparent) {
+                warn!(%error, "transparent surface not cleared");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        rustkit_viewhost::set_raw_view_transparent(self.host_view, transparent);
+        self.present_latest();
+    }
+
     /// Whether this view's frame on screen paints anything over its hole
     /// (an open chrome popup over the page).
     pub fn region_has_overlays(&self) -> bool {

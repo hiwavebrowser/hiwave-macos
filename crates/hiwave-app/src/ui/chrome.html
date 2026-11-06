@@ -146,6 +146,40 @@
             display: flex;
         }
 
+        /* CH3.A3c (the alpha route): the RustKit chrome is a transparent
+           surface over the page; the app marks its document with
+           data-rustkit-alpha. The body paints nothing, so the page column
+           shows the page; the tab strip, toolbar, sidebars, panels and
+           popups keep their own backgrounds. The WebKit chrome never has
+           the attribute. */
+        html[data-rustkit-alpha],
+        html[data-rustkit-alpha] body {
+            background: transparent;
+        }
+
+        /* The body's colour above the page column, where the tab strip and
+           toolbar do not reach (the app's chrome height is a few px taller
+           than they are). 104px is the app's default chrome height; the app
+           restates the height in a #rustkitPageTop style when the page
+           column's top moves. An element, not body::before: RustKit does
+           not resolve var() on pseudo-elements yet. Never shown in the
+           WebKit chrome. */
+        .rustkit-page-band {
+            display: none;
+        }
+
+        html[data-rustkit-alpha] .rustkit-page-band {
+            display: block;
+            position: fixed;
+            left: 0;
+            top: 0;
+            right: 0;
+            height: 104px;
+            background: var(--bg-primary);
+            z-index: -1;
+            pointer-events: none;
+        }
+
         .context-menu {
             position: absolute;
             z-index: 9999;
@@ -3567,6 +3601,7 @@
     </style>
 </head>
 <body>
+    <div class="rustkit-page-band" aria-hidden="true"></div>
     <!-- Focus Mode Progress Bar -->
     <div class="focus-progress-bar" id="focusProgressBar">
         <div class="progress-fill" id="focusProgressFill"></div>

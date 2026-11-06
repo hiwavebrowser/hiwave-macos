@@ -313,6 +313,8 @@ pub use painted_region::{painted_boxes, BACKDROP_COVER};
 pub use rustkit_layout::Rect as PaintRect;
 #[cfg(test)]
 mod painted_region_tests;
+#[cfg(test)]
+mod transparent_frame_tests;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use presenter::WindowSurface;
 mod page_protocol;
@@ -19776,6 +19778,29 @@ impl Engine {
                 .note_render_result(id, &result);
         }
         drawn
+    }
+
+    /// Draw view `id` as a transparent surface (CH3.A3c): its frames clear
+    /// to (0, 0, 0, 0), not to the page's canvas, so whatever its document
+    /// does not paint shows the views below it; colour is premultiplied.
+    /// The RustKit chrome stacked over the page sets this. Off by default.
+    pub fn set_view_transparent(&mut self, id: EngineViewId, transparent: bool) -> Result<(), EngineError> {
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        let viewhost_id = view.viewhost_id;
+        view.presented = None;
+        if let Some(presenter) = self.presenter.as_mut() {
+            presenter.set_transparent(viewhost_id, transparent);
+        }
+        Ok(())
+    }
+
+    /// Render view `id` and read its headless texture back as RGBA, alpha
+    /// kept (tests).
+    #[cfg(test)]
+    pub(crate) fn frame_rgba(&mut self, id: EngineViewId) -> Result<(u32, u32, Vec<u8>), EngineError> {
+        self.render(id)?;
+        let viewhost_id = self.views.get(&id).ok_or(EngineError::ViewNotFound(id))?.viewhost_id;
+        self.presenter.as_ref().unwrap().read_headless_rgba(viewhost_id)
     }
 
     /// Capture a frame from a view to a PPM file.
