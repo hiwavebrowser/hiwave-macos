@@ -568,6 +568,13 @@ mod render_no_clone_tests;
 #[cfg(all(test, feature = "headless"))]
 mod hover_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inline_svg_prepass_tests;
+#[cfg(test)]
+thread_local! {
+    /// Inline svg markups serialized on this thread (LAT4b's tests).
+    pub(crate) static INLINE_SVG_MARKUP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
 #[cfg(all(test, feature = "headless"))]
 mod mouse_surface_tests;
@@ -8956,6 +8963,7 @@ impl Engine {
             view.last_dirty = Some(dirty);
             view.relayout_stats.record(&causes, tree_reused, took_ms);
             view.relayout_stats.last_build_ms = stages.build;
+            view.relayout_stats.last_svg_ms = stages.svg;
             view.inspector.relayout(causes.first.as_ref(), took_ms);
             if layout_skipped {
                 view.relayout_stats.layouts_skipped =
@@ -9006,8 +9014,11 @@ impl Engine {
         // Inline <svg> subtrees parse into svg_cache before the tree build,
         // which only looks the documents up; the author paint declarations
         // go first, since they are part of the markup that is parsed.
-        self.cache_svg_paint_styles(&document, id, Some((bounds.width as f32, bounds.height as f32)));
-        self.lctx.cache_inline_svgs(&document);
+        {
+            let _svg = relayout_cause::time_stage(relayout_cause::Stage::Svg);
+            self.cache_svg_paint_styles(&document, id, Some((bounds.width as f32, bounds.height as f32)));
+            self.lctx.cache_inline_svgs(&document);
+        }
 
         // Get external stylesheets from view state
         let external_stylesheets = self
@@ -16524,6 +16535,8 @@ impl Engine {
     /// `inline_svg_markup`, with author paint declarations written into the
     /// elements `paint` names (`serialize_svg_subtree_with`).
     fn inline_svg_markup_with(svg: &Rc<Node>, paint: &HashMap<usize, SvgPaintStyle>) -> String {
+        #[cfg(test)]
+        INLINE_SVG_MARKUP_BUILDS.with(|n| n.set(n.get() + 1));
         fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
             f(node);
             for child in node.children() {
