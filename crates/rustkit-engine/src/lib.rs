@@ -416,6 +416,8 @@ mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
 #[cfg(all(test, feature = "headless"))]
+mod pseudo_custom_props_var_tests;
+#[cfg(all(test, feature = "headless"))]
 mod keyframes_opacity_tests;
 #[cfg(all(test, feature = "headless"))]
 mod float_margin_tests;
