@@ -434,6 +434,12 @@ mod color_shorthand_keep_tests;
 mod depth_perspective_refuse_tests;
 #[cfg(test)]
 mod outline_apply_tests;
+#[cfg(test)]
+mod computed_read_unit_tests;
+#[cfg(test)]
+mod redirect_url_tests;
+#[cfg(test)]
+mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -5880,9 +5886,12 @@ impl Engine {
         if let Some(view) = self.views.get_mut(&id) {
             for (index, sheet) in late_sheets {
                 let Some(sheet) = sheet else { continue };
-                let at = view.external_sheet_slots.partition_point(|&slot| slot < index);
-                view.external_sheet_slots.insert(at, index);
-                Rc::make_mut(&mut view.external_stylesheets).insert(at, sheet);
+                insert_sheet_at_document_order(
+                    &mut view.external_sheet_slots,
+                    Rc::make_mut(&mut view.external_stylesheets),
+                    index,
+                    sheet,
+                );
                 sheets_arrived += 1;
             }
         }
@@ -8075,18 +8084,15 @@ impl Engine {
         // keeps the request's fragment when the last hop has none). Until
         // S1 the requested URL was committed, so every relative URL on
         // www.gmail.com's sign-in page was asked of www.gmail.com.
-        let url = if response.url != url && !response.redirect_chain.is_empty() {
-            let mut last = response.url.clone();
-            if last.fragment().is_none() {
-                last.set_fragment(url.fragment());
-            }
-            debug!(?id, from = %url, to = %last, "Navigation redirected");
-            if let Some(view) = self.views.get_mut(&id) {
-                view.navigation.redirected_to(last.clone());
+        let url = {
+            let last = url_after_redirects(&url, &response.url, !response.redirect_chain.is_empty());
+            if last != url {
+                debug!(?id, from = %url, to = %last, "Navigation redirected");
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.navigation.redirected_to(last.clone());
+                }
             }
             last
-        } else {
-            url
         };
 
         let status = response.status;
@@ -25047,6 +25053,34 @@ fn compose_affine(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
         outer[0] * inner[4] + outer[2] * inner[5] + outer[4],
         outer[1] * inner[4] + outer[3] * inner[5] + outer[5],
     ]
+}
+
+/// The document URL after a navigate response (HTML + Fetch fragment rule):
+/// the last hop wins when there was a redirect; the request's fragment is
+/// kept when the last hop has none. No redirect leaves the request alone.
+pub(crate) fn url_after_redirects(requested: &Url, response_url: &Url, had_redirects: bool) -> Url {
+    if response_url != requested && had_redirects {
+        let mut last = response_url.clone();
+        if last.fragment().is_none() {
+            last.set_fragment(requested.fragment());
+        }
+        last
+    } else {
+        requested.clone()
+    }
+}
+
+/// Insert a late external stylesheet at its document-order slot (Z row S6).
+/// `slots` and `sheets` stay the same length and the same order.
+pub(crate) fn insert_sheet_at_document_order<T>(
+    slots: &mut Vec<usize>,
+    sheets: &mut Vec<T>,
+    index: usize,
+    sheet: T,
+) {
+    let at = slots.partition_point(|&slot| slot < index);
+    slots.insert(at, index);
+    sheets.insert(at, sheet);
 }
 
 /// The list the window drew for a page scrolled by `scroll_offset`, until
