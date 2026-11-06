@@ -96,6 +96,10 @@ pub struct RustKitView {
     chrome_updates: RefCell<ChromeUpdates>,
     /// What the page posted on `window.ipc`, in order (CH2.E9).
     ipc_inbox: RefCell<Vec<String>>,
+    /// CH3.A7: the app owns this view (its chrome, a panel), so the
+    /// documents it loads with `load_html_internal` get the app bridge.
+    /// A content view never does.
+    app_owned: Cell<bool>,
     /// Current zoom level.
     zoom_level: RefCell<f64>,
     /// Visibility state.
@@ -347,7 +351,7 @@ impl RustKitView {
     /// A content view on the content thread, with no window (tests). There
     /// is no surface, so nothing is presented.
     #[cfg(test)]
-    fn headless_content(bounds: Bounds) -> Self {
+    pub(crate) fn headless_content(bounds: Bounds) -> Self {
         let thread = ContentThread::spawn(content_engine_builder(), bounds).expect("content thread");
         Self::from_parts(None, None, Some(thread), None, None, None, 0)
     }
@@ -379,6 +383,7 @@ impl RustKitView {
             current_title: RefCell::new(None),
             chrome_updates: RefCell::new(ChromeUpdates::default()),
             ipc_inbox: RefCell::new(Vec::new()),
+            app_owned: Cell::new(false),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
             loading: RefCell::new(false),
@@ -707,6 +712,24 @@ impl RustKitView {
     /// Content thread only (the flag-off engine owns its host view).
     pub fn input_view(&self) -> Option<rustkit_viewhost::ViewId> {
         self.surface.as_ref().map(|surface| surface.borrow().viewhost_id())
+    }
+
+    /// CH3.A7: make this an app-owned view (the chrome, the shelf, the
+    /// Inspector, the settings page): the documents the app loads into it
+    /// from now on get `window.ipc` and `window.hiwaveChrome`. Call it
+    /// before the first load. A web content view is never marked.
+    pub fn set_app_owned(&self) {
+        self.app_owned.set(true);
+        if let Some(thread) = &self.content {
+            thread.set_app_owned(true);
+        } else {
+            self.submit(PageCmd::SetAppOwned { owned: true });
+        }
+    }
+
+    /// Whether [`Self::set_app_owned`] made this an app-owned view.
+    pub fn is_app_owned(&self) -> bool {
+        self.app_owned.get()
     }
 
     /// The messages the page posted with `window.ipc.postMessage` since
@@ -2038,6 +2061,8 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     #[test]
     fn content_thread_the_window_takes_what_the_page_posts_on_window_ipc() {
         let view = content_view();
+        // The chrome's view is app-owned (CH3.A7).
+        view.set_app_owned();
         view.load_html_internal(
             "<p>chrome</p><script>window.ipc.postMessage(JSON.stringify({cmd: 'navigate', url: 'https://example.com/'}));\
              window.ipc.postMessage({cmd: 'get_version'});</script>",
@@ -2057,6 +2082,62 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
                 r#"{"cmd":"navigate","url":"https://example.com/"}"#.to_string(),
                 r#"{"cmd":"get_version"}"#.to_string(),
             ]
+        );
+    }
+
+    /// CH3.A7: a page is not told about the app bridge. Its own script
+    /// reads `typeof window.ipc` and `typeof window.hiwaveChrome` while it
+    /// loads; Chromium 143 answers `undefined,undefined`.
+    const BRIDGE_PROBE: &str = "<script>document.title = \
+        typeof window.ipc + ',' + typeof window.hiwaveChrome;</script>";
+
+    #[test]
+    fn content_thread_a_web_document_sees_no_app_bridge() {
+        let view = content_view();
+        assert!(!view.is_app_owned(), "a content view is not app-owned");
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while view.latest_commit.borrow().is_none() {
+            assert!(Instant::now() < deadline, "the document never committed");
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut rx = view.devtools_eval("document.title", Instant::now() + Duration::from_secs(10));
+        let title = loop {
+            assert!(Instant::now() < deadline, "the page never answered");
+            if let Ok(answer) = rx.try_recv() {
+                break answer;
+            }
+            wake(&view);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            title.as_deref().is_ok_and(|t| t.contains("undefined,undefined")),
+            "{title:?}"
+        );
+        assert!(view.take_ipc_messages().is_empty());
+    }
+
+    #[test]
+    fn a_flag_off_web_document_sees_no_app_bridge() {
+        let view = view();
+        assert!(!view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("undefined,undefined")"#)
+        );
+    }
+
+    #[test]
+    fn a_flag_off_app_owned_view_keeps_the_bridge() {
+        let view = view();
+        view.set_app_owned();
+        assert!(view.is_app_owned());
+        view.load_html_internal(BRIDGE_PROBE).unwrap();
+        assert_eq!(
+            view.execute_script_sync("document.title").as_deref(),
+            Some(r#"String("object,object")"#)
         );
     }
 

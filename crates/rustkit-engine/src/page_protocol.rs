@@ -104,6 +104,11 @@ pub enum PageCmd {
     },
     GrabKeyboard,
     Relayout,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Sent before
+    /// the view's first document; see [`crate::Engine::set_app_owned`].
+    SetAppOwned {
+        owned: bool,
+    },
     /// Test hook: the next JavaScript runtime uses this host re-entry cap.
     /// The frame cap and the operand-stack cap are not changed.
     SetHostReentry {
@@ -616,6 +621,9 @@ impl PageEndpoint {
             }
             PageCmd::SetHostReentry { limit } => {
                 self.engine.set_host_reentry_limit(limit);
+            }
+            PageCmd::SetAppOwned { owned } => {
+                self.engine.set_app_owned(self.view, owned);
             }
             PageCmd::InstallReentryProbe { reply } => {
                 let result = self

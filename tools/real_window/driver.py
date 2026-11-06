@@ -955,6 +955,24 @@ class Driver:
         time.sleep(3)
         self.expect(c, "the app is still running 3 s later", self.app.alive())
 
+    def a7_no_bridge_in_content(self):
+        """CH3.A7: a web page in the content view has no window.ipc / window.hiwaveChrome, flag off and flag on."""
+        c = "a7_no_bridge_in_content"
+        for label, env in (("flag off", None), ("flag on", {"HIWAVE_RUSTKIT_CHROME": "1"})):
+            if not self.open_page(c, "a7_bridge.html", env=env):
+                self.close_page()
+                continue
+            got = self.fixture.wait("beacon?a7-bridge=", 15, self.since)
+            seen = self.fixture.seen("a7-bridge=", self.since)
+            self.expect(c, "%s: the page's script ran and reported" % label, bool(got))
+            self.expect(c, "%s: the page sees typeof window.ipc, window.hiwaveChrome = undefined,undefined" % label,
+                        any("a7-bridge=undefined%2Cundefined" in r for r in seen), str(seen))
+            if env:
+                # The chrome, an app-owned view, keeps its bridge meanwhile.
+                ipc = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_sidebar_width"', 20)
+                self.expect(c, "%s: the chrome still posts get_sidebar_width" % label, bool(ipc))
+            self.close_page()
+
     def a2_chrome_navigate(self):
         """CH3.A2 3c: the address bar's navigate, run in the RustKit chrome, reaches the app and the page loads it."""
         c = "a2_chrome_navigate"
@@ -2268,7 +2286,7 @@ class Driver:
                     "page said saved: %s, file written: %s" % (said_saved, written))
 
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
-              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots",
+              "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
