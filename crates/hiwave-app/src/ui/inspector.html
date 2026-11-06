@@ -995,8 +995,11 @@
                     refreshBtn.style.display = 'none';
                     // Focus console input
                     setTimeout(() => consoleInput.focus(), 50);
-                    // Lines that came while another tab showed.
+                    // Lines that came while another tab showed. The
+                    // output was not laid out, so its scroll position
+                    // starts over.
                     consoleScrollDue = true;
+                    ownScrollTop = -1;
                     scheduleConsole();
                 }
             }
@@ -1090,13 +1093,22 @@
             // frame the new rows are appended in one fragment, and the
             // scroll (the one geometry read) happens only while the
             // Console tab is showing and the view was at the bottom.
+            //
+            // Whatever replaces the rows wholesale (a clear, another
+            // filter, a newer document turning earlier lines stale) bumps
+            // `consoleGeneration`; a frame that sees a generation other
+            // than the one its rows were built in builds them again from
+            // the buffer. A count cannot see a clear followed by as many
+            // new lines before the frame.
             let consoleDue = false;
+            let consoleGeneration = 0;  // bumped when the rows are replaced
+            let renderedGeneration = -1; // the generation the rows were built in
             let renderedRows = 0;       // rows of `consoleRows` now in the output
-            let renderedShape = null;   // what those rows were built against
+            let renderedView = null;    // filter, newest document, several documents
             let shownErrors = -1, shownWarnings = -1, shownEmpty = null;
             let consolePinned = true;   // follow the newest line
             let consoleScrollDue = false; // rows came since the last scroll
-            let ownScrollAt = -1e9;     // when we last scrolled it ourselves
+            let ownScrollTop = -1;      // where we last scrolled it; -1: no scroll to tell apart
 
             function scheduleConsole() {
                 if (consoleDue) return;
@@ -1124,20 +1136,28 @@
                 const rows = consoleRows(filteredEntries);
                 const docs = filteredEntries.map(e => e.doc).filter(d => d != null);
                 const newest = docs.length ? Math.max(...docs) : null;
-                const shape = consoleFilter + '|' + newest + '|' + docs.some(d => d !== newest);
+                const view = consoleFilter + '|' + newest + '|' + docs.some(d => d !== newest);
+                if (view !== renderedView) {
+                    // Another filter or a new document: earlier rows change.
+                    renderedView = view;
+                    consoleGeneration++;
+                }
                 const empty = filteredEntries.length === 0;
                 if (empty !== shownEmpty) {
                     shownEmpty = empty;
                     consoleEmpty.style.display = empty ? 'flex' : 'none';
                 }
                 let added = false;
-                if (shape !== renderedShape || rows.length < renderedRows) {
-                    // Another filter, a new document (earlier lines turn
-                    // stale) or a clear: build the rows again.
+                if (consoleGeneration !== renderedGeneration || rows.length < renderedRows) {
+                    // A clear, another filter or a new document (earlier
+                    // lines turn stale): build the rows again.
                     consoleOutput.querySelectorAll('.console-entry, .console-doc-divider').forEach(e => e.remove());
                     if (rows.length) consoleOutput.appendChild(rowsFragment(rows));
-                    renderedShape = shape;
+                    renderedGeneration = consoleGeneration;
                     renderedRows = rows.length;
+                    // The output shrank or changed: its scroll position
+                    // says nothing about the person until we scroll again.
+                    ownScrollTop = -1;
                     added = rows.length > 0;
                 } else if (rows.length > renderedRows) {
                     consoleOutput.appendChild(rowsFragment(rows.slice(renderedRows)));
@@ -1162,15 +1182,21 @@
             function followConsole() {
                 if (!consoleScrollDue || currentTab !== 'console' || !consolePinned) return;
                 consoleScrollDue = false;
-                ownScrollAt = Date.now();
                 consoleOutput.scrollTop = consoleOutput.scrollHeight;
+                ownScrollTop = consoleOutput.scrollTop;
             }
 
+            // Ours or the person's: by position, not by time. Our scroll's
+            // event comes later (from a timer), after more rows may have
+            // been appended, so it need not be at the bottom; but it is
+            // never above where we put the view. A scroll above that is
+            // the person's, and stops the following until they scroll
+            // back to the bottom.
             consoleOutput.addEventListener('scroll', () => {
-                // Our own scroll's event (it comes from a timer, and not
-                // at all when the view was already at the bottom).
-                if (Date.now() - ownScrollAt < 100) return;
-                consolePinned = consoleOutput.scrollHeight - consoleOutput.clientHeight - consoleOutput.scrollTop <= 4;
+                const top = consoleOutput.scrollTop;
+                if (consolePinned && top >= ownScrollTop - 1) return;
+                consolePinned = consoleOutput.scrollHeight - consoleOutput.clientHeight - top <= 4;
+                if (consolePinned) ownScrollTop = top;
             });
 
             document.addEventListener('visibilitychange', () => {
@@ -1192,6 +1218,7 @@
 
             function clearConsole() {
                 consoleEntries = [];
+                consoleGeneration++;
                 updateConsoleDisplay();
             }
 
@@ -1201,6 +1228,7 @@
                     document.querySelectorAll('.console-filter-btn').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
                     consoleFilter = btn.dataset.filter;
+                    consoleGeneration++;
                     updateConsoleDisplay();
                 });
             });
