@@ -53,6 +53,10 @@ MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
 
 # ── fixture server ──────────────────────────────────────────────────────────
 
+class HidUnsafe(Exception):
+    """The seat is not safe to drive: the app is not frontmost, or a person is using it."""
+
+
 def flat_png(rgb, width=120, height=60):
     """A flat-colour PNG, built by hand so the fixture needs no image library."""
     def chunk(tag, data):
@@ -283,8 +287,67 @@ class Driver:
             sys.exit("hwdrive did not compile:\n" + r.stderr[-2000:])
         return exe
 
+    # HID events go to whatever window is under the pointer or has the
+    # keyboard, not to a pid: before each one, the app must be frontmost and
+    # nobody else must be using the machine (11-05 HID-safety rule).
+    HID_COMMANDS = {"move", "click", "press", "release", "dblclick", "rightclick", "rightpress", "drag",
+                    "scroll", "key", "type"}
+    MIN_IDLE_S = 30
+
+    @staticmethod
+    def frontmost_pid():
+        r = subprocess.run(["lsappinfo", "info", "-only", "pid", subprocess.run(
+            ["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()], capture_output=True, text=True)
+        m = re.search(r"=(\d+)", r.stdout)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def hid_idle_seconds():
+        r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
+        m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
+        return int(m.group(1)) / 1e9 if m else 0.0
+
+    def hid_guard(self, argv):
+        """Raise HidUnsafe unless the target pid is frontmost and the seat is idle."""
+        pid = int(argv[1])
+        # Our own events reset the idle clock: the seat is someone else's when
+        # it went idle more recently than our last event (or than the floor).
+        idle = self.hid_idle_seconds()
+        since_ours = time.time() - self.last_hid()
+        if idle + 1.0 < min(self.MIN_IDLE_S, since_ours):
+            raise HidUnsafe("someone is using this Mac (HID idle %.1f s, our last event %.1f s ago)"
+                            % (idle, since_ours))
+        if self.frontmost_pid() != pid:
+            subprocess.run([str(self.hwdrive), "activate", str(pid)], capture_output=True, text=True)
+            if self.frontmost_pid() != pid:
+                raise HidUnsafe("pid %d is not frontmost (frontmost %s)" % (pid, self.frontmost_pid()))
+
+    # Our last event's time is kept beside the real-window lock (outside it,
+    # so the lock stays an empty directory), so the next
+    # run's first event does not read our own as a person's.
+    LAST_HID = pathlib.Path.home() / ".claude" / "realwindow.last_hid"
+
+    def last_hid(self):
+        try:
+            return float(self.LAST_HID.read_text())
+        except (OSError, ValueError):
+            return getattr(self, "_last_hid", 0.0)
+
+    def note_hid(self):
+        self._last_hid = time.time()
+        try:
+            self.LAST_HID.write_text(str(self._last_hid))
+        except OSError:
+            pass
+
     def hw(self, *argv):
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.hid_guard(argv)
         r = subprocess.run([str(self.hwdrive)] + [str(a) for a in argv], capture_output=True, text=True)
+        if argv and argv[0] in self.HID_COMMANDS:
+            self.note_hid()
+            if r.returncode == 5:
+                raise HidUnsafe(r.stdout.strip()[-300:])
         try:
             return r.returncode, json.loads(r.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -1454,6 +1517,97 @@ class Driver:
         self.expect(c, "and closes the menu",
                     bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
 
+    def a3b_context_menu_over_page(self):
+        """CH3.A3b: a right click in the tab strip off any tab opens the chrome's own context menu, which paints over the page and takes a click on its item there."""
+        c = "a3b_context_menu_over_page"
+        if not self.a3_open(c):
+            return
+        if not self.can_input:
+            return self.not_run(c, "a right click in the tab strip", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        # The tab strip right of the tabs: no tab under the pointer, so the
+        # chrome shows its page menu (showPageContextMenu), not the tab panel.
+        at = (int(win["w"] * 0.8), self.TITLE_BAR + 22)
+        before = self.capture(c, "before")
+        log_from = len(self.app.log_text())
+        self.hw("rightclick", pid, *at)
+        m = self.app.wait_log(self.OVERLAY, 5, log_from)
+        self.expect(c, "the menu's paint over the page is in the chrome's region", bool(m),
+                    m.group(0) if m else "no overlay")
+        if not m:
+            return
+        time.sleep(0.8)  # the menu's opening transition
+        last = None
+        for last in re.finditer(self.OVERLAY, self.app.log_text()[log_from:]):
+            pass
+        x, y, w, h = (float(last.group(i)) for i in range(2, 6))
+        self.expect(c, "the menu opened at the pointer and reaches over the page",
+                    abs(x - at[0]) <= 2 and y + h > 150, "box %s, pointer %s" % ([x, y, w, h], at))
+        after = self.capture(c, "after")
+        if before is None or after is None:
+            self.not_run(c, "the menu paints over the page", self.why_not("Screen Recording"))
+        else:
+            px, py = x + w / 2, self.TITLE_BAR + y + h - 24
+            self.expect(c, "before: the page is where the menu opens", self.green_at(before, px, py),
+                        "at %d,%d" % (px, py))
+            self.expect(c, "after: the menu paints over the page there (not clipped at the strip)",
+                        not self.green_at(after, px, py), "at %d,%d" % (px, py))
+            self.expect(c, "after: the page still shows beside the menu",
+                        self.green_at(after, x - 40, py))
+        # Its last item lies over the page: the click is the chrome's, the
+        # item runs (an IPC from the chrome) and the menu closes.
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, int(x + w / 2), int(self.TITLE_BAR + y + h - 22))
+        self.expect(c, "a click on the menu's item over the page reaches the chrome",
+                    bool(self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)))
+        self.expect(c, "the item ran (the chrome posted its command)",
+                    bool(self.app.wait_log(r"RustKit chrome IPC body=\{\"cmd\"", 3, log_from)))
+        self.expect(c, "the menu closed and left the region",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+
+    # A box no popup selector names, over the page column, opened 6 s after
+    # boot: what a new chrome popup or tooltip looks like to the region.
+    A3B_PROBE_JS = ("setTimeout(function () { var d = document.createElement('div'); d.id = 'a3bProbe'; "
+                    "d.style.cssText = 'position:absolute;z-index:9999;left:640px;top:260px;width:160px;"
+                    "height:90px;background:#0000ff'; d.addEventListener('click', function () { "
+                    "d.remove(); sendIpc('a3b_probe_clicked', {}); }); document.body.appendChild(d); }, 6000);")
+
+    def a3b_unlisted_popup_over_page(self):
+        """CH3.A3b: a chrome box no selector names (a new popup or tooltip) paints over the page and takes clicks there."""
+        c = "a3b_unlisted_popup_over_page"
+        if not self.a3_open(c, {"HIWAVE_RUSTKIT_CHROME_EVAL": self.A3B_PROBE_JS}):
+            return
+        # Opened 6 s after the chrome booted; a3_open waits about 3 s of that.
+        time.sleep(5.0)
+        shot = self.capture(c, "open")
+        if shot is None:
+            self.not_run(c, "the box paints over the page", self.why_not("Screen Recording"))
+        else:
+            img, scale, win = shot
+            px, py = 720, self.TITLE_BAR + 305
+            rgb = img.getpixel((int(px * scale), int(py * scale)))
+            self.expect(c, "the box's blue shows over the page", all(abs(rgb[i] - BLUE[i]) <= 48 for i in range(3)),
+                        "at %d,%d: %s" % (px, py, rgb))
+            self.expect(c, "the page shows beside it", self.green_at(shot, 600, py))
+        if not self.can_input:
+            return self.not_run(c, "a click on the box", self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        log_from, mark = len(self.app.log_text()), self.fixture.mark()
+        self.hw("click", pid, 720, self.TITLE_BAR + 305)
+        self.expect(c, "a click on the box over the page reaches the chrome's handler",
+                    bool(self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"a3b_probe_clicked"', 3, log_from)))
+        time.sleep(0.3)
+        self.expect(c, "the page did not get that click",
+                    "content click (view-local)" not in self.app.log_text()[log_from:]
+                    and not self.fixture.seen("beacon?a3-click-", mark))
+        self.expect(c, "the removed box left the region",
+                    bool(self.app.wait_log(r"RustKit chrome overlays count=0", 3, log_from)))
+
     def a3_cmd_l_from_page(self):
         """CH3.A3: with the keyboard on the page, Cmd+L focuses the chrome's address bar and typing goes there."""
         c = "a3_cmd_l_from_page"
@@ -2288,6 +2442,7 @@ class Driver:
     CHECKS = ["h1", "h1_slow", "h2", "h3", "h4", "h4_slow", "h6", "h6_extent", "h8", "h16_click_nav", "h19_spin",
               "i0a_script", "i0a_layout", "i0a_nav", "i0a_close", "e9_redirect", "a2_chrome_boots", "a7_no_bridge_in_content",
               "a2_chrome_navigate", "a2_chrome_typed_url", "a3_passthrough_click", "a3_dropdown_over_page",
+              "a3b_context_menu_over_page", "a3b_unlisted_popup_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
               "e4_chrome_tab",
@@ -2303,6 +2458,11 @@ class Driver:
             print("%s: %s" % (name, check.__doc__.strip()), flush=True)
             try:
                 check()
+            except HidUnsafe as e:
+                self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                print("  STOP (HID safety): %s" % e, flush=True)
+                self.close_page()
+                break
             finally:
                 self.close_page()
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
