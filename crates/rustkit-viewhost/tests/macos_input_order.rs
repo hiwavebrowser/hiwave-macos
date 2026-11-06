@@ -175,6 +175,7 @@ fn main() {
                 PointerInput::Secondary => format!("secondary({view})"),
             },
             InputKind::Key(k) => format!("key({view}, {:?})", k.text),
+            other => format!("{other:?}({view})"),
         }
     };
     let got: Vec<String> = first.iter().map(describe).collect();
