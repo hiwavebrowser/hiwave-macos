@@ -18,6 +18,7 @@ struct Gpu {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     adapter: String,
+    device_type: wgpu::DeviceType,
 }
 
 /// One device per test (the renderer's tests share no GPU state).
@@ -31,7 +32,8 @@ fn gpu() -> Option<Gpu> {
         compatible_surface: None,
         force_fallback_adapter: false,
     }))?;
-    let name = adapter.get_info().name;
+    let info = adapter.get_info();
+    let (name, device_type) = (info.name, info.device_type);
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("scroll cost test device"),
@@ -46,6 +48,7 @@ fn gpu() -> Option<Gpu> {
         device: Arc::new(device),
         queue: Arc::new(queue),
         adapter: name,
+        device_type,
     })
 }
 
@@ -683,6 +686,46 @@ fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_scree
             );
         }
     }
+}
+
+/// The buffer-limit frame for an adapter: how many text rows, and the
+/// buffer limit to set (`None` keeps the device's own).
+#[derive(Debug, PartialEq)]
+struct BufferLimitCase {
+    rows: usize,
+    max_buffer_bytes: Option<u64>,
+}
+
+/// Real GPUs draw the 80,000-row frame past the device's 256 MB limit.
+fn buffer_limit_case(_device_type: wgpu::DeviceType) -> BufferLimitCase {
+    BufferLimitCase {
+        rows: 80_000,
+        max_buffer_bytes: None,
+    }
+}
+
+#[test]
+fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
+    let full = BufferLimitCase {
+        rows: 80_000,
+        max_buffer_bytes: None,
+    };
+    for hw in [
+        wgpu::DeviceType::DiscreteGpu,
+        wgpu::DeviceType::IntegratedGpu,
+        wgpu::DeviceType::VirtualGpu,
+        wgpu::DeviceType::Other,
+    ] {
+        assert_eq!(buffer_limit_case(hw), full, "{hw:?}");
+    }
+    // On a CPU adapter (WARP, llvmpipe, SwiftShader) 3.4M glyph quads time
+    // out the queue and panic in `Queue::drop`, aborting the test binary.
+    let soft = buffer_limit_case(wgpu::DeviceType::Cpu);
+    let cap = soft.max_buffer_bytes.expect("a small limit on a CPU adapter");
+    assert!(soft.rows <= 2_000, "{soft:?}");
+    // Still past the limit: the frame's glyph vertices need several buffers.
+    let glyph_bytes = soft.rows * LINE.len() * 4 * std::mem::size_of::<TextureVertex>();
+    assert!(glyph_bytes as u64 > 4 * cap, "{glyph_bytes} vs {cap}");
 }
 
 #[test]
