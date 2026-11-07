@@ -14927,7 +14927,20 @@ impl layout_ctx::LayoutCtx {
                         }
                         layer
                     } else {
-                        parse_background_layer(layer_str)
+                        match parse_background_layer(layer_str) {
+                            // A bad url (`url(a(b.png)`) is an invalid value:
+                            // the declaration is dropped and the image the
+                            // cascade had stays, as in Chromium (CH2.E29). It
+                            // used to clear the layers, so a bad inline url
+                            // wiped a stylesheet's image.
+                            None if layer_str
+                                .get(..4)
+                                .is_some_and(|h| h.eq_ignore_ascii_case("url(")) =>
+                            {
+                                return;
+                            }
+                            layer => layer,
+                        }
                     };
                     layers.extend(layer);
                 }

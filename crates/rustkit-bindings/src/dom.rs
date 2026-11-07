@@ -3726,6 +3726,11 @@ const WRAPPERS_JS: &str = r#"
         // row is empty, where the engine is known to drop part of the value,
         // where layout does not apply, and when the write has not been laid
         // out (the forced-layout budget). `display: none` has no transform.
+        // A declaration `el.style` leaves out (a bad url, CH2.E29) is not
+        // here at all, so the cascaded value shows. No row cannot be read as
+        // "initial" in general: the engine stores `justify-content:
+        // flex-start` and `align-items: stretch` as its defaults
+        // and publishes no row for them, where Chromium reads the value.
         var inline = el.style;
         if (inline) {
             var stale = !!info(el, 'stale');
@@ -3953,6 +3958,40 @@ const WRAPPERS_JS: &str = r#"
         out.push(cur);
         return out;
     }
+    // A value holding a bad url (CSS Syntax 3 §4.3.6: an unquoted url with a
+    // quote, `(`, inner whitespace or a control character in it) is invalid
+    // for every property, so the declaration is not in the block (CH2.E29:
+    // Chromium's `el.style.length` leaves it out and the earlier value
+    // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    function hasBadUrl(value) {
+        var quote = null, i, j, k, c;
+        for (i = 0; i < value.length; i++) {
+            c = value.charAt(i);
+            if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+            if (c === '"' || c === "'") { quote = c; continue; }
+            if (c === '\\') { i++; continue; }
+            // `url(` as its own function name, not the tail of `foourl(`.
+            if (value.substr(i, 4).toLowerCase() !== 'url(' ||
+                (i > 0 && /[\w\-\\\u0080-￿]/.test(value.charAt(i - 1)))) continue;
+            for (j = i + 4; j < value.length && /\s/.test(value.charAt(j)); j++) {}
+            // A quoted url is a function with a string: the strings rule above reads it.
+            if (value.charAt(j) === '"' || value.charAt(j) === "'") { i = j - 1; continue; }
+            for (; j < value.length; j++) {
+                c = value.charAt(j);
+                if (c === '\\') { j++; continue; }
+                if (c === ')') break;
+                if (c === '"' || c === "'" || c === '(' || /[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(c)) return true;
+                if (/\s/.test(c)) {
+                    for (k = j; k < value.length && /\s/.test(value.charAt(k)); k++) {}
+                    // Whitespace is allowed only before the closing `)`.
+                    if (k < value.length && value.charAt(k) !== ')') return true;
+                    j = k - 1;
+                }
+            }
+            i = j;
+        }
+        return false;
+    }
     function decls(st) {
         var out = [];
         splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
@@ -3962,6 +4001,7 @@ const WRAPPERS_JS: &str = r#"
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
+            if (hasBadUrl(value)) return;
             out = out.filter(function (x) { return x.name !== name; });
             out.push({ name: name, value: value, important: important });
         });
@@ -3993,6 +4033,8 @@ const WRAPPERS_JS: &str = r#"
             name = String(name).trim().toLowerCase();
             value = value == null ? '' : String(value).trim();
             if (value === '') { this.removeProperty(name); return; }
+            // An invalid value changes nothing (the attribute is not rewritten).
+            if (hasBadUrl(value)) return;
             var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             var important = String(priority || '').toLowerCase() === 'important';
             // The same declaration again changes nothing: the attribute is
