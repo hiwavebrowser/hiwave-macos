@@ -15987,6 +15987,35 @@ mod tests {
         assert_eq!(frame(none), 0.0);
     }
 
+    /// CH2.B18c: an author border width is the painted frame. Chromium 143
+    /// paints `<input style="border:40px solid red">` with a 40px ring; the
+    /// painter drew the 1px UA stand-in for any style but `none`, so the
+    /// real-window `e22_focus_ring` check counted a hairline.
+    #[test]
+    fn an_author_border_width_is_the_painted_control_frame() {
+        let frame = |top: Length, style: rustkit_css::BorderStyle| {
+            let mut control = n53_text_input();
+            control.style.border_top_width = top;
+            control.style.border_top_style = style;
+            control.dimensions.content = Rect::new(0.0, 0.0, 229.0, 99.0);
+            let list = DisplayList::build(&control);
+            list.commands
+                .iter()
+                .find_map(|c| match c {
+                    DisplayCommand::TextInput { border_width, .. } => Some(*border_width),
+                    _ => None,
+                })
+                .expect("a TextInput command")
+        };
+        let solid = rustkit_css::BorderStyle::Solid;
+        assert_eq!(frame(Length::Px(40.0), solid), 40.0, "border: 40px solid");
+        assert_eq!(frame(Length::Px(3.0), solid), 3.0, "border: 3px solid");
+        // `border: 0` / `border-width: 0px`: no frame (unitless 0 parses to Px(0)).
+        assert_eq!(frame(Length::Px(0.0), solid), 0.0, "border-width: 0px");
+        // Unset (Length::Zero) keeps the 1px UA stand-in.
+        assert_eq!(frame(Length::Zero, solid), 1.0, "UA default");
+    }
+
     #[test]
     fn a_password_control_paints_one_bullet_per_character() {
         let mut field = n53_control(FormControlType::TextInput {
