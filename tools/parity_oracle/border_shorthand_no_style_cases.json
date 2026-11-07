@@ -137,6 +137,26 @@
    "chrome_boxes": "a:0:0:10:4 c:0:4:10:14"
   },
   {
+   "name": "animated-width-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}@keyframes w{from{border-width:5px}to{border-width:5px}}#a{animation:w 100s linear}</style></head><body><div id=a></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "animated-top-width-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}@keyframes w{from{border-top-width:5px}to{border-top-width:5px}}#a{animation:w 100s linear}</style></head><body><div id=a></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "animated-width-solid",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}@keyframes w{from{border-width:5px}to{border-width:5px}}#a{border-style:solid;animation:w 100s linear}</style></head><body><div id=a></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "transition-width-no-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-width:1px;transition:border-width 100s linear\"></div><script>var a=document.getElementById(\"a\");a.offsetWidth;a.style.borderWidth=\"9px\"</script><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
    "name": "script-border-5px-then-style",
    "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px\"></div><script>var a=document.getElementById(\"a\");a.offsetWidth;a.style.borderStyle=\"solid\"</script><div id=b></div></body></html>",
    "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
