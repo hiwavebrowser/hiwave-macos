@@ -10821,9 +10821,12 @@ impl DisplayList {
     }
 
     fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        // A non-replaced inline is one box at its first line fragment here,
+        // and Chrome clips a wrapped inline to that first fragment too (WPT
+        // clip-path-reference-box-004), so its own boxes are the reference.
         if !matches!(
             layout_box.box_type,
-            BoxType::Block | BoxType::Image { .. } | BoxType::FormControl(_)
+            BoxType::Block | BoxType::Inline | BoxType::Image { .. } | BoxType::FormControl(_)
         ) {
             return None;
         }
