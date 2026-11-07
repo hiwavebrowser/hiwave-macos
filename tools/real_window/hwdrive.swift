@@ -8,6 +8,7 @@
 //
 //   hwdrive preflight
 //   hwdrive request                       (show the system's grant prompts)
+//   hwdrive movie    <file>                 (a recording's length, tracks and whether it plays)
 //   hwdrive window   <pid>
 //   hwdrive windows  <pid>                  (every ordinary window, on screen or not)
 //   hwdrive find     <pid> <text>|role:<AXRole>  (elements by their accessible text or role)
@@ -40,6 +41,7 @@
 
 import AppKit
 import ApplicationServices
+import AVFoundation
 import CoreGraphics
 import Foundation
 
@@ -173,6 +175,20 @@ if cmd == "request" {
         "post_events": CGRequestPostEventAccess(),
         "screen_capture": CGRequestScreenCaptureAccess(),
     ])
+}
+
+// A recording's length and whether AVFoundation can play it (T26: the
+// driver's --record checks the .mov it made is playable and as long as the
+// run). Needs no grant.
+if cmd == "movie" {
+    guard args.count >= 2 else { emit(["error": "movie needs a file"], code: 2) }
+    let url = URL(fileURLWithPath: args[1])
+    guard FileManager.default.fileExists(atPath: url.path) else { emit(["error": "no file \(url.path)"], code: 2) }
+    let asset = AVURLAsset(url: url)
+    let seconds = CMTimeGetSeconds(asset.duration)
+    emit(["seconds": seconds.isFinite ? seconds : -1, "playable": asset.isPlayable,
+          "video_tracks": asset.tracks(withMediaType: .video).count],
+         code: asset.isPlayable ? 0 : 2)
 }
 
 guard args.count >= 2, let pidInt = Int32(args[1]) else { emit(["error": "\(cmd) needs a pid"], code: 2) }

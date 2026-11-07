@@ -9,6 +9,12 @@ colours are in the window.
 
     python3 tools/real_window/driver.py --app <path to hiwave> [--out DIR]
                                         [--checks h1,h4] [--list]
+                                        [--record [--record-label NAME]]
+
+--record screen-records the whole run with `screencapture -v` into
+~/Library/Logs/hiwave/recordings/ (outside the checkout), stops it when the
+run ends, fails or is killed, and asserts the .mov plays and is as long as
+the run. It needs the Screen Recording grant; without it, NOT RUN.
 
 Each assertion ends as PASS, FAIL or NOT RUN. NOT RUN names what the seat
 lacks (a grant, or an unlocked screen); it is never counted as a pass.
@@ -35,6 +41,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -50,6 +57,29 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # The RustKit chrome is the app's default on macOS (CH3.A5a); a check that
 # covers the WebKit chrome (the escape hatch) launches with this.
 WEBKIT_CHROME = {"HIWAVE_RUSTKIT_CHROME": "0"}
+
+# --record writes here by default: outside every checkout, so a recording is
+# never committed (the repo is public) and a fresh worktree does not lose it.
+RECORD_DIR = pathlib.Path.home() / "Library" / "Logs" / "hiwave" / "recordings"
+
+
+def record_dir_problem(path):
+    """Why `path` may not hold recordings, or None. Recordings stay outside the checkout."""
+    p = pathlib.Path(path).expanduser().resolve()
+    repo = HERE.parents[1].resolve()
+    if p == repo or repo in p.parents:
+        return "%s is inside the checkout %s; recordings stay outside it" % (p, repo)
+    return None
+
+
+def install_stop_signals():
+    """SIGTERM and SIGHUP end the run the way an exception does, so the
+    `finally` blocks stop the app and finalise a recording."""
+    def stop(signum, _frame):
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+
 
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
 MAGENTA, CYAN = (255, 0, 255), (0, 255, 255)
@@ -273,6 +303,9 @@ class Driver:
         self.results = []  # (check, assertion, status, detail)
         self.app = None
         self.template = None
+        self.record_dir = pathlib.Path(args.record_dir).expanduser() if getattr(args, "record", False) else None
+        self.record_label = getattr(args, "record_label", None)
+        self.record_max_s = getattr(args, "record_max_s", 7200.0)
 
     def why_not(self, grant):
         reasons = []
@@ -2796,26 +2829,117 @@ class Driver:
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
 
+    # ── T26: --record, one screen recording of the whole run ───────────────
+
+    SCREENCAPTURE = "/usr/sbin/screencapture"
+
+    def recording_name(self, names):
+        """<time>-<label>-<check set>.mov: 'all', the checks (up to three), or '<n>checks-<hash>'."""
+        if set(names) == set(self.CHECKS):
+            checks = "all"
+        elif len(names) <= 3:
+            checks = "+".join(names)
+        else:
+            checks = "%dchecks-%s" % (len(names), hashlib.sha256(",".join(names).encode()).hexdigest()[:6])
+        label = re.sub(r"[^A-Za-z0-9._-]+", "-", self.record_label or "").strip("-")[:40]
+        return "-".join(p for p in (time.strftime("%Y%m%d-%H%M%S"), label, checks) if p) + ".mov"
+
+    def start_recording(self, names):
+        c = "record"
+        if not self.can_capture:
+            self.not_run(c, "screen-record the run", self.why_not("Screen Recording"))
+            return None
+        problem = record_dir_problem(self.record_dir)
+        if problem:
+            self.note(c, "screen-record the run", "FAIL", problem)
+            return None
+        self.record_dir.mkdir(parents=True, exist_ok=True)
+        path = self.record_dir / self.recording_name(names)
+        # -v records until a character arrives on stdin (or SIGINT); -C shows
+        # the pointer and -k the clicks; -x no sound.
+        proc = subprocess.Popen([self.SCREENCAPTURE, "-v", "-x", "-C", "-k", str(path)],
+                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        rec = {"path": path, "proc": proc, "start": time.monotonic(), "lock": threading.Lock()}
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            err = proc.stderr.read().decode(errors="replace").strip()[-200:]
+            self.note(c, "screen-record the run", "FAIL", "screencapture exited at start, rc %s: %s"
+                      % (proc.returncode, err))
+            return None
+        # A wedged run does not record for ever.
+        rec["timer"] = threading.Timer(self.record_max_s, self.end_recording, (rec, "the --record-max-s cap"))
+        rec["timer"].daemon = True
+        rec["timer"].start()
+        print("record   %s" % path, flush=True)
+        return rec
+
+    def end_recording(self, rec, why):
+        """Stop screencapture once (idempotent): the stop character, then SIGINT, then kill."""
+        with rec["lock"]:
+            if "ended" in rec:
+                return
+            rec["ended"], rec["why"] = time.monotonic(), why
+            proc = rec["proc"]
+            try:
+                proc.stdin.write(b"\n")
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            for step in (lambda: None, lambda: proc.send_signal(signal.SIGINT), proc.kill):
+                try:
+                    step()
+                    proc.wait(timeout=30)
+                    break
+                except (subprocess.TimeoutExpired, OSError):
+                    continue
+            rec["rc"] = proc.returncode
+
+    def stop_recording(self, rec):
+        c = "record"
+        rec["timer"].cancel()
+        self.end_recording(rec, "the run ended")
+        path, ran = rec["path"], rec["ended"] - rec["start"]
+        self.expect(c, "the recording covers the whole run", rec["why"] == "the run ended", rec["why"])
+        self.expect(c, "screencapture stopped cleanly", rec["rc"] == 0, "rc %s" % rec["rc"])
+        if not self.expect(c, "the .mov was written", path.is_file() and path.stat().st_size > 0, str(path)):
+            return {"path": str(path), "run_s": round(ran, 1)}
+        code, movie = self.hw("movie", str(path))
+        self.expect(c, "the .mov plays and has a video track",
+                    bool(movie.get("playable")) and movie.get("video_tracks", 0) >= 1, json.dumps(movie))
+        secs = movie.get("seconds", -1)
+        self.expect(c, "the recording's length matches the run's",
+                    secs >= 0 and abs(secs - ran) <= max(5.0, 0.1 * ran),
+                    "recording %.1f s, run %.1f s" % (secs, ran))
+        print("record   %s (%.1f s)" % (path, secs), flush=True)
+        return {"path": str(path), "run_s": round(ran, 1), "movie": movie, "stopped_by": rec["why"]}
+
     def run(self, names):
         sha = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         print("app      %s\nsha256   %s\nseat     %s" % (self.binary, sha, json.dumps(self.pre, sort_keys=True)))
-        for name in names:
-            check = getattr(self, name)
-            print("%s: %s" % (name, check.__doc__.strip()), flush=True)
-            try:
-                check()
-            except HidUnsafe as e:
-                self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
-                print("  STOP (HID safety): %s" % e, flush=True)
-                self.close_page()
-                break
-            finally:
-                self.close_page()
+        rec = self.start_recording(names) if getattr(self, "record_dir", None) is not None else None
+        recording = None
+        try:
+            for name in names:
+                check = getattr(self, name)
+                print("%s: %s" % (name, check.__doc__.strip()), flush=True)
+                try:
+                    check()
+                except HidUnsafe as e:
+                    self.results.append((name, "HID input", "NOT RUN", "stopped: %s" % e))
+                    print("  STOP (HID safety): %s" % e, flush=True)
+                    self.close_page()
+                    break
+                finally:
+                    self.close_page()
+        finally:
+            if rec is not None:
+                recording = self.stop_recording(rec)
         tally = {s: sum(1 for r in self.results if r[2] == s) for s in ("PASS", "FAIL", "NOT RUN")}
         summary = {
             "app": str(self.binary), "sha256": sha, "seat": self.pre, "tally": tally,
             "assertions": [dict(check=r[0], name=r[1], status=r[2], detail=r[3]) for r in self.results],
             "requests": self.fixture.requests,
+            "recording": recording,
         }
         (self.out / "result.json").write_text(json.dumps(summary, indent=1))
         print("PASS %(PASS)d  FAIL %(FAIL)d  NOT RUN %(NOT RUN)d" % tally, "->", self.out / "result.json")
@@ -2829,6 +2953,11 @@ def main():
     ap.add_argument("--checks", default=",".join(Driver.CHECKS))
     ap.add_argument("--hwdrive", help="a prebuilt hwdrive (default: compile hwdrive.swift into --out)")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--record", action="store_true",
+                    help="screen-record the whole run (needs the Screen Recording grant)")
+    ap.add_argument("--record-dir", default=str(RECORD_DIR), help="where --record writes (outside the checkout)")
+    ap.add_argument("--record-label", help="names the recording, e.g. the batch: <time>-<label>-<checks>.mov")
+    ap.add_argument("--record-max-s", type=float, default=7200.0, help="stop recording after this long")
     args = ap.parse_args()
     if args.list:
         for name in Driver.CHECKS:
@@ -2842,6 +2971,10 @@ def main():
     if unknown:
         print("unknown checks: %s" % unknown, file=sys.stderr)
         return 2
+    if args.record and record_dir_problem(args.record_dir):
+        print("--record-dir: %s" % record_dir_problem(args.record_dir), file=sys.stderr)
+        return 2
+    install_stop_signals()
     driver = Driver(args)
     try:
         return driver.run(names)
