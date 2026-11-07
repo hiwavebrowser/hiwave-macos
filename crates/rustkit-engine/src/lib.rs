@@ -624,6 +624,8 @@ mod positioned_form_control_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_control_author_size_tests;
 #[cfg(all(test, feature = "headless"))]
+mod form_control_min_max_tests;
+#[cfg(all(test, feature = "headless"))]
 mod grid_item_lone_text_tests;
 #[cfg(all(test, feature = "headless"))]
 mod grid_item_min_max_tests;

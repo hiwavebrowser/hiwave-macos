@@ -1,0 +1,65 @@
+{
+ "viewport": [
+  400,
+  600
+ ],
+ "boxes": "xywh",
+ "cases": [
+  {
+   "name": "an-input-min-width-over-its-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;width:20px;min-width:60px;height:20px\">",
+   "chrome_boxes": "a:0:0:68:26"
+  },
+  {
+   "name": "an-input-max-width-under-its-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;width:100px;max-width:40px;height:20px\">",
+   "chrome_boxes": "a:0:0:48:26"
+  },
+  {
+   "name": "an-input-max-width-under-its-intrinsic-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;max-width:40px;height:20px\">",
+   "chrome_boxes": "a:0:0:48:26"
+  },
+  {
+   "name": "an-input-percent-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;width:100px;max-width:10%;height:20px\">",
+   "chrome_boxes": "a:0:0:48:26"
+  },
+  {
+   "name": "a-border-box-input-min-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;width:20px;min-width:60px;height:20px\">",
+   "chrome_boxes": "a:0:0:60:20"
+  },
+  {
+   "name": "a-textarea-min-width-over-its-width",
+   "html": "<!doctype html><body style=\"margin:0\"><textarea id=a style=\"display:block;width:20px;min-width:60px;height:20px\"></textarea>",
+   "chrome_boxes": "a:0:0:66:26"
+  },
+  {
+   "name": "a-textarea-max-width-under-its-width",
+   "html": "<!doctype html><body style=\"margin:0\"><textarea id=a style=\"display:block;width:100px;max-width:40px;height:20px\"></textarea>",
+   "chrome_boxes": "a:0:0:46:26"
+  },
+  {
+   "name": "an-input-min-height-over-its-height",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;width:40px;height:20px;min-height:40px\">",
+   "chrome_boxes": "a:0:0:48:46"
+  },
+  {
+   "name": "an-input-max-height-under-its-height",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;width:40px;height:20px;max-height:10px\">",
+   "chrome_boxes": "a:0:0:48:16"
+  },
+  {
+   "name": "an-input-min-width-in-a-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start\"><input id=a style=\"width:20px;min-width:60px;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:68:26"
+  },
+  {
+   "name": "an-input-max-width-in-a-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start\"><input id=a style=\"width:100px;max-width:40px;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:48:26"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
