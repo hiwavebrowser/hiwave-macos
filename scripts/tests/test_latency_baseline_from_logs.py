@@ -120,6 +120,82 @@ class Lat1HoldSummary(unittest.TestCase):
             self.assertNotIn(leak, text)
 
 
+# LAT1b: a headless capture on the window thread: the load and one render, summarised at the
+# engine's drop. That is no content visit; its p95 is the whole-load hold, so it gives no metric.
+DROP_ONLY_LOG = f"""{E}2026-11-07T10:00:00.000000Z  INFO rustkit_engine: Loading URL id=EngineViewId(1) url=https://d.example/dpath?z=1 replace=false
+2026-11-07T10:00:00.100000Z  INFO rustkit_engine: Running page script source=inline#1 bytes=10
+2026-11-07T10:00:09.000000Z  WARN rustkit_engine::wgate: Window thread hold entry=load ms=9000 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=9000.0
+2026-11-07T10:00:09.500000Z  INFO rustkit_engine::wgate: Window thread holds n=2 p50_ms=12.0 p95_ms=9000.0 max_ms=9000.0 over_50=1 by_entry=load:1:9000.0,render_view:1:12.0 at=drop
+"""
+
+# LAT1b: the per-visit lines as the content thread writes them, tagged with view and host. The
+# a.example visit's line lands after the window has already logged the next load (another
+# thread), so the tag, not the log position, names the site. a.example: 100 + 30 entries, logged
+# holds 300, 200, 120, 90, 80, 70, 60 (7 = 130 - 124 + 1): rank 124 of 130 is the 60.
+# b.example: 10 entries, none logged: under 50. The window thread's drop line is ignored.
+TAGGED_LOG = f"""{E}2026-11-07T11:00:00.000000Z  INFO rustkit_engine: Loading URL id=EngineViewId(4) url=https://a.example/tpath?t=1 replace=false
+2026-11-07T11:00:00.100000Z  INFO rustkit_engine: Running page script source=inline#1 bytes=10
+2026-11-07T11:00:01.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=load ms=300 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=300.0
+2026-11-07T11:00:02.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=live_turn ms=200 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=200.0 other_ms=0.0
+2026-11-07T11:00:03.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=move ms=120 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=120.0
+2026-11-07T11:00:04.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=move ms=90 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=90.0
+2026-11-07T11:00:05.000000Z  INFO rustkit_engine::wgate: Content thread holds view=4 host=a.example n=100 p50_ms=2.0 p95_ms=90.0 max_ms=300.0 over_50=4 by_entry=move:95:20.0,live_turn:4:200.0,load:1:300.0 at=every_100
+2026-11-07T11:00:06.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=move ms=80 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=80.0
+2026-11-07T11:00:07.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=click ms=70 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=70.0
+2026-11-07T11:00:08.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=click ms=60 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=60.0
+2026-11-07T11:01:00.000000Z  INFO hiwave: Navigating content to: https://b.example/next?q=1
+2026-11-07T11:01:00.000100Z  INFO rustkit_engine: Loading URL id=EngineViewId(4) url=https://b.example/next?q=1 replace=false
+2026-11-07T11:01:00.000200Z  INFO rustkit_engine::wgate: Content thread holds view=4 host=a.example n=30 p50_ms=1.0 p95_ms=70.0 max_ms=80.0 over_50=3 by_entry=move:20:80.0,click:10:70.0 at=navigation
+2026-11-07T11:01:00.100000Z  INFO rustkit_engine: Running page script source=inline#1 bytes=10
+2026-11-07T11:01:30.000000Z  INFO rustkit_engine::wgate: Content thread holds view=4 host=b.example n=10 p50_ms=3.0 p95_ms=9.0 max_ms=9.0 over_50=0 by_entry=load:1:9.0,move:9:4.0 at=drop
+2026-11-07T11:01:30.500000Z  INFO rustkit_engine::wgate: Window thread holds n=2 p50_ms=12.0 p95_ms=900.0 max_ms=900.0 over_50=1 by_entry=load_html:1:900.0,render_view:1:12.0 at=drop
+"""
+
+
+def _summary(text, **kw):
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+    tmp.write(text)
+    tmp.close()
+    return tool.summarize(tool.parse([tmp.name], **kw))
+
+
+class Lat1bPerVisitSummary(unittest.TestCase):
+    def test_a_drop_line_only_gives_no_hold_metric(self):
+        s = _summary(DROP_ONLY_LOG)
+        m = s["d.example"]["exit_metric"]
+        self.assertIsNone(m["hold_thread"])
+        self.assertEqual(m["hold_n"], 0)
+        self.assertIsNone(m["hold_p95_ms"])
+        self.assertIsNone(m["hold_p95_under_threshold"])
+        self.assertIsNone(m["pass"])
+        out = io.StringIO()
+        tool.print_exit_metric(s, out)
+        row = [l for l in out.getvalue().splitlines() if l.startswith("d.example")]
+        self.assertEqual(len(row), 1, out.getvalue())
+        self.assertIn("n/a", row[0])
+        self.assertNotIn("NO", row[0])
+
+    def test_tagged_lines_group_by_host_and_compute_p95(self):
+        s = _summary(TAGGED_LOG)
+        a = s["a.example"]
+        self.assertEqual(a["hold_entries"]["thread"], "Content")
+        self.assertEqual(a["hold_entries"]["n"], 130)
+        self.assertEqual(a["hold_entries"]["by_entry"], {"move": 115, "live_turn": 4, "load": 1, "click": 10})
+        m = a["exit_metric"]
+        self.assertEqual(m["hold_p95_ms"], 60.0)
+        self.assertFalse(m["hold_p95_under_threshold"])
+        self.assertFalse(m["pass"])
+        b = s["b.example"]
+        self.assertEqual(b["hold_entries"]["n"], 10)
+        self.assertTrue(b["exit_metric"]["hold_p95_under_threshold"])
+        self.assertTrue(b["exit_metric"]["pass"])
+
+    def test_tagged_lines_split_by_view(self):
+        s = _summary(TAGGED_LOG, by_view=True)
+        self.assertEqual(s["a.example#v4"]["hold_entries"]["n"], 130)
+        self.assertEqual(s["b.example#v4"]["hold_entries"]["n"], 10)
+
+
 class BaselineFromLogs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)

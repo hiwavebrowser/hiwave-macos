@@ -479,6 +479,78 @@ fn the_hold_summary_line_names_entries_and_milliseconds_only() {
     }
 }
 
+/// Runs `f` on a thread named as the content thread is (`page`).
+fn on_page_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .name("page".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn")
+        .join()
+        .expect("join")
+}
+
+/// LAT1b: the hold summary is one line per content visit, tagged with the
+/// view and the host (hostname only), so a log groups it by site: a
+/// navigation ends the first visit's line and the drop the second's, each
+/// with that visit's entries only.
+#[test]
+fn the_hold_summary_is_one_line_per_content_visit_with_its_view_and_host() {
+    let server = serve_routes(vec![("/secretpath?q=1", "text/html", "<p>two</p>".to_string())]);
+    let port = server.port;
+    let (view, first, second) = on_page_thread(move || {
+        crate::wgate::flush_hold_summary("drop");
+        let _ = crate::wgate::take_last_summary();
+        let (mut engine, view) = engine_and_view();
+        engine.load_html(view, "<p>one</p>").expect("load_html");
+        for _ in 0..2 {
+            engine.execute_script(view, "1").expect("script");
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/secretpath?q=1")).unwrap();
+        rt.block_on(engine.load_url(view, url)).expect("load_url");
+        let first = crate::wgate::take_last_summary();
+        engine.execute_script(view, "2").expect("script");
+        drop(engine);
+        let second = crate::wgate::take_last_summary();
+        (view.raw(), first, second)
+    });
+    let first = first.expect("the navigation ends the first visit");
+    assert!(
+        first.starts_with(&format!("Content thread holds view={view} host=- n=3 ")),
+        "{first}"
+    );
+    assert!(first.contains("load_html:1:") && first.contains("script:2:"), "{first}");
+    assert!(first.ends_with(" at=navigation"), "{first}");
+    let second = second.expect("the drop ends the second visit");
+    assert!(
+        second.starts_with(&format!("Content thread holds view={view} host=127.0.0.1 n=2 ")),
+        "{second}"
+    );
+    assert!(second.contains("load:1:") && second.contains("script:1:"), "{second}");
+    assert!(second.ends_with(" at=drop"), "{second}");
+    for leak in ["secretpath", "q=1", "http"] {
+        assert!(!second.contains(leak), "{leak}: {second}");
+    }
+}
+
+/// LAT1b: entries on the window thread (a headless capture's load and
+/// render, the flag-off page) are no content visit: the drop logs no hold
+/// summary for them, so a log's metric is never the whole-load hold.
+#[test]
+fn the_window_thread_logs_no_hold_summary() {
+    crate::wgate::flush_hold_summary("drop");
+    let _ = crate::wgate::take_last_summary();
+    let (mut engine, view) = engine_and_view();
+    engine.load_html(view, "<p>one</p>").expect("load_html");
+    engine.execute_script(view, "1").expect("script");
+    drop(engine);
+    assert_eq!(crate::wgate::take_last_summary(), None);
+}
+
 /// LAT1: the relayout line names the sheet and custom-property extraction
 /// (`extract_ms`), which `build_ms` does not include.
 #[test]
