@@ -470,6 +470,8 @@ mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
+mod style_attr_declaration_tests;
+#[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;

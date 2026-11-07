@@ -4587,6 +4587,29 @@ mod tests {
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
     }
 
+    /// CH2.E27: the attribute is a declaration list, so the `;` in a data
+    /// URL's `;base64,` does not end the declaration, and a write elsewhere
+    /// keeps the URL whole. Chromium 148.0.7778.216 on the same page:
+    /// `2|background-image|red|url("data:image/svg+xml;base64,AA==")|3|
+    /// background-image: url("data:image/svg+xml;base64,AA=="); color: red; width: 1px;`
+    /// -- the same declarations; it re-serializes the URL quoted, this
+    /// keeps the author's text.
+    #[test]
+    fn style_keeps_a_semicolon_inside_a_data_url() {
+        let b = bound(
+            "<html><body><div id='d' style='background-image:url(data:image/svg+xml;base64,AA==);color:red'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = [s.length, s[0], s.color, s.backgroundImage]; \
+                 s.width = '1px'; r.push(s.length, d.getAttribute('style')); r.join('|')"
+            ),
+            "2|background-image|red|url(data:image/svg+xml;base64,AA==)|3|\
+             background-image: url(data:image/svg+xml;base64,AA==); color: red; width: 1px;"
+        );
+    }
+
     const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
 
     #[test]
