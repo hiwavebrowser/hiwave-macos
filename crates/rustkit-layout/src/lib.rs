@@ -10843,6 +10843,24 @@ impl DisplayList {
                 "" | "border-box" | "stroke-box" | "view-box" => d.border_box(),
                 "padding-box" => d.padding_box(),
                 "content-box" | "fill-box" => d.content,
+                // An inline's vertical margins take no space in the line,
+                // so layout leaves them at zero, but its margin box still
+                // has them (WPT clip-path-inline-004). A percentage, of the
+                // containing block's width, is not known here and reads 0.
+                "margin-box" if matches!(layout_box.box_type, BoxType::Inline) => {
+                    let s = &layout_box.style;
+                    let font = match s.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    let v = |l: &Length| match l {
+                        Length::Percent(_) => 0.0,
+                        l => l.to_px(font, self.root_font_size, 0.0),
+                    };
+                    let m = d.margin_box();
+                    let (top, bottom) = (v(&s.margin_top), v(&s.margin_bottom));
+                    Rect::new(m.x, m.y - top, m.width, m.height + top + bottom)
+                }
                 "margin-box" => d.margin_box(),
                 _ => return None,
             })
