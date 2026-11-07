@@ -49496,6 +49496,42 @@ mod clip_path_pins {
         assert!(bg > push && depth_at(&lines, bg) >= 1, "background unclipped:\n{all}");
     }
 
+    /// `margin-box` on an inline includes its vertical margins, which take
+    /// no space in the line (WPT clip-path-inline-004: `circle(25%)
+    /// margin-box` on a 100px Ahem `X` with `margin: 50px` is the 50px
+    /// circle `circle(50%)` cuts from the border box; Chrome for Testing
+    /// 148 paints the two pages the same, 7716 green px each). RustKit
+    /// lays an inline out with its vertical margins at zero, so its margin
+    /// box was only the horizontal margins wider than the border box.
+    #[test]
+    fn clip_path_margin_box_on_an_inline_includes_its_vertical_margins() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace;padding:50px">ab <span style="background:green;margin:20px 10px;clip-path:inset(0) margin-box">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let clip = lines
+            .iter()
+            .find(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("no clip:\n{all}"));
+        assert!((num(clip, "x") - (num(bg, "x") - 10.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "width") - (num(bg, "width") + 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "y") - (num(bg, "y") - 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "height") - (num(bg, "height") + 40.0)).abs() < 0.01, "{clip}\n{bg}");
+    }
+
     /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
     /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
     /// box. A `<geometry-box>` alone clips to that box. All of them were
