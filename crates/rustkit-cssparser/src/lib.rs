@@ -715,6 +715,13 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
             // is decoration, and decoration in a parser reads as intent.
             if c == ':' {
                 in_value = true;
+            } else if c == ';' && structural {
+                // A `;` before any `:` ends an empty declaration (`;;`) or
+                // one with no colon (`foo;`): both are skipped and the next
+                // declaration starts clean (CSS Syntax 3 §5.4.5). Kept as
+                // text, the `;` became part of the next property name, so
+                // `color:red;;background:blue` lost the background (CH2.E28).
+                current_property.clear();
             } else {
                 current_property.push(c);
             }
@@ -1013,6 +1020,29 @@ mod tests {
     }
 
     use super::*;
+
+    /// CH2.E28: an empty declaration, or one with no colon, is skipped and
+    /// the next one is kept (Chromium 148.0.7778.216 on the same rules:
+    /// tools/parity_oracle/empty_declaration_cases.json).
+    #[test]
+    fn an_empty_or_colonless_declaration_does_not_eat_the_next_one() {
+        let decls = |css: &str| -> Vec<(String, String, bool)> {
+            parse_stylesheet(css).unwrap().rules[0]
+                .declarations
+                .iter()
+                .map(|d| (d.property.clone(), d.value.clone(), d.important))
+                .collect()
+        };
+        let d = |p: &str, v: &str, i: bool| (p.to_string(), v.to_string(), i);
+        assert_eq!(decls("a{color:red;;background:blue}"), [d("color", "red", false), d("background", "blue", false)]);
+        assert_eq!(decls("a{;;color:red}"), [d("color", "red", false)]);
+        assert_eq!(decls("a{color:red;;background:blue !important}"), [d("color", "red", false), d("background", "blue", true)]);
+        assert_eq!(decls("a{foo;color:red}"), [d("color", "red", false)]);
+        assert_eq!(decls("a{width:1px;}"), [d("width", "1px", false)]);
+        assert_eq!(decls("a{b:url(x;y);;w:1}"), [d("b", "url(x;y)", false), d("w", "1", false)]);
+        assert_eq!(decls("a{--t: ;;w:1}"), [d("--t", "", false), d("w", "1", false)]);
+        assert_eq!(decls("a{f(;);color:red}"), [d("color", "red", false)]);
+    }
 
     #[test]
     fn parse_simple_stylesheet() {
