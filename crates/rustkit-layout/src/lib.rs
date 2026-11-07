@@ -10935,26 +10935,61 @@ impl DisplayList {
         };
 
         let (rect, radii) = match name {
-            "inset" => {
+            // `inset()`, and `rect()` / `xywh()` (css-shapes-1 §3.1), which
+            // are the same rectangle written from the top and left edges.
+            "inset" | "rect" | "xywh" => {
                 let (offsets, round) = match shape.find("round") {
                     Some(i) => (shape[..i].trim(), Some(shape[i + 5..].trim())),
                     None => (shape, None),
                 };
                 let o: Vec<&str> = offsets.split_whitespace().collect();
-                let (t, r, b, l) = match o.as_slice() {
-                    [a] => (*a, *a, *a, *a),
-                    [a, b] => (*a, *b, *a, *b),
-                    [a, b, c] => (*a, *b, *c, *b),
-                    [a, b, c, d] => (*a, *b, *c, *d),
-                    _ => return None,
+                let rect = match name {
+                    "inset" => {
+                        let (t, r, b, l) = match o.as_slice() {
+                            [a] => (*a, *a, *a, *a),
+                            [a, b] => (*a, *b, *a, *b),
+                            [a, b, c] => (*a, *b, *c, *b),
+                            [a, b, c, d] => (*a, *b, *c, *d),
+                            _ => return None,
+                        };
+                        let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
+                        Rect::new(
+                            reference.x + l,
+                            reference.y + t,
+                            (w - l - r).max(0.0),
+                            (h - t - b).max(0.0),
+                        )
+                    }
+                    "rect" => {
+                        // Each edge from the top or left side; `auto` is the
+                        // box's own edge. A right (bottom) edge before the
+                        // left (top) one is clamped to it.
+                        let [t, r, b, l] = o.as_slice() else {
+                            return None;
+                        };
+                        let edge = |v: &str, basis: f32, auto: f32| -> Option<f32> {
+                            if v == "auto" {
+                                Some(auto)
+                            } else {
+                                px(v, basis)
+                            }
+                        };
+                        let (t, l) = (edge(t, h, 0.0)?, edge(l, w, 0.0)?);
+                        let (r, b) = (edge(r, w, w)?.max(l), edge(b, h, h)?.max(t));
+                        Rect::new(reference.x + l, reference.y + t, r - l, b - t)
+                    }
+                    _ => {
+                        // `xywh(x y width height)`; a negative size is invalid.
+                        let [x, y, rw, rh] = o.as_slice() else {
+                            return None;
+                        };
+                        let (rw, rh) = (px(rw, w)?, px(rh, h)?);
+                        if rw < 0.0 || rh < 0.0 {
+                            return None;
+                        }
+                        Rect::new(reference.x + px(x, w)?, reference.y + px(y, h)?, rw, rh)
+                    }
                 };
-                let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
-                let rect = Rect::new(
-                    reference.x + l,
-                    reference.y + t,
-                    (w - l - r).max(0.0),
-                    (h - t - b).max(0.0),
-                );
                 let radii = match round {
                     None => BorderRadius::default(),
                     Some(round) => {

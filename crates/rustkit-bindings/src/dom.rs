@@ -468,10 +468,14 @@ impl DomHost {
     /// need the layout current but not the geometry maps (the scroll
     /// maximum).
     pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark, read: &'static str) {
-        if !dirty.written_since_layout() {
+        if !dirty.needs_layout_for(read) {
             return;
         }
-        let cause = dirty.cause().unwrap_or("other");
+        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        let cause = match dirty.written_since_layout() {
+            true => dirty.cause().unwrap_or("other"),
+            false => "animation",
+        };
         let forced = {
             let mut h = host.borrow_mut();
             let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
@@ -2060,13 +2064,27 @@ pub(crate) fn install(
                 _ => None,
             };
             let mut layer = host.animated.borrow_mut();
-            let changed = match entries {
-                Some(entries) => layer.script.insert(node.id.raw(), entries.clone()) != Some(entries),
-                None => layer.script.remove(&node.id.raw()).is_some(),
+            // What the layer held and holds for the element: the reads a
+            // change can reach are those of both (LAT7c).
+            let (changed, reads) = match entries {
+                Some(entries) => {
+                    let reads = layer_reads(entries.iter().map(|e| e.0.as_str()));
+                    let old = layer.script.insert(node.id.raw(), entries.clone());
+                    let old_reads = old.as_ref().map_or(Some(0), |o| layer_reads(o.iter().map(|e| e.0.as_str())));
+                    (old.as_ref() != Some(&entries), reads.zip(old_reads).map(|(a, b)| a | b))
+                }
+                None => match layer.script.remove(&node.id.raw()) {
+                    Some(old) => (true, layer_reads(old.iter().map(|e| e.0.as_str()))),
+                    None => (false, None),
+                },
             };
             if changed {
                 layer.generation += 1;
-                d.mark_animation_layer(crate::DomDirty::Layout, "animation");
+                match reads {
+                    // Paint properties only: the boxes did not move.
+                    Some(reads) => d.mark_animation_paint(crate::DomDirty::Layout, reads),
+                    None => d.mark_animation_layer(crate::DomDirty::Layout, "animation"),
+                }
                 // The element restyles as if its inline style changed, so
                 // the next build walks it rather than keep its box.
                 l.borrow_mut().push(MutationRecord {
@@ -5979,4 +5997,21 @@ mod tests {
         let (_, label) = b.take_script_mutations().first.expect("a write");
         assert_eq!(label, format!("div#{}…", "b".repeat(48)));
     }
+}
+
+/// LAT7c: the reads a Web Animations layer write of `props` reaches, or
+/// `None` when one of them is one layout reads (the boxes may move). The
+/// paint properties are the engine's paint-only animation frame's
+/// (`animations::is_paint_prop`).
+fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
+    let mut reads = 0;
+    for prop in props {
+        reads |= match prop {
+            "opacity" | "color" | "background-color" | "border-top-color" | "border-right-color"
+            | "border-bottom-color" | "border-left-color" => crate::LAYER_PAINT,
+            "transform" | "translate" | "rotate" | "scale" => crate::LAYER_PAINT | crate::LAYER_TRANSFORM,
+            _ => return None,
+        };
+    }
+    Some(reads)
 }

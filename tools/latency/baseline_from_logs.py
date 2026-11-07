@@ -12,7 +12,8 @@ the latency-relevant counts the engine already logs:
   first sign of life -- see ``leaving_input_tests.rs``, fixed by #892) and
   *live* stops (everything else);
 * ``relayout cause=`` lines by cause, with ``took_ms`` and stage ms;
-* ``Forced layouts in the script task`` (count of forced layouts);
+* ``Forced layouts in the script task`` (count of forced layouts, and their
+  ``ms``);
 * ``Content thread hold`` / ``Window thread hold`` lines by entry, with
   ``ms`` and the build/layout/display_list/snapshot stages (only holds of
   50 ms or more are logged: ``wgate::HOLD_THRESHOLD_MS``);
@@ -21,6 +22,15 @@ the latency-relevant counts the engine already logs:
   ``Page lifecycle step done source="timers"`` callbacks;
 * ``Page scripts ran`` and ``Navigation finished`` elapsed_ms;
 * ``Input to present`` summary lines;
+* (LAT1) the ``Content thread holds n=... by_entry=...`` summary lines, one
+  per 100 entries and one per visit, over **every** entry whatever its
+  length; merged with the hold lines (each entry of 50 ms or more) they
+  give the exact hold p95 over all entries when it is 50 ms or more, and
+  "under 50" when it is not;
+* the exit metric of ``trench/latency/BASELINE.md`` per site: live
+  script-budget stops per minute <= 1, content-thread hold p95 over all
+  entries <= 50 ms, and input-to-present p95 <= 100 ms (the worst
+  100-input window, since windows' percentiles do not merge);
 * an input-to-paint proxy: for each pointer/mouse event that hit the budget
   line, the ms of the first hold that followed within 2 s.
 
@@ -40,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import defaultdict
@@ -67,6 +78,11 @@ NAV_SIGNALS = (
     '"cmd":"close_tab"',
 )
 PROXY_WINDOW_S = 2.0
+HOLD_THRESHOLD_MS = 50.0  # wgate::HOLD_THRESHOLD_MS: shorter holds get no line of their own
+EXIT_STOPS_PER_MIN = 1.0
+EXIT_HOLD_P95_MS = 50.0
+EXIT_INPUT_P95_MS = 100.0
+HOLD_SUMMARY = re.compile(r"\b(Content|Window) thread holds n=")
 
 
 def pct(values, p):
@@ -125,6 +141,11 @@ class Site:
             "took": [], "unstaged": [], "extract": [], "reasons": defaultdict(int), **{s: [] for s in STAGES}})
         self.forced_layouts = 0
         self.forced_tasks = 0
+        self.forced_ms = 0.0
+        # LAT1: per thread label, entries counted by the summary lines, and
+        # the logged holds (>= 50 ms) as (entry, ms).
+        self.hold_summary_n = defaultdict(lambda: defaultdict(int))
+        self.hold_logged = defaultdict(list)
         self.holds = defaultdict(lambda: {
             "ms": [], **{s: [] for s in STAGES}, "script_ms": [], "other_ms": [], "leaving_ms": []})
         self.image_drops = 0
@@ -218,7 +239,10 @@ def parse_one(path, sites, by_view):
                 took = num(d, "took_ms")
                 started = ts.timestamp() - took / 1000.0
                 ext = extracted_at.pop(view, None)
-                if ext is not None and started <= ext.timestamp() <= ts.timestamp():
+                if "extract_ms" in d:
+                    # LAT1: the line names it.
+                    r["extract"].append(num(d, "extract_ms"))
+                elif ext is not None and started <= ext.timestamp() <= ts.timestamp():
                     # Time from the relayout's start to the end of sheet extraction:
                     # stylesheet + custom-property collection, outside build_ms.
                     r["extract"].append(round((ext.timestamp() - started) * 1000.0, 1))
@@ -234,14 +258,24 @@ def parse_one(path, sites, by_view):
                 if cause == "initial_load" and cv in loading:
                     committed[cv] = loading[cv]
             elif "Forced layouts in the script task" in msg:
-                site.forced_layouts += int(num(kv(msg), "forced_layouts"))
+                d = kv(msg)
+                site.forced_layouts += int(num(d, "forced_layouts"))
+                site.forced_ms += num(d, "ms")
                 site.forced_tasks += 1
+            elif HOLD_SUMMARY.search(msg):
+                thread = HOLD_SUMMARY.search(msg).group(1)
+                for item in kv(msg).get("by_entry", "").split(","):
+                    parts = item.split(":")
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        site.hold_summary_n[thread][parts[0]] += int(parts[1])
             elif "thread hold entry=" in msg:
                 d = kv(msg.split("hold ", 1)[1])
                 entry = d.get("entry", "?")
                 target = sites[key_for(cv, host_load if entry in ("load", "load_html") else host_live)]
                 h = target.holds[entry]
                 h["ms"].append(num(d, "ms"))
+                thread = "Content" if "Content thread hold" in msg else "Window"
+                target.hold_logged[thread].append((entry, num(d, "ms")))
                 h["script_ms"].append(num(d, "script_ms"))
                 h["other_ms"].append(num(d, "other_ms"))
                 if cv in leaving and entry not in ("load", "load_html"):
@@ -302,6 +336,7 @@ def summarize(sites):
             for e, h in sorted(s.holds.items())
         }
         timer_relayouts = len(s.relayouts.get("timer", {"took": []})["took"])
+        hold_entries = hold_entry_counts(s)
         out[name] = {
             "visits": s.visits,
             "dwell_s": round(s.dwell_s, 1),
@@ -313,6 +348,8 @@ def summarize(sites):
             "relayouts": relayouts,
             "forced_layouts": s.forced_layouts,
             "forced_layout_tasks": s.forced_tasks,
+            "forced_layout_ms": round(s.forced_ms, 1),
+            "hold_entries": hold_entries,
             "holds": holds,
             "hold_all": dist([x for h in s.holds.values() for x in h["ms"]]),
             "image_budget_drops": s.image_drops,
@@ -325,7 +362,62 @@ def summarize(sites):
             "pointer_stop_hold_entries": dict(s.proxy_entries),
             "watchdog_ran_ms": dist(s.watchdog),
         }
+        out[name]["exit_metric"] = exit_metric(s, out[name])
     return out
+
+
+def hold_thread(s):
+    """The thread whose summary lines the metric reads: the content thread
+    when it logged any, else the window thread (flag off)."""
+    if s.hold_summary_n.get("Content"):
+        return "Content"
+    if s.hold_summary_n.get("Window"):
+        return "Window"
+    return None
+
+
+def hold_entry_counts(s):
+    thread = hold_thread(s)
+    by_entry = dict(s.hold_summary_n[thread]) if thread else {}
+    return {"thread": thread, "n": sum(by_entry.values()), "by_entry": by_entry}
+
+
+def merged_p95(n, logged):
+    """Nearest-rank p95 over `n` entries of which `logged` (each >= 50 ms)
+    are known: (exact p95, False) when it is one of them, (None, True) when
+    it falls under the threshold, (None, None) with no entries."""
+    n = max(n, len(logged))
+    if n == 0:
+        return None, None
+    k = max(1, min(n, math.ceil(0.95 * n)))
+    if len(logged) >= n - k + 1:
+        return sorted(logged, reverse=True)[n - k], False
+    return None, True
+
+
+def exit_metric(s, row):
+    thread = hold_thread(s)
+    entries = row["hold_entries"]["n"]
+    logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
+    p95, under = merged_p95(entries, logged) if thread else (None, None)
+    itp = max((w[1] for w in s.input_to_present), default=None)
+    stops = row["stops_live_per_min"]
+    stops_ok = (stops if stops is not None else (0.0 if row["stops_live"] == 0 else None))
+    hold_ok = None if under is None else (under or p95 <= EXIT_HOLD_P95_MS)
+    verdict = None
+    if hold_ok is not None and stops_ok is not None:
+        verdict = (stops_ok <= EXIT_STOPS_PER_MIN and hold_ok
+                   and (itp is None or itp <= EXIT_INPUT_P95_MS))
+    return {
+        "stops_live_per_min": stops,
+        "hold_thread": thread,
+        "hold_n": entries,
+        "hold_logged_over_threshold": len(logged),
+        "hold_p95_ms": p95,
+        "hold_p95_under_threshold": under,
+        "input_to_present_p95_worst_ms": itp,
+        "pass": verdict,
+    }
 
 
 def fmt_d(d, keys=("p50", "p95", "max")):
@@ -380,8 +472,39 @@ def print_table(summary, out=sys.stdout):
             w(f"pointer-stop -> hold entries: {s['pointer_stop_hold_entries']}\n")
         if s["watchdog_ran_ms"]["n"]:
             w(f"watchdog interrupts ran_ms: {fmt_d(s['watchdog_ran_ms'])} n={s['watchdog_ran_ms']['n']}\n")
-        w(f"forced layouts {s['forced_layouts']} in {s['forced_layout_tasks']} tasks; "
-          f"timer lifecycle callbacks {s['timer_lifecycle_callbacks']}\n\n")
+        w(f"forced layouts {s['forced_layouts']} in {s['forced_layout_tasks']} tasks, "
+          f"{s['forced_layout_ms']:g} ms; "
+          f"timer lifecycle callbacks {s['timer_lifecycle_callbacks']}\n")
+        if s["hold_entries"]["n"]:
+            w(f"hold entries ({s['hold_entries']['thread']} thread, all lengths): n={s['hold_entries']['n']} "
+              f"by entry {s['hold_entries']['by_entry']}\n")
+        w("\n")
+    print_exit_metric(summary, out)
+
+
+def print_exit_metric(summary, out=sys.stdout):
+    w = out.write
+    w(f"## exit metric (live stops/min <= {EXIT_STOPS_PER_MIN:g}, hold p95 over all entries <= "
+      f"{EXIT_HOLD_P95_MS:g} ms, input-to-present p95 <= {EXIT_INPUT_P95_MS:g} ms, worst window)\n")
+    w("site | live stops/min | hold entries n (logged >= 50) | hold p95 ms | input-to-present p95 worst ms | pass\n")
+    w("|".join(["---"] * 6) + "\n")
+    for name, s in summary.items():
+        m = s["exit_metric"]
+        if not (s["visits"] or m["hold_n"] or s["stops_live"] or s["input_to_present"]):
+            continue
+        if m["hold_p95_ms"] is not None:
+            p95 = f"{m['hold_p95_ms']:g}"
+        elif m["hold_p95_under_threshold"]:
+            p95 = f"< {HOLD_THRESHOLD_MS:g}"
+        else:
+            p95 = "n/a (no summary line)"
+        verdict = {True: "yes", False: "NO", None: "n/a"}[m["pass"]]
+        w(" | ".join(str(x) for x in [
+            name, "-" if m["stops_live_per_min"] is None else m["stops_live_per_min"],
+            f"{m['hold_n']} ({m['hold_logged_over_threshold']})", p95,
+            "-" if m["input_to_present_p95_worst_ms"] is None else f"{m['input_to_present_p95_worst_ms']:g}",
+            verdict,
+        ]) + "\n")
 
 
 def rank(summary):
@@ -406,6 +529,8 @@ def rank(summary):
                 t[k] += r[k].get("sum", 0.0)
             cross["sheet_extract_ms"] += r["extract"].get("sum", 0.0)
         cross["forced_layouts"] += s["forced_layouts"]
+        cross["forced_layout_ms"] += s["forced_layout_ms"]
+        cross["hold_entries"] += s["hold_entries"]["n"]
         cross["image_budget_drops"] += s["image_budget_drops"]
         cross["watchdog_ms"] += s["watchdog_ran_ms"].get("sum", 0.0)
         cross["stops_live"] += s["stops_live"]

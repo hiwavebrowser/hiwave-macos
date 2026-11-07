@@ -630,6 +630,8 @@ mod grid_item_min_max_tests;
 #[cfg(all(test, feature = "headless"))]
 mod unitless_zero_tests;
 #[cfg(all(test, feature = "headless"))]
+mod border_medium_tests;
+#[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
@@ -2785,6 +2787,18 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
             height,
         },
         _ => stored,
+    }
+}
+
+impl Drop for Engine {
+    /// The last visit's hold summary (LAT1): the entries since the last
+    /// line, which no navigation or hundredth entry ended. The summary is
+    /// the dropping thread's (`wgate` keeps one per thread): an engine
+    /// dropped off the thread that ran its entries leaves that thread's
+    /// partial line unlogged, and two engines on one thread share one
+    /// summary, which the first drop flushes.
+    fn drop(&mut self) {
+        wgate::flush_hold_summary("drop");
     }
 }
 
@@ -9255,12 +9269,16 @@ impl Engine {
         // the build itself (`LayoutCtx::with_building`), so a forced
         // layout sees them too.
 
+        // The builds' sheet and custom-property extraction (LAT1): outside
+        // `build_ms`, so the line names it.
+        let extract_before = SheetExtract::totals().extract_us;
         let layout_skipped = self.relayout_uncounted(id)?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
         self.close_stale_select_popup(id);
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let extract_ms = SheetExtract::totals().extract_us.saturating_sub(extract_before) as f64 / 1000.0;
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
@@ -9285,13 +9303,14 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
             took_ms,
             stages,
+            extract_ms,
             layout_skipped,
             would
         );
@@ -13300,6 +13319,7 @@ impl layout_ctx::LayoutCtx {
         // `compute_style_for_element` seeds them for a child element, plus
         // `line-height`. They started from the initial values, so pseudo
         // text was always black 16px in the default face.
+        let _border_style_declared = BorderStyleDeclaredScope::enter(pseudo);
         let mut pseudo_style = ComputedStyle::new();
         // `display` is not inherited, but its initial value is `inline`, not
         // `Display`'s Rust default (Block). A pseudo with no `display` was an
@@ -13443,6 +13463,10 @@ impl layout_ctx::LayoutCtx {
             other => other,
         };
 
+        // As for an element: no style (or `none`) on a side, no width.
+        zero_width_of_styleless_sides(&mut pseudo_style);
+        zero_width_of_borderless_sides(&mut pseudo_style);
+
         pseudo_style.settle_animation_opacity(stylesheets);
 
         pseudo_style.custom_properties = vars;
@@ -13517,6 +13541,8 @@ impl layout_ctx::LayoutCtx {
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
+        let _ua_control_border = UaControlBorderScope::enter(tag_name);
+        let _border_style_declared = BorderStyleDeclaredScope::enter(tag_name);
         let mut style = ComputedStyle::new();
         style.color = rustkit_css::Color::BLACK;
         // CSS Display 3: the initial value of `display` is `inline`.
@@ -13826,9 +13852,22 @@ impl layout_ctx::LayoutCtx {
             }
             // Horizontal rule
             "hr" => {
+                // Chromium's UA `hr { border-style: inset; border-width: 1px;
+                // color: gray }`: 1px on EVERY side (a bare hr is 2px tall in
+                // Chromium 143). Only the top was set, so the other sides were
+                // unset and `hr { border-style: solid }` took medium there
+                // (CH2.B18 R1: 1/3/3/3, height 4). Inset paints as solid here.
                 style.display = rustkit_css::Display::Block;
-                style.border_top_width = rustkit_css::Length::Px(1.0);
-                style.border_top_color = rustkit_css::Color::new(128, 128, 128, 1.0);
+                let one = rustkit_css::Length::Px(1.0);
+                let gray = rustkit_css::Color::new(128, 128, 128, 1.0);
+                style.border_top_width = one.clone();
+                style.border_right_width = one.clone();
+                style.border_bottom_width = one.clone();
+                style.border_left_width = one;
+                style.border_top_color = gray;
+                style.border_right_color = gray;
+                style.border_bottom_color = gray;
+                style.border_left_color = gray;
                 style.margin_top = rustkit_css::Length::Px(8.0); // 0.5em
                 style.margin_bottom = rustkit_css::Length::Px(8.0);
             }
@@ -14236,6 +14275,10 @@ impl layout_ctx::LayoutCtx {
             _ => matching_rules.as_slice(),
         };
 
+        // Every UA border width above comes with a UA border style
+        // (hr inset, fieldset groove, dialog/popover solid).
+        note_ua_border_sides(&style);
+
         // HTML presentational hints for tables (HTML §15.3.8): declarations
         // that sit above the UA defaults and below every author rule.
         let hints = table_presentational_hints(&lower_tag(tag_name), attributes);
@@ -14412,7 +14455,9 @@ impl layout_ctx::LayoutCtx {
 
         // A `none`/`hidden` side has a zero used width, whichever of width
         // and style was declared last (`border: 5px solid; border-style: none`
-        // used to keep the 5px frame).
+        // used to keep the 5px frame). A side nothing gave a style is `none`
+        // too, whatever width was declared (`border-width: thick` alone).
+        zero_width_of_styleless_sides(&mut style);
         zero_width_of_borderless_sides(&mut style);
 
         // Needs all three line-clamp properties, whatever their order.
@@ -14695,6 +14740,29 @@ impl Engine {
                 style.border_left_color = parent.border_left_color;
             }
             "border-top-color" => style.border_top_color = parent.border_top_color,
+            "border-style" => {
+                for side in ["border-top-style", "border-right-style", "border-bottom-style", "border-left-style"] {
+                    Engine::inherit_property(style, parent, side);
+                }
+            }
+            "border-top-style" | "border-right-style" | "border-bottom-style"
+            | "border-left-style" => {
+                let (side_style, parent_style, parent_width) = match property {
+                    "border-top-style" => (&mut style.border_top_style, parent.border_top_style, &parent.border_top_width),
+                    "border-right-style" => (&mut style.border_right_style, parent.border_right_style, &parent.border_right_width),
+                    "border-bottom-style" => (&mut style.border_bottom_style, parent.border_bottom_style, &parent.border_bottom_width),
+                    _ => (&mut style.border_left_style, parent.border_left_style, &parent.border_left_width),
+                };
+                *side_style = parent_style;
+                // A parent side that had no style ends with the initial
+                // `Solid` and an unset (`Length::Zero`) width: it is `none`,
+                // so the child's side stays undeclared too.
+                if !(parent_style == rustkit_css::BorderStyle::Solid
+                    && *parent_width == rustkit_css::Length::Zero)
+                {
+                    note_border_style(border_side_bit(property));
+                }
+            }
             // The shorthand leaves `outline-offset` alone.
             "outline" => {
                 style.outline.style = parent.outline.style;
@@ -15109,6 +15177,7 @@ impl layout_ctx::LayoutCtx {
                 // whole value to parse_length, so `border: 2px solid #333` was
                 // silently dropped and only a bare `border: 2px` ever applied.
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    note_border_style(BORDER_SIDES_ALL);
                     let border_style = border_style_keyword(value);
                     style.border_top_style = border_style;
                     style.border_right_style = border_style;
@@ -15165,25 +15234,33 @@ impl layout_ctx::LayoutCtx {
                     [a, b, c, d] => (a, b, c, d),
                     _ => return,
                 };
+                note_border_style(BORDER_SIDES_ALL);
                 style.border_top_style = t;
                 style.border_right_style = r;
                 style.border_bottom_style = b;
                 style.border_left_style = l;
+                medium_if_unset(&mut style.border_top_width, t);
+                medium_if_unset(&mut style.border_right_width, r);
+                medium_if_unset(&mut style.border_bottom_width, b);
+                medium_if_unset(&mut style.border_left_width, l);
             }
             "border-top-style" | "border-right-style" | "border-bottom-style"
             | "border-left-style" => {
                 if let Some(s) = rustkit_css::BorderStyle::from_keyword(value.trim()) {
-                    match property {
-                        "border-top-style" => style.border_top_style = s,
-                        "border-right-style" => style.border_right_style = s,
-                        "border-bottom-style" => style.border_bottom_style = s,
-                        _ => style.border_left_style = s,
-                    }
+                    let (side_style, width) = match property {
+                        "border-top-style" => (&mut style.border_top_style, &mut style.border_top_width),
+                        "border-right-style" => (&mut style.border_right_style, &mut style.border_right_width),
+                        "border-bottom-style" => (&mut style.border_bottom_style, &mut style.border_bottom_width),
+                        _ => (&mut style.border_left_style, &mut style.border_left_width),
+                    };
+                    note_border_style(border_side_bit(property));
+                    *side_style = s;
+                    medium_if_unset(width, s);
                 }
             }
             "border-width" => {
-                // 1–4 length values, standard sides expansion
-                if let Some((t, r, b, l)) = parse_shorthand_4(value) {
+                // 1–4 widths (lengths or thin/medium/thick), standard sides expansion
+                if let Some((t, r, b, l)) = parse_border_widths(value) {
                     style.border_top_width = t;
                     style.border_right_width = r;
                     style.border_bottom_width = b;
@@ -15192,6 +15269,7 @@ impl layout_ctx::LayoutCtx {
             }
             "border-top" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    note_border_style(border_side_bit("border-top"));
                     style.border_top_style = border_style_keyword(value);
                     style.border_top_width = width;
                     if let Some(color) = color {
@@ -15201,6 +15279,7 @@ impl layout_ctx::LayoutCtx {
             }
             "border-right" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    note_border_style(border_side_bit("border-right"));
                     style.border_right_style = border_style_keyword(value);
                     style.border_right_width = width;
                     if let Some(color) = color {
@@ -15210,6 +15289,7 @@ impl layout_ctx::LayoutCtx {
             }
             "border-bottom" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    note_border_style(border_side_bit("border-bottom"));
                     style.border_bottom_style = border_style_keyword(value);
                     style.border_bottom_width = width;
                     if let Some(color) = color {
@@ -15219,6 +15299,7 @@ impl layout_ctx::LayoutCtx {
             }
             "border-left" => {
                 if let Some((width, color)) = parse_border_shorthand(value) {
+                    note_border_style(border_side_bit("border-left"));
                     style.border_left_style = border_style_keyword(value);
                     style.border_left_width = width;
                     if let Some(color) = color {
@@ -15997,22 +16078,22 @@ impl layout_ctx::LayoutCtx {
                 };
             }
             "border-top-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_top_width = length;
                 }
             }
             "border-right-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_right_width = length;
                 }
             }
             "border-bottom-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_bottom_width = length;
                 }
             }
             "border-left-width" => {
-                if let Some(length) = parse_length(value) {
+                if let Some(length) = parse_border_width(value) {
                     style.border_left_width = length;
                 }
             }
@@ -16362,12 +16443,30 @@ impl layout_ctx::LayoutCtx {
             "padding-right" => style.padding_right = rustkit_css::Length::Zero,
             "padding-bottom" => style.padding_bottom = rustkit_css::Length::Zero,
             "padding-left" => style.padding_left = rustkit_css::Length::Zero,
-            "border-width" | "border-top-width" => {
-                style.border_top_width = rustkit_css::Length::Zero
+            // The initial width is `medium` on every side; a side with no
+            // style is zeroed after the cascade (zero_width_of_styleless_sides).
+            "border-width" => {
+                let medium = rustkit_css::Length::Px(3.0);
+                style.border_top_width = medium.clone();
+                style.border_right_width = medium.clone();
+                style.border_bottom_width = medium.clone();
+                style.border_left_width = medium;
             }
-            "border-right-width" => style.border_right_width = rustkit_css::Length::Zero,
-            "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Zero,
-            "border-left-width" => style.border_left_width = rustkit_css::Length::Zero,
+            "border-top-width" => style.border_top_width = rustkit_css::Length::Px(3.0),
+            "border-right-width" => style.border_right_width = rustkit_css::Length::Px(3.0),
+            "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Px(3.0),
+            "border-left-width" => style.border_left_width = rustkit_css::Length::Px(3.0),
+            // The initial style is `none`: a zero used width.
+            "border-style" => {
+                style.border_top_style = rustkit_css::BorderStyle::None;
+                style.border_right_style = rustkit_css::BorderStyle::None;
+                style.border_bottom_style = rustkit_css::BorderStyle::None;
+                style.border_left_style = rustkit_css::BorderStyle::None;
+            }
+            "border-top-style" => style.border_top_style = rustkit_css::BorderStyle::None,
+            "border-right-style" => style.border_right_style = rustkit_css::BorderStyle::None,
+            "border-bottom-style" => style.border_bottom_style = rustkit_css::BorderStyle::None,
+            "border-left-style" => style.border_left_style = rustkit_css::BorderStyle::None,
             "width" => style.width = rustkit_css::Length::Auto,
             "visibility" => style.visibility = rustkit_css::Visibility::Visible,
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
@@ -23569,6 +23668,162 @@ fn parse_outline_shorthand(value: &str) -> Option<rustkit_css::Outline> {
         }
     }
     (style || width || color).then_some(parsed)
+}
+
+/// A `border-*-width` value: a length or `thin`/`medium`/`thick`
+/// (1/3/5 px, as Chromium).
+fn parse_border_width(value: &str) -> Option<rustkit_css::Length> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "thin" => Some(rustkit_css::Length::Px(1.0)),
+        "medium" => Some(rustkit_css::Length::Px(3.0)),
+        "thick" => Some(rustkit_css::Length::Px(5.0)),
+        other => parse_length(other),
+    }
+}
+
+/// `border-width`: 1–4 [`parse_border_width`] values, sides expanded.
+fn parse_border_widths(
+    value: &str,
+) -> Option<(rustkit_css::Length, rustkit_css::Length, rustkit_css::Length, rustkit_css::Length)> {
+    let parts = value
+        .split_whitespace()
+        .map(parse_border_width)
+        .collect::<Option<Vec<_>>>()?;
+    match parts.as_slice() {
+        [a] => Some((a.clone(), a.clone(), a.clone(), a.clone())),
+        [a, b] => Some((a.clone(), b.clone(), a.clone(), b.clone())),
+        [a, b, c] => Some((a.clone(), b.clone(), c.clone(), b.clone())),
+        [a, b, c, d] => Some((a.clone(), b.clone(), c.clone(), d.clone())),
+        _ => None,
+    }
+}
+
+thread_local! {
+    /// Set while the element being cascaded is a form control whose UA
+    /// border lives in layout, not in its style (`medium_if_unset`).
+    static UA_CONTROL_BORDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds `UA_CONTROL_BORDER` for one element's cascade and restores the
+/// previous value on drop (every return path, and a nested cascade).
+struct UaControlBorderScope(bool);
+
+impl UaControlBorderScope {
+    fn enter(tag_name: &str) -> Self {
+        let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
+        Self(UA_CONTROL_BORDER.with(|c| c.replace(control)))
+    }
+}
+
+impl Drop for UaControlBorderScope {
+    fn drop(&mut self) {
+        UA_CONTROL_BORDER.with(|c| c.set(self.0));
+    }
+}
+
+const BORDER_SIDE_TOP: u8 = 1;
+const BORDER_SIDE_RIGHT: u8 = 2;
+const BORDER_SIDE_BOTTOM: u8 = 4;
+const BORDER_SIDE_LEFT: u8 = 8;
+const BORDER_SIDES_ALL: u8 = 15;
+
+thread_local! {
+    /// The sides (`BORDER_SIDE_*`) of the element being cascaded that some
+    /// origin gave a `border-style` (`zero_width_of_styleless_sides`).
+    static BORDER_STYLE_DECLARED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Holds `BORDER_STYLE_DECLARED` for one element's (or pseudo-element's)
+/// cascade and restores the previous value on drop. A form control starts
+/// with every side declared: Chromium's UA sheet gives input, textarea,
+/// button and select a border style, so `border-width` alone applies there.
+struct BorderStyleDeclaredScope(u8);
+
+impl BorderStyleDeclaredScope {
+    fn enter(tag_name: &str) -> Self {
+        let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
+        let start = if control { BORDER_SIDES_ALL } else { 0 };
+        Self(BORDER_STYLE_DECLARED.with(|c| c.replace(start)))
+    }
+}
+
+impl Drop for BorderStyleDeclaredScope {
+    fn drop(&mut self) {
+        BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
+    }
+}
+
+/// Record that `sides` were given a border style in this cascade.
+fn note_border_style(sides: u8) {
+    BORDER_STYLE_DECLARED.with(|c| c.set(c.get() | sides));
+}
+
+/// The `BORDER_SIDE_*` bit of a `border-<side>[-style]` property name.
+fn border_side_bit(property: &str) -> u8 {
+    match property.strip_prefix("border-").and_then(|p| p.split('-').next()) {
+        Some("top") => BORDER_SIDE_TOP,
+        Some("right") => BORDER_SIDE_RIGHT,
+        Some("bottom") => BORDER_SIDE_BOTTOM,
+        _ => BORDER_SIDE_LEFT,
+    }
+}
+
+/// The UA arms of `compute_style_for_element` set border widths without a
+/// style field; each of those sides has a UA style in Chromium.
+fn note_ua_border_sides(style: &ComputedStyle) {
+    let zero = rustkit_css::Length::Zero;
+    for (bit, width) in [
+        (BORDER_SIDE_TOP, &style.border_top_width),
+        (BORDER_SIDE_RIGHT, &style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &style.border_left_width),
+    ] {
+        if *width != zero {
+            note_border_style(bit);
+        }
+    }
+}
+
+/// CH2.B18 R1 hold 2: a side no origin gave a `border-style` is `none`
+/// (the initial value), so its used width is 0 whatever `border-width`
+/// said, a keyword or a length (CSS Backgrounds 3 §3.3; Chromium 143:
+/// `div { border-width: thick }` is 0px). RustKit's initial `BorderStyle`
+/// is `Solid`, so the cascade tracks which sides were declared instead.
+/// The `border` shorthands count as declaring a style (RustKit keeps
+/// `Solid` for one without a style keyword).
+fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
+    let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
+    for (bit, width) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_width),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &mut style.border_left_width),
+    ] {
+        if declared & bit == 0 {
+            *width = rustkit_css::Length::Zero;
+        }
+    }
+}
+
+/// CH2.B18 (1): a side given a style keeps its width, or takes `medium`
+/// (3px, the initial `border-width`) when no width was declared. The
+/// initial `BorderStyle` is `Solid`, so the unset width (`Length::Zero`;
+/// an authored `0` is `Px(0.0)`) can't start at 3px itself. `none` sides
+/// are zeroed after the cascade (`zero_width_of_borderless_sides`).
+///
+/// Not on `input`, `textarea`, `button` or `select` (R1 hold on #950): their
+/// UA border (2/1/2/1 px in Chromium 143) is not in the style. Layout reads
+/// an unset width on a control as "the UA border"
+/// (`form_control_intrinsic_size`'s calibrated blobs,
+/// `content_box_control_extra`), so `border-style: solid` keeps it, as in
+/// Chromium, instead of adding 3px on top.
+fn medium_if_unset(width: &mut rustkit_css::Length, side_style: rustkit_css::BorderStyle) {
+    if UA_CONTROL_BORDER.with(std::cell::Cell::get) {
+        return;
+    }
+    if side_style != rustkit_css::BorderStyle::None && *width == rustkit_css::Length::Zero {
+        *width = rustkit_css::Length::Px(3.0);
+    }
 }
 
 /// Parse a `border` / `border-<side>` shorthand: `<width> || <style> || <color>`.
@@ -40592,7 +40847,6 @@ impl SheetExtract {
     }
 
     /// The totals of this thread's builds so far.
-    #[cfg(test)]
     pub(crate) fn totals() -> SheetExtract {
         SHEET_EXTRACT_TOTALS.with(Cell::get)
     }
@@ -49132,6 +49386,58 @@ mod clip_path_pins {
                 "`{style}`:\n{}",
                 lines.join("\n")
             );
+        }
+    }
+
+    /// `rect()` and `xywh()` (css-shapes-1 §3.1), both `inset()` rectangles
+    /// written from the reference box's top and left edges. They had no arm,
+    /// so the box painted unclipped (WPT clip-path-rect-002, clip-path-xywh-001).
+    /// Chrome for Testing 148, the same 140px border box at the origin: the
+    /// painted bounds of each style are the rect pinned here; `rect(10px
+    /// 20px 90px 100px)` (right left of left) paints nothing; the `round`
+    /// forms leave the box's corner pixel white.
+    #[test]
+    fn clip_path_rect_and_xywh_clip_to_their_rectangle() {
+        let e = engine();
+        let page = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 8] = [
+            ("clip-path:rect(10px 100px 90px 20px)", "PushClip(", "x: 20.0, y: 10.0, width: 80.0, height: 80.0", None),
+            // `auto` is the reference box's own edge: top/left 0%, right/bottom 100%.
+            ("clip-path:rect(auto auto 50% 25%)", "PushClip(", "x: 35.0, y: 0.0, width: 105.0, height: 70.0", None),
+            ("-webkit-clip-path:rect(10px 100px 90px 20px) content-box", "PushClip(", "x: 40.0, y: 30.0, width: 80.0, height: 80.0", None),
+            // A right edge left of the left edge is the left edge: nothing shows.
+            ("clip-path:rect(10px 20px 90px 100px)", "PushClip(", "width: 0.0, height: 80.0", None),
+            ("clip-path:rect(0 100% 100% 0 round 20px / 10px)", "PushClipRounded", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", Some("CornerRadius { h: 20.0, v: 10.0 }")),
+            ("clip-path:xywh(10px 20px 50% 30px)", "PushClip(", "x: 10.0, y: 20.0, width: 70.0, height: 30.0", None),
+            ("clip-path:xywh(-10px -10px 200px 200px)", "PushClip(", "x: -10.0, y: -10.0, width: 200.0, height: 200.0", None),
+            ("clip-path:xywh(0 0 100% 100% round 10px)", "PushClipRounded", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", Some("CornerRadius { h: 10.0, v: 10.0 }")),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            for (i, c) in lines.iter().enumerate().skip(push + 1) {
+                if !c.starts_with("PushClip") && !c.starts_with("PopClip") {
+                    assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{c}` unclipped:\n{all}");
+                }
+            }
+        }
+        // A malformed one is ignored, as Chrome ignores the declaration.
+        for style in ["clip-path:rect(10px 20px)", "clip-path:xywh(10px 20px 30px)", "clip-path:xywh(0 0 -1px 10px)"] {
+            let lines = page(style);
+            assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
         }
     }
 
