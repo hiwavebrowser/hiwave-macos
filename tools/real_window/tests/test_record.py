@@ -31,8 +31,14 @@ FAKE = textwrap.dedent("""\
         os.remove(out + ".started")
         sys.exit(0)
     signal.signal(signal.SIGINT, finish)
-    sys.stdin.buffer.read(1)
-    finish()
+    # Only a character (or SIGINT) stops it: whether the real one stops on
+    # stdin EOF (its parent died) is not known, so this one does not, and a
+    # driver that never sends the stop leaves it running (the test sees it).
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if sys.stdin.buffer.read(1):
+            finish()
+        time.sleep(0.1)
 """)
 
 
