@@ -10,6 +10,7 @@
 //! 4. **Computed values**: Resolve relative units and keywords
 
 use rustkit_cssparser::parse_stylesheet;
+pub use rustkit_cssparser::split_declaration_list;
 use thiserror::Error;
 use tracing::debug;
 

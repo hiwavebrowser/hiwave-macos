@@ -14303,7 +14303,12 @@ impl layout_ctx::LayoutCtx {
             Some(p) => p.custom_properties.clone(),
             None => Arc::new(CustomProperties::from_map(css_vars.clone())),
         };
-        let inline_style = attributes.get("style");
+        // A `style` attribute is a declaration list: split it once, by the
+        // CSS tokenizer's rules, not at every `;` (CH2.E27).
+        let inline_decls: Vec<String> = attributes
+            .get("style")
+            .map(|s| rustkit_css::split_declaration_list(s))
+            .unwrap_or_default();
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
             for (rule, _, _) in rules_for(important_pass) {
@@ -14322,17 +14327,15 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
             }
-            if let Some(style_attr) = inline_style {
-                for declaration in style_attr.split(';') {
-                    if let Some((property, value)) = declaration.split_once(':') {
-                        let property = property.trim();
-                        if !property.starts_with("--") {
-                            continue;
-                        }
-                        let (value, important) = split_important(value.trim());
-                        if important == important_pass {
-                            declared_vars.push((property, Some(value)));
-                        }
+            for declaration in &inline_decls {
+                if let Some((property, value)) = declaration.split_once(':') {
+                    let property = property.trim();
+                    if !property.starts_with("--") {
+                        continue;
+                    }
+                    let (value, important) = split_important(value.trim());
+                    if important == important_pass {
+                        declared_vars.push((property, Some(value)));
                     }
                 }
             }
@@ -14495,11 +14498,7 @@ impl layout_ctx::LayoutCtx {
         order: &mut usize,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let (value, important) = split_important(value.trim());
                 if important != important_pass {
@@ -14593,11 +14592,7 @@ impl layout_ctx::LayoutCtx {
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());

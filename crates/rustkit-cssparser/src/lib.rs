@@ -945,6 +945,83 @@ fn flush_decl(
     current_value.clear();
 }
 
+/// Split a declaration list -- the text of a `style` attribute -- into its
+/// declarations, the way CSS Syntax 3 §5.4.5 ("consume a list of
+/// declarations") does: only a `;` at the top level ends one. A `;` inside a
+/// quoted string, inside `()`/`[]`/`{}` (which covers `url(...)`, `calc()` and
+/// `var()` fallbacks) or inside a comment does not, and an escaped `\;` is
+/// text. Comments are dropped (a tokenizer never yields them); one becomes a
+/// space so `1px/**/2px` stays two tokens. A closer ends only the block it
+/// matches (`(]` leaves the `(` open), and EOF closes an open string, block
+/// or comment, appending the missing closers the way Chromium serializes
+/// them: `url(data:...` at the end of the attribute still loads. Each
+/// declaration comes back trimmed; empty ones (`;;`, a trailing `;`) are
+/// skipped, as Chromium skips them.
+///
+/// Splitting at every `;` cut `url(data:image/svg+xml;base64,...)` at its
+/// `;base64,`, so no inline data-URL background or mask ever applied (Z plan
+/// CH2.E27).
+pub fn split_declaration_list(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut closers: Vec<char> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    let finish = |current: &mut String, out: &mut Vec<String>| {
+        let declaration = current.trim();
+        if !declaration.is_empty() {
+            out.push(declaration.to_string());
+        }
+        current.clear();
+    };
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            current.push(c);
+            if let Some(n) = chars.next() {
+                current.push(n);
+            }
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            current.push(c);
+            continue;
+        }
+        match c {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(cc) = chars.next() {
+                    if cc == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        break;
+                    }
+                }
+                current.push(' ');
+                continue;
+            }
+            '"' | '\'' => quote = Some(c),
+            '(' => closers.push(')'),
+            '[' => closers.push(']'),
+            '{' => closers.push('}'),
+            ')' | ']' | '}' if closers.last() == Some(&c) => {
+                closers.pop();
+            }
+            ';' if closers.is_empty() => {
+                finish(&mut current, &mut out);
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    current.extend(quote);
+    current.extend(closers.iter().rev());
+    finish(&mut current, &mut out);
+    out
+}
+
 fn strip_important(value: &str) -> (&str, bool) {
     let lower = value.to_ascii_lowercase();
     if let Some(idx) = lower.rfind("!important") {
@@ -1013,6 +1090,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_declaration_list_splits_only_at_top_level_semicolons() {
+        let split = |s: &str| split_declaration_list(s);
+        assert_eq!(
+            split("background-image:url(data:image/svg+xml;base64,AA==);width:10px"),
+            ["background-image:url(data:image/svg+xml;base64,AA==)", "width:10px"]
+        );
+        assert_eq!(split("font-family:'a;b', serif;width:1px"), ["font-family:'a;b', serif", "width:1px"]);
+        assert_eq!(split("a:url(\"x;y\");b:1"), ["a:url(\"x;y\")", "b:1"]);
+        assert_eq!(split("--k:f(;);w:1"), ["--k:f(;)", "w:1"]);
+        assert_eq!(split("--k:[;];w:1"), ["--k:[;]", "w:1"]);
+        assert_eq!(split("--k:{;};w:1"), ["--k:{;}", "w:1"]);
+        assert_eq!(split("a:'it\\'s;x';b:1"), ["a:'it\\'s;x'", "b:1"]);
+        assert_eq!(split("a:x\\;y;b:1"), ["a:x\\;y", "b:1"]);
+        assert_eq!(split("width:20px /* ; */;height:2px"), ["width:20px", "height:2px"]);
+        assert_eq!(split("margin:1px/**/2px"), ["margin:1px 2px"]);
+        assert_eq!(split(" ;; color:red !important ;; ;"), ["color:red !important"]);
+        assert_eq!(split("w:1;b:url(data:x;y"), ["w:1", "b:url(data:x;y)"]);
+        assert_eq!(split("a:'open;b:1"), ["a:'open;b:1'"]);
+        assert_eq!(split("a:f(];b:1"), ["a:f(];b:1)"]);
+        assert_eq!(split("a:1);b:2"), ["a:1)", "b:2"]);
+        assert!(split("").is_empty());
+    }
 
     #[test]
     fn parse_simple_stylesheet() {
