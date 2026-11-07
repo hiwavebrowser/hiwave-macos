@@ -755,6 +755,10 @@ impl Animations {
         self.transitions_update(node, style);
         self.animations_update(node, style, resolve);
         self.transitions_overlay(node, style);
+        // CH2.B18b: an animated or transitioning width on a `none` side
+        // (no style, or `none`/`hidden`) is still a 0 used width (Chromium
+        // 143: `@keyframes { border-width: 5px }` on an unstyled div is 0).
+        crate::zero_width_of_borderless_sides(style);
     }
 
     /// Start the transitions this element's changed values call for.

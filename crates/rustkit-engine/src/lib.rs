@@ -23635,8 +23635,6 @@ fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
     }
 }
 
-/// The border style a `border` / `border-<side>` shorthand names; a
-/// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
 /// The style a `border` / `border-<side>` shorthand sets. One with no style
 /// keyword sets the initial value, `none` (CSS Backgrounds 3 §3.6: a
 /// shorthand resets what it leaves out), so `border: 5px` paints nothing,
@@ -23857,13 +23855,17 @@ fn note_ua_border_sides(style: &ComputedStyle) {
 /// keyword declares `none` (`border_style_keyword`).
 fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
     let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
-    for (bit, width) in [
-        (BORDER_SIDE_TOP, &mut style.border_top_width),
-        (BORDER_SIDE_RIGHT, &mut style.border_right_width),
-        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_width),
-        (BORDER_SIDE_LEFT, &mut style.border_left_width),
+    for (bit, side_style, width) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_style, &mut style.border_top_width),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_style, &mut style.border_right_width),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_style, &mut style.border_bottom_width),
+        (BORDER_SIDE_LEFT, &mut style.border_left_style, &mut style.border_left_width),
     ] {
         if declared & bit == 0 {
+            // CH2.B18b: the style too, so a width written after the
+            // cascade (an animation or transition, `on_style`) is zeroed
+            // again by `zero_width_of_borderless_sides`.
+            *side_style = rustkit_css::BorderStyle::None;
             *width = rustkit_css::Length::Zero;
         }
     }
