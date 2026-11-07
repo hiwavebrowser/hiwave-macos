@@ -11774,6 +11774,9 @@ impl layout_ctx::LayoutCtx {
                 if tag_lower == "html" && style.display == rustkit_css::Display::Contents {
                     style.display = rustkit_css::Display::Block;
                 }
+                // An inline-level abspos box keeps its static position on
+                // the line (CH2.B25), so layout is told what it was.
+                style.abspos_was_inline_level = out_of_flow && style.display.is_inline_level();
                 if is_item || out_of_flow || floated || tag_lower == "html" {
                     style.display = style.display.blockified();
                 }
