@@ -688,28 +688,33 @@ fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_scree
     }
 }
 
-/// The buffer-limit frame for an adapter: how many commands of text page, and the
-/// buffer limit to set (`None` keeps the device's own).
+/// The buffer-limit frame for an adapter: how many commands of text page,
+/// and the buffer and batch limits to set (`None` keeps the renderer's own:
+/// the device's buffer limit, at most 256 MB, and 64 MB batches).
 #[derive(Debug, PartialEq)]
 struct BufferLimitCase {
     commands: usize,
     max_buffer_bytes: Option<u64>,
+    max_batch_bytes: Option<u64>,
 }
 
 /// Real GPUs draw the 80,000-command frame past the device's 256 MB limit. A
 /// CPU adapter (WARP, llvmpipe, SwiftShader) cannot: its queue times out on
 /// 3.4M glyph quads and panics in `Queue::drop`, which aborts the whole test
-/// binary. It draws 2,000 commands past a 64 KiB limit instead, so the split
-/// path still runs there.
+/// binary. It draws 2,000 commands past a 64 KiB buffer limit and a 16 KiB
+/// batch limit instead (the same 4:1 ratio), so the flush and split paths
+/// still run there.
 fn buffer_limit_case(device_type: wgpu::DeviceType) -> BufferLimitCase {
     match device_type {
         wgpu::DeviceType::Cpu => BufferLimitCase {
             commands: 2_000,
             max_buffer_bytes: Some(64 * 1024),
+            max_batch_bytes: Some(16 * 1024),
         },
         _ => BufferLimitCase {
             commands: 80_000,
             max_buffer_bytes: None,
+            max_batch_bytes: None,
         },
     }
 }
@@ -719,6 +724,7 @@ fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
     let full = BufferLimitCase {
         commands: 80_000,
         max_buffer_bytes: None,
+        max_batch_bytes: None,
     };
     for hw in [
         wgpu::DeviceType::DiscreteGpu,
@@ -731,7 +737,13 @@ fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
     // On a CPU adapter (WARP, llvmpipe, SwiftShader) 3.4M glyph quads time
     // out the queue and panic in `Queue::drop`, aborting the test binary.
     let soft = buffer_limit_case(wgpu::DeviceType::Cpu);
-    let cap = soft.max_buffer_bytes.expect("a small limit on a CPU adapter");
+    let cap = soft
+        .max_buffer_bytes
+        .expect("a small limit on a CPU adapter");
+    let batch = soft
+        .max_batch_bytes
+        .expect("a small batch on a CPU adapter");
+    assert!(batch < cap, "{soft:?}");
     assert!(soft.commands <= 2_000, "{soft:?}");
     // Still past the limit: the frame's glyph vertices need several buffers.
     let glyphs: usize = page(Mix::Text, soft.commands)
@@ -743,6 +755,7 @@ fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
         .sum();
     let glyph_bytes = glyphs * 4 * std::mem::size_of::<TextureVertex>();
     assert!(glyph_bytes as u64 > 4 * cap, "{glyph_bytes} vs {cap}");
+    assert!(glyph_bytes as u64 > 2 * batch, "{glyph_bytes} vs {batch}");
 }
 
 #[test]
@@ -767,6 +780,9 @@ fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
     r.reference = true;
     if let Some(cap) = case.max_buffer_bytes {
         r.max_buffer_bytes = cap;
+    }
+    if let Some(batch) = case.max_batch_bytes {
+        r.max_batch_bytes = batch;
     }
     let (_t, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
     r.execute(&list, &view).expect("the frame draws");
