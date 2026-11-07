@@ -14858,6 +14858,12 @@ impl layout_ctx::LayoutCtx {
                     return;
                 }
             }
+            "revert" | "revert-layer" => {
+                if let Some(sides) = border_style_property_sides(property) {
+                    revert_border_style(style, sides);
+                    return;
+                }
+            }
             _ => {}
         }
 
@@ -23631,11 +23637,15 @@ fn zero_width_of_borderless_sides(style: &mut ComputedStyle) {
 
 /// The border style a `border` / `border-<side>` shorthand names; a
 /// shorthand without one keeps `Solid` (see rustkit_css::BorderStyle).
+/// The style a `border` / `border-<side>` shorthand sets. One with no style
+/// keyword sets the initial value, `none` (CSS Backgrounds 3 §3.6: a
+/// shorthand resets what it leaves out), so `border: 5px` paints nothing,
+/// as in Chromium 143 (CH2.B18b). It used to keep RustKit's default `Solid`.
 fn border_style_keyword(value: &str) -> rustkit_css::BorderStyle {
     value
         .split_whitespace()
-        .find_map(rustkit_css::BorderStyle::from_keyword)
-        .unwrap_or_default()
+        .find_map(|token| rustkit_css::BorderStyle::from_keyword(&token.to_ascii_lowercase()))
+        .unwrap_or(rustkit_css::BorderStyle::None)
 }
 
 /// An `outline-color` value, lowercase: `Some(None)` for `currentcolor`.
@@ -23731,25 +23741,76 @@ thread_local! {
     /// The sides (`BORDER_SIDE_*`) of the element being cascaded that some
     /// origin gave a `border-style` (`zero_width_of_styleless_sides`).
     static BORDER_STYLE_DECLARED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// The sides the UA gave a `border-style` (controls, and the UA arms
+    /// `note_ua_border_sides` sees): where `border-style: revert` goes back
+    /// to a styled side instead of `none` (CH2.B18b).
+    static UA_BORDER_STYLE_SIDES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
-/// Holds `BORDER_STYLE_DECLARED` for one element's (or pseudo-element's)
-/// cascade and restores the previous value on drop. A form control starts
-/// with every side declared: Chromium's UA sheet gives input, textarea,
-/// button and select a border style, so `border-width` alone applies there.
-struct BorderStyleDeclaredScope(u8);
+/// Holds `BORDER_STYLE_DECLARED` and `UA_BORDER_STYLE_SIDES` for one
+/// element's (or pseudo-element's) cascade and restores the previous values
+/// on drop. A form control starts with every side declared: Chromium's UA
+/// sheet gives input, textarea, button and select a border style, so
+/// `border-width` alone applies there.
+struct BorderStyleDeclaredScope(u8, u8);
 
 impl BorderStyleDeclaredScope {
     fn enter(tag_name: &str) -> Self {
         let control = matches!(&*lower_tag(tag_name), "input" | "textarea" | "button" | "select");
         let start = if control { BORDER_SIDES_ALL } else { 0 };
-        Self(BORDER_STYLE_DECLARED.with(|c| c.replace(start)))
+        Self(
+            BORDER_STYLE_DECLARED.with(|c| c.replace(start)),
+            UA_BORDER_STYLE_SIDES.with(|c| c.replace(start)),
+        )
     }
 }
 
 impl Drop for BorderStyleDeclaredScope {
     fn drop(&mut self) {
         BORDER_STYLE_DECLARED.with(|c| c.set(self.0));
+        UA_BORDER_STYLE_SIDES.with(|c| c.set(self.1));
+    }
+}
+
+/// The `BORDER_SIDE_*` bits a border style or border shorthand property
+/// covers, or `None` for any other property.
+fn border_style_property_sides(property: &str) -> Option<u8> {
+    match property {
+        "border" | "border-style" => Some(BORDER_SIDES_ALL),
+        "border-top" | "border-right" | "border-bottom" | "border-left" | "border-top-style"
+        | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+            Some(border_side_bit(property))
+        }
+        _ => None,
+    }
+}
+
+/// CH2.B18b: `revert` / `revert-layer` on `border-style`, its side longhands
+/// or the `border` shorthands. Every author declaration rolls back to the UA
+/// sheet: a side the UA styled (a control, hr, fieldset, dialog, popover)
+/// keeps its UA style, RustKit's `Solid`; any other side goes back to `none`
+/// (Chromium 143: `border: 5px solid; border-style: revert` on a div is
+/// 10×10). The declaration was dropped before, so the author's frame stayed.
+/// `revert-layer` is read as `revert`: right while no lower cascade layer
+/// sets the property. Widths and colours are left as they are; a `none`
+/// side's width is zeroed after the cascade anyway.
+fn revert_border_style(style: &mut ComputedStyle, sides: u8) {
+    let ua = UA_BORDER_STYLE_SIDES.with(std::cell::Cell::get);
+    for (bit, side_style) in [
+        (BORDER_SIDE_TOP, &mut style.border_top_style),
+        (BORDER_SIDE_RIGHT, &mut style.border_right_style),
+        (BORDER_SIDE_BOTTOM, &mut style.border_bottom_style),
+        (BORDER_SIDE_LEFT, &mut style.border_left_style),
+    ] {
+        if sides & bit == 0 {
+            continue;
+        }
+        if ua & bit != 0 {
+            *side_style = rustkit_css::BorderStyle::Solid;
+            note_border_style(bit);
+        } else {
+            *side_style = rustkit_css::BorderStyle::None;
+        }
     }
 }
 
@@ -23782,6 +23843,9 @@ fn note_ua_border_sides(style: &ComputedStyle) {
             note_border_style(bit);
         }
     }
+    // Author rules come after this point: what is declared now is the UA's.
+    let ua = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
+    UA_BORDER_STYLE_SIDES.with(|c| c.set(ua));
 }
 
 /// CH2.B18 R1 hold 2: a side no origin gave a `border-style` is `none`
@@ -23789,8 +23853,8 @@ fn note_ua_border_sides(style: &ComputedStyle) {
 /// said, a keyword or a length (CSS Backgrounds 3 §3.3; Chromium 143:
 /// `div { border-width: thick }` is 0px). RustKit's initial `BorderStyle`
 /// is `Solid`, so the cascade tracks which sides were declared instead.
-/// The `border` shorthands count as declaring a style (RustKit keeps
-/// `Solid` for one without a style keyword).
+/// The `border` shorthands count as declaring a style; one without a style
+/// keyword declares `none` (`border_style_keyword`).
 fn zero_width_of_styleless_sides(style: &mut ComputedStyle) {
     let declared = BORDER_STYLE_DECLARED.with(std::cell::Cell::get);
     for (bit, width) in [
