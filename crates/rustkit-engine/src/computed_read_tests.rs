@@ -168,11 +168,7 @@ fn r1_parts_cover_every_case_once() {
         "{n} R1 cases, {R1_PARTS} parts of {R1_PER_PART} hold {}: add r1_part tests",
         R1_PARTS * R1_PER_PART
     );
-    assert!(
-        n > (R1_PARTS - 1) * R1_PER_PART,
-        "{n} R1 cases leave r1_part_{} empty: drop it",
-        R1_PARTS - 1
-    );
+    assert!(n >= R1_PARTS, "{n} R1 cases leave a part empty");
 }
 
 macro_rules! r1_parts {
@@ -211,8 +207,14 @@ r1_parts!(
 /// develop read before that change where the engine still cannot answer
 /// (`base`), or `gap` (neither, listed in the PR).
 fn r1_cases(part: usize) {
-    let all = r1_all();
-    let cases = all.chunks(R1_PER_PART).nth(part).unwrap_or(&[]);
+    // Dealt out round-robin, not in runs: the three 300-node loops (cases
+    // 112-114) together made one part 3x slower than the others.
+    let cases: Vec<_> = r1_all()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % R1_PARTS == part)
+        .map(|(_, c)| c)
+        .collect();
     assert!(!cases.is_empty(), "r1 part {part} has no cases");
     // The hold starts when the guard is taken, not when the test starts:
     // time queued behind other GPU tests is theirs.
@@ -221,7 +223,7 @@ fn r1_cases(part: usize) {
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let mut wrong = Vec::new();
     let mut counts = std::collections::BTreeMap::new();
-    for c in cases {
+    for c in &cases {
         let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
         let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
         engine.load_html(id, &s("html")).expect("load");
