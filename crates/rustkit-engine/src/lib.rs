@@ -670,6 +670,8 @@ mod wheel_routing_tests;
 #[cfg(all(test, feature = "headless"))]
 mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inserted_link_tests;
+#[cfg(all(test, feature = "headless"))]
 mod sticky_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sticky_flex_grid_tests;
