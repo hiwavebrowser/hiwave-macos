@@ -11012,8 +11012,11 @@ impl DisplayList {
                                 _ => return None,
                             })
                         };
-                        let hr = four(hs, rect.width)?;
-                        let vr = four(vs, rect.height)?;
+                        // A percentage is of the reference box, like the
+                        // offsets, not of the inset rectangle (css-shapes-1
+                        // §3.1; WPT clip-path-inset-round-percent).
+                        let hr = four(hs, w)?;
+                        let vr = four(vs, h)?;
                         let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
                         BorderRadius {
                             top_left: c(0),
