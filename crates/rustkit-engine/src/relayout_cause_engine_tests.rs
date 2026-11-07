@@ -454,20 +454,24 @@ fn a_navigation_summary_scrubs_the_outgoing_url() {
 #[test]
 fn the_hold_summary_line_names_entries_and_milliseconds_only() {
     // Read through `take_last_summary` (this thread's last line), not the
-    // log capture, so another test's tracing state cannot hide it.
-    crate::wgate::flush_hold_summary("drop");
-    let _ = crate::wgate::take_last_summary();
-    let (mut engine, view) = engine_and_view();
-    engine
-        .load_html(view, "<p id=secretid>private words</p>")
-        .expect("load_html");
-    for _ in 0..3 {
+    // log capture, so another test's tracing state cannot hide it. The
+    // summary is the content thread's, so the engine runs on one.
+    let line = on_page_thread(|| {
+        crate::wgate::flush_hold_summary("drop");
+        let _ = crate::wgate::take_last_summary();
+        let (mut engine, view) = engine_and_view();
         engine
-            .execute_script(view, "document.getElementById('secretid').textContent")
-            .unwrap();
-    }
-    drop(engine);
-    let line = crate::wgate::take_last_summary().expect("the drop logs the visit's summary");
+            .load_html(view, "<p id=secretid>private words</p>")
+            .expect("load_html");
+        for _ in 0..3 {
+            engine
+                .execute_script(view, "document.getElementById('secretid').textContent")
+                .unwrap();
+        }
+        drop(engine);
+        crate::wgate::take_last_summary()
+    });
+    let line = line.expect("the drop logs the visit's summary");
     assert!(line.contains(" at=drop"), "{line}");
     assert!(line.contains("load_html:1:"), "{line}");
     assert!(line.contains("script:3:"), "{line}");
