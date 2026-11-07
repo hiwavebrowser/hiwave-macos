@@ -2258,8 +2258,7 @@
     "prop": "border-left-width",
     "base": "border:3px solid;border-width:var(--missing)",
     "value": "",
-    "chrome": "3px",
-    "gap": "initial border-width is medium under a style; RustKit's unset Length::Zero takes medium only with CH2.B18 (#950)"
+    "chrome": "3px"
    },
    {
     "prop": "display",
