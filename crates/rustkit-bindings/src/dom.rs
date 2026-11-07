@@ -2439,7 +2439,7 @@ pub(crate) fn install(
             };
             let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
             document.set_style_sheet_disabled(&node, on);
-            d.mark(DomDirty::Style);
+            d.mark(DomDirty::Style, "sheet");
             JsValue::Null
         }),
     )?;
