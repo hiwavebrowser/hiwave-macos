@@ -53,6 +53,8 @@ mod flex_item_min_height_tests;
 #[cfg(test)]
 mod fit_content_width_tests;
 #[cfg(test)]
+mod element_scroll_extent_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
@@ -74,6 +76,12 @@ mod sizing_equivalence_tests;
 
 #[cfg(test)]
 mod table_layout_tests;
+
+#[cfg(test)]
+mod own_context_collapse_tests;
+
+#[cfg(test)]
+mod clip_rect_unit_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -1796,6 +1804,11 @@ pub struct LayoutBox {
     /// Whether the pointer is over this scroller's thumb
     /// (`::-webkit-scrollbar-thumb:hover`). Set by the engine.
     pub scrollbar_thumb_hovered: std::cell::Cell<bool>,
+    /// The engine's animation key of the `::before`/`::after` this box (or
+    /// the text run under it) was generated for, `None` for every other
+    /// box. A pseudo-element has no node of its own (`node_id` is `None`),
+    /// so a paint-only animation frame finds its boxes by this.
+    pub pseudo_animation_key: Option<usize>,
 }
 
 /// The scrollport each kind of box under a box answers to: an absolute box
@@ -1851,6 +1864,7 @@ impl LayoutBox {
             sticky_paths: std::cell::RefCell::new(Vec::new()),
             scrollbar_overflows: std::cell::Cell::new((false, false)),
             scrollbar_thumb_hovered: std::cell::Cell::new(false),
+            pseudo_animation_key: None,
         }
     }
 
@@ -4515,7 +4529,7 @@ impl LayoutBox {
     /// (an orthogonal flow), `hr` (`overflow: hidden` in Chromium's UA sheet),
     /// `fieldset`, `details` (its summary line), and replaced elements.
     /// Only collapse-through reads this; `establishes_bfc` is unchanged.
-    fn is_own_context_for_collapse(&self) -> bool {
+    pub(crate) fn is_own_context_for_collapse(&self) -> bool {
         let s = &self.style;
         s.display_modifier == rustkit_css::DisplayModifier::FlowRoot
             || s.contain_holds_fixed
@@ -6671,16 +6685,19 @@ impl LayoutBox {
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
-                let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
                 // Out-of-flow boxes do not participate in margin collapsing
-                // (CSS 2.1 §8.3.1). The static position must still land where
-                // the box would have been in flow — including the pending
-                // sibling margin — so the child gets a CLONE of the context to
-                // resolve against; the live context stays intact for the next
-                // in-flow sibling (an abspos box between two blocks must not
-                // swallow the margin between them).
-                let mut oof_margin_context = margin_context.clone();
+                // (CSS 2.1 §8.3.1). The static position is past the pending
+                // sibling margin, materialized here; the box's own top margin
+                // goes on top of it rather than collapsing with it (Chromium:
+                // `<p>` then `margin-top:50px` abspos sits 16 + 50 below the
+                // text, WPT clip-path-rectangle-ref; CH2.B24). A replaced box
+                // never reads a margin context, so it needs the cursor to
+                // carry the margin as well. The live context stays intact for
+                // the next in-flow sibling (an abspos box between two blocks
+                // must not swallow the margin between them).
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y + margin_context.resolve();
+                let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
             }
@@ -10774,7 +10791,7 @@ impl DisplayList {
     /// A right side left of the left side (or bottom above top) clips all:
     /// `rect(0,0,0,0)` and `rect(1px,1px,1px,1px)` are the visually-hidden
     /// pattern on most large sites.
-    fn clip_rect_clip(&self, layout_box: &LayoutBox) -> Option<Rect> {
+    pub(crate) fn clip_rect_clip(&self, layout_box: &LayoutBox) -> Option<Rect> {
         let clip = layout_box.style.clip.as_ref()?;
         if !matches!(layout_box.position, Position::Absolute | Position::Fixed) {
             return None;
@@ -10817,6 +10834,34 @@ impl DisplayList {
         if raw.is_empty() || raw == "none" {
             return None;
         }
+        let d = &layout_box.dimensions;
+        // A `<geometry-box>`; on an HTML box the SVG boxes fall back
+        // (css-masking-1 §8.1): `fill-box` to the content box, `stroke-box`
+        // and `view-box` to the border box.
+        let reference_box = |keyword: &str| -> Option<Rect> {
+            Some(match keyword {
+                "" | "border-box" | "stroke-box" | "view-box" => d.border_box(),
+                "padding-box" => d.padding_box(),
+                "content-box" | "fill-box" => d.content,
+                "margin-box" => d.margin_box(),
+                _ => return None,
+            })
+        };
+        // A `<geometry-box>` alone clips to that box. Its rounding (the
+        // border radius, shrunk or grown to the box) is read only for the
+        // border box; a rounded element's other boxes keep the old path
+        // (unclipped) rather than clip square.
+        if !raw.contains('(') {
+            let rect = reference_box(&raw)?;
+            let radii = self.border_radius_px(layout_box);
+            if radii.is_zero() {
+                return Some((rect, BorderRadius::default()));
+            }
+            if matches!(raw.as_str(), "border-box" | "stroke-box" | "view-box") {
+                return Some((rect, radii.fitted(rect.width, rect.height)));
+            }
+            return None;
+        }
         let open = raw.find('(')?;
         let close = raw.rfind(')')?;
         if close < open {
@@ -10835,14 +10880,7 @@ impl DisplayList {
             [k] => *k,
             _ => return None,
         };
-        let d = &layout_box.dimensions;
-        let reference = match keyword {
-            "" | "border-box" => d.border_box(),
-            "padding-box" => d.padding_box(),
-            "content-box" => d.content,
-            "margin-box" => d.margin_box(),
-            _ => return None,
-        };
+        let reference = reference_box(keyword)?;
         let font_size = match layout_box.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,
@@ -10900,26 +10938,61 @@ impl DisplayList {
         };
 
         let (rect, radii) = match name {
-            "inset" => {
+            // `inset()`, and `rect()` / `xywh()` (css-shapes-1 §3.1), which
+            // are the same rectangle written from the top and left edges.
+            "inset" | "rect" | "xywh" => {
                 let (offsets, round) = match shape.find("round") {
                     Some(i) => (shape[..i].trim(), Some(shape[i + 5..].trim())),
                     None => (shape, None),
                 };
                 let o: Vec<&str> = offsets.split_whitespace().collect();
-                let (t, r, b, l) = match o.as_slice() {
-                    [a] => (*a, *a, *a, *a),
-                    [a, b] => (*a, *b, *a, *b),
-                    [a, b, c] => (*a, *b, *c, *b),
-                    [a, b, c, d] => (*a, *b, *c, *d),
-                    _ => return None,
+                let rect = match name {
+                    "inset" => {
+                        let (t, r, b, l) = match o.as_slice() {
+                            [a] => (*a, *a, *a, *a),
+                            [a, b] => (*a, *b, *a, *b),
+                            [a, b, c] => (*a, *b, *c, *b),
+                            [a, b, c, d] => (*a, *b, *c, *d),
+                            _ => return None,
+                        };
+                        let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
+                        Rect::new(
+                            reference.x + l,
+                            reference.y + t,
+                            (w - l - r).max(0.0),
+                            (h - t - b).max(0.0),
+                        )
+                    }
+                    "rect" => {
+                        // Each edge from the top or left side; `auto` is the
+                        // box's own edge. A right (bottom) edge before the
+                        // left (top) one is clamped to it.
+                        let [t, r, b, l] = o.as_slice() else {
+                            return None;
+                        };
+                        let edge = |v: &str, basis: f32, auto: f32| -> Option<f32> {
+                            if v == "auto" {
+                                Some(auto)
+                            } else {
+                                px(v, basis)
+                            }
+                        };
+                        let (t, l) = (edge(t, h, 0.0)?, edge(l, w, 0.0)?);
+                        let (r, b) = (edge(r, w, w)?.max(l), edge(b, h, h)?.max(t));
+                        Rect::new(reference.x + l, reference.y + t, r - l, b - t)
+                    }
+                    _ => {
+                        // `xywh(x y width height)`; a negative size is invalid.
+                        let [x, y, rw, rh] = o.as_slice() else {
+                            return None;
+                        };
+                        let (rw, rh) = (px(rw, w)?, px(rh, h)?);
+                        if rw < 0.0 || rh < 0.0 {
+                            return None;
+                        }
+                        Rect::new(reference.x + px(x, w)?, reference.y + px(y, h)?, rw, rh)
+                    }
                 };
-                let (t, r, b, l) = (px(t, h)?, px(r, w)?, px(b, h)?, px(l, w)?);
-                let rect = Rect::new(
-                    reference.x + l,
-                    reference.y + t,
-                    (w - l - r).max(0.0),
-                    (h - t - b).max(0.0),
-                );
                 let radii = match round {
                     None => BorderRadius::default(),
                     Some(round) => {
