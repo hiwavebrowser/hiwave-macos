@@ -55,6 +55,10 @@ mod fit_content_width_tests;
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
+mod element_scroll_helper_tests;
+#[cfg(test)]
+mod relative_offset_unit_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
