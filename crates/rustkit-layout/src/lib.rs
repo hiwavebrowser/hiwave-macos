@@ -15997,10 +15997,20 @@ mod tests {
     /// real-window `e22_focus_ring` check counted a hairline.
     #[test]
     fn an_author_border_width_is_the_painted_control_frame() {
-        let frame = |top: Length, style: rustkit_css::BorderStyle| {
+        let solid = rustkit_css::BorderStyle::Solid;
+        // `border: <w> solid` sets all four sides; `top` then overrides the
+        // top side (`border-top: 0` after it) when given.
+        let sides = |w: Length, top: Option<Length>| {
             let mut control = n53_text_input();
-            control.style.border_top_width = top;
-            control.style.border_top_style = style;
+            let s = &mut control.style;
+            s.border_top_width = top.unwrap_or_else(|| w.clone());
+            s.border_right_width = w.clone();
+            s.border_bottom_width = w.clone();
+            s.border_left_width = w;
+            s.border_top_style = solid;
+            s.border_right_style = solid;
+            s.border_bottom_style = solid;
+            s.border_left_style = solid;
             control.dimensions.content = Rect::new(0.0, 0.0, 229.0, 99.0);
             let list = DisplayList::build(&control);
             list.commands
@@ -16011,13 +16021,23 @@ mod tests {
                 })
                 .expect("a TextInput command")
         };
-        let solid = rustkit_css::BorderStyle::Solid;
-        assert_eq!(frame(Length::Px(40.0), solid), 40.0, "border: 40px solid");
-        assert_eq!(frame(Length::Px(3.0), solid), 3.0, "border: 3px solid");
+        let frame = |w: Length| sides(w, None);
+        // Chromium snaps a border width: 0 < w < 1 paints 1, else floor.
+        assert_eq!(frame(Length::Px(0.65)), 1.0, "border: 0.05em solid at 13px");
+        assert_eq!(frame(Length::Px(2.5)), 2.0, "border: 2.5px solid");
+        // Sides that disagree keep the old 1px frame (one width paints all
+        // four; the top side's 0 must not erase the other three).
+        assert_eq!(
+            sides(Length::Px(1.0), Some(Length::Px(0.0))),
+            1.0,
+            "border: 1px solid; border-top: 0"
+        );
+        assert_eq!(frame(Length::Px(40.0)), 40.0, "border: 40px solid");
+        assert_eq!(frame(Length::Px(3.0)), 3.0, "border: 3px solid");
         // `border: 0` / `border-width: 0px`: no frame (unitless 0 parses to Px(0)).
-        assert_eq!(frame(Length::Px(0.0), solid), 0.0, "border-width: 0px");
+        assert_eq!(frame(Length::Px(0.0)), 0.0, "border-width: 0px");
         // Unset (Length::Zero) keeps the 1px UA stand-in.
-        assert_eq!(frame(Length::Zero, solid), 1.0, "UA default");
+        assert_eq!(frame(Length::Zero), 1.0, "UA default");
     }
 
     #[test]
