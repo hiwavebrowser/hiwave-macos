@@ -62,13 +62,14 @@
 //!    (hostname only; `-` for an HTML load or a URL without one):
 //!
 //!    ```text
-//!    Content thread holds view=3 host=en.wikipedia.org n=100 p50_ms=0.4 p95_ms=38.2 max_ms=612.0 over_50=3 by_entry=move:80:12.1,live_turn:20:96.0 at=every_100
+//!    Content thread holds view=3 host=en.wikipedia.org n=100 p50_ms=0.4 p95_ms=38.2 max_ms=612.0 over_50=3 over_50_ms=612.0,96.0,51.2 by_entry=move:80:12.1,live_turn:20:96.0 at=every_100
 //!    ```
 //!
-//!    `by_entry` is `entry:n:p95_ms`, most entries first. Merged with the
-//!    hold lines above (every entry of 50 ms or more), the summaries give
-//!    the exact p95 over all entries whenever it is 50 ms or more
-//!    (`tools/latency/baseline_from_logs.py`). The line carries no page
+//!    `over_50_ms` lists the entries of 50 ms or more, longest first (`-`
+//!    for none), and `by_entry` is `entry:n:p95_ms`, most entries first.
+//!    So the summaries alone give the exact p95 over all entries whenever
+//!    it is 50 ms or more (`tools/latency/baseline_from_logs.py`), with no
+//!    hold line placed by where it fell in the log. The line carries no page
 //!    content, only the view id, the hostname, entry names and
 //!    milliseconds. Window-thread entries (the flag-off page, a headless
 //!    capture's load and render on its worker) are no content visit and
@@ -541,19 +542,27 @@ pub(crate) fn hold_summary_line(visit: Option<(u64, &str)>, samples: &[(&'static
         .map(|(entry, values)| format!("{entry}:{}:{:.1}", values.len(), nearest_rank(values, 0.95)))
         .collect::<Vec<_>>()
         .join(",");
-    let over = all.iter().filter(|&&ms| ms >= HOLD_THRESHOLD_MS).count();
+    let over: Vec<String> = all
+        .iter()
+        .rev()
+        .take_while(|&&ms| ms >= HOLD_THRESHOLD_MS)
+        .map(|ms| format!("{ms:.1}"))
+        .collect();
+    let over_ms = if over.is_empty() { "-".to_string() } else { over.join(",") };
     let (view, host) = match visit {
         Some((view, host)) => (view.to_string(), host),
         None => ("-".to_string(), "-"),
     };
     Some(format!(
-        "Content thread holds view={view} host={host} n={} p50_ms={:.1} p95_ms={:.1} max_ms={:.1} over_{}={} by_entry={} at={}",
+        "Content thread holds view={view} host={host} n={} p50_ms={:.1} p95_ms={:.1} max_ms={:.1} over_{}={} over_{}_ms={} by_entry={} at={}",
         all.len(),
         nearest_rank(&all, 0.5),
         nearest_rank(&all, 0.95),
         all.last().copied().unwrap_or(0.0),
         HOLD_THRESHOLD_MS as u32,
-        over,
+        over.len(),
+        HOLD_THRESHOLD_MS as u32,
+        over_ms,
         by_entry,
         at
     ))

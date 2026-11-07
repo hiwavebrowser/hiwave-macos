@@ -150,6 +150,10 @@ class Site:
         # LAT1: per thread label, entries counted by the summary lines, and
         # the logged holds (>= 50 ms) as (entry, ms).
         self.hold_summary_n = defaultdict(lambda: defaultdict(int))
+        # LAT1b: the entries of 50 ms or more the tagged summary lines list
+        # themselves, and how many entries those lines covered.
+        self.hold_summary_over = []
+        self.hold_summary_tagged_n = 0
         self.hold_logged = defaultdict(list)
         self.holds = defaultdict(lambda: {
             "ms": [], **{s: [] for s in STAGES}, "script_ms": [], "other_ms": [], "leaving_ms": []})
@@ -276,7 +280,12 @@ def parse_one(path, sites, by_view):
                     # LAT1b: the line names its visit; the log position may be another's.
                     target = sites[key_for(int(tag_view) if tag_view.isdigit() else None,
                                            "(html)" if tag_host == "-" else tag_host)]
-                for item in (kv(msg).get("by_entry", "") if target is not None else "").split(","):
+                fields = kv(msg) if target is not None else {}
+                if "over_50_ms" in fields:
+                    over = fields["over_50_ms"]
+                    target.hold_summary_over.extend(float(x) for x in over.split(",") if over != "-")
+                    target.hold_summary_tagged_n += int(num(fields, "n"))
+                for item in fields.get("by_entry", "").split(","):
                     parts = item.split(":")
                     if len(parts) >= 2 and parts[1].isdigit():
                         target.hold_summary_n[thread][parts[0]] += int(parts[1])
@@ -409,7 +418,11 @@ def merged_p95(n, logged):
 def exit_metric(s, row):
     thread = hold_thread(s)
     entries = row["hold_entries"]["n"]
-    logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
+    if thread and s.hold_summary_tagged_n == entries:
+        # LAT1b: every line listed its own long entries; no hold line is needed.
+        logged = list(s.hold_summary_over)
+    else:
+        logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
     p95, under = merged_p95(entries, logged) if thread else (None, None)
     itp = max((w[1] for w in s.input_to_present), default=None)
     stops = row["stops_live_per_min"]
