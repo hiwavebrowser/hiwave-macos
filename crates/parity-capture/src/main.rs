@@ -2192,6 +2192,51 @@ background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-rep
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// #966 R1: a url() inside a double-quoted `style` attribute. Writing the
+    /// data URL as `url("data:...")` closed the attribute and the element
+    /// lost its whole style (border and size too). Chrome for Testing 148 on
+    /// this page over http: the 4px green border at (1, 1), the blue image
+    /// inside it at (30, 30).
+    #[test]
+    fn an_image_in_a_double_quoted_style_attribute_keeps_the_rest_of_the_style() {
+        let dir = std::env::temp_dir().join(format!("pc-test-style-attr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_file(
+            &dir,
+            "support/blue.svg",
+            r#"<svg width="60" height="60" xmlns="http://www.w3.org/2000/svg"><rect width="60" height="60" fill="blue"/></svg>"#,
+        );
+        write_file(
+            &dir,
+            "page.html",
+            r#"<!DOCTYPE html><body style="margin:0"><div style="background-image:url(support/blue.svg);width:60px;height:60px;border:4px solid green;background-repeat:no-repeat;background-position:4px 4px"></div>"#,
+        );
+        let frame = dir.join("frame.ppm");
+        let args = Args::try_parse_from([
+            "parity-capture",
+            "--html-file",
+            dir.join("page.html").to_str().unwrap(),
+            "--width",
+            "100",
+            "--height",
+            "100",
+            "--dump-frame",
+            frame.to_str().unwrap(),
+        ])
+        .expect("the command line parses");
+        let result = capture(&args, None, &mut None);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let ppm = fs::read(&frame).unwrap();
+        let header_end = ppm.windows(4).position(|w| w == b"255\n").unwrap() + 4;
+        let pixel = |x: usize, y: usize| {
+            let i = header_end + (y * 100 + x) * 3;
+            [ppm[i], ppm[i + 1], ppm[i + 2]]
+        };
+        assert_eq!(pixel(1, 1), [0, 128, 0], "the border survives");
+        assert_eq!(pixel(30, 30), [0, 0, 255], "the image paints inside it");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// What is inlined and what is left: a sheet's url() is relative to the
     /// sheet; scheme, fragment and missing references are untouched.
     #[test]
