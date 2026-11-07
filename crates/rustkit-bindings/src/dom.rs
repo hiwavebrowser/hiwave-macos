@@ -3739,6 +3739,9 @@ const WRAPPERS_JS: &str = r#"
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
                 if (!v) continue;
+                // `inherit`/`initial`/`unset` are never a computed value:
+                // their text is no stand-in for a missing row (CH2.E29b).
+                if (hasOwn(CSS_WIDE, v.toLowerCase())) continue;
                 // An animated property (Web Animations' layer, a CSS
                 // animation or transition) reads the engine's row: the
                 // animation is above the inline text in the cascade.
@@ -3992,6 +3995,89 @@ const WRAPPERS_JS: &str = r#"
         }
         return false;
     }
+    // Keyword-only properties and the words Chromium 148 takes for each
+    // (CH2.E29b; `tools/parity_oracle/keyword_grammar_log.mjs`). A value
+    // that is one other word is invalid, so the declaration is not in the
+    // block: `el.style` leaves it out and getComputedStyle reads the
+    // cascaded value, not the author's text. Only a lone identifier is
+    // judged; anything else (two words, a function, `var()`) is kept as
+    // before, so a word missing here can at worst keep an invalid value,
+    // never drop a valid one.
+    var KEYWORDS = (function () {
+        var t = {}, side = 'dashed dotted double groove hidden inset none outset ridge solid',
+            overflow = 'auto clip hidden overlay scroll visible', wrap = 'anywhere break-word normal';
+        var rows = {
+            'object-fit': 'contain cover fill none scale-down',
+            'position': 'absolute fixed relative static sticky',
+            'float': 'inline-end inline-start left none right',
+            'clear': 'both inline-end inline-start left none right',
+            'visibility': 'collapse hidden visible',
+            'box-sizing': 'border-box content-box',
+            'flex-direction': 'column column-reverse row row-reverse',
+            'flex-wrap': 'nowrap wrap wrap-reverse',
+            'table-layout': 'auto fixed',
+            'border-collapse': 'collapse separate',
+            'empty-cells': 'hide show',
+            'caption-side': 'bottom top',
+            'list-style-position': 'inside outside',
+            'direction': 'ltr rtl',
+            'isolation': 'auto isolate',
+            'backface-visibility': 'hidden visible',
+            'mix-blend-mode': 'color color-burn color-dodge darken difference exclusion hard-light hue ' +
+                'lighten luminosity multiply normal overlay plus-lighter saturation screen soft-light',
+            'overflow-x': overflow, 'overflow-y': overflow,
+            'resize': 'auto block both horizontal inline none vertical',
+            'text-overflow': 'clip ellipsis',
+            'user-select': 'all auto none text',
+            'box-decoration-break': 'clone slice',
+            'scroll-behavior': 'auto smooth',
+            'text-decoration-style': 'dashed dotted double solid wavy',
+            'border-top-style': side, 'border-right-style': side,
+            'border-bottom-style': side, 'border-left-style': side,
+            'outline-style': 'auto dashed dotted double groove inset none outset ridge solid',
+            'font-kerning': 'auto none normal',
+            'content-visibility': 'auto hidden visible',
+            'hyphens': 'auto manual none',
+            'white-space': 'break-spaces collapse normal nowrap pre pre-line pre-wrap preserve preserve-breaks wrap',
+            'text-align': '-webkit-auto -webkit-center -webkit-left -webkit-match-parent -webkit-right ' +
+                'center end justify left right start',
+            'word-break': 'auto-phrase break-all break-word keep-all normal',
+            'overflow-wrap': wrap, 'word-wrap': wrap,
+            'line-break': 'anywhere auto loose normal strict',
+            'writing-mode': 'horizontal-tb lr lr-tb rl rl-tb sideways-lr sideways-rl tb tb-rl vertical-lr vertical-rl',
+            'unicode-bidi': '-webkit-isolate -webkit-isolate-override -webkit-plaintext bidi-override embed ' +
+                'isolate isolate-override normal plaintext',
+            'image-rendering': '-webkit-optimize-contrast auto crisp-edges pixelated',
+            'background-attachment': 'fixed local scroll'
+        };
+        Object.keys(rows).forEach(function (p) {
+            t[p] = {};
+            rows[p].split(' ').forEach(function (k) { t[p][k] = true; });
+        });
+        return t;
+    })();
+    // Properties whose one value is a non-negative <number> (Chromium:
+    // `.5`, `+2`, `1e1` yes; `1.`, `-1`, `1px` no).
+    var NUMBERS = { 'flex-grow': true, 'flex-shrink': true };
+    var CSS_WIDE = { 'initial': true, 'inherit': true, 'unset': true, 'revert': true, 'revert-layer': true };
+    // Is `value` invalid for `name`, so the declaration is not in the block?
+    function invalidValue(name, value) {
+        if (hasBadUrl(value)) return true;
+        var word = value.toLowerCase();
+        if (hasOwn(CSS_WIDE, word)) return false;
+        if (hasOwn(KEYWORDS, name) && /^-?[a-z_][a-z0-9_-]*$/.test(word)) return !hasOwn(KEYWORDS[name], word);
+        if (hasOwn(NUMBERS, name) && !/[\s(]/.test(word)) return !/^\+?(\d+(\.\d+)?|\.\d+)(e[+-]?\d+)?$/.test(word);
+        return false;
+    }
+    // The value as Chromium serialises a declaration it took: a keyword in
+    // lower case, a plain number in its shortest form (`.5` -> `0.5`).
+    function normalValue(name, value) {
+        var word = value.toLowerCase();
+        if (hasOwn(CSS_WIDE, word)) return word;
+        if (hasOwn(KEYWORDS, name) && hasOwn(KEYWORDS[name], word)) return word;
+        if (hasOwn(NUMBERS, name) && /^\+?(\d+(\.\d+)?|\.\d+)(e[+-]?\d+)?$/.test(word)) return String(Number(word));
+        return value;
+    }
     function decls(st) {
         var out = [];
         splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
@@ -4001,9 +4087,9 @@ const WRAPPERS_JS: &str = r#"
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
-            if (hasBadUrl(value)) return;
+            if (invalidValue(name, value)) return;
             out = out.filter(function (x) { return x.name !== name; });
-            out.push({ name: name, value: value, important: important });
+            out.push({ name: name, value: normalValue(name, value), important: important });
         });
         return out;
     }
@@ -4034,7 +4120,7 @@ const WRAPPERS_JS: &str = r#"
             value = value == null ? '' : String(value).trim();
             if (value === '') { this.removeProperty(name); return; }
             // An invalid value changes nothing (the attribute is not rewritten).
-            if (hasBadUrl(value)) return;
+            if (invalidValue(name, value)) return;
             var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             var important = String(priority || '').toLowerCase() === 'important';
             // The same declaration again changes nothing: the attribute is

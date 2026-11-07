@@ -13144,6 +13144,10 @@ impl layout_ctx::LayoutCtx {
                             continue;
                         }
                         if let rustkit_css::PropertyValue::Specified(value) = &declaration.value {
+                            // A lone word a keyword-only property does not take (`position: middle`) is not in the block (CH2.E29b).
+                            if rustkit_css::keyword_grammar::invalid_value(&declaration.property, value) {
+                                continue;
+                            }
                             self.apply_cascaded(&mut style, Some(element), &declaration.property, value);
                         }
                     }
@@ -13422,6 +13426,10 @@ impl layout_ctx::LayoutCtx {
                     };
                     if declaration.property.starts_with("--") {
                         // Already applied to `vars` above.
+                        continue;
+                    }
+                    // A lone word a keyword-only property does not take (`position: middle`) is not in the block (CH2.E29b).
+                    if rustkit_css::keyword_grammar::invalid_value(&declaration.property, value_str) {
                         continue;
                     }
                     // `inherit` takes the generating element's value, as an
@@ -14360,7 +14368,9 @@ impl layout_ctx::LayoutCtx {
                         continue;
                     }
                     let (value, important) = split_important(value.trim());
-                    if important == important_pass {
+                    // A bad url makes the declaration invalid, a custom
+                    // property's too (CH2.E29b): the inherited or sheet value stands.
+                    if important == important_pass && !rustkit_css::mask::has_bad_url(value) {
                         declared_vars.push((property, Some(value)));
                     }
                 }
@@ -14412,6 +14422,10 @@ impl layout_ctx::LayoutCtx {
                     };
                     if decl.property.starts_with("--") {
                         // Already applied to `vars` above.
+                        continue;
+                    }
+                    // A lone word a keyword-only property does not take (`position: middle`) is not in the block (CH2.E29b).
+                    if rustkit_css::keyword_grammar::invalid_value(&decl.property, &value_str) {
                         continue;
                     }
                     let resolved_value = self.resolve_css_variables(&value_str, css_vars);
@@ -14623,6 +14637,10 @@ impl layout_ctx::LayoutCtx {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
                 if important != important_pass {
+                    continue;
+                }
+                // A lone word a keyword-only property does not take (`position: middle`) is not in the block (CH2.E29b).
+                if rustkit_css::keyword_grammar::invalid_value(&property, value) {
                     continue;
                 }
                 // Resolve CSS variables in the value

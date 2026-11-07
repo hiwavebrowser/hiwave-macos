@@ -4721,6 +4721,36 @@ mod tests {
         assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
     }
 
+    /// CH2.E29b: `el.style`'s keyword table (`KEYWORDS` in WRAPPERS_JS) and
+    /// the cascade's (`rustkit_css::keyword_grammar`) must not drift. Every
+    /// word any property takes is tried on every property: the JS keeps it
+    /// exactly where the Rust table does, and the numbers rule agrees too.
+    #[test]
+    fn style_keyword_table_matches_the_cascade() {
+        use rustkit_css::keyword_grammar::{invalid_value, KEYWORDS, NUMBERS};
+        let mut pool: Vec<&str> = KEYWORDS.iter().flat_map(|(_, w)| w.split_whitespace()).collect();
+        pool.extend(["bogus", "default", "inherit", "-webkit-sticky", "1", ".5", "-1", "1.", "1px"]);
+        pool.sort();
+        pool.dedup();
+        let props: Vec<&str> = KEYWORDS.iter().map(|(p, _)| *p).chain(NUMBERS.iter().copied()).collect();
+        let b = bound("<html><body><div id='d'>x</div></body></html>");
+        let mut wrong = Vec::new();
+        for p in &props {
+            let script = format!(
+                "var d = document.getElementById('d'), words = {}, kept = []; \
+                 words.forEach(function (w) {{ d.setAttribute('style', '{p}:' + w); \
+                 if (d.style.getPropertyValue('{p}') !== '') kept.push(w); }}); JSON.stringify(kept)",
+                serde_json::to_string(&pool).unwrap()
+            );
+            let got: Vec<String> = serde_json::from_str(&eval_string(&b, &script)).expect("json");
+            let want: Vec<&str> = pool.iter().copied().filter(|w| !invalid_value(p, w)).collect();
+            if got != want {
+                wrong.push(format!("{p}: JS keeps {got:?}, cascade {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
 
     #[test]

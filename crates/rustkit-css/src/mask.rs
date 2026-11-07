@@ -358,6 +358,83 @@ pub fn parse_css_url(token: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+/// Does `value` hold a bad url (CSS Syntax 3 §4.3.6): an unquoted `url(`
+/// whose body has a quote, a `(`, a control character or whitespace that is
+/// not right before the closing `)`? Such a value is invalid for every
+/// property, custom properties included, so the declaration is dropped
+/// (CH2.E29b: Chromium's `--x: url(a(b.png)` reads ''). Strings and escapes
+/// are skipped; `foourl(` is another function. The bindings' `hasBadUrl` is
+/// the same rule.
+pub fn has_bad_url(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let is_name = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '\\' || !c.is_ascii();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        let head: String = chars[i..chars.len().min(i + 4)].iter().collect();
+        if !head.eq_ignore_ascii_case("url(") || (i > 0 && is_name(chars[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 4;
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        // A quoted url is a function holding a string: the string rule reads it.
+        if j < chars.len() && (chars[j] == '"' || chars[j] == '\'') {
+            i = j;
+            continue;
+        }
+        while j < chars.len() {
+            let c = chars[j];
+            if c == '\\' {
+                j += 2;
+                continue;
+            }
+            if c == ')' {
+                break;
+            }
+            if c == '"' || c == '\'' || c == '(' || (c.is_control() && !c.is_whitespace()) {
+                return true;
+            }
+            if c.is_whitespace() {
+                let mut k = j;
+                while k < chars.len() && chars[k].is_whitespace() {
+                    k += 1;
+                }
+                // Whitespace is allowed only before the closing `)`.
+                if k < chars.len() && chars[k] != ')' {
+                    return true;
+                }
+                j = k;
+                continue;
+            }
+            j += 1;
+        }
+        i = j + 1;
+    }
+    false
+}
+
 /// `<repeat-style>`: one keyword, or two (horizontal then vertical).
 fn parse_repeat(value: &str) -> Option<BackgroundRepeat> {
     use BackgroundRepeat::{RepeatX, RepeatY};
@@ -716,5 +793,17 @@ mod tests {
     fn computed_style_carries_the_mask() {
         let style = crate::ComputedStyle::default();
         assert!(!style.mask.has_image());
+    }
+
+    /// CH2.E29b: the bad-url rule the cascade drops a custom property by.
+    #[test]
+    fn has_bad_url_finds_an_unquoted_url_with_a_bad_body() {
+        for bad in ["url(a(b.png)", "url(it's)", "URL(a b.png)", "x url(a\"b) y", "url( a b )"] {
+            assert!(has_bad_url(bad), "{bad}");
+        }
+        for good in ["url(a.png)", "url( a.png )", "url(\"a b(.png\")", "'url(a b)'", "foourl(a b)",
+                     "url(a\\(b.png)", "red", "url(a.png) url(b.png)"] {
+            assert!(!has_bad_url(good), "{good}");
+        }
     }
 }

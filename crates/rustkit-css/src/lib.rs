@@ -3733,6 +3733,7 @@ pub mod background;
 mod color_mix;
 pub mod mask;
 pub use mask::Mask;
+pub mod keyword_grammar;
 
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
