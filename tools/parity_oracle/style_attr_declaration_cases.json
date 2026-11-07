@@ -61,6 +61,72 @@
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:26px;background-image:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\">x</div>",
    "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('width'),s.getPropertyValue('background-image')].join(' | ')})()",
    "chrome": "26px | url(\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\")"
+  },
+  {
+   "name": "style attr: unquoted url() holding /*",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;utf8,a/*b);width:15px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,a/*b\") | 15px"
+  },
+  {
+   "name": "style attr: unquoted url() holding an unpaired '",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;utf8,it's);width:23px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "none | 23px"
+  },
+  {
+   "name": "style attr: unquoted url() holding an unbalanced (",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(a(b.png);width:24px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "none | 24px"
+  },
+  {
+   "name": "style attr: unquoted url() holding /*;*/",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(x/*;*/y.png);width:25px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"x/*;*/y.png\") | 25px"
+  },
+  {
+   "name": "style attr: URL( in capitals",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:URL(data:image/svg+xml;base64,PHN2Zy8+);width:31px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2Zy8+\") | 31px"
+  },
+  {
+   "name": "style attr: url( then a space then a quote",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url( 'data:image/svg+xml;utf8,x');width:32px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,x\") | 32px"
+  },
+  {
+   "name": "style attr: unterminated quoted url() at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:35px;background-image:url('data:image/svg+xml;utf8,x\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,x\") | 35px"
+  },
+  {
+   "name": "style attr: custom property string open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:26px;--s:'abc\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--s'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "'abc | 26px"
+  },
+  {
+   "name": "style attr: custom property block open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:27px;--k:f(a\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--k'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "f(a | 27px"
+  },
+  {
+   "name": "style attr: custom property url( open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:28px;--u:url(a\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--u'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(a | 28px"
+  },
+  {
+   "name": "style attr: custom property unquoted url() holding ;",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--u:url(a;b);width:29px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--u'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(a;b) | 29px"
   }
  ]
 }

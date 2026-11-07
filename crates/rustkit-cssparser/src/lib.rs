@@ -1091,6 +1091,33 @@ mod tests {
 
     use super::*;
 
+    /// The case list both copies of the rule run (this one and the bindings'
+    /// JS `splitDecls`), so they cannot drift apart (#972 R1 nit 3).
+    #[test]
+    fn the_shared_declaration_list_cases_split_as_listed() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("declaration_list_cases.json")).expect("cases");
+        let mut wrong = Vec::new();
+        for case in doc["cases"].as_array().expect("cases") {
+            let input = case["input"].as_str().unwrap();
+            let want: Vec<(String, String)> = case["decls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| (d[0].as_str().unwrap().to_string(), d[1].as_str().unwrap().to_string()))
+                .collect();
+            let got: Vec<(String, String)> = split_declaration_list(input)
+                .iter()
+                .filter_map(|d| d.split_once(':'))
+                .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
+                .collect();
+            if got != want {
+                wrong.push(format!("{input:?}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     #[test]
     fn a_declaration_list_splits_only_at_top_level_semicolons() {
         let split = |s: &str| split_declaration_list(s);
@@ -1110,6 +1137,7 @@ mod tests {
         assert_eq!(split(" ;; color:red !important ;; ;"), ["color:red !important"]);
         assert_eq!(split("w:1;b:url(data:x;y"), ["w:1", "b:url(data:x;y)"]);
         assert_eq!(split("a:'open;b:1"), ["a:'open;b:1'"]);
+        assert_eq!(split("--a:'open;b:1"), ["--a:'open;b:1"]);
         assert_eq!(split("a:f(];b:1"), ["a:f(];b:1)"]);
         assert_eq!(split("a:1);b:2"), ["a:1)", "b:2"]);
         assert!(split("").is_empty());

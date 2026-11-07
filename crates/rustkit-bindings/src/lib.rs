@@ -4677,6 +4677,39 @@ mod tests {
         );
     }
 
+    /// The JS copy of the declaration-list rule (`splitDecls`) on the case
+    /// list `rustkit_cssparser`'s own copy runs, read back through
+    /// `CSSStyleDeclaration` (#972 R1 nit 3: the two copies must not drift).
+    #[test]
+    fn style_splits_the_shared_declaration_list_cases() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../rustkit-cssparser/src/declaration_list_cases.json"
+        ))
+        .expect("cases");
+        let b = bound("<html><body><div id='d'>x</div></body></html>");
+        let mut wrong = Vec::new();
+        for case in doc["cases"].as_array().expect("cases") {
+            let input = case["input"].as_str().unwrap();
+            let want: Vec<String> = case["decls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| format!("{}={}", d[0].as_str().unwrap(), d[1].as_str().unwrap()))
+                .collect();
+            let script = format!(
+                "var d = document.getElementById('d'); d.setAttribute('style', {}); \
+                 var s = d.style, r = []; for (var i = 0; i < s.length; i++) r.push(s[i] + '=' + s.getPropertyValue(s[i])); \
+                 JSON.stringify(r)",
+                serde_json::to_string(input).unwrap()
+            );
+            let got: Vec<String> = serde_json::from_str(&eval_string(&b, &script)).expect("json");
+            if got != want {
+                wrong.push(format!("{input:?}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
 
     #[test]
