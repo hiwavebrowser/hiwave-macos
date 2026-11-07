@@ -2790,7 +2790,11 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
 
 impl Drop for Engine {
     /// The last visit's hold summary (LAT1): the entries since the last
-    /// line, which no navigation or hundredth entry ended.
+    /// line, which no navigation or hundredth entry ended. The summary is
+    /// the dropping thread's (`wgate` keeps one per thread): an engine
+    /// dropped off the thread that ran its entries leaves that thread's
+    /// partial line unlogged, and two engines on one thread share one
+    /// summary, which the first drop flushes.
     fn drop(&mut self) {
         wgate::flush_hold_summary("drop");
     }

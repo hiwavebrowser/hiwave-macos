@@ -360,7 +360,13 @@ pub(crate) fn capture_lines(needle: &str, run: impl FnOnce()) -> Vec<String> {
         .with_max_level(tracing::Level::INFO)
         .with_writer(move || writer.clone())
         .finish();
-    tracing::subscriber::with_default(subscriber, run);
+    tracing::subscriber::with_default(subscriber, || {
+        // A callsite first reached on another test's thread, with no
+        // subscriber there, caches "never" and skips this one (#967 R1):
+        // recompute every callsite's interest under this subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        run()
+    });
     let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     log.lines()
         .filter(|line| line.contains(needle))
@@ -447,24 +453,26 @@ fn a_navigation_summary_scrubs_the_outgoing_url() {
 /// page content; the engine's drop logs the last visit's.
 #[test]
 fn the_hold_summary_line_names_entries_and_milliseconds_only() {
-    let lines = capture_lines("thread holds n=", || {
-        let (mut engine, view) = engine_and_view();
+    // Read through `take_last_summary` (this thread's last line), not the
+    // log capture, so another test's tracing state cannot hide it.
+    crate::wgate::flush_hold_summary("drop");
+    let _ = crate::wgate::take_last_summary();
+    let (mut engine, view) = engine_and_view();
+    engine
+        .load_html(view, "<p id=secretid>private words</p>")
+        .expect("load_html");
+    for _ in 0..3 {
         engine
-            .load_html(view, "<p id=secretid>private words</p>")
-            .expect("load_html");
-        for _ in 0..3 {
-            engine
-                .execute_script(view, "document.getElementById('secretid').textContent")
-                .unwrap();
-        }
-        drop(engine);
-    });
-    let line = lines.last().expect("the drop logs the visit's summary");
+            .execute_script(view, "document.getElementById('secretid').textContent")
+            .unwrap();
+    }
+    drop(engine);
+    let line = crate::wgate::take_last_summary().expect("the drop logs the visit's summary");
     assert!(line.contains(" at=drop"), "{line}");
     assert!(line.contains("load_html:1:"), "{line}");
     assert!(line.contains("script:3:"), "{line}");
     for field in ["p50_ms", "p95_ms", "max_ms"] {
-        assert!(field_ms(line, field).is_some(), "{field}: {line}");
+        assert!(field_ms(&line, field).is_some(), "{field}: {line}");
     }
     for leak in ["secretid", "private", "words"] {
         assert!(!line.contains(leak), "{leak}: {line}");

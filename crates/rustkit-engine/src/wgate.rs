@@ -309,7 +309,7 @@ thread_local! {
     static HOLD_DEPTH: Cell<u32> = const { Cell::new(0) };
     /// Every outermost entry since the last hold summary line: its name
     /// and milliseconds (LAT1).
-    static HOLD_SUMMARY: RefCell<Vec<(&'static str, f32)>> = const { RefCell::new(Vec::new()) };
+    static HOLD_SUMMARY: RefCell<Vec<(&'static str, f64)>> = const { RefCell::new(Vec::new()) };
     /// The last hold summary line this thread logged, for tests.
     #[cfg(test)]
     static LAST_SUMMARY: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -444,7 +444,9 @@ impl Drop for WindowHold {
             if summary.capacity() == 0 {
                 summary.reserve_exact(HOLD_SUMMARY_EVERY);
             }
-            summary.push((self.entry, total_ms as f32));
+            // f64, as the hold line compares it: `over_50` counts exactly the
+            // entries that logged a hold line.
+            summary.push((self.entry, total_ms));
             summary.len() >= HOLD_SUMMARY_EVERY
         });
         if full {
@@ -477,7 +479,7 @@ pub(crate) fn take_last_summary() -> Option<String> {
 }
 
 /// Nearest-rank percentile `p` (0..=1) of sorted `values`; 0 when empty.
-fn nearest_rank(sorted: &[f32], p: f64) -> f32 {
+fn nearest_rank(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -487,13 +489,13 @@ fn nearest_rank(sorted: &[f32], p: f64) -> f32 {
 
 /// The hold summary line of `samples` (entry, ms), or `None` when there
 /// are none. Pure, so its shape is testable without a clock.
-pub(crate) fn hold_summary_line(thread: &str, samples: &[(&'static str, f32)], at: &str) -> Option<String> {
+pub(crate) fn hold_summary_line(thread: &str, samples: &[(&'static str, f64)], at: &str) -> Option<String> {
     if samples.is_empty() {
         return None;
     }
-    let mut all: Vec<f32> = samples.iter().map(|&(_, ms)| ms).collect();
-    all.sort_unstable_by(f32::total_cmp);
-    let mut by_entry: Vec<(&str, Vec<f32>)> = Vec::new();
+    let mut all: Vec<f64> = samples.iter().map(|&(_, ms)| ms).collect();
+    all.sort_unstable_by(f64::total_cmp);
+    let mut by_entry: Vec<(&str, Vec<f64>)> = Vec::new();
     for &(entry, ms) in samples {
         match by_entry.iter_mut().find(|(name, _)| *name == entry) {
             Some((_, values)) => values.push(ms),
@@ -501,7 +503,7 @@ pub(crate) fn hold_summary_line(thread: &str, samples: &[(&'static str, f32)], a
         }
     }
     for (_, values) in &mut by_entry {
-        values.sort_unstable_by(f32::total_cmp);
+        values.sort_unstable_by(f64::total_cmp);
     }
     by_entry.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
     let by_entry = by_entry
@@ -509,7 +511,7 @@ pub(crate) fn hold_summary_line(thread: &str, samples: &[(&'static str, f32)], a
         .map(|(entry, values)| format!("{entry}:{}:{:.1}", values.len(), nearest_rank(values, 0.95)))
         .collect::<Vec<_>>()
         .join(",");
-    let over = all.iter().filter(|&&ms| f64::from(ms) >= HOLD_THRESHOLD_MS).count();
+    let over = all.iter().filter(|&&ms| ms >= HOLD_THRESHOLD_MS).count();
     Some(format!(
         "{thread} thread holds n={} p50_ms={:.1} p95_ms={:.1} max_ms={:.1} over_{}={} by_entry={} at={}",
         all.len(),
@@ -819,7 +821,7 @@ mod tests {
     /// p50 under 50 ms, where the hold log alone shows only the slow one.
     #[test]
     fn the_hold_summary_counts_every_entry_by_kind() {
-        let mut samples: Vec<(&'static str, f32)> = vec![("click", 5.0); 10];
+        let mut samples: Vec<(&'static str, f64)> = vec![("click", 5.0); 10];
         samples.push(("click", 200.0));
         samples.push(("move", 1.5));
         samples.push(("move", 2.5));
@@ -829,6 +831,11 @@ mod tests {
             "Content thread holds n=13 p50_ms=5.0 p95_ms=200.0 max_ms=200.0 over_50=1 by_entry=click:11:200.0,move:2:2.5 at=navigation"
         );
         assert_eq!(hold_summary_line("Content", &[], "drop"), None, "no entries, no line");
+        // The boundary is the hold line's: 49.99999 ms logs no hold line, so
+        // it is not over (it would round to 50.0 in f32).
+        let line = hold_summary_line("Content", &[("move", 49.999_99), ("move", 50.0)], "drop").unwrap();
+        assert!(line.contains(" over_50=1 "), "{line}");
+        assert!(hold_line("Content", "move", 49.999_99, &HoldMs::default()).is_none());
         // Ties in count sort by name, so the line is stable.
         let line = hold_summary_line("Window", &[("scroll", 1.0), ("key", 2.0)], "drop").unwrap();
         assert!(line.contains(" by_entry=key:1:2.0,scroll:1:1.0 "), "{line}");
