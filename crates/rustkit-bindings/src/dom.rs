@@ -3906,12 +3906,15 @@ const WRAPPERS_JS: &str = r#"
     var CSSStyleDeclaration = iface('CSSStyleDeclaration');
     var OWNER = Symbol('rustkit.styleOwner');
     // The attribute is a declaration list (CH2.E27): only a top-level `;`
-    // ends a declaration, not one inside a string, a ()/[]/{} block (a
-    // `url(data:...;base64,...)`) or a comment; `\;` is text. Comments drop
-    // out; EOF closes what is open. rustkit_cssparser::split_declaration_list
-    // is the engine's copy of the same rule.
+    // ends a declaration, not one inside a string, a ()/[]/{} block, an
+    // unquoted url( token (one token to its first unescaped `)`, with no
+    // string, comment or block inside: `url(a/*b)`, `url(it's)`) or a
+    // comment; `\;` is text. Comments drop out. At the end a custom property
+    // keeps its text as written; any other declaration gets its open url,
+    // string and blocks closed. rustkit_cssparser::split_declaration_list is
+    // the Rust copy of this rule; both run declaration_list_cases.json.
     function splitDecls(text) {
-        var out = [], cur = '', closers = [], quote = null, i = 0, c;
+        var out = [], cur = '', closers = [], quote = null, openUrl = false, i = 0, c, j;
         var pairs = { '(': ')', '[': ']', '{': '}' };
         while (i < text.length) {
             c = text.charAt(i++);
@@ -3923,14 +3926,30 @@ const WRAPPERS_JS: &str = r#"
                 cur += ' ';
                 continue;
             }
+            if (c === '(' && /(^|[^\w\-\\\u0080-￿])url$/i.test(cur)) {
+                cur += c;
+                for (j = i; j < text.length && /\s/.test(text.charAt(j)); j++) {}
+                if (text.charAt(j) === '"' || text.charAt(j) === "'") { closers.push(')'); continue; }
+                openUrl = true;
+                while (i < text.length) {
+                    c = text.charAt(i++);
+                    cur += c;
+                    if (c === '\\') cur += text.charAt(i++);
+                    else if (c === ')') { openUrl = false; break; }
+                }
+                continue;
+            }
             if (c === '"' || c === "'") quote = c;
             else if (pairs[c]) closers.push(pairs[c]);
             else if (closers.length && c === closers[closers.length - 1]) closers.pop();
             else if (c === ';' && !closers.length) { out.push(cur); cur = ''; continue; }
             cur += c;
         }
-        if (quote) cur += quote;
-        while (closers.length) cur += closers.pop();
+        if (!/^\s*--/.test(cur)) {
+            if (openUrl) cur += ')';
+            if (quote) cur += quote;
+            while (closers.length) cur += closers.pop();
+        }
         out.push(cur);
         return out;
     }

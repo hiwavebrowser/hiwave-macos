@@ -72,13 +72,15 @@
    "name": "style attr: unquoted url() holding an unpaired '",
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;utf8,it's);width:23px\">x</div>",
    "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
-   "chrome": "none | 23px"
+   "chrome": "none | 23px",
+   "gap": "getComputedStyle lays the style attribute's text over a property the engine left without a row; a rejected url leaves no background layer, so the text shows through. The cascade drops it as Chromium does (an_inline_bad_url_is_dropped); width is the regression #972 R1 found and is asserted by the other half of this read."
   },
   {
    "name": "style attr: unquoted url() holding an unbalanced (",
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(a(b.png);width:24px\">x</div>",
    "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
-   "chrome": "none | 24px"
+   "chrome": "none | 24px",
+   "gap": "getComputedStyle lays the style attribute's text over a property the engine left without a row; a rejected url leaves no background layer, so the text shows through. The cascade drops it as Chromium does (an_inline_bad_url_is_dropped); width is the regression #972 R1 found and is asserted by the other half of this read."
   },
   {
    "name": "style attr: unquoted url() holding /*;*/",

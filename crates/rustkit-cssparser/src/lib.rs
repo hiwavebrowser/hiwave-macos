@@ -948,15 +948,28 @@ fn flush_decl(
 /// Split a declaration list -- the text of a `style` attribute -- into its
 /// declarations, the way CSS Syntax 3 §5.4.5 ("consume a list of
 /// declarations") does: only a `;` at the top level ends one. A `;` inside a
-/// quoted string, inside `()`/`[]`/`{}` (which covers `url(...)`, `calc()` and
-/// `var()` fallbacks) or inside a comment does not, and an escaped `\;` is
-/// text. Comments are dropped (a tokenizer never yields them); one becomes a
-/// space so `1px/**/2px` stays two tokens. A closer ends only the block it
-/// matches (`(]` leaves the `(` open), and EOF closes an open string, block
-/// or comment, appending the missing closers the way Chromium serializes
-/// them: `url(data:...` at the end of the attribute still loads. Each
-/// declaration comes back trimmed; empty ones (`;;`, a trailing `;`) are
-/// skipped, as Chromium skips them.
+/// quoted string, inside `()`/`[]`/`{}` (`calc()`, `var()` fallbacks,
+/// custom-property blocks), inside an unquoted `url(...)` or inside a
+/// comment does not, and an escaped `\;` is text. Comments are dropped (a
+/// tokenizer never yields them); one becomes a space so `1px/**/2px` stays
+/// two tokens. A closer ends only the block it matches (`(]` leaves the `(`
+/// open). Each declaration comes back trimmed; empty ones (`;;`, a trailing
+/// `;`) are skipped, as Chromium skips them.
+///
+/// An unquoted `url(` is ONE url token (§4.3.6): it runs to the first
+/// unescaped `)` with no string, comment or block inside it, so
+/// `url(a/*b)`, `url(it's)` and `url(a(b.png)` end at their `)` (the last
+/// two are bad urls, which the value parser rejects) and the next
+/// declaration survives.
+///
+/// End of input: a custom property keeps its text as written (Chromium reads
+/// `--s:'abc` back as `'abc`). Any other declaration gets its open url,
+/// string and blocks closed, which is what its value parser needs and what
+/// Chromium's tokenizer does: `url(data:...` at the end of the attribute
+/// still loads.
+///
+/// `rustkit-bindings`' `splitDecls` (dom.rs) is the JS copy of this rule;
+/// both run `declaration_list_cases.json`.
 ///
 /// Splitting at every `;` cut `url(data:image/svg+xml;base64,...)` at its
 /// `;base64,`, so no inline data-URL background or mask ever applied (Z plan
@@ -966,6 +979,7 @@ pub fn split_declaration_list(text: &str) -> Vec<String> {
     let mut current = String::new();
     let mut closers: Vec<char> = Vec::new();
     let mut quote: Option<char> = None;
+    let mut open_url = false;
     let mut chars = text.chars().peekable();
     let finish = |current: &mut String, out: &mut Vec<String>| {
         let declaration = current.trim();
@@ -1001,6 +1015,37 @@ pub fn split_declaration_list(text: &str) -> Vec<String> {
                 current.push(' ');
                 continue;
             }
+            '(' if ends_with_url_ident(&current) => {
+                current.push(c);
+                let quoted = {
+                    let mut ahead = chars.clone();
+                    loop {
+                        match ahead.next() {
+                            Some(w) if w.is_whitespace() => continue,
+                            Some('"' | '\'') => break true,
+                            _ => break false,
+                        }
+                    }
+                };
+                if quoted {
+                    // `url("...")` is an ordinary function holding a string.
+                    closers.push(')');
+                    continue;
+                }
+                open_url = true;
+                while let Some(u) = chars.next() {
+                    current.push(u);
+                    if u == '\\' {
+                        if let Some(n) = chars.next() {
+                            current.push(n);
+                        }
+                    } else if u == ')' {
+                        open_url = false;
+                        break;
+                    }
+                }
+                continue;
+            }
             '"' | '\'' => quote = Some(c),
             '(' => closers.push(')'),
             '[' => closers.push(']'),
@@ -1016,10 +1061,32 @@ pub fn split_declaration_list(text: &str) -> Vec<String> {
         }
         current.push(c);
     }
-    current.extend(quote);
-    current.extend(closers.iter().rev());
+    if !current.trim_start().starts_with("--") {
+        if open_url {
+            current.push(')');
+        }
+        current.extend(quote);
+        current.extend(closers.iter().rev());
+    }
     finish(&mut current, &mut out);
     out
+}
+
+/// Whether `text` ends with the identifier `url` (ASCII case-insensitive), so
+/// a `(` after it opens a url token. `myurl(` and `my-url(` are other
+/// functions: the character before `url` must not continue an identifier.
+fn ends_with_url_ident(text: &str) -> bool {
+    let Some(head) = text.len().checked_sub(3).and_then(|i| text.get(i..).map(|t| (i, t))) else {
+        return false;
+    };
+    let (at, tail) = head;
+    if !tail.eq_ignore_ascii_case("url") {
+        return false;
+    }
+    !text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|p| p.is_alphanumeric() || p == '-' || p == '_' || p == '\\' || !p.is_ascii())
 }
 
 fn strip_important(value: &str) -> (&str, bool) {

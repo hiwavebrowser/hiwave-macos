@@ -23227,13 +23227,13 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
         return Some(layer);
     }
 
-    // Check for url()
-    if value.starts_with("url(") {
-        if let Some(end) = value.find(')') {
-            let url = value[4..end].trim().trim_matches(|c| c == '"' || c == '\'');
-            layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
-            return Some(layer);
-        }
+    // Check for url(). `parse_css_url` is case-insensitive (`URL(...)`),
+    // keeps a `)` or `;` inside a quoted url, and rejects a bad url
+    // (`url(it's)`, `url(a(b.png)`) the way Chromium does (#972 R1).
+    if value.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url(")) {
+        let url = rustkit_css::mask::parse_css_url(value)?;
+        layer.image = rustkit_css::BackgroundImage::Url(url);
+        return Some(layer);
     }
 
     // Check if it's a color (these don't create image layers)
@@ -23351,10 +23351,7 @@ fn parse_background_shorthand_layer(
             }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
-                let url = token[4..token.len() - 1]
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\'');
-                layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+                layer.image = rustkit_css::BackgroundImage::Url(rustkit_css::mask::parse_css_url(token)?);
             }
             _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {

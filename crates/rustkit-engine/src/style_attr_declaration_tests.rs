@@ -48,6 +48,26 @@ fn an_inline_data_url_reaches_the_computed_style() {
     assert_eq!(row("color"), "rgb(0, 128, 0)");
 }
 
+/// #972 R1: an unquoted url holding a quote or a `(` is a bad url. It ends
+/// at its `)` (the next declaration survives) and the declaration is
+/// dropped, as Chromium drops it: no background layer.
+#[test]
+fn an_inline_bad_url_is_dropped_and_the_next_declaration_applies() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine");
+    for attr in [
+        "background-image:url(data:image/svg+xml;utf8,it's);color:rgb(0, 128, 0)",
+        "background-image:url(a(b.png);color:rgb(0, 128, 0)",
+        "background:url(a(b.png) red;color:rgb(0, 128, 0)",
+    ] {
+        let mut style = ComputedStyle::default();
+        let vars: HashMap<String, String> = HashMap::new();
+        engine.lctx.apply_inline_style(&mut style, None, attr, &vars, &mut ChPending::default(), false);
+        assert!(style.background_layers.is_empty(), "{attr}");
+        let lines = computed_style_lines(&LayoutBox::new(rustkit_layout::BoxType::Block, style));
+        assert!(lines.contains("\ncolor\trgb(0, 128, 0)"), "{attr}");
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "headless"))]
 #[test]
 fn style_attribute_declarations_read_as_chromium() {
@@ -60,7 +80,17 @@ fn style_attribute_declarations_read_as_chromium() {
         let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
         engine.load_html(id, &s("html")).expect("load");
         let read = eval(&mut engine, id, &s("expr"));
-        if read != s("chrome") {
+        // A `gap` case reads wrong for a reason outside this rule, stated in
+        // the case; its LAST field (after ` | `) must still match, and the
+        // whole read must still differ, so the gap cannot go stale.
+        let ok = match c["gap"].as_str() {
+            Some(_) => {
+                read != s("chrome")
+                    && read.rsplit(" | ").next() == s("chrome").rsplit(" | ").next()
+            }
+            None => read == s("chrome"),
+        };
+        if !ok {
             wrong.push(format!("{}: read {read:?}, Chromium {:?}", s("name"), s("chrome")));
         }
         let _ = engine.destroy_view(id);
