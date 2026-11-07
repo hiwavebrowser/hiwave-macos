@@ -16688,12 +16688,23 @@ impl Engine {
     fn load_cancelled(&mut self, id: EngineViewId, nav_id: u64) {
         let _turn = rustkit_js::DiagTurn::enter("navigation-teardown");
         rustkit_js::set_diag_nav(nav_id);
+        // The stylesheet links the stopped load held, so the live loop does
+        // not request them as links a script inserted (CH2.E20): a cancel
+        // drops the load's fetches, and a sheet that lands after Stop must
+        // not restyle the page or start its images.
+        let held_links = self
+            .views
+            .get(&id)
+            .and_then(|v| v.document.as_ref().map(|d| (v, d)))
+            .map(|(v, d)| self.discover_external_stylesheets(d.as_ref(), v.url.as_ref()))
+            .unwrap_or_default();
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
         if view.nav_id != nav_id || !view.control.nav_cancelled(nav_id) {
             return;
         }
+        view.sheet_urls_seen.extend(held_links);
         // Before the commit the word is the shown page's, whose script
         // keeps running: the cancel is of the load, not of that page.
         let committed = view.control.nav_committed(nav_id);
