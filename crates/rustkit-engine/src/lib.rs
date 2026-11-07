@@ -49437,6 +49437,65 @@ mod clip_path_pins {
         }
     }
 
+    /// `clip-path` on a non-replaced inline (WPT clip-path-reference-box-004,
+    /// clip-path-inline-006). Only block, image and form-control boxes read
+    /// it, so an inline painted unclipped. RustKit's inline is one box at its
+    /// first line fragment; Chrome for Testing 148 clips a wrapped inline to
+    /// that first fragment too: `<span style="clip-path:inset(0)">XXX XXX</span>`
+    /// in a 50px `font:20px/40px monospace` block paints 36x23 at (0,8), the
+    /// first line only (1656 px green without the clip, 828 with it), and
+    /// `inset(0 10px)` on a one-line inline with 10px side padding paints the
+    /// 36px text and none of the padding.
+    #[test]
+    fn clip_path_clips_an_inline_box_and_its_text() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:50px;font:20px/40px monospace"><span style="background:green;color:green;clip-path:inset(0)">XXX XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        // One line tall at the first fragment: the second line's text is outside it.
+        assert!(lines[push].contains("x: 0.0, y: 8.5"), "{}", lines[push]);
+        let height: f32 = lines[push]
+            .split("height: ")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| c != '.' && !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no height in {}", lines[push]));
+        assert!(height > 0.0 && height <= 40.0, "first fragment only: {}", lines[push]);
+        let texts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("Text"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!texts.is_empty(), "no text:\n{all}");
+        for i in texts {
+            assert!(depth_at(&lines, i) >= 1, "text paints unclipped:\n{all}");
+        }
+
+        // A one-line inline: `inset(0 10px)` takes the side padding away.
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace">ab <span style="background:green;padding:0 10px;clip-path:inset(0 10px)">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        assert!(lines[push].contains("width: 36.0"), "{}", lines[push]);
+        let bg = lines
+            .iter()
+            .position(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        assert!(bg > push && depth_at(&lines, bg) >= 1, "background unclipped:\n{all}");
+    }
+
     /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
     /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
     /// box. A `<geometry-box>` alone clips to that box. All of them were
