@@ -113,8 +113,8 @@
   },
   {
    "name": "input-border-5px",
-   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><input id=a style=\"border:5px;padding:0;width:20px;height:10px\"><div id=b></div></body></html>",
-   "chrome_boxes": "a:0:5:20:10 b:0:18:10:10"
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><input id=a style=\"display:block;border:5px;padding:0;width:20px;height:10px\"><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:10 b:0:10:10:10"
   },
   {
    "name": "input-border-5px-solid",
@@ -128,8 +128,8 @@
   },
   {
    "name": "hr-border-5px",
-   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><hr id=a style=\"border:5px;margin:0\"><div id=b></div></body></html>",
-   "chrome_boxes": "a:0:0:400:0 b:0:0:10:10"
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><hr style=\"border:5px;margin:0\"><div id=b></div></body></html>",
+   "chrome_boxes": "b:0:0:10:10"
   },
   {
    "name": "pseudo-border-5px",
