@@ -639,6 +639,8 @@ mod border_medium_tests;
 mod float_percent_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod abspos_static_margin_tests;
+#[cfg(all(test, feature = "headless"))]
+mod abspos_static_rest_tests;
 #[cfg(test)]
 mod grid_in_flex_tests;
 #[cfg(all(test, feature = "headless"))]
