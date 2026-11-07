@@ -1479,8 +1479,7 @@
    {
     "prop": "border-style",
     "value": "solid dashed",
-    "chrome": "solid dashed",
-    "gap": "a solid side with no width set lays out 0px wide, so its style reads none"
+    "chrome": "solid dashed"
    },
    {
     "prop": "border-style",
