@@ -715,6 +715,13 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
             // is decoration, and decoration in a parser reads as intent.
             if c == ':' {
                 in_value = true;
+            } else if c == ';' && structural {
+                // A `;` before any `:` ends an empty declaration (`;;`) or
+                // one with no colon (`foo;`): both are skipped and the next
+                // declaration starts clean (CSS Syntax 3 §5.4.5). Kept as
+                // text, the `;` became part of the next property name, so
+                // `color:red;;background:blue` lost the background (CH2.E28).
+                current_property.clear();
             } else {
                 current_property.push(c);
             }
