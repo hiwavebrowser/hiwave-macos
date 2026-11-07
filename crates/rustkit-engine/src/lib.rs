@@ -2792,6 +2792,18 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
     }
 }
 
+impl Drop for Engine {
+    /// The last visit's hold summary (LAT1): the entries since the last
+    /// line, which no navigation or hundredth entry ended. The summary is
+    /// the dropping thread's (`wgate` keeps one per thread): an engine
+    /// dropped off the thread that ran its entries leaves that thread's
+    /// partial line unlogged, and two engines on one thread share one
+    /// summary, which the first drop flushes.
+    fn drop(&mut self) {
+        wgate::flush_hold_summary("drop");
+    }
+}
+
 impl Engine {
     /// Create a new browser engine.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
@@ -9259,12 +9271,16 @@ impl Engine {
         // the build itself (`LayoutCtx::with_building`), so a forced
         // layout sees them too.
 
+        // The builds' sheet and custom-property extraction (LAT1): outside
+        // `build_ms`, so the line names it.
+        let extract_before = SheetExtract::totals().extract_us;
         let layout_skipped = self.relayout_uncounted(id)?;
         // A drop-down whose select left the document, lost the focus or
         // was disabled closes (Chrome).
         self.close_stale_select_popup(id);
 
         let took_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let extract_ms = SheetExtract::totals().extract_us.saturating_sub(extract_before) as f64 / 1000.0;
         let stages = relayout_cause::take_stage_ms();
         let tree_reused = relayout_cause::last_build_reused_tree();
         // What an incremental restyle would have done (PR 1: logged only).
@@ -9289,13 +9305,14 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
             cause,
             causes.counts,
             causes.mutations,
             tree_reused,
             took_ms,
             stages,
+            extract_ms,
             layout_skipped,
             would
         );
@@ -40827,7 +40844,6 @@ impl SheetExtract {
     }
 
     /// The totals of this thread's builds so far.
-    #[cfg(test)]
     pub(crate) fn totals() -> SheetExtract {
         SHEET_EXTRACT_TOTALS.with(Cell::get)
     }
@@ -49367,6 +49383,58 @@ mod clip_path_pins {
                 "`{style}`:\n{}",
                 lines.join("\n")
             );
+        }
+    }
+
+    /// `rect()` and `xywh()` (css-shapes-1 §3.1), both `inset()` rectangles
+    /// written from the reference box's top and left edges. They had no arm,
+    /// so the box painted unclipped (WPT clip-path-rect-002, clip-path-xywh-001).
+    /// Chrome for Testing 148, the same 140px border box at the origin: the
+    /// painted bounds of each style are the rect pinned here; `rect(10px
+    /// 20px 90px 100px)` (right left of left) paints nothing; the `round`
+    /// forms leave the box's corner pixel white.
+    #[test]
+    fn clip_path_rect_and_xywh_clip_to_their_rectangle() {
+        let e = engine();
+        let page = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 8] = [
+            ("clip-path:rect(10px 100px 90px 20px)", "PushClip(", "x: 20.0, y: 10.0, width: 80.0, height: 80.0", None),
+            // `auto` is the reference box's own edge: top/left 0%, right/bottom 100%.
+            ("clip-path:rect(auto auto 50% 25%)", "PushClip(", "x: 35.0, y: 0.0, width: 105.0, height: 70.0", None),
+            ("-webkit-clip-path:rect(10px 100px 90px 20px) content-box", "PushClip(", "x: 40.0, y: 30.0, width: 80.0, height: 80.0", None),
+            // A right edge left of the left edge is the left edge: nothing shows.
+            ("clip-path:rect(10px 20px 90px 100px)", "PushClip(", "width: 0.0, height: 80.0", None),
+            ("clip-path:rect(0 100% 100% 0 round 20px / 10px)", "PushClipRounded", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", Some("CornerRadius { h: 20.0, v: 10.0 }")),
+            ("clip-path:xywh(10px 20px 50% 30px)", "PushClip(", "x: 10.0, y: 20.0, width: 70.0, height: 30.0", None),
+            ("clip-path:xywh(-10px -10px 200px 200px)", "PushClip(", "x: -10.0, y: -10.0, width: 200.0, height: 200.0", None),
+            ("clip-path:xywh(0 0 100% 100% round 10px)", "PushClipRounded", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", Some("CornerRadius { h: 10.0, v: 10.0 }")),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            for (i, c) in lines.iter().enumerate().skip(push + 1) {
+                if !c.starts_with("PushClip") && !c.starts_with("PopClip") {
+                    assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{c}` unclipped:\n{all}");
+                }
+            }
+        }
+        // A malformed one is ignored, as Chrome ignores the declaration.
+        for style in ["clip-path:rect(10px 20px)", "clip-path:xywh(10px 20px 30px)", "clip-path:xywh(0 0 -1px 10px)"] {
+            let lines = page(style);
+            assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
         }
     }
 }

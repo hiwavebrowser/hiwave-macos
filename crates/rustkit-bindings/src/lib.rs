@@ -770,7 +770,20 @@ pub(crate) struct DirtyMark {
     /// the embedder's `mark_dirty`), so the engine's paint-only animation
     /// frame is taken only when the layer write is all that changed.
     beyond_animation_layer: Cell<bool>,
+    /// LAT7c: Web Animations wrote paint properties of the animated-style
+    /// layer since the last published layout ([`LAYER_PAINT`],
+    /// [`LAYER_TRANSFORM`]). The boxes did not move, so only the reads that
+    /// see those values lay out first (`needs_layout_for`).
+    layer_since_layout: Cell<u8>,
 }
+
+/// A layer write of paint properties (`opacity`, `color`,
+/// `background-color`, the border colours): the computed style sees it.
+pub(crate) const LAYER_PAINT: u8 = 1;
+/// A layer write of `transform` (and `translate`/`rotate`/`scale`): the
+/// computed style, the transformed rects, hit testing and the scroll
+/// extents see it; offset and client boxes do not.
+pub(crate) const LAYER_TRANSFORM: u8 = 2;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
@@ -791,6 +804,35 @@ impl DirtyMark {
             if !self.since_layout.replace(true) {
                 self.cause.set(Some(kind));
             }
+        }
+    }
+
+    /// LAT7c: Web Animations wrote only paint properties of an element's
+    /// animated-style layer (`reads`: [`LAYER_PAINT`] and/or
+    /// [`LAYER_TRANSFORM`]). The engine paints it when script settles (the
+    /// bucket, and the paint-only frame: `beyond_animation_layer` is left
+    /// alone), but no box moved: an offset or client read stays clean, and
+    /// only the reads that see the values lay out (`needs_layout_for`).
+    pub(crate) fn mark_animation_paint(&self, bucket: DomDirty, reads: u8) {
+        if bucket != DomDirty::Clean {
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+        }
+    }
+
+    /// Whether the read `read` (the forced-layout log's read kinds) must
+    /// lay the page out first: after any write a layout can see, or after a
+    /// paint-layer write whose values it reads.
+    pub(crate) fn needs_layout_for(&self, read: &str) -> bool {
+        if self.since_layout.get() {
+            return true;
+        }
+        let layer = self.layer_since_layout.get();
+        match read {
+            "computed_style" => layer != 0,
+            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
+            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            _ => false,
         }
     }
 
@@ -836,6 +878,7 @@ impl DirtyMark {
     /// A layout of the DOM as it is now was published.
     pub(crate) fn laid_out(&self) {
         self.since_layout.set(false);
+        self.layer_since_layout.set(0);
         self.cause.set(None);
     }
 }
@@ -3754,6 +3797,30 @@ mod tests {
             .set_document(Rc::new(Document::parse_html("<p>x</p>").unwrap()))
             .unwrap();
         assert_eq!(bindings.take_dirty(), DomDirty::Clean);
+    }
+
+    // LAT7c: a Web Animations write of paint properties only marks the
+    // layer for the reads that see it, not the published layout.
+    #[test]
+    fn lat7c_a_paint_layer_write_leaves_offset_reads_clean() {
+        let d = DirtyMark::default();
+        d.mark_animation_paint(DomDirty::Layout, LAYER_PAINT);
+        assert!(!d.written_since_layout(), "the boxes did not move");
+        assert!(!d.needs_layout_for("offset"));
+        assert!(!d.needs_layout_for("client"));
+        assert!(!d.needs_layout_for("rect"), "opacity moves no rect");
+        assert!(d.needs_layout_for("computed_style"), "the computed value is the animated one");
+        assert_eq!(d.get(), DomDirty::Layout, "the engine still paints the frame");
+        assert!(!d.beyond_animation_layer());
+        d.mark_animation_paint(DomDirty::Layout, LAYER_TRANSFORM);
+        assert!(d.needs_layout_for("rect") && d.needs_layout_for("hit_test") && d.needs_layout_for("scroll_size"));
+        assert!(!d.needs_layout_for("offset"), "a transform moves no offset box");
+        d.laid_out();
+        assert!(!d.needs_layout_for("computed_style"), "a layout publishes the layer");
+        // A seen write afterwards forces every read again.
+        d.mark(DomDirty::Layout, "text");
+        assert!(d.needs_layout_for("offset"));
+        assert_eq!(d.cause(), Some("text"));
     }
 
     // #947 x #941: the LAT7 marks (write cause, unseen writes, no-op writes)
