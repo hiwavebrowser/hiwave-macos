@@ -636,6 +636,8 @@ mod unitless_zero_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_medium_tests;
 #[cfg(all(test, feature = "headless"))]
+mod border_shorthand_no_style_tests;
+#[cfg(all(test, feature = "headless"))]
 mod float_percent_height_tests;
 #[cfg(all(test, feature = "headless"))]
 mod abspos_static_margin_tests;

@@ -1,0 +1,146 @@
+{
+ "viewport": [
+  400,
+  300
+ ],
+ "boxes": "xywh",
+ "note": "CH2.B18b: a border shorthand with no style keyword resets the style to none (Chromium paints nothing); border-style revert/revert-layer.",
+ "cases": [
+  {
+   "name": "border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-thick",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:thick\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-5px-red",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px red\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-red-thin",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:red thin\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-top-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-top:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-left-thick-red",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-left:thick red\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-right-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-right:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-bottom-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-bottom:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-5px-solid",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "border-5px-dotted-blue",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px dotted blue\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "style-then-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border-style:solid;border:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-solid-then-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-5px-then-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px;border-style:solid\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  },
+  {
+   "name": "border-5px-then-top-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px;border-top-style:dashed\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:15 b:0:15:10:10"
+  },
+  {
+   "name": "side-solid-then-border-top-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-top:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:15 b:0:15:10:10"
+  },
+  {
+   "name": "sheet-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}.x{border:5px}</style></head><body><div id=a class=x></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "sheet-style-inline-border",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}.x{border-style:solid}</style></head><body><div id=a class=x style=\"border:5px\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-style-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-style:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-style-revert-layer",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-style:revert-layer\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "border-top-style-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border-top-style:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:15 b:0:15:10:10"
+  },
+  {
+   "name": "border-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px solid;border:revert\"></div><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:10:10 b:0:10:10:10"
+  },
+  {
+   "name": "input-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><input id=a style=\"border:5px;padding:0;width:20px;height:10px\"><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:5:20:10 b:0:18:10:10"
+  },
+  {
+   "name": "input-border-5px-solid",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><input id=a style=\"border:5px solid;padding:0;width:20px;height:10px\"><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:30:20 b:0:20:10:10"
+  },
+  {
+   "name": "input-border-style-revert",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><input id=a style=\"border-style:none;border-style:revert;padding:0;width:20px;height:10px\"><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:3:24:14 b:0:18:10:10"
+  },
+  {
+   "name": "hr-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><hr id=a style=\"border:5px;margin:0\"><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:400:0 b:0:0:10:10"
+  },
+  {
+   "name": "pseudo-border-5px",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}#a,#c{height:auto}#a::after{content:\"\";display:block;width:4px;height:4px;border:5px}#c::after{content:\"\";display:block;width:4px;height:4px;border:5px solid}</style></head><body><div id=a></div><div id=c></div></body></html>",
+   "chrome_boxes": "a:0:0:10:4 c:0:4:10:14"
+  },
+  {
+   "name": "script-border-5px-then-style",
+   "html": "<!doctype html><html><head><style>body{margin:0}div{width:10px;height:10px}</style></head><body><div id=a style=\"border:5px\"></div><script>var a=document.getElementById(\"a\");a.offsetWidth;a.style.borderStyle=\"solid\"</script><div id=b></div></body></html>",
+   "chrome_boxes": "a:0:0:20:20 b:0:20:10:10"
+  }
+ ],
+ "chrome": "143.0.7499.4"
+}
