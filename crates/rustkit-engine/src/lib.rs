@@ -49440,6 +49440,53 @@ mod clip_path_pins {
             assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
         }
     }
+
+    /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
+    /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
+    /// box. A `<geometry-box>` alone clips to that box. All of them were
+    /// unknown keywords, so the box painted unclipped. Chrome for Testing 148
+    /// on the 140px border box: the painted bounds are the rects pinned here.
+    #[test]
+    fn clip_path_svg_reference_boxes_and_a_lone_box_clip_on_an_html_box() {
+        let e = engine();
+        let page = |style: &str| {
+            dl(&e, &format!(
+                r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:100px;height:100px;border:20px solid red;background:green;{style}"></div></body></html>"#
+            ))
+        };
+        let cases: [(&str, &str, &str, Option<&str>); 7] = [
+            ("clip-path:inset(10px) fill-box", "PushClip(", "x: 30.0, y: 30.0, width: 80.0, height: 80.0", None),
+            ("clip-path:inset(10px) stroke-box", "PushClip(", "x: 10.0, y: 10.0, width: 120.0, height: 120.0", None),
+            ("clip-path:view-box inset(10px)", "PushClip(", "x: 10.0, y: 10.0, width: 120.0, height: 120.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 100% 100%, 0 100%) view-box", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:circle(50%) fill-box", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
+            ("clip-path:fill-box", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
+            ("clip-path:stroke-box", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+        ];
+        for (style, kind, rect, corner) in cases {
+            let lines = page(style);
+            let all = lines.join("\n");
+            let push = lines
+                .iter()
+                .position(|c| c.starts_with("PushClip"))
+                .unwrap_or_else(|| panic!("`{style}` opened no clip:\n{all}"));
+            assert!(lines[push].starts_with(kind), "`{style}`: {}", lines[push]);
+            assert!(lines[push].contains(rect), "`{style}`: {}", lines[push]);
+            if let Some(corner) = corner {
+                assert_eq!(lines[push].matches(corner).count(), 4, "`{style}`: {}", lines[push]);
+            }
+            for (i, c) in lines.iter().enumerate().skip(push + 1) {
+                if !c.starts_with("PushClip") && !c.starts_with("PopClip") {
+                    assert!(depth_at(&lines, i) >= 1, "`{style}` paints `{c}` unclipped:\n{all}");
+                }
+            }
+        }
+        // Two boxes, or a word that is not one, is invalid: no clip.
+        for style in ["clip-path:fill-box stroke-box", "clip-path:inset(10px) bogus-box"] {
+            let lines = page(style);
+            assert!(!lines.iter().any(|c| c.starts_with("PushClip")), "`{style}`:\n{}", lines.join("\n"));
+        }
+    }
 }
 
 #[cfg(test)]
