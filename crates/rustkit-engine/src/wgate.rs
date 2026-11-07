@@ -862,13 +862,19 @@ mod tests {
         let line = hold_summary_line(Some((7, "a.example")), &samples, "navigation").expect("a line");
         assert_eq!(
             line,
-            "Content thread holds view=7 host=a.example n=13 p50_ms=5.0 p95_ms=200.0 max_ms=200.0 over_50=1 by_entry=click:11:200.0,move:2:2.5 at=navigation"
+            "Content thread holds view=7 host=a.example n=13 p50_ms=5.0 p95_ms=200.0 max_ms=200.0 over_50=1 over_50_ms=200.0 by_entry=click:11:200.0,move:2:2.5 at=navigation"
         );
         assert_eq!(hold_summary_line(None, &[], "drop"), None, "no entries, no line");
         // The boundary is the hold line's: 49.99999 ms logs no hold line, so
         // it is not over (it would round to 50.0 in f32).
         let line = hold_summary_line(None, &[("move", 49.999_99), ("move", 50.0)], "drop").unwrap();
-        assert!(line.contains(" over_50=1 "), "{line}");
+        assert!(line.contains(" over_50=1 over_50_ms=50.0 "), "{line}");
+        // LAT1b: the line lists its entries of 50 ms or more, longest first,
+        // so the p95 needs no hold line attributed by its log position.
+        let line = hold_summary_line(None, &[("move", 60.0), ("move", 1.0), ("click", 612.0)], "drop").unwrap();
+        assert!(line.contains(" over_50=2 over_50_ms=612.0,60.0 "), "{line}");
+        let line = hold_summary_line(None, &[("move", 1.0)], "drop").unwrap();
+        assert!(line.contains(" over_50=0 over_50_ms=- "), "{line}");
         assert!(hold_line("Content", "move", 49.999_99, &HoldMs::default()).is_none());
         // Ties in count sort by name, so the line is stable.
         let line = hold_summary_line(None, &[("scroll", 1.0), ("key", 2.0)], "drop").unwrap();

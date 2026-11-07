@@ -152,6 +152,13 @@ TAGGED_LOG = f"""{E}2026-11-07T11:00:00.000000Z  INFO rustkit_engine: Loading UR
 """
 
 
+# LAT1b: a capture logged at warn plus the wgate lines: no `Loading URL` line, so a hold line has no
+# site by its log position. The tagged summary lists its entries of 50 ms or more itself.
+UNPLACED_LOG = f"""{E}2026-11-07T12:00:01.000000Z  WARN rustkit_engine::wgate: Content thread hold entry=load ms=1200 build_ms=0.0 layout_ms=0.0 display_list_ms=0.0 snapshot_ms=0.0 render_ms=0.0 script_ms=0.0 other_ms=1200.0
+2026-11-07T12:00:01.500000Z  INFO rustkit_engine::wgate: Content thread holds view=1 host=c.example n=2 p50_ms=0.5 p95_ms=1200.3 max_ms=1200.3 over_50=1 over_50_ms=1200.3 by_entry=load:1:1200.3,render_view:1:0.5 at=drop
+"""
+
+
 def _summary(text, **kw):
     tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
     tmp.write(text)
@@ -189,6 +196,12 @@ class Lat1bPerVisitSummary(unittest.TestCase):
         self.assertEqual(b["hold_entries"]["n"], 10)
         self.assertTrue(b["exit_metric"]["hold_p95_under_threshold"])
         self.assertTrue(b["exit_metric"]["pass"])
+
+    def test_a_tagged_line_carries_its_own_long_entries(self):
+        m = _summary(UNPLACED_LOG)["c.example"]["exit_metric"]
+        self.assertEqual(m["hold_n"], 2)
+        self.assertEqual(m["hold_p95_ms"], 1200.3)
+        self.assertFalse(m["pass"])
 
     def test_tagged_lines_split_by_view(self):
         s = _summary(TAGGED_LOG, by_view=True)
