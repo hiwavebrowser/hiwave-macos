@@ -154,3 +154,32 @@ fn the_disabled_attribute_on_a_style_is_not_the_sheets_flag() {
     // `<style disabled>` is not a thing in HTML: Chromium applies it.
     assert_eq!(size("<style disabled>#t{width:20px}</style>", ""), "20x0");
 }
+
+#[test]
+fn sheet_text_cannot_close_the_media_attributes_condition_early() {
+    // A stray `}` at the top level of a sheet is part of the next rule's
+    // prelude, which then fails: Chromium drops that one rule, `media` or
+    // not. Wrapping the text as `@media <list> { ... }` let the `}` close
+    // the wrapper instead, so the rules after it applied everywhere.
+    // Chromium 148.0.7778.216 headless, 800x600 (#964 R1 nit 1).
+    let cases = [
+        ("screen, stray }", "<style media=\"screen\">a{} } #t{width:20px}</style>", "10x0"),
+        ("print, stray }", "<style media=\"print\">a{} } #t{width:20px}</style>", "10x0"),
+        ("no media, stray }", "<style>a{} } #t{width:20px}</style>", "10x0"),
+        ("screen, stray } then ;", "<style media=\"screen\">a{} }; #t{width:20px}</style>", "10x0"),
+        ("screen, only the next rule", "<style media=\"screen\">a{} } b{} #t{width:20px}</style>", "20x0"),
+        ("print, only the next rule", "<style media=\"print\">a{} } b{} #t{width:20px}</style>", "10x0"),
+        ("screen, at-rule with } ends at ;", "<style media=\"screen\">@layer x }; #t{width:20px}</style>", "20x0"),
+        ("screen, } in a function", "<style media=\"screen\">a{b:c(})} #t{width:20px}</style>", "20x0"),
+        ("screen, stray } at the end", "<style media=\"screen\">#t{width:20px} }</style>", "20x0"),
+        ("print, stray } at the end", "<style media=\"print\">#t{width:20px} }</style>", "10x0"),
+    ];
+    let mut wrong = Vec::new();
+    for (name, body, want) in cases {
+        let got = size(body, "");
+        if got != want {
+            wrong.push(format!("{name}: got {got}, Chromium {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
