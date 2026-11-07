@@ -641,6 +641,93 @@ class Driver:
         self.expect(c, ":hover paints green", hover[GREEN] > hover[RED], str(hover))
         self.expect(c, ":active paints blue", active[BLUE] > active[RED], str(active))
 
+    def e19_icon_hover(self):
+        """CH2.E19: an inline svg icon whose fill an author `:hover` rule sets turns from red to green under the pointer."""
+        c = "e19_icon_hover"
+        if not self.open_page(c, "e19_icon_hover.html"):
+            return
+        if not self.can_input:
+            return self.not_run(c, "hover an icon: its svg fill follows `button:hover svg path`",
+                                self.why_not("Accessibility"))
+        pid = self.app.proc.pid
+        x, y = self.centre()
+        rest = self.frame(c, "rest", [RED, GREEN])
+        mark = self.fixture.mark()
+        self.hw("move", pid, x - 40, y - 40)
+        self.hw("move", pid, x, y)
+        self.expect(c, "script heard mouseover", self.fixture.wait("beacon?e19-mouseover", 4, mark))
+        time.sleep(0.6)
+        hover = self.frame(c, "hover", [RED, GREEN])
+        self.hw("move", pid, x, 12)
+        time.sleep(0.6)
+        left = self.frame(c, "left", [RED, GREEN])
+        if rest is None or hover is None or left is None:
+            return self.not_run(c, "the icon's fill", self.why_not("Screen Recording"))
+        self.expect(c, "at rest the icon is red", rest[RED] > 1000 and rest[GREEN] < rest[RED] / 10, str(rest))
+        self.expect(c, "under the pointer the icon is green", hover[GREEN] > 1000 and hover[RED] < hover[GREEN] / 10,
+                    str(hover))
+        self.expect(c, "off the button it is red again", left[RED] > left[GREEN], str(left))
+
+    def e22_focus_ring(self):
+        """CH2.E22: a click in the RustKit chrome's address bar paints its `:focus-within` ring; Tab to a page field paints its `:focus` border."""
+        c = "e22_focus_ring"
+        if not self.open_page(c, "e22_focus_ring.html"):
+            return
+        self.fixture.wait("beacon?e22-ready", 10, self.since)
+        self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
+        time.sleep(1.0)
+        if not self.can_input:
+            return self.not_run(c, "click the address bar, Tab to a field", self.why_not("Accessibility"))
+        if not self.can_capture:
+            return self.not_run(c, "the ring and the border are painted", self.why_not("Screen Recording"))
+        pid = self.app.proc.pid
+        code, win = self.hw("window", pid)
+        from PIL import Image
+
+        def accent(name):
+            """Pixels of the chrome's accent (#06b6d4) in the toolbar row."""
+            path = self.out / ("%s.%s.png" % (c, name))
+            code, w = self.hw("window", pid)
+            subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(w.get("id", 0)), str(path)])
+            img = Image.open(path).convert("RGB")
+            sx = img.width / float(w["w"])
+            # The toolbar row: window y 80..124 (32 px title bar), right of the sidebar.
+            band = img.crop((int(230 * sx), int(80 * sx), img.width - int(10 * sx), int(124 * sx)))
+            want = (6, 182, 212)
+            return sum(n for n, rgb in band.getcolors(maxcolors=band.width * band.height)
+                       if all(abs(rgb[i] - want[i]) <= 24 for i in range(3)))
+
+        # The address bar: right of the sidebar and the nav buttons, in the
+        # toolbar row (as a2_chrome_typed_url clicks it). Away from it first.
+        self.hw("move", pid, int(win["w"] * 0.5), int(win["h"] * 0.9))
+        time.sleep(0.6)
+        rest = accent("bar-rest")
+        log_from = len(self.app.log_text())
+        self.hw("click", pid, int(win["w"] * 0.55), 100)
+        clicked = self.app.wait_log(r"chrome click \(view-local\)", 3, log_from)
+        self.expect(c, "the click reached the RustKit chrome", bool(clicked))
+        self.hw("move", pid, int(win["w"] * 0.5), int(win["h"] * 0.9))
+        time.sleep(0.8)
+        focused = accent("bar-focused")
+        self.expect(c, "the focused address bar paints its accent border", focused > rest + 300,
+                    "accent pixels %d at rest, %d focused" % (rest, focused))
+        # The page: a click on its blank half gives it the keys and focuses
+        # nothing; Tab focuses the field, whose border turns green.
+        self.hw("click", pid, int(win["w"] * 0.5), int(win["h"] * 0.9))
+        time.sleep(0.6)
+        before = self.frame(c, "field-rest", [RED, GREEN])
+        mark = self.fixture.mark()
+        self.hw("key", pid, 48)
+        self.expect(c, "Tab focused the field", self.fixture.wait("beacon?e22-focus", 4, mark))
+        time.sleep(0.6)
+        tabbed = self.frame(c, "field-tabbed", [RED, GREEN])
+        if before is None or tabbed is None:
+            return self.not_run(c, "the field's border", self.why_not("Screen Recording"))
+        self.expect(c, "at rest the field's border is red", before[RED] > 10000 and before[GREEN] < before[RED] / 10,
+                    str(before))
+        self.expect(c, "after Tab the field's border is green (`:focus`)",
+                    tabbed[GREEN] > 10000 and tabbed[RED] < tabbed[GREEN] / 10, str(tabbed))
+
     def h6(self):
         """H6: the wheel scrolls the page."""
         c = "h6"
@@ -2082,7 +2169,7 @@ class Driver:
         if not self.can_input:
             return self.not_run(c, "Cmd+Opt+I", self.why_not("Accessibility"))
         pid = self.app.proc.pid
-        log_from = len(self.app.log_text())
+        log_from = opened_from = len(self.app.log_text())
         self.hw("key", pid, 34, "cmd", "alt")  # Cmd+Opt+I
         self.expect(c, "Cmd+Opt+I opened the Inspector",
                     bool(self.app.wait_log(r"Opening inspector panel", 5, log_from)))
@@ -2158,6 +2245,27 @@ class Driver:
                     "beacon %s, entries %s" % (bool(ran), json.dumps({k: self.el(self.last_probe("Inspector", log_from), k)
                                                                      for k in (".console-entry", ".console-entry.result",
                                                                                ".console-entry.error")})))
+        # CH3.A4c: the Inspector's engine view is the one its page loaded
+        # into when it opened; its forced layouts and relayouts are logged
+        # under that id (shapes only: counts).
+        vid = re.search(r"Loading HTML content id=EngineViewId\((\d+)\)", self.app.log_text()[opened_from:])
+        vid = vid.group(1) if vid else None
+        if vid is None:
+            self.expect(c, "the log names the Inspector's view", False)
+        else:
+            base = self.count(self.last_probe("Inspector", log_from) or {}, ".console-entry")
+            log_from = len(self.app.log_text())
+            self.hw("type", pid, "for (let i = 0; i < 200; i++) console.log('a4c ' + i)")
+            self.hw("key", pid, 36)
+            shown = self.wait_probe("Inspector", lambda p: self.count(p, ".console-entry") >= base + 200, 15, log_from)
+            time.sleep(1.0)
+            forced = sum(int(n) for n in re.findall(
+                r"Forced layouts in the script task id=EngineViewId\(%s\) forced_layouts=(\d+)" % vid,
+                self.app.log_text()[log_from:]))
+            self.expect(c, "200 console lines: the Inspector shows them with at most 4 forced layouts",
+                        bool(shown) and forced <= 4,
+                        "forced layouts %d; entries %d -> %d" % (forced, base, self.count(
+                            self.last_probe("Inspector", log_from) or {}, ".console-entry")))
         log_from = len(self.app.log_text())
         self.hw("key", pid, 34, "cmd", "alt")
         self.expect(c, "Cmd+Opt+I again closed it", bool(self.app.wait_log(r"Closing inspector panel", 5, log_from)))
@@ -2166,6 +2274,13 @@ class Driver:
         if shot is not None:
             code, win = self.hw("window", pid)
             self.expect(c, "closed: the page is green to the bottom", self.green_at(shot, x0 + pw / 2, win["h"] - 20))
+        if vid is not None:
+            log_from = len(self.app.log_text())
+            time.sleep(10)
+            relayouts = len(re.findall(r"relayout\{id=EngineViewId\(%s\)[^\n]*relayout cause=" % vid,
+                                       self.app.log_text()[log_from:]))
+            self.expect(c, "closed: the hidden Inspector lays out nothing in 10 s", relayouts == 0,
+                        "%d relayouts" % relayouts)
 
     A4_SETTINGS_BTN_JS = ("setTimeout(function () { var r = document.getElementById('sidebarSettingsBtn')"
                           ".getBoundingClientRect(); sendIpc('a4_settings_button', { rect: [r.left, r.top, "
@@ -2676,7 +2791,7 @@ class Driver:
               "e6b_select_over_page",
               "a3_cmd_l_from_page", "a3_resize", "e12_input_select_all", "e4_contextmenu",
               "e4_contextmenu_prevented", "e4_dblclick_selects_word", "e4_drag", "e4_cursor_hand", "e4_tooltip",
-              "e4_chrome_tab",
+              "e4_chrome_tab", "e19_icon_hover", "e22_focus_ring",
               "a4_shelf", "a4_inspector", "a4_settings", "a4_private",
               "b11_settings_save",
               "e3_dead_key", "e3_dead_key_no_field", "e3_paste", "e3_cut_copy", "e3_undo", "e3_cmd_key_to_page", "e3_chrome_paste_url"]
