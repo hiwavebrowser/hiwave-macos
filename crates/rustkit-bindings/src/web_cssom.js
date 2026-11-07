@@ -278,7 +278,20 @@
         fill(sheet._list, sheet._rules);
         refreshAdopted(sheet);
     }
-    function write(sheet, text) { sheet._text = text; sheet._owner.textContent = text; }
+    function write(sheet, text) {
+        sheet._text = text;
+        sheet._owner.textContent = text;
+        // A CSSOM edit keeps the sheet (and its disabled flag); tell the
+        // engine the flag is for the new text.
+        if (sheet._disabled) publishDisabled(sheet);
+    }
+    // A <style>'s sheet.disabled goes to the engine, which leaves the sheet
+    // out of the cascade while the element's text is unchanged.
+    function publishDisabled(sheet) {
+        if (isStyle(sheet) && typeof g.__rkSetSheetDisabled === 'function') {
+            g.__rkSetSheetDisabled(sheet._owner, !!sheet._disabled);
+        }
+    }
     function checkIndex(sheet, index, max) {
         if (index > max) throw domError("Failed to execute on 'CSSStyleSheet': The index provided (" + index +
             ') is larger than the maximum index (' + max + ').', 'IndexSizeError');
@@ -355,13 +368,16 @@
         sheet._mediaList = list;
         return list;
     }
-    // `disabled` republishes a constructed sheet's adopters.
+    // `disabled` republishes a constructed sheet's adopters, and a <style>'s
+    // flag goes to the engine (for the text the sheet has now).
     Object.defineProperty(StyleSheet.prototype, 'disabled', {
         get: function () { return !!this._disabled; },
         set: function (v) {
             var was = !!this._disabled;
             this._disabled = !!v;
-            if (was !== this._disabled) refreshAdopted(this);
+            if (was === this._disabled) return;
+            if (isStyle(this)) { sync(this); publishDisabled(this); }
+            refreshAdopted(this);
         },
         configurable: true
     });
@@ -375,6 +391,11 @@
     function ownSheet(el) {
         if (!el.isConnected || (el.localName === 'link' && !isSheetLink(el))) return null;
         var s = sheets.get(el);
+        // New text in a <style> makes a new sheet (CSSOM "update a style
+        // block"), which is not disabled. Only a disabled sheet is replaced,
+        // so an enabled sheet keeps its identity as before.
+        if (s && s._disabled && el.localName === 'style' && s._text !== null &&
+            (el.textContent || '') !== s._text) s = null;
         if (!s) { s = sheetFor(el); sheets.set(el, s); }
         return s;
     }

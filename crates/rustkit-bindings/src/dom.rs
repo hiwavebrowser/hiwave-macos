@@ -2421,6 +2421,29 @@ pub(crate) fn install(
         }),
     )?;
 
+    // `set_sheet_disabled(gen, id, on)`: `<style>.sheet.disabled`. The
+    // engine leaves the element's sheet out of the cascade while its text
+    // is the text it had now (web_cssom.js calls again after a CSSOM edit).
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_set_sheet_disabled",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Null;
+            };
+            let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+                return JsValue::Null;
+            };
+            let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
+            document.set_style_sheet_disabled(&node, on);
+            d.mark(DomDirty::Style);
+            JsValue::Null
+        }),
+    )?;
+
     // Its listener and handler errors go to the host natives (`__rk`).
     runtime.evaluate_with_host(WRAPPERS_JS)?;
     shadow::install(runtime, host, dirty)?;
@@ -2443,12 +2466,13 @@ const WRAPPERS_JS: &str = r#"
         checked: __rustkit_dom_checked, submit: __rustkit_dom_submit,
         navigate: __rustkit_dom_navigate, insertedScript: __rustkit_dom_inserted_script,
         hit: __rustkit_dom_hit, setAdopted: __rustkit_dom_set_adopted,
+        setSheetDisabled: __rustkit_dom_set_sheet_disabled,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
         cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
     };
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'set_adopted', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
 
@@ -5486,6 +5510,12 @@ const WRAPPERS_JS: &str = r#"
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
+    };
+    // web_cssom.js: a <style>'s sheet.disabled, for its current text.
+    g.__rkSetSheetDisabled = function (node, on) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return;
+        N.setSheetDisabled(s.gen, s.id, !!on);
     };
 
     // For dom/editing.js, which deletes it.
