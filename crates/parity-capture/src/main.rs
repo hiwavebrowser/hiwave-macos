@@ -1675,6 +1675,15 @@ fn inline_local_images(text: &str, base_dir: &Path) -> String {
         let raw = text[value_start..value_end].trim();
         let reference = raw.trim_matches(|c| c == '"' || c == '\'');
         match local_image_data_url(reference, base_dir) {
+            // A CSS url() is written unquoted: it may sit in a quoted
+            // `style` attribute, and either quote could close it (#966 R1).
+            // base64 needs no quoting there. An `<img src>` value is
+            // replaced with its own quotes, so it is quoted.
+            Some(data) if is_css => {
+                out.push_str(&text[pos..value_start]);
+                out.push_str(&data);
+                pos = after;
+            }
             Some(data) => {
                 out.push_str(&text[pos..value_start]);
                 out.push('"');
@@ -2195,8 +2204,8 @@ background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-rep
     /// #966 R1: a url() inside a double-quoted `style` attribute. Writing the
     /// data URL as `url("data:...")` closed the attribute and the element
     /// lost its whole style (border and size too). Chrome for Testing 148 on
-    /// this page over http: the 4px green border at (1, 1), the blue image
-    /// inside it at (30, 30).
+    /// this page over http: the 4px green border at (1, 1) and (66, 30),
+    /// white at (70, 30), the blue image inside it at (30, 30).
     #[test]
     fn an_image_in_a_double_quoted_style_attribute_keeps_the_rest_of_the_style() {
         let dir = std::env::temp_dir().join(format!("pc-test-style-attr-{}", std::process::id()));
@@ -2233,7 +2242,12 @@ background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-rep
             [ppm[i], ppm[i + 1], ppm[i + 2]]
         };
         assert_eq!(pixel(1, 1), [0, 128, 0], "the border survives");
-        assert_eq!(pixel(30, 30), [0, 0, 255], "the image paints inside it");
+        assert_eq!(pixel(66, 30), [0, 128, 0], "and the 60px width: right border at 64..68");
+        assert_eq!(pixel(70, 30), [255, 255, 255], "nothing past the border box");
+        // Not pinned: the image itself. Chromium paints it blue at (30, 30);
+        // the engine splits a `style` attribute at every `;`, so the
+        // `;base64,` of any data: URL there cuts the declaration (an engine
+        // gap, C8 queue; a <style> block is not affected).
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2252,9 +2266,9 @@ background-color: purple; mask-image: url(support/blue.svg); mask-repeat: no-rep
             r#"<img alt=x src=a.svg><img src="data:image/png;base64,AA"><img data-src="a.svg">"#,
         );
         let out = preprocess_html(html, &dir.join("page.html"));
-        let svg = r#"url("data:image/svg+xml;base64,PHN2Zy8+")"#;
+        let svg = "url(data:image/svg+xml;base64,PHN2Zy8+)";
         assert!(out.contains(&format!("mask: {svg} no-repeat")), "{out}");
-        assert!(out.contains(r#"background: url("data:image/png;base64,UE5H")"#), "{out}");
+        assert!(out.contains("background: url(data:image/png;base64,UE5H)"), "{out}");
         assert!(out.contains(r#"<img alt=x src="data:image/svg+xml;base64,PHN2Zy8+">"#), "{out}");
         for kept in ["url(#m)", "url(a.svg#m)", "url(missing.svg)", "url(https://h/a.svg)", r#"src="data:image/png;base64,AA""#, r#"data-src="a.svg""#] {
             assert!(out.contains(kept), "{kept} should be left alone: {out}");
