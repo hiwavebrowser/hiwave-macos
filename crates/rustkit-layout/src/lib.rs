@@ -12296,12 +12296,38 @@ impl DisplayList {
         // (shelf's command input). An author width is the frame (CH2.B18c:
         // `border: 40px solid` painted a 1px hairline; Chromium 143 paints
         // 40). `Length::Zero` is the unset UA default, as in
-        // `content_box_control_extra`; an author `0px` paints none.
-        let border_width = match &layout_box.style.border_top_width {
-            _ if layout_box.style.border_top_style == rustkit_css::BorderStyle::None => 0.0,
-            Length::Zero => 1.0,
-            Length::Percent(_) | Length::Auto => 1.0,
-            w => w.to_px(font_size, self.root_font_size, 0.0).max(0.0),
+        // `content_box_control_extra`; an author `0px` paints none. Widths
+        // snap as Chromium's do (0 < w < 1 paints 1, else floor). The frame
+        // is one width for all four sides, so it follows the author only
+        // when the four sides agree; otherwise (e.g. `border-top: 0` on a
+        // bordered input) it keeps the old frame rather than painting the
+        // top side's width everywhere.
+        let style = &layout_box.style;
+        let side = |s: rustkit_css::BorderStyle, w: &Length| -> Option<f32> {
+            if s == rustkit_css::BorderStyle::None {
+                return Some(0.0);
+            }
+            match w {
+                Length::Zero => None,
+                Length::Percent(_) | Length::Auto => Some(1.0),
+                w => {
+                    let px = w.to_px(font_size, self.root_font_size, 0.0).max(0.0);
+                    Some(if px > 0.0 && px < 1.0 { 1.0 } else { px.floor() })
+                }
+            }
+        };
+        let sides = [
+            side(style.border_top_style, &style.border_top_width),
+            side(style.border_right_style, &style.border_right_width),
+            side(style.border_bottom_style, &style.border_bottom_width),
+            side(style.border_left_style, &style.border_left_width),
+        ];
+        let border_width = if sides.iter().all(|s| *s == sides[0]) {
+            sides[0].unwrap_or(1.0)
+        } else if style.border_top_style == rustkit_css::BorderStyle::None {
+            0.0
+        } else {
+            1.0
         };
         let font_family = layout_box.style.font_family.clone();
         let font_weight = layout_box.style.font_weight.0;
