@@ -6685,16 +6685,19 @@ impl LayoutBox {
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
-                let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
                 // Out-of-flow boxes do not participate in margin collapsing
-                // (CSS 2.1 §8.3.1). The static position must still land where
-                // the box would have been in flow — including the pending
-                // sibling margin — so the child gets a CLONE of the context to
-                // resolve against; the live context stays intact for the next
-                // in-flow sibling (an abspos box between two blocks must not
-                // swallow the margin between them).
-                let mut oof_margin_context = margin_context.clone();
+                // (CSS 2.1 §8.3.1). The static position is past the pending
+                // sibling margin, materialized here; the box's own top margin
+                // goes on top of it rather than collapsing with it (Chromium:
+                // `<p>` then `margin-top:50px` abspos sits 16 + 50 below the
+                // text, WPT clip-path-rectangle-ref; CH2.B24). A replaced box
+                // never reads a margin context, so it needs the cursor to
+                // carry the margin as well. The live context stays intact for
+                // the next in-flow sibling (an abspos box between two blocks
+                // must not swallow the margin between them).
+                let mut cb = self.dimensions.clone();
+                cb.content.height = cursor_y + margin_context.resolve();
+                let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
             }
