@@ -469,6 +469,23 @@ mod tests {
         }
     }
 
+    /// The SVG boxes on an element with a CSS layout box (css-masking-1
+    /// §6.3, WPT mask-clip-8): `fill-box` is the content box, `stroke-box`
+    /// and `view-box` the border box. Chrome for Testing 148: a 20px
+    /// `mask-origin: fill-box` layer sits at the content box's corner, a
+    /// `view-box` one at the border box's; `mask-clip: fill-box` shows the
+    /// content box only.
+    #[test]
+    fn svg_boxes_fall_back_to_content_and_border_box() {
+        let m = applied(&[("mask-origin", "fill-box, stroke-box, view-box"), ("mask-clip", "fill-box, stroke-box, view-box")]);
+        use BackgroundClip as C;
+        use BackgroundOrigin as O;
+        assert_eq!(m.origins, vec![O::ContentBox, O::BorderBox, O::BorderBox]);
+        assert_eq!(m.clips, vec![C::ContentBox, C::BorderBox, C::BorderBox]);
+        let m = applied(&[("mask", "url(a.svg) fill-box")]);
+        assert_eq!((m.origins[0], m.clips[0]), (O::ContentBox, C::ContentBox));
+    }
+
     #[test]
     fn mask_image_url_forms() {
         let m = applied(&[("mask-image", "url(icons/a.svg)")]);
