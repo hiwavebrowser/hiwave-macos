@@ -60,12 +60,41 @@ least one failed, `3` none failed but some did not run, `2` the driver could
 not run. `--out` gets `result.json` (assertions and the full request log),
 one `<check>.app.log` per check and the captured frames.
 
+## Recording a pass (`--record`)
+
+```
+python3 tools/real_window/driver.py --app <hiwave> --record --record-label batch33
+```
+
+screen-records the whole run with `screencapture -v -x -C -k` (pointer and
+clicks shown) into `~/Library/Logs/hiwave/recordings/`, named
+`<YYYYmmdd-HHMMSS>-<label>-<checks>.mov`, where `<checks>` is `all` for the
+full set, the check names for up to three, else `<n>checks-<hash>`. The
+directory is outside the checkout on purpose (the repo is public);
+`--record-dir` inside the checkout is refused (exit 2).
+
+The recording stops when the run ends, when a check raises, on SIGTERM or
+SIGHUP (the driver turns them into an exit so its `finally` runs), and at
+`--record-max-s` (default 2 h) so a wedged run does not record for ever. A
+`kill -9` of the driver can leave `screencapture` running; stop it with
+`pkill -INT -x screencapture`. The run then gets `record` assertions: the
+recording covered the whole run, `screencapture` exited 0, the .mov exists,
+plays and has a video track (`hwdrive movie`, AVFoundation, no grant), and
+its length is within 5 s or 10% of the run. They are in `result.json`, with
+the path under `recording`. Without the Screen Recording grant or with the
+screen locked, `record` is `NOT RUN` and nothing is started.
+
+Cadence (Pete, 11-06): one recorded full pass a week, Friday after the last
+batch with the seat idle; Atlas names the file in the Monday digest. Not
+every batch.
+
 ## What needs what
 
 | part | needs |
 |---|---|
 | request-log and app-log assertions | nothing |
 | frames | Screen Recording grant, screen unlocked |
+| `--record` | Screen Recording grant, screen unlocked |
 | move, click, wheel, keys | Accessibility grant, screen unlocked |
 | resize | Accessibility grant, screen unlocked |
 | `hwdrive find` (elements of the chrome and settings WebViews by their accessible text or role) | Accessibility grant |

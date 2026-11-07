@@ -118,7 +118,7 @@ def test_an_aborted_run_still_stops_the_recording(tmp_path, monkeypatch):
     assert not list(d.record_dir.glob("*.started"))
 
 
-def test_a_recording_much_shorter_than_the_run_fails(tmp_path, monkeypatch):
+def test_a_recording_whose_length_is_far_from_the_run_fails(tmp_path, monkeypatch):
     def h1():
         time.sleep(0.2)
     d, _ = driver_at(tmp_path, monkeypatch, {"h1": h1}, movie_seconds=60.0)
