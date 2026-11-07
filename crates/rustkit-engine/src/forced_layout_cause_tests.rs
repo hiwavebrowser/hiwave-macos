@@ -235,6 +235,82 @@ fn a_read_in_an_animation_frame_during_a_css_animation_forces_no_layout() {
     assert_eq!(forced(&engine, view), 0, "animation ticks do not dirty the tree for script");
 }
 
+/// LAT7c: a page whose element `#s` runs a Web Animation of `keyframes`
+/// while a frame callback evaluates `expr` for 10 frames.
+/// Returns (reads that ran, forced layouts).
+fn waapi_frames(keyframes: &str, expr: &str) -> (u32, u64) {
+    let page = "<html><head><style>body{margin:0} #s{width:20px;height:20px;background:red}</style></head><body>\
+        <div id=s></div><div id=a style='width:100px;height:20px'></div>\
+        <script>var a = document.getElementById('a'), s = document.getElementById('s');</script></body></html>";
+    let server = crate::script_net_tests::serve_routes(vec![("/", "text/html", page.to_string())]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 200 })
+        .expect("view");
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    engine
+        .execute_script(view, &format!("s.animate({keyframes}, {{duration: 1000, iterations: Infinity}})"))
+        .unwrap();
+    for _ in 0..4 {
+        rt.block_on(engine.pump_live(view, 16));
+    }
+    engine
+        .execute_script(
+            view,
+            &format!(
+                "window.__reads = 0; (function f(){{ requestAnimationFrame(function(){{ var v = {expr}; \
+                 window.__reads += 1; if (window.__reads < 10) f(); }}); }})()"
+            ),
+        )
+        .unwrap();
+    let before = forced(&engine, view);
+    for _ in 0..12 {
+        rt.block_on(engine.pump_live(view, 16));
+    }
+    let reads: u32 = read(&mut engine, view, "window.__reads").parse().unwrap();
+    (reads, forced(&engine, view) - before)
+}
+
+/// LAT7c: a Web Animations frame of a paint property (opacity, colour,
+/// transform) changes nothing a box's offset or client size reads, so a
+/// geometry read in a frame callback during it lays nothing out, as during
+/// the same CSS animation. Chromium (CDP `LayoutCount`, 10 rAF frames each
+/// reading `offsetWidth`): CSS opacity 0, WAAPI opacity 0, background-color
+/// 0, transform 0; WAAPI width 10.
+#[test]
+fn a_read_in_an_animation_frame_during_a_web_animation_of_a_paint_property_forces_no_layout() {
+    for keyframes in [
+        "[{opacity: 0}, {opacity: 1}]",
+        "[{backgroundColor: 'red'}, {backgroundColor: 'blue'}]",
+        "[{transform: 'translateX(0px)'}, {transform: 'translateX(50px)'}]",
+    ] {
+        let (reads, forced) = waapi_frames(keyframes, "a.offsetWidth + a.clientHeight");
+        assert!(reads >= 5, "{keyframes}: the frame callback ran: {reads}");
+        assert_eq!(forced, 0, "{keyframes}: a paint-property animation frame leaves offset/client reads clean");
+    }
+}
+
+/// LAT7c's other side: what the animated value does reach still lays out.
+/// A width animation moves boxes; the computed opacity and a transformed
+/// rect read the animated value (Chromium answers both at the current time).
+#[test]
+fn reads_that_see_a_web_animation_value_still_force_a_layout() {
+    let (reads, forced) = waapi_frames("[{width: '20px'}, {width: '60px'}]", "a.offsetWidth");
+    assert!(reads >= 5, "{reads}");
+    assert!(forced >= 3, "a width animation moves boxes: {forced}");
+    let (_, forced) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "getComputedStyle(s).opacity");
+    assert!(forced >= 3, "the computed opacity reads the animated value: {forced}");
+    let (_, forced) = waapi_frames(
+        "[{transform: 'translateX(0px)'}, {transform: 'translateX(50px)'}]",
+        "s.getBoundingClientRect().left",
+    );
+    assert!(forced >= 3, "a transformed rect reads the animated value: {forced}");
+    let (_, forced) = waapi_frames("[{opacity: 0}, {opacity: 1}]", "s.getBoundingClientRect().left");
+    assert_eq!(forced, 0, "opacity moves no rect");
+}
+
 #[test]
 fn a_real_write_then_a_read_forces_one_layout_and_logs_its_cause() {
     let (mut engine, view) = engine_with(PAGE);
