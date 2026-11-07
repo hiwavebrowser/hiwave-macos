@@ -4099,11 +4099,14 @@ mod shape_memo_tests {
     #[test]
     fn a_repeat_is_a_hit_and_agrees_with_the_uncached_measure() {
         let shaper = TextShaper::new();
-        let text = "Handgloves quick wizard memo";
         // The web-font generation is process-wide and other tests install
         // sets on their own threads: only judge a hit when it held still.
-        let mut judged = false;
-        for _ in 0..20 {
+        // Each attempt shapes its own text, so a retry can never be answered
+        // by the entry an earlier (discarded) attempt left in the memo.
+        let mut judged = None;
+        for attempt in 0..20 {
+            let text = format!("Handgloves quick wizard memo {attempt}");
+            let text = text.as_str();
             let generation = rustkit_text::webfonts::generation();
             let first = shape(&shaper, text, 400, 16.0);
             let before = misses();
@@ -4114,11 +4117,13 @@ mod shape_memo_tests {
                     (first.width().to_bits(), first.glyphs.len()),
                     (again.width().to_bits(), again.glyphs.len())
                 );
-                judged = true;
+                judged = Some(attempt);
                 break;
             }
         }
-        assert!(judged, "the web-font generation never held still");
+        let attempt = judged.expect("the web-font generation never held still");
+        let text = format!("Handgloves quick wizard memo {attempt}");
+        let text = text.as_str();
         let uncached = shaper
             .shape_uncached(
                 text,
@@ -4148,8 +4153,8 @@ mod shape_memo_tests {
         let _ = shape(&shaper, text, 400, 15.0);
         let before = misses();
         let generation = rustkit_text::webfonts::generation();
-        // Bumps the generation where a web-font registry exists (macOS);
-        // elsewhere it installs nothing and the generation holds still.
+        // Bumps the generation where a web-font registry exists (macOS and
+        // Linux); elsewhere it installs nothing and the generation holds still.
         rustkit_text::webfonts::install("lat12-shape-memo-probe", &[]);
         let changed = rustkit_text::webfonts::generation() != generation;
         let _ = shape(&shaper, text, 400, 15.0);
@@ -4158,7 +4163,8 @@ mod shape_memo_tests {
         } else {
             assert_eq!(misses(), before, "no change to the set: still a hit");
         }
-        assert_eq!(changed, cfg!(target_os = "macos"));
+        let has_registry = cfg!(any(target_os = "macos", target_os = "linux"));
+        assert_eq!(changed, has_registry);
     }
 }
 
