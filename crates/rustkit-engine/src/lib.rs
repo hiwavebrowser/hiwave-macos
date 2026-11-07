@@ -2797,12 +2797,13 @@ fn resize_dispatch_bounds(_pending: Bounds, stored: Bounds, frame: Option<(u32, 
 impl Drop for Engine {
     /// The last visit's hold summary (LAT1): the entries since the last
     /// line, which no navigation or hundredth entry ended. The summary is
-    /// the dropping thread's (`wgate` keeps one per thread): an engine
-    /// dropped off the thread that ran its entries leaves that thread's
-    /// partial line unlogged, and two engines on one thread share one
-    /// summary, which the first drop flushes.
+    /// the dropping thread's (`wgate` keeps one per thread, and only the
+    /// content thread's entries are summarised): an engine dropped off the
+    /// thread that ran its entries leaves that thread's partial line
+    /// unlogged, and two engines on one thread share one summary, which
+    /// the first drop flushes.
     fn drop(&mut self) {
-        wgate::flush_hold_summary("drop");
+        wgate::end_visits();
     }
 }
 
@@ -8047,6 +8048,7 @@ impl Engine {
     }
 
     pub async fn load_url(&mut self, id: EngineViewId, url: Url) -> Result<(), EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, false, None)
             .await
@@ -8071,6 +8073,7 @@ impl Engine {
         id: EngineViewId,
         url: Url,
     ) -> Result<LoadYield, EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, None)
             .await
@@ -8085,6 +8088,7 @@ impl Engine {
         url: Url,
         nav_id: u64,
     ) -> Result<LoadYield, EngineError> {
+        wgate::begin_visit(id.raw(), url.host_str());
         let _hold = wgate::hold("load");
         self.load_url_with_disposition(id, url, false, true, Some(nav_id))
             .await
@@ -8819,6 +8823,7 @@ impl Engine {
         html: &str,
         preset_nav: Option<u64>,
     ) -> Result<(), EngineError> {
+        wgate::begin_visit(id.raw(), None);
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
         // cancel that can reach it is the interrupt word stopping a script.
