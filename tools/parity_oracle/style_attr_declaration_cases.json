@@ -1,0 +1,134 @@
+{
+ "oracle": "148.0.7778.216",
+ "source": "CH2.E27: a style attribute is a declaration list; a ; inside url(), a string, a () block or a comment does not end a declaration. Pages are synthetic; chrome is written by declaration_list_log.mjs --write.",
+ "cases": [
+  {
+   "name": "style attr: base64 data-URL background-image",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+);width:10px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\") | 10px"
+  },
+  {
+   "name": "style attr: base64 data-URL mask-image",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"mask-image:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+);width:10px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('mask-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\") | 10px"
+  },
+  {
+   "name": "style attr: ; inside a quoted string",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--s:'a;b';width:12px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--s'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "'a;b' | 12px"
+  },
+  {
+   "name": "style attr: ; inside quoted url()",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url('data:image/svg+xml;utf8,x');width:14px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,x\") | 14px"
+  },
+  {
+   "name": "style attr: ; inside parens of a custom property",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--k:f(;);width:16px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--k'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "f(;) | 16px"
+  },
+  {
+   "name": "style attr: calc() and var() fallback",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:calc(10px + 8px);height:var(--none, 20px)\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('width'),s.getPropertyValue('height')].join(' | ')})()",
+   "chrome": "18px | 20px"
+  },
+  {
+   "name": "style attr: ; inside a comment",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:20px /* ; */;height:22px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('width'),s.getPropertyValue('height')].join(' | ')})()",
+   "chrome": "20px | 22px"
+  },
+  {
+   "name": "style attr: !important after an empty declaration",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"color:rgb(255, 0, 0) !important;;color:rgb(0, 0, 255)\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('color')].join(' | ')})()",
+   "chrome": "rgb(255, 0, 0)"
+  },
+  {
+   "name": "style attr: trailing ;",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:24px;\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "24px"
+  },
+  {
+   "name": "style attr: unterminated url() at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:26px;background-image:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('width'),s.getPropertyValue('background-image')].join(' | ')})()",
+   "chrome": "26px | url(\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImdyZWVuIi8+PC9zdmc+\")"
+  },
+  {
+   "name": "style attr: unquoted url() holding /*",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;utf8,a/*b);width:15px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,a/*b\") | 15px"
+  },
+  {
+   "name": "style attr: unquoted url() holding an unpaired '",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;utf8,it's);width:23px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "none | 23px",
+   "gap": "getComputedStyle lays the style attribute's text over a property the engine left without a row; a rejected url leaves no background layer, so the text shows through. The cascade drops it as Chromium does (an_inline_bad_url_is_dropped); width is the regression #972 R1 found and is asserted by the other half of this read."
+  },
+  {
+   "name": "style attr: unquoted url() holding an unbalanced (",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(a(b.png);width:24px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "none | 24px",
+   "gap": "getComputedStyle lays the style attribute's text over a property the engine left without a row; a rejected url leaves no background layer, so the text shows through. The cascade drops it as Chromium does (an_inline_bad_url_is_dropped); width is the regression #972 R1 found and is asserted by the other half of this read."
+  },
+  {
+   "name": "style attr: unquoted url() holding /*;*/",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(x/*;*/y.png);width:25px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"x/*;*/y.png\") | 25px"
+  },
+  {
+   "name": "style attr: URL( in capitals",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:URL(data:image/svg+xml;base64,PHN2Zy8+);width:31px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2Zy8+\") | 31px"
+  },
+  {
+   "name": "style attr: url( then a space then a quote",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url( 'data:image/svg+xml;utf8,x');width:32px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,x\") | 32px"
+  },
+  {
+   "name": "style attr: unterminated quoted url() at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:35px;background-image:url('data:image/svg+xml;utf8,x\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('background-image'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;utf8,x\") | 35px"
+  },
+  {
+   "name": "style attr: custom property string open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:26px;--s:'abc\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--s'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "'abc | 26px"
+  },
+  {
+   "name": "style attr: custom property block open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:27px;--k:f(a\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--k'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "f(a | 27px"
+  },
+  {
+   "name": "style attr: custom property url( open at end",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:28px;--u:url(a\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--u'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(a | 28px"
+  },
+  {
+   "name": "style attr: custom property unquoted url() holding ;",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--u:url(a;b);width:29px\">x</div>",
+   "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--u'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(a;b) | 29px"
+  }
+ ]
+}

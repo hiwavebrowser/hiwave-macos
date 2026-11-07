@@ -4654,6 +4654,62 @@ mod tests {
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
     }
 
+    /// CH2.E27: the attribute is a declaration list, so the `;` in a data
+    /// URL's `;base64,` does not end the declaration, and a write elsewhere
+    /// keeps the URL whole. Chromium 148.0.7778.216 on the same page:
+    /// `2|background-image|red|url("data:image/svg+xml;base64,AA==")|3|
+    /// background-image: url("data:image/svg+xml;base64,AA=="); color: red; width: 1px;`
+    /// -- the same declarations; it re-serializes the URL quoted, this
+    /// keeps the author's text.
+    #[test]
+    fn style_keeps_a_semicolon_inside_a_data_url() {
+        let b = bound(
+            "<html><body><div id='d' style='background-image:url(data:image/svg+xml;base64,AA==);color:red'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = [s.length, s[0], s.color, s.backgroundImage]; \
+                 s.width = '1px'; r.push(s.length, d.getAttribute('style')); r.join('|')"
+            ),
+            "2|background-image|red|url(data:image/svg+xml;base64,AA==)|3|\
+             background-image: url(data:image/svg+xml;base64,AA==); color: red; width: 1px;"
+        );
+    }
+
+    /// The JS copy of the declaration-list rule (`splitDecls`) on the case
+    /// list `rustkit_cssparser`'s own copy runs, read back through
+    /// `CSSStyleDeclaration` (#972 R1 nit 3: the two copies must not drift).
+    #[test]
+    fn style_splits_the_shared_declaration_list_cases() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../rustkit-cssparser/src/declaration_list_cases.json"
+        ))
+        .expect("cases");
+        let b = bound("<html><body><div id='d'>x</div></body></html>");
+        let mut wrong = Vec::new();
+        for case in doc["cases"].as_array().expect("cases") {
+            let input = case["input"].as_str().unwrap();
+            let want: Vec<String> = case["decls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| format!("{}={}", d[0].as_str().unwrap(), d[1].as_str().unwrap()))
+                .collect();
+            let script = format!(
+                "var d = document.getElementById('d'); d.setAttribute('style', {}); \
+                 var s = d.style, r = []; for (var i = 0; i < s.length; i++) r.push(s[i] + '=' + s.getPropertyValue(s[i])); \
+                 JSON.stringify(r)",
+                serde_json::to_string(input).unwrap()
+            );
+            let got: Vec<String> = serde_json::from_str(&eval_string(&b, &script)).expect("json");
+            if got != want {
+                wrong.push(format!("{input:?}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
 
     #[test]

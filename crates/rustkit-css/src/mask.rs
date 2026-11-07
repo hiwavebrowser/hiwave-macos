@@ -337,7 +337,23 @@ pub fn parse_css_url(token: &str) -> Option<String> {
             }
             body
         }
-        _ => inner,
+        // An unquoted url holding a quote, a `(`, whitespace or a control
+        // character is a bad url (CSS Syntax 3 §4.3.6): Chromium drops the
+        // declaration (`url(it's)`, `url(a(b.png)` read `none`).
+        _ => {
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' | '\'' | '(' => return None,
+                    c if c.is_whitespace() || c.is_control() => return None,
+                    _ => {}
+                }
+            }
+            inner
+        }
     };
     Some(url.to_string())
 }

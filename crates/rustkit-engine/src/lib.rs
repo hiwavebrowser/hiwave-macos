@@ -470,6 +470,8 @@ mod computed_read;
 #[cfg(test)]
 mod computed_read_tests;
 #[cfg(test)]
+mod style_attr_declaration_tests;
+#[cfg(test)]
 mod canvas_context_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
@@ -14320,7 +14322,12 @@ impl layout_ctx::LayoutCtx {
             Some(p) => p.custom_properties.clone(),
             None => Arc::new(CustomProperties::from_map(css_vars.clone())),
         };
-        let inline_style = attributes.get("style");
+        // A `style` attribute is a declaration list: split it once, by the
+        // CSS tokenizer's rules, not at every `;` (CH2.E27).
+        let inline_decls: Vec<String> = attributes
+            .get("style")
+            .map(|s| rustkit_css::split_declaration_list(s))
+            .unwrap_or_default();
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
             for (rule, _, _) in rules_for(important_pass) {
@@ -14339,17 +14346,15 @@ impl layout_ctx::LayoutCtx {
                     }
                 }
             }
-            if let Some(style_attr) = inline_style {
-                for declaration in style_attr.split(';') {
-                    if let Some((property, value)) = declaration.split_once(':') {
-                        let property = property.trim();
-                        if !property.starts_with("--") {
-                            continue;
-                        }
-                        let (value, important) = split_important(value.trim());
-                        if important == important_pass {
-                            declared_vars.push((property, Some(value)));
-                        }
+            for declaration in &inline_decls {
+                if let Some((property, value)) = declaration.split_once(':') {
+                    let property = property.trim();
+                    if !property.starts_with("--") {
+                        continue;
+                    }
+                    let (value, important) = split_important(value.trim());
+                    if important == important_pass {
+                        declared_vars.push((property, Some(value)));
                     }
                 }
             }
@@ -14512,11 +14517,7 @@ impl layout_ctx::LayoutCtx {
         order: &mut usize,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let (value, important) = split_important(value.trim());
                 if important != important_pass {
@@ -14610,11 +14611,7 @@ impl layout_ctx::LayoutCtx {
         ch_pending: &mut ChPending,
         important_pass: bool,
     ) {
-        for declaration in style_attr.split(';') {
-            let declaration = declaration.trim();
-            if declaration.is_empty() {
-                continue;
-            }
+        for declaration in rustkit_css::split_declaration_list(style_attr) {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
@@ -23232,13 +23229,13 @@ fn parse_background_layer(value: &str) -> Option<rustkit_css::BackgroundLayer> {
         return Some(layer);
     }
 
-    // Check for url()
-    if value.starts_with("url(") {
-        if let Some(end) = value.find(')') {
-            let url = value[4..end].trim().trim_matches(|c| c == '"' || c == '\'');
-            layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
-            return Some(layer);
-        }
+    // Check for url(). `parse_css_url` is case-insensitive (`URL(...)`),
+    // keeps a `)` or `;` inside a quoted url, and rejects a bad url
+    // (`url(it's)`, `url(a(b.png)`) the way Chromium does (#972 R1).
+    if value.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url(")) {
+        let url = rustkit_css::mask::parse_css_url(value)?;
+        layer.image = rustkit_css::BackgroundImage::Url(url);
+        return Some(layer);
     }
 
     // Check if it's a color (these don't create image layers)
@@ -23356,10 +23353,7 @@ fn parse_background_shorthand_layer(
             }
             "left" | "right" | "top" | "bottom" | "center" => position.push(token),
             _ if lower.starts_with("url(") && token.ends_with(')') => {
-                let url = token[4..token.len() - 1]
-                    .trim()
-                    .trim_matches(|c| c == '"' || c == '\'');
-                layer.image = rustkit_css::BackgroundImage::Url(url.to_string());
+                layer.image = rustkit_css::BackgroundImage::Url(rustkit_css::mask::parse_css_url(token)?);
             }
             _ if numeric(&lower) || math(&lower) => position.push(token),
             _ => {
