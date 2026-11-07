@@ -49454,19 +49454,32 @@ mod clip_path_pins {
             r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:50px;font:20px/40px monospace"><span style="background:green;color:green;clip-path:inset(0)">XXX XXX</span></div></body></html>"#,
         );
         let all = lines.join("\n");
+        // Font-independent: the clip is read against the inline's own
+        // background rect, not against one platform's monospace metrics.
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
         let push = lines
             .iter()
             .position(|c| c.starts_with("PushClip"))
             .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
-        // One line tall at the first fragment: the second line's text is outside it.
-        assert!(lines[push].contains("x: 0.0, y: 8.5"), "{}", lines[push]);
-        let height: f32 = lines[push]
-            .split("height: ")
-            .nth(1)
-            .and_then(|s| s.split(|c: char| c != '.' && !c.is_ascii_digit()).next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| panic!("no height in {}", lines[push]));
-        assert!(height > 0.0 && height <= 40.0, "first fragment only: {}", lines[push]);
+        let clip = &lines[push];
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        // `inset(0)` is the inline's border box at its first fragment: one
+        // line tall, so the second line's text is outside it.
+        for key in ["x", "y", "width", "height"] {
+            assert!(near(num(clip, key), num(bg, key)), "{key}: {clip}\n{bg}");
+        }
+        let height = num(clip, "height");
+        assert!(height > 0.0 && height <= 40.0, "first fragment only: {clip}");
         let texts: Vec<usize> = lines
             .iter()
             .enumerate()
@@ -49488,11 +49501,13 @@ mod clip_path_pins {
             .iter()
             .position(|c| c.starts_with("PushClip"))
             .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
-        assert!(lines[push].contains("width: 36.0"), "{}", lines[push]);
         let bg = lines
             .iter()
             .position(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
             .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let (clip, bg_line) = (&lines[push], &lines[bg]);
+        assert!(near(num(clip, "x"), num(bg_line, "x") + 10.0), "{clip}\n{bg_line}");
+        assert!(near(num(clip, "width"), num(bg_line, "width") - 20.0), "{clip}\n{bg_line}");
         assert!(bg > push && depth_at(&lines, bg) >= 1, "background unclipped:\n{all}");
     }
 
