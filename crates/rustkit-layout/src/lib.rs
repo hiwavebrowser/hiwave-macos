@@ -12293,11 +12293,15 @@ impl DisplayList {
         // The control's painted frame: 1px (the UA border stand-in) unless
         // the author removed it. `border: none` on a styled search box drew
         // a 1px frame anyway and seated the text 1px right of Chrome's
-        // (shelf's command input).
-        let border_width = if layout_box.style.border_top_style == rustkit_css::BorderStyle::None {
-            0.0
-        } else {
-            1.0
+        // (shelf's command input). An author width is the frame (CH2.B18c:
+        // `border: 40px solid` painted a 1px hairline; Chromium 143 paints
+        // 40). `Length::Zero` is the unset UA default, as in
+        // `content_box_control_extra`; an author `0px` paints none.
+        let border_width = match &layout_box.style.border_top_width {
+            _ if layout_box.style.border_top_style == rustkit_css::BorderStyle::None => 0.0,
+            Length::Zero => 1.0,
+            Length::Percent(_) | Length::Auto => 1.0,
+            w => w.to_px(font_size, self.root_font_size, 0.0).max(0.0),
         };
         let font_family = layout_box.style.font_family.clone();
         let font_weight = layout_box.style.font_weight.0;
