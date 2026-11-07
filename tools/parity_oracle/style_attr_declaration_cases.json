@@ -156,8 +156,7 @@
    "name": "rejected inline: invalid values read the initial value",
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:bogus;flex-grow:abc;text-overflow:zzz;width:29px\">x</div>",
    "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit'),s.getPropertyValue('flex-grow'),s.getPropertyValue('text-overflow'),s.getPropertyValue('width')].join(' | ')})()",
-   "chrome": "fill | 0 | clip | 29px",
-   "gap": "getComputedStyle still lays an invalid keyword's text over a property the engine published no row for: no row cannot be read as the initial value, because the engine stores justify-content flex-start and align-items stretch as its defaults and publishes nothing for them (computed_read r1_cases). Needs an accepted/rejected signal from the cascade. width is asserted by the last field."
+   "chrome": "fill | 0 | clip | 29px"
   },
   {
    "name": "rejected inline: an invalid value keeps the sheet's",
@@ -181,8 +180,67 @@
    "name": "rejected inline: a custom property holding a bad url",
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--x:url(a(b.png);width:35px\">x</div>",
    "expr": "(function(){var e=document.getElementById('a');return [getComputedStyle(e).getPropertyValue('--x'),e.style.getPropertyValue('--x'),e.style.length].join(' | ')})()",
-   "chrome": " |  | 1",
-   "gap": "the engine still takes a custom property's text when it holds a bad url (its cascade does not tokenize custom property values), so getComputedStyle reads it; el.style leaves it out as Chromium does, asserted by the last field."
+   "chrome": " |  | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): one unknown word per property reads the initial value and leaves el.style",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:bogus;position:bogus;float:bogus;clear:bogus;visibility:bogus;box-sizing:bogus;flex-direction:bogus;flex-wrap:bogus;table-layout:bogus;border-collapse:bogus;empty-cells:bogus;caption-side:bogus;list-style-position:bogus;direction:bogus;isolation:bogus;backface-visibility:bogus;mix-blend-mode:bogus;overflow-x:bogus;overflow-y:bogus;resize:bogus;text-overflow:bogus;user-select:bogus;box-decoration-break:bogus;scroll-behavior:bogus;text-decoration-style:bogus;border-top-style:bogus;outline-style:bogus;font-kerning:bogus;content-visibility:bogus;hyphens:bogus;white-space:bogus;text-align:bogus;word-break:bogus;overflow-wrap:bogus;line-break:bogus;writing-mode:bogus;unicode-bidi:bogus;image-rendering:bogus;background-attachment:bogus;flex-grow:bogus;flex-shrink:bogus;width:40px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit')+'/'+e.style.getPropertyValue('object-fit'),s.getPropertyValue('position')+'/'+e.style.getPropertyValue('position'),s.getPropertyValue('float')+'/'+e.style.getPropertyValue('float'),s.getPropertyValue('clear')+'/'+e.style.getPropertyValue('clear'),s.getPropertyValue('visibility')+'/'+e.style.getPropertyValue('visibility'),s.getPropertyValue('box-sizing')+'/'+e.style.getPropertyValue('box-sizing'),s.getPropertyValue('flex-direction')+'/'+e.style.getPropertyValue('flex-direction'),s.getPropertyValue('flex-wrap')+'/'+e.style.getPropertyValue('flex-wrap'),s.getPropertyValue('table-layout')+'/'+e.style.getPropertyValue('table-layout'),s.getPropertyValue('border-collapse')+'/'+e.style.getPropertyValue('border-collapse'),s.getPropertyValue('empty-cells')+'/'+e.style.getPropertyValue('empty-cells'),s.getPropertyValue('caption-side')+'/'+e.style.getPropertyValue('caption-side'),s.getPropertyValue('list-style-position')+'/'+e.style.getPropertyValue('list-style-position'),s.getPropertyValue('direction')+'/'+e.style.getPropertyValue('direction'),s.getPropertyValue('isolation')+'/'+e.style.getPropertyValue('isolation'),s.getPropertyValue('backface-visibility')+'/'+e.style.getPropertyValue('backface-visibility'),s.getPropertyValue('mix-blend-mode')+'/'+e.style.getPropertyValue('mix-blend-mode'),s.getPropertyValue('overflow-x')+'/'+e.style.getPropertyValue('overflow-x'),s.getPropertyValue('overflow-y')+'/'+e.style.getPropertyValue('overflow-y'),s.getPropertyValue('resize')+'/'+e.style.getPropertyValue('resize'),s.getPropertyValue('text-overflow')+'/'+e.style.getPropertyValue('text-overflow'),s.getPropertyValue('user-select')+'/'+e.style.getPropertyValue('user-select'),s.getPropertyValue('box-decoration-break')+'/'+e.style.getPropertyValue('box-decoration-break'),s.getPropertyValue('scroll-behavior')+'/'+e.style.getPropertyValue('scroll-behavior'),s.getPropertyValue('text-decoration-style')+'/'+e.style.getPropertyValue('text-decoration-style'),s.getPropertyValue('border-top-style')+'/'+e.style.getPropertyValue('border-top-style'),s.getPropertyValue('outline-style')+'/'+e.style.getPropertyValue('outline-style'),s.getPropertyValue('font-kerning')+'/'+e.style.getPropertyValue('font-kerning'),s.getPropertyValue('content-visibility')+'/'+e.style.getPropertyValue('content-visibility'),s.getPropertyValue('hyphens')+'/'+e.style.getPropertyValue('hyphens'),s.getPropertyValue('white-space')+'/'+e.style.getPropertyValue('white-space'),s.getPropertyValue('text-align')+'/'+e.style.getPropertyValue('text-align'),s.getPropertyValue('word-break')+'/'+e.style.getPropertyValue('word-break'),s.getPropertyValue('overflow-wrap')+'/'+e.style.getPropertyValue('overflow-wrap'),s.getPropertyValue('line-break')+'/'+e.style.getPropertyValue('line-break'),s.getPropertyValue('writing-mode')+'/'+e.style.getPropertyValue('writing-mode'),s.getPropertyValue('unicode-bidi')+'/'+e.style.getPropertyValue('unicode-bidi'),s.getPropertyValue('image-rendering')+'/'+e.style.getPropertyValue('image-rendering'),s.getPropertyValue('background-attachment')+'/'+e.style.getPropertyValue('background-attachment'),s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('flex-shrink')+'/'+e.style.getPropertyValue('flex-shrink'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "fill/ | static/ | none/ | none/ | visible/ | content-box/ | row/ | nowrap/ | auto/ | separate/ | show/ | top/ | outside/ | ltr/ | auto/ | visible/ | normal/ | visible/ | visible/ | none/ | clip/ | auto/ | slice/ | auto/ | solid/ | none/ | none/ | auto/ | visible/ | manual/ | normal/ | start/ | normal/ | normal/ | auto/ | horizontal-tb/ | isolate/ | auto/ | scroll/ | 0/ | 1/ | 40px/40px | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): an unknown word keeps the sheet's value",
+   "html": "<!doctype html><style>body{margin:0}#a{position:relative;visibility:hidden;flex-direction:column;white-space:pre;text-align:right;flex-grow:3}</style><body><div id=a style=\"position:middle;visibility:shown;flex-direction:down;white-space:keep;text-align:middle;flex-grow:big;width:41px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('position')+'/'+e.style.getPropertyValue('position'),s.getPropertyValue('visibility')+'/'+e.style.getPropertyValue('visibility'),s.getPropertyValue('flex-direction')+'/'+e.style.getPropertyValue('flex-direction'),s.getPropertyValue('white-space')+'/'+e.style.getPropertyValue('white-space'),s.getPropertyValue('text-align')+'/'+e.style.getPropertyValue('text-align'),s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "relative/ | hidden/ | column/ | pre/ | right/ | 3/ | 41px/41px | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): valid words in any case are kept",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"OBJECT-FIT:Cover;position:Relative;text-overflow:ELLIPSIS;overflow-x:Clip;white-space:Pre-Wrap;text-align:-WEBKIT-center;width:42px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit')+'/'+e.style.getPropertyValue('object-fit'),s.getPropertyValue('position')+'/'+e.style.getPropertyValue('position'),s.getPropertyValue('text-overflow')+'/'+e.style.getPropertyValue('text-overflow'),s.getPropertyValue('overflow-x')+'/'+e.style.getPropertyValue('overflow-x'),s.getPropertyValue('white-space')+'/'+e.style.getPropertyValue('white-space'),s.getPropertyValue('text-align')+'/'+e.style.getPropertyValue('text-align'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "cover/cover | relative/relative | ellipsis/ellipsis | clip/clip | pre-wrap/pre-wrap | -webkit-center/-webkit-center | 42px/42px"
+  },
+  {
+   "name": "rejected inline keyword (E29b): an unknown word after a valid one leaves the valid one",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:cover;object-fit:bogus;flex-grow:2;flex-grow:abc;width:43px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit')+'/'+e.style.getPropertyValue('object-fit'),s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "cover/cover | 2/2 | 43px/43px | 3"
+  },
+  {
+   "name": "rejected inline keyword (E29b): flex-grow and flex-shrink take only a non-negative number",
+   "html": "<!doctype html><style>body{margin:0}#a{flex-grow:5;flex-shrink:6}</style><body><div id=a style=\"flex-grow:-1;flex-shrink:1px;width:44px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('flex-shrink')+'/'+e.style.getPropertyValue('flex-shrink'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "5/ | 6/ | 44px/44px | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): number forms Chromium takes",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"flex-grow:.5;flex-shrink:+2;width:45px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('flex-shrink')+'/'+e.style.getPropertyValue('flex-shrink'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "0.5/0.5 | 2/2 | 45px/45px | 3"
+  },
+  {
+   "name": "rejected inline keyword (E29b): number forms Chromium drops",
+   "html": "<!doctype html><style>body{margin:0}#a{flex-grow:7;flex-shrink:8}</style><body><div id=a style=\"flex-grow:1.;flex-shrink:1e;width:46px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('flex-shrink')+'/'+e.style.getPropertyValue('flex-shrink'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "7/ | 8/ | 46px/46px | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): CSS-wide keywords and var() are kept",
+   "html": "<!doctype html><style>body{margin:0}#a{object-fit:cover;position:relative;flex-grow:4;--v:hidden}body{position:static}</style><body><div id=a style=\"object-fit:initial;position:inherit;flex-grow:unset;visibility:var(--v);width:47px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit')+'/'+e.style.getPropertyValue('object-fit'),s.getPropertyValue('position')+'/'+e.style.getPropertyValue('position'),s.getPropertyValue('flex-grow')+'/'+e.style.getPropertyValue('flex-grow'),s.getPropertyValue('visibility')+'/'+e.style.getPropertyValue('visibility'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "fill/initial | static/inherit | 0/unset | hidden/var(--v) | 47px/47px | 5"
+  },
+  {
+   "name": "rejected inline keyword (E29b): `default` is not a CSS-wide keyword",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:default;position:default;width:48px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit')+'/'+e.style.getPropertyValue('object-fit'),s.getPropertyValue('position')+'/'+e.style.getPropertyValue('position'),s.getPropertyValue('width')+'/'+e.style.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "fill/ | static/ | 48px/48px | 1"
+  },
+  {
+   "name": "rejected inline keyword (E29b): setting an unknown word through el.style changes nothing",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:cover;width:49px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a');e.style.objectFit='bogus';e.style.setProperty('position','middle');e.style.flexGrow='-2';e.style.textOverflow='ellipsis';return [e.style.length,e.style.objectFit,e.style.position,e.style.flexGrow,getComputedStyle(e).objectFit,getComputedStyle(e).position].join(' | ')})()",
+   "chrome": "3 | cover |  |  | cover | static"
   }
  ]
 }
