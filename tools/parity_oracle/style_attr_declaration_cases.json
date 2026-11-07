@@ -129,6 +129,60 @@
    "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--u:url(a;b);width:29px\">x</div>",
    "expr": "(function(){var s=getComputedStyle(document.getElementById('a'));return [s.getPropertyValue('--u'),s.getPropertyValue('width')].join(' | ')})()",
    "chrome": "url(a;b) | 29px"
+  },
+  {
+   "name": "rejected inline: a bad url keeps the sheet's background-image",
+   "html": "<!doctype html><style>body{margin:0}#a{background-image:url(data:image/svg+xml;base64,PHN2Zy8+)}</style><body><div id=a style=\"background-image:url(a(b.png);width:27px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('background-image'),s.getPropertyValue('width'),e.style.length,e.style.backgroundImage].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2Zy8+\") | 27px | 1 | "
+  },
+  {
+   "name": "rejected inline: el.style leaves out a bad url",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(a(b.png);width:28px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a');return [e.style.length,e.style.backgroundImage,e.style.width,e.style.item(0)].join(' | ')})()",
+   "chrome": "1 |  | 28px | width"
+  },
+  {
+   "name": "rejected inline: a bad url after a good one keeps the good one",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"background-image:url(data:image/svg+xml;base64,PHN2Zy8+);background-image:url(it's);width:30px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('background-image'),s.getPropertyValue('width'),e.style.length].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2Zy8+\") | 30px | 2"
+  },
+  {
+   "name": "rejected inline: a bad url in the background shorthand keeps the sheet's",
+   "html": "<!doctype html><style>body{margin:0}#a{background:url(data:image/svg+xml;base64,PHN2Zy8+) rgb(255, 0, 0)}</style><body><div id=a style=\"background:url(a(b.png) blue;width:31px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('background-image'),s.getPropertyValue('background-color'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "url(\"data:image/svg+xml;base64,PHN2Zy8+\") | rgb(255, 0, 0) | 31px"
+  },
+  {
+   "name": "rejected inline: invalid values read the initial value",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"object-fit:bogus;flex-grow:abc;clip-path:nonsense(1);text-overflow:zzz;width:29px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit'),s.getPropertyValue('flex-grow'),s.getPropertyValue('clip-path'),s.getPropertyValue('text-overflow'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "fill | 0 | none | clip | 29px"
+  },
+  {
+   "name": "rejected inline: an invalid value keeps the sheet's",
+   "html": "<!doctype html><style>body{margin:0}#a{object-fit:contain;flex-grow:2}</style><body><div id=a style=\"object-fit:bogus;flex-grow:abc;width:32px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit'),s.getPropertyValue('flex-grow'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "contain | 2 | 32px"
+  },
+  {
+   "name": "rejected inline: a valid initial value reads as itself",
+   "html": "<!doctype html><style>body{margin:0}#a{object-fit:contain;flex-grow:2}</style><body><div id=a style=\"object-fit:fill;flex-grow:0;width:33px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a'),s=getComputedStyle(e);return [s.getPropertyValue('object-fit'),s.getPropertyValue('flex-grow'),s.getPropertyValue('width')].join(' | ')})()",
+   "chrome": "fill | 0 | 33px"
+  },
+  {
+   "name": "rejected inline: setting a bad url through el.style changes nothing",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"width:34px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a');e.style.backgroundImage='url(a(b.png)';e.style.setProperty('mask-image','url(it\\'s)');return [e.style.length,e.style.backgroundImage,e.getAttribute('style'),getComputedStyle(e).backgroundImage].join(' | ')})()",
+   "chrome": "1 |  | width:34px | none"
+  },
+  {
+   "name": "rejected inline: a custom property holding a bad url",
+   "html": "<!doctype html><style>body{margin:0}</style><body><div id=a style=\"--x:url(a(b.png);width:35px\">x</div>",
+   "expr": "(function(){var e=document.getElementById('a');return [e.style.length,e.style.getPropertyValue('--x'),getComputedStyle(e).getPropertyValue('--x')].join(' | ')})()",
+   "chrome": "1 |  | "
   }
  ]
 }
