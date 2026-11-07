@@ -10831,6 +10831,34 @@ impl DisplayList {
         if raw.is_empty() || raw == "none" {
             return None;
         }
+        let d = &layout_box.dimensions;
+        // A `<geometry-box>`; on an HTML box the SVG boxes fall back
+        // (css-masking-1 §8.1): `fill-box` to the content box, `stroke-box`
+        // and `view-box` to the border box.
+        let reference_box = |keyword: &str| -> Option<Rect> {
+            Some(match keyword {
+                "" | "border-box" | "stroke-box" | "view-box" => d.border_box(),
+                "padding-box" => d.padding_box(),
+                "content-box" | "fill-box" => d.content,
+                "margin-box" => d.margin_box(),
+                _ => return None,
+            })
+        };
+        // A `<geometry-box>` alone clips to that box. Its rounding (the
+        // border radius, shrunk or grown to the box) is read only for the
+        // border box; a rounded element's other boxes keep the old path
+        // (unclipped) rather than clip square.
+        if !raw.contains('(') {
+            let rect = reference_box(&raw)?;
+            let radii = self.border_radius_px(layout_box);
+            if radii.is_zero() {
+                return Some((rect, BorderRadius::default()));
+            }
+            if matches!(raw.as_str(), "border-box" | "stroke-box" | "view-box") {
+                return Some((rect, radii.fitted(rect.width, rect.height)));
+            }
+            return None;
+        }
         let open = raw.find('(')?;
         let close = raw.rfind(')')?;
         if close < open {
@@ -10849,14 +10877,7 @@ impl DisplayList {
             [k] => *k,
             _ => return None,
         };
-        let d = &layout_box.dimensions;
-        let reference = match keyword {
-            "" | "border-box" => d.border_box(),
-            "padding-box" => d.padding_box(),
-            "content-box" => d.content,
-            "margin-box" => d.margin_box(),
-            _ => return None,
-        };
+        let reference = reference_box(keyword)?;
         let font_size = match layout_box.style.font_size {
             Length::Px(px) => px,
             _ => 16.0,

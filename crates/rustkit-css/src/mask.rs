@@ -365,26 +365,27 @@ fn parse_repeat(value: &str) -> Option<BackgroundRepeat> {
     }
 }
 
-/// `<geometry-box>` as an origin. The SVG boxes (`fill-box`, `stroke-box`,
-/// `view-box`) are the border box for an HTML element (§6.3).
+/// `<geometry-box>` as an origin. On an element with a CSS layout box the
+/// SVG boxes fall back (§6.3): `fill-box` to the content box, `stroke-box`
+/// and `view-box` to the border box.
 fn parse_origin(value: &str) -> Option<BackgroundOrigin> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
-        "content-box" => BackgroundOrigin::ContentBox,
+        "content-box" | "fill-box" => BackgroundOrigin::ContentBox,
         "padding-box" => BackgroundOrigin::PaddingBox,
-        "border-box" | "margin-box" | "fill-box" | "stroke-box" | "view-box" => {
+        "border-box" | "margin-box" | "stroke-box" | "view-box" => {
             BackgroundOrigin::BorderBox
         }
         _ => return None,
     })
 }
 
-/// `<geometry-box> | no-clip` as a clip. `no-clip` is approximated by the
-/// border box.
+/// `<geometry-box> | no-clip` as a clip, the SVG boxes falling back as in
+/// [`parse_origin`]. `no-clip` is approximated by the border box.
 fn parse_clip(value: &str) -> Option<BackgroundClip> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
-        "content-box" => BackgroundClip::ContentBox,
+        "content-box" | "fill-box" => BackgroundClip::ContentBox,
         "padding-box" => BackgroundClip::PaddingBox,
-        "border-box" | "margin-box" | "fill-box" | "stroke-box" | "view-box" | "no-clip" => {
+        "border-box" | "margin-box" | "stroke-box" | "view-box" | "no-clip" => {
             BackgroundClip::BorderBox
         }
         // Legacy `-webkit-mask-clip: text` etc. do not parse.
