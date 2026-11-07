@@ -1263,6 +1263,14 @@ struct ViewState {
     /// The document-order index of each entry of `external_stylesheets`,
     /// so a late sheet is inserted where the cascade expects it.
     external_sheet_slots: Vec<usize>,
+    /// Every stylesheet link URL this document has requested, the load's
+    /// and those its scripts inserted since (CH2.E20), so a link is
+    /// fetched once.
+    sheet_urls_seen: std::collections::HashSet<Url>,
+    /// The frame generation at which the live loop last looked for
+    /// stylesheet links the page's scripts inserted; `None` until the
+    /// first live turn of this document.
+    sheets_checked_for: Option<u64>,
     /// External classic scripts the page inserted whose fetches are still
     /// out, or finished and not yet run. The fetch is not tied to a turn
     /// deadline. A live turn runs one whose fetch has finished (an
@@ -1389,6 +1397,8 @@ impl ViewState {
         self.live_images.clear();
         self.live_sheets.clear();
         self.external_sheet_slots.clear();
+        self.sheet_urls_seen.clear();
+        self.sheets_checked_for = None;
         // The previous document's inserted scripts must not run here. A
         // fetch still out is discarded when its result arrives. A load tail
         // parked on that document must not fire `load` on this one.
@@ -2992,6 +3002,8 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -3107,6 +3119,8 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -3239,6 +3253,8 @@ impl Engine {
             live_images: Vec::new(),
             live_sheets: Vec::new(),
             external_sheet_slots: Vec::new(),
+            sheet_urls_seen: std::collections::HashSet::new(),
+            sheets_checked_for: None,
             live_inserted: script_net::InsertedScripts::new(),
             load_tail: None,
             relayout_pending: PendingCauses::default(),
@@ -5923,6 +5939,16 @@ impl Engine {
                 Ok(_) => {}
                 Err(e) => debug!(?id, error = %e, "Failed to look for images added by live page scripts"),
             }
+        }
+        // Stylesheet links the page's scripts inserted (CH2.E20): looked
+        // for on the first turn of the document and after every layout,
+        // as images are, and fetched like a late load sheet below.
+        if self
+            .views
+            .get(&id)
+            .is_some_and(|v| v.sheets_checked_for != Some(v.frame_generation))
+        {
+            self.queue_inserted_stylesheets(id);
         }
         // External stylesheets that missed the load's budget (Z row S6):
         // each goes in at its document-order place, then the page restyles.
@@ -17731,6 +17757,7 @@ impl Engine {
 
         let base_url = view.url.as_ref();
         let urls = self.discover_external_stylesheets(document.as_ref(), base_url);
+        let seen: std::collections::HashSet<Url> = urls.iter().cloned().collect();
 
         // Fetch concurrently, but keep DOCUMENT ORDER in the result: the
         // cascade depends on stylesheet order, so `buffered` (ordered) is
@@ -17777,7 +17804,54 @@ impl Engine {
                     as script_net::LiveFuture<(usize, Option<Stylesheet>)>),
             }
         }
+        // What the live loop must not request again (CH2.E20).
+        if let Some(view) = self.views.get_mut(&id) {
+            view.sheet_urls_seen = seen;
+        }
         Ok((sheets, late))
+    }
+
+    /// Start fetching every stylesheet link the document holds that it has
+    /// not requested yet: the links its scripts inserted after the load
+    /// looked (CH2.E20). Until this row a lazily added `<link
+    /// rel=stylesheet>` was never requested and its rules never applied.
+    /// Each sheet lands through `live_sheets`, like a late load sheet (S6),
+    /// at a slot after every sheet the load found, in the order the live
+    /// loop found them: right for links appended to the document, which is
+    /// what lazy CSS does. A link inserted before one the markup holds
+    /// still cascades after it.
+    fn queue_inserted_stylesheets(&mut self, id: EngineViewId) {
+        let deadline = self.subresource_deadline();
+        let referrer = self.subresource_referrer(id);
+        let loader = self.loader.clone();
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let generation = view.frame_generation;
+        let found = match &view.document {
+            Some(document) => self.discover_external_stylesheets(document.as_ref(), view.url.as_ref()),
+            None => Vec::new(),
+        };
+        let inspector = view.inspector.clone();
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        view.sheets_checked_for = Some(generation);
+        for url in found {
+            if !view.sheet_urls_seen.insert(url.clone()) {
+                continue;
+            }
+            let slot = INSERTED_SHEET_SLOT_BASE + view.sheet_urls_seen.len();
+            info!(url = %url_for_log(&url), "Fetching a stylesheet a script inserted");
+            let fetch = Self::fetch_stylesheet(
+                loader.clone(),
+                inspector.clone(),
+                referrer.get_for(url.clone(), RequestDestination::Style),
+                url,
+                deadline,
+            );
+            view.live_sheets.push(Box::pin(async move { (slot, fetch.await) }));
+        }
     }
 
     /// Fetch and parse one external stylesheet. Owns what it uses, so a
@@ -25563,6 +25637,10 @@ pub(crate) fn url_after_redirects(requested: &Url, response_url: &Url, had_redir
         requested.clone()
     }
 }
+
+/// The first slot of a stylesheet link a script inserted (CH2.E20): after
+/// every slot the load gave out, which are document-order indices.
+const INSERTED_SHEET_SLOT_BASE: usize = usize::MAX / 2;
 
 /// Insert a late external stylesheet at its document-order slot (Z row S6).
 /// `slots` and `sheets` stay the same length and the same order.
