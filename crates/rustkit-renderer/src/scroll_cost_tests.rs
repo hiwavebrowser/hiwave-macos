@@ -688,26 +688,36 @@ fn a_badge_stays_over_its_image_and_an_image_over_its_text_whatever_is_off_scree
     }
 }
 
-/// The buffer-limit frame for an adapter: how many text rows, and the
+/// The buffer-limit frame for an adapter: how many commands of text page, and the
 /// buffer limit to set (`None` keeps the device's own).
 #[derive(Debug, PartialEq)]
 struct BufferLimitCase {
-    rows: usize,
+    commands: usize,
     max_buffer_bytes: Option<u64>,
 }
 
-/// Real GPUs draw the 80,000-row frame past the device's 256 MB limit.
-fn buffer_limit_case(_device_type: wgpu::DeviceType) -> BufferLimitCase {
-    BufferLimitCase {
-        rows: 80_000,
-        max_buffer_bytes: None,
+/// Real GPUs draw the 80,000-command frame past the device's 256 MB limit. A
+/// CPU adapter (WARP, llvmpipe, SwiftShader) cannot: its queue times out on
+/// 3.4M glyph quads and panics in `Queue::drop`, which aborts the whole test
+/// binary. It draws 2,000 commands past a 64 KiB limit instead, so the split
+/// path still runs there.
+fn buffer_limit_case(device_type: wgpu::DeviceType) -> BufferLimitCase {
+    match device_type {
+        wgpu::DeviceType::Cpu => BufferLimitCase {
+            commands: 2_000,
+            max_buffer_bytes: Some(64 * 1024),
+        },
+        _ => BufferLimitCase {
+            commands: 80_000,
+            max_buffer_bytes: None,
+        },
     }
 }
 
 #[test]
 fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
     let full = BufferLimitCase {
-        rows: 80_000,
+        commands: 80_000,
         max_buffer_bytes: None,
     };
     for hw in [
@@ -722,9 +732,16 @@ fn a_software_adapter_draws_a_small_frame_past_a_small_limit() {
     // out the queue and panic in `Queue::drop`, aborting the test binary.
     let soft = buffer_limit_case(wgpu::DeviceType::Cpu);
     let cap = soft.max_buffer_bytes.expect("a small limit on a CPU adapter");
-    assert!(soft.rows <= 2_000, "{soft:?}");
+    assert!(soft.commands <= 2_000, "{soft:?}");
     // Still past the limit: the frame's glyph vertices need several buffers.
-    let glyph_bytes = soft.rows * LINE.len() * 4 * std::mem::size_of::<TextureVertex>();
+    let glyphs: usize = page(Mix::Text, soft.commands)
+        .iter()
+        .map(|c| match c {
+            DisplayCommand::Text { text, .. } => text.chars().count(),
+            _ => 0,
+        })
+        .sum();
+    let glyph_bytes = glyphs * 4 * std::mem::size_of::<TextureVertex>();
     assert!(glyph_bytes as u64 > 4 * cap, "{glyph_bytes} vs {cap}");
 }
 
@@ -736,10 +753,21 @@ fn a_batch_past_the_buffer_limit_is_flushed_instead_of_panicking() {
     };
     // 80,000 rows of text drawn without culling: about 3.4M glyph quads,
     // past wgpu's 256 MB buffer limit in one batch. This panicked in
-    // `flush_to` (Texture Vertex Buffer).
-    let list = page(Mix::Text, 80_000);
+    // `flush_to` (Texture Vertex Buffer). A CPU adapter draws a small frame
+    // past a small limit (`buffer_limit_case`).
+    let case = buffer_limit_case(gpu.device_type);
+    if case.max_buffer_bytes.is_some() {
+        eprintln!(
+            "software adapter {} ({:?}): {case:?}",
+            gpu.adapter, gpu.device_type
+        );
+    }
+    let list = page(Mix::Text, case.commands);
     let mut r = renderer(&gpu);
     r.reference = true;
+    if let Some(cap) = case.max_buffer_bytes {
+        r.max_buffer_bytes = cap;
+    }
     let (_t, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
     r.execute(&list, &view).expect("the frame draws");
     let s = r.last_frame_stats();
