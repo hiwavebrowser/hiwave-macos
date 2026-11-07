@@ -61,6 +61,8 @@ mod abspos_image_reanchor_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
+#[cfg(test)]
+mod form_control_content_box_tests;
 
 #[cfg(test)]
 mod replaced_size_unit_tests;
