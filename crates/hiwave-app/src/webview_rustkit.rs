@@ -1356,6 +1356,7 @@ impl RustKitView {
                     }
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
+                PageEvent::Committed { nav_id, .. } => self.history.borrow_mut().committed(nav_id),
                 PageEvent::NavigateRequested {
                     url,
                     replace,
@@ -1540,6 +1541,7 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         PageEvent::Title { nav_id, .. }
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
+        | PageEvent::Committed { nav_id, .. }
         | PageEvent::NavigateRequested { nav_id, .. }
         | PageEvent::Ipc { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
@@ -1571,26 +1573,48 @@ pub(crate) struct NavHistory {
     entries: Vec<Url>,
     /// The entry on screen. Meaningless while `entries` is empty.
     index: usize,
+    /// The navigation asked for and not committed yet: its window number,
+    /// URL and whether it replaces the current entry. Only the newest is
+    /// kept; a newer request cancels the one before.
+    pending: Option<(u64, Url, bool)>,
 }
 
 impl NavHistory {
     /// A navigation to `url` (window number `nav_id`, 0 on the same-thread
-    /// page) was asked for. `replace` keeps the current entry.
-    pub(crate) fn request(&mut self, _nav_id: u64, url: Url, replace: bool) {
-        self.record(url, replace);
+    /// page) was asked for. `replace` keeps the current entry. It is
+    /// recorded when it commits; on the same-thread page, at once.
+    pub(crate) fn request(&mut self, nav_id: u64, url: Url, replace: bool) {
+        if nav_id == 0 {
+            // The same-thread page reports no commit to wait for.
+            self.pending = None;
+            self.record(url, replace);
+        } else {
+            self.pending = Some((nav_id, url, replace));
+        }
     }
 
-    /// The page committed navigation `nav_id`: its first frame was
-    /// published, or its load completed.
-    #[allow(dead_code)]
-    pub(crate) fn committed(&mut self, _nav_id: u64) {}
+    /// The page committed navigation `nav_id` (`PageEvent::Committed`):
+    /// the pending entry is recorded now.
+    pub(crate) fn committed(&mut self, nav_id: u64) {
+        if self.pending.as_ref().is_some_and(|(pending, ..)| *pending == nav_id) {
+            if let Some((_, url, replace)) = self.pending.take() {
+                self.record(url, replace);
+            }
+        }
+    }
 
     /// Navigation `nav_id` failed or was stopped before it committed.
-    pub(crate) fn abandoned(&mut self, _nav_id: u64) {}
+    pub(crate) fn abandoned(&mut self, nav_id: u64) {
+        if self.pending.as_ref().is_some_and(|(pending, ..)| *pending == nav_id) {
+            self.pending = None;
+        }
+    }
 
     /// Every navigation asked for and not yet committed is cancelled (a
     /// newer document, such as New Tab, replaced it).
-    pub(crate) fn abandon_pending(&mut self) {}
+    pub(crate) fn abandon_pending(&mut self) {
+        self.pending = None;
+    }
 
     fn record(&mut self, url: Url, replace: bool) {
         if replace && self.index < self.entries.len() {

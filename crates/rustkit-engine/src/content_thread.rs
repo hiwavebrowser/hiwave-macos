@@ -418,6 +418,7 @@ pub fn reject_stale(events: Vec<PageEvent>, accepted: u64) -> Vec<PageEvent> {
             PageEvent::Title { nav_id, .. }
             | PageEvent::Url { nav_id, .. }
             | PageEvent::LoadState { nav_id, .. }
+            | PageEvent::Committed { nav_id, .. }
             | PageEvent::NavigateRequested { nav_id, .. } => *nav_id == 0 || *nav_id >= accepted,
             PageEvent::Commit(commit) => {
                 commit.nav_generation == 0 || commit.nav_generation >= accepted
@@ -1747,6 +1748,70 @@ mod tests {
             }
         });
         (port, release, seen)
+    }
+
+    /// The window numbers of the `Committed` events among `events`.
+    fn committed_ids(events: &[PageEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PageEvent::Committed { nav_id, .. } => Some(*nav_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_navigation_reports_its_commit_once_and_a_refused_one_none() {
+        // CH2.E38 (hiwave-macos#991): a window kept history at request time
+        // because the page said nothing at commit. `Committed` is that word;
+        // a navigation that never commits does not send it.
+        let (port, _release, _seen) = serve(|_, _| (200, "text/html", b"<p>ok</p>".to_vec()));
+        let page = page();
+        let ok = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap());
+        let events = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, nav_id } if *nav_id == ok))
+        });
+        assert_eq!(committed_ids(&events), vec![ok], "{events:?}");
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let bad = page.navigate(Url::parse(&format!("http://127.0.0.1:{refused}/")).unwrap());
+        let events = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id } if *nav_id == bad))
+        });
+        assert!(
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Failed { .. }, nav_id } if *nav_id == bad)),
+            "the refused navigation did not fail: {events:?}"
+        );
+        assert!(!committed_ids(&events).contains(&bad), "a refused navigation reported a commit: {events:?}");
+    }
+
+    #[test]
+    fn a_navigation_cancelled_before_its_response_reports_no_commit() {
+        let (port, release, _seen) = serve(|path, release_flag| {
+            if path == "/held" {
+                let start = Instant::now();
+                while !release_flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(8) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            (200, "text/html", b"<p>page</p>".to_vec())
+        });
+        let page = page();
+        let held = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/held")).unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+        let next = page.navigate(Url::parse(&format!("http://127.0.0.1:{port}/next")).unwrap());
+        let events = poll_until(&page, Duration::from_secs(8), |events| {
+            events.iter().any(|e| matches!(e, PageEvent::LoadState { state: LoadState::Complete, nav_id } if *nav_id == next))
+        });
+        release.store(true, Ordering::Release);
+        let mut events = events;
+        events.extend(poll_until(&page, Duration::from_millis(500), |_| false));
+        let ids = committed_ids(&events);
+        assert!(ids.contains(&next), "the second navigation did not commit: {events:?}");
+        assert!(!ids.contains(&held), "the superseded navigation reported a commit: {events:?}");
     }
 
     #[test]

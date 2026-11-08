@@ -326,6 +326,14 @@ pub enum PageEvent {
         /// `location.href`, `link.click()` or `form.submit()` is false.
         from_user: bool,
     },
+    /// Navigation `nav_id` committed: its response arrived and its
+    /// document replaces the one on screen (CH2.E38). A navigation that
+    /// fails or is cancelled before then sends none, so this, not the
+    /// request, is when a window adds the history entry.
+    Committed {
+        url: Url,
+        nav_id: u64,
+    },
     Focused(bool),
     /// Whether the focused element is a text field, sent with `Focused`.
     TextFocused(bool),
@@ -1267,7 +1275,7 @@ fn forward_events(
                 PageEvent::Url { url, nav_id },
             ],
             EngineEvent::NavigationCommitted { url, .. } => {
-                vec![PageEvent::Url { url, nav_id }]
+                vec![PageEvent::Url { url: url.clone(), nav_id }, PageEvent::Committed { url, nav_id }]
             }
             EngineEvent::PageLoaded { url, title, .. } => {
                 let mut out = Vec::new();
