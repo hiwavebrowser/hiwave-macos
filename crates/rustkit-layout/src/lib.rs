@@ -381,18 +381,24 @@ pub(crate) fn form_control_intrinsic_size(
             // (DIG-2): the css-selectors buttons (padding 8px 16px) build
             // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
             // composes when the author sets horizontal padding.
-            let label_width = measure_text_advanced(
+            let label_metrics = measure_text_advanced(
                 label,
                 &style.font_family,
                 font_size,
                 style.font_weight,
                 style.font_style,
-            )
-            .width;
-            (
-                button_border_box_width(style, font_size, label_width),
-                single_line_box(19.0 * ua_scale),
-            )
+            );
+            // The label's line is `normal` united with every fallback face
+            // its text used (an emoji lifts Arial 14px from 16 to 23 in
+            // Chrome 148: report's "📱 Share to Social" is 39 tall where
+            // "Export as JSON" is 32). ASCII never reaches a fallback face.
+            let height = if author_pb_v > 0.0 && !label.is_ascii() && label_metrics.ascent > 0.0 {
+                normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
+                    + author_pb_v
+            } else {
+                single_line_box(19.0 * ua_scale)
+            };
+            (button_border_box_width(style, font_size, label_metrics.width), height)
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
             // Fixed size for checkboxes and radios
@@ -3943,8 +3949,16 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
+        // Blink's FontMetrics are whole pixels (SimpleFontData rounds ascent
+        // and descent), and the text inside is seated on the same rounded
+        // pair with the leading above FLOORED (`blink_baseline_offset`), so
+        // the rect is round(a) + round(d) tall and starts that floored
+        // leading below the slot: report's 12px system-font `.time-format`
+        // is 15 tall at baseline - 12 in Chrome 148, not 14.13 at
+        // baseline - 11.6.
+        let (ascent, descent) = (ascent.round(), descent.round());
         let content = ascent + descent;
-        let half_leading = half_leading(line_height, ascent, descent);
+        let half_leading = half_leading(line_height, ascent, descent).floor();
         (content, half_leading)
     }
 
