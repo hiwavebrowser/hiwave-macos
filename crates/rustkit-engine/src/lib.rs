@@ -14420,7 +14420,19 @@ impl layout_ctx::LayoutCtx {
                         // Already applied to `vars` above.
                         continue;
                     }
-                    let resolved_value = self.resolve_css_variables(&value_str, css_vars);
+                    // A `var()` with no value and no fallback: the declaration
+                    // still wins, as `unset` (CSS Variables 1 §3), so an
+                    // earlier `width: 50px` does not survive it (CH2.E14b).
+                    let Some(resolved_value) =
+                        self.resolve_css_variables_or_invalid(&value_str, css_vars)
+                    else {
+                        self.apply_invalid_at_computed_value_time(
+                            &mut style,
+                            parent_style,
+                            &decl.property,
+                        );
+                        continue;
+                    };
                     if value_str != resolved_value {
                         trace!(
                             property = decl.property.as_str(),
@@ -14628,11 +14640,17 @@ impl layout_ctx::LayoutCtx {
             if let Some((property, value)) = declaration.split_once(':') {
                 let property = property.trim().to_lowercase();
                 let (value, important) = split_important(value.trim());
-                if important != important_pass {
+                if important != important_pass || property.starts_with("--") {
+                    // `--*` are already in `css_vars` (the cascade's first pass).
                     continue;
                 }
-                // Resolve CSS variables in the value
-                let resolved_value = self.resolve_css_variables(value, css_vars);
+                // Resolve CSS variables in the value; an unresolvable `var()`
+                // makes the declaration `unset` (CSS Variables 1 §3).
+                let Some(resolved_value) = self.resolve_css_variables_or_invalid(value, css_vars)
+                else {
+                    self.apply_invalid_at_computed_value_time(style, parent_style, &property);
+                    continue;
+                };
                 ch_pending.note(&property, &resolved_value);
                 self.apply_cascaded(style, parent_style, &property, &resolved_value);
             }
@@ -16460,23 +16478,28 @@ impl layout_ctx::LayoutCtx {
             "font-style" => style.font_style = rustkit_css::FontStyle::Normal,
             "font-family" => style.font_family = rustkit_css::INITIAL_FONT_FAMILY.to_string(),
             "line-height" => style.line_height = rustkit_css::LineHeight::Normal,
-            "margin" | "margin-top" => style.margin_top = rustkit_css::Length::Zero,
+            // A shorthand resets all four sides (it reset only the top, so
+            // `padding: 5px; padding: var(--missing)` kept 5px on three).
+            "margin" | "padding" | "border-width" => {
+                for side in ["top", "right", "bottom", "left"] {
+                    let (prefix, suffix) = match property.split_once('-') {
+                        Some((p, s)) => (p, format!("-{s}")),
+                        None => (property, String::new()),
+                    };
+                    self.apply_initial_value(style, &format!("{prefix}-{side}{suffix}"));
+                }
+            }
+            "margin-top" => style.margin_top = rustkit_css::Length::Zero,
             "margin-right" => style.margin_right = rustkit_css::Length::Zero,
             "margin-bottom" => style.margin_bottom = rustkit_css::Length::Zero,
             "margin-left" => style.margin_left = rustkit_css::Length::Zero,
-            "padding" | "padding-top" => style.padding_top = rustkit_css::Length::Zero,
+            "padding-top" => style.padding_top = rustkit_css::Length::Zero,
             "padding-right" => style.padding_right = rustkit_css::Length::Zero,
             "padding-bottom" => style.padding_bottom = rustkit_css::Length::Zero,
             "padding-left" => style.padding_left = rustkit_css::Length::Zero,
-            // The initial width is `medium` on every side; a side with no
-            // style is zeroed after the cascade (zero_width_of_styleless_sides).
-            "border-width" => {
-                let medium = rustkit_css::Length::Px(3.0);
-                style.border_top_width = medium.clone();
-                style.border_right_width = medium.clone();
-                style.border_bottom_width = medium.clone();
-                style.border_left_width = medium;
-            }
+            // The initial width is `medium` on every side (the `border-width`
+            // shorthand reaches these through the four-side loop above); a side
+            // with no style is zeroed after the cascade (zero_width_of_styleless_sides).
             "border-top-width" => style.border_top_width = rustkit_css::Length::Px(3.0),
             "border-right-width" => style.border_right_width = rustkit_css::Length::Px(3.0),
             "border-bottom-width" => style.border_bottom_width = rustkit_css::Length::Px(3.0),
@@ -16497,10 +16520,13 @@ impl layout_ctx::LayoutCtx {
             "pointer-events" => style.pointer_events = rustkit_css::PointerEvents::Auto,
             "cursor" => style.cursor = rustkit_css::Cursor::Auto,
             "height" => style.height = rustkit_css::Length::Auto,
+            // The initial `display` is `inline` (CSS Display 3 §2); it read
+            // `block`, so `div { display: unset }` stayed a block.
             "display" => {
-                style.display = rustkit_css::Display::Block;
+                style.display = rustkit_css::Display::Inline;
                 style.display_modifier = rustkit_css::DisplayModifier::None;
                 style.webkit_box = None;
+                style.display_contents_declared = false;
             }
             "opacity" => style.opacity = 1.0,
             "clip-path" | "-webkit-clip-path" => style.clip_path.clear(),
