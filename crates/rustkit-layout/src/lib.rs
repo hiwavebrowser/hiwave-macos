@@ -55,6 +55,10 @@ mod fit_content_width_tests;
 #[cfg(test)]
 mod element_scroll_extent_tests;
 #[cfg(test)]
+mod element_scroll_helper_tests;
+#[cfg(test)]
+mod relative_offset_unit_tests;
+#[cfg(test)]
 mod min_max_height_unit_tests;
 #[cfg(test)]
 mod abspos_image_reanchor_tests;
@@ -10826,9 +10830,12 @@ impl DisplayList {
     }
 
     fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+        // A non-replaced inline is one box at its first line fragment here,
+        // and Chrome clips a wrapped inline to that first fragment too (WPT
+        // clip-path-reference-box-004), so its own boxes are the reference.
         if !matches!(
             layout_box.box_type,
-            BoxType::Block | BoxType::Image { .. } | BoxType::FormControl(_)
+            BoxType::Block | BoxType::Inline | BoxType::Image { .. } | BoxType::FormControl(_)
         ) {
             return None;
         }
@@ -10845,6 +10852,24 @@ impl DisplayList {
                 "" | "border-box" | "stroke-box" | "view-box" => d.border_box(),
                 "padding-box" => d.padding_box(),
                 "content-box" | "fill-box" => d.content,
+                // An inline's vertical margins take no space in the line,
+                // so layout leaves them at zero, but its margin box still
+                // has them (WPT clip-path-inline-004). A percentage, of the
+                // containing block's width, is not known here and reads 0.
+                "margin-box" if matches!(layout_box.box_type, BoxType::Inline) => {
+                    let s = &layout_box.style;
+                    let font = match s.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    let v = |l: &Length| match l {
+                        Length::Percent(_) => 0.0,
+                        l => l.to_px(font, self.root_font_size, 0.0),
+                    };
+                    let m = d.margin_box();
+                    let (top, bottom) = (v(&s.margin_top), v(&s.margin_bottom));
+                    Rect::new(m.x, m.y - top, m.width, m.height + top + bottom)
+                }
                 "margin-box" => d.margin_box(),
                 _ => return None,
             })
@@ -11017,8 +11042,11 @@ impl DisplayList {
                                 _ => return None,
                             })
                         };
-                        let hr = four(hs, rect.width)?;
-                        let vr = four(vs, rect.height)?;
+                        // A percentage is of the reference box, like the
+                        // offsets, not of the inset rectangle (css-shapes-1
+                        // §3.1; WPT clip-path-inset-round-percent).
+                        let hr = four(hs, w)?;
+                        let vr = four(vs, h)?;
                         let c = |i: usize| CornerRadius { h: hr[i], v: vr[i] };
                         BorderRadius {
                             top_left: c(0),
