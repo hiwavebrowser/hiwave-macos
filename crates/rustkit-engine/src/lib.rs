@@ -431,6 +431,8 @@ mod ua_em_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ua_heading_font_size_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ua_control_margin_tests;
+#[cfg(all(test, feature = "headless"))]
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;

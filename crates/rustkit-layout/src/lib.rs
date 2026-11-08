@@ -13067,6 +13067,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_a_styled_drop_down_composes_its_arrow_well_with_author_padding() {
+        // settings.html `select { padding: .5rem .75rem; border: 1px solid;
+        // font-size: .85rem }`: Chrome for Testing 148 builds #theme
+        // ("System") 92 x 35 — ceil(widest option) + a 20px arrow well +
+        // the author's horizontal padding and border, and an inner line of
+        // round(ascent) + round(descent) + 2 plus the vertical padding and
+        // border. RustKit built widest + 24 (69.8) and the text line (33).
+        // Bare at the UA font the same rule gives Chrome's 60 / 137 / 67.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(13.6);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(12.0);
+        style.padding_right = Length::Px(12.0);
+        for side in [
+            &mut style.border_top_width,
+            &mut style.border_right_width,
+            &mut style.border_bottom_width,
+            &mut style.border_left_width,
+        ] {
+            *side = Length::Px(1.0);
+        }
+        let select = |options: &[&str]| FormControlType::Select {
+            options: options.iter().map(|o| o.to_string()).collect(),
+            selected_index: None,
+            size: 0,
+            selected: Vec::new(),
+        };
+        assert_eq!(
+            form_control_intrinsic_size(&style, &select(&["Dark", "Light", "System"])),
+            (92.0, 35.0)
+        );
+
+        let mut bare = ComputedStyle::new();
+        bare.font_size = Length::Px(40.0 / 3.0);
+        bare.font_family = "Arial".to_string();
+        for (options, want) in [
+            (&["Select"][..], 60.0),
+            (&["A longer option text"][..], 137.0),
+            (&["Dark", "Light", "System"][..], 67.0),
+        ] {
+            let (w, h) = form_control_intrinsic_size(&bare, &select(options));
+            assert_eq!((w, h), (want, 19.0), "{options:?}");
+        }
+    }
+
+    #[test]
     fn test_an_emoji_label_lifts_a_styled_buttons_line() {
         // report.html `.export-btn { padding: .5rem 1rem; font-size: .875rem }`:
         // Chrome for Testing 148 builds "Export as JSON" 32 tall and
