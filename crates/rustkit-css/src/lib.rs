@@ -3020,6 +3020,11 @@ pub struct ComputedStyle {
     /// The authored `display` keyword `display` folds (`list-item`,
     /// `flow-root`), for `getComputedStyle` ([`ComputedStyle::display_keyword`]).
     pub display_modifier: DisplayModifier,
+    /// An absolutely positioned box whose `display` was inline-level before
+    /// it was blockified (CSS 2.1 §9.7). Not a property: layout reads it for
+    /// the static position, which is the box's place on the current line
+    /// rather than below it (CSS 2.1 §10.3.7 "hypothetical box").
+    pub abspos_was_inline_level: bool,
     pub position: Position,
     pub float: Float,
     pub clear: Clear,
