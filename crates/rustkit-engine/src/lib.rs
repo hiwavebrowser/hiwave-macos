@@ -555,6 +555,8 @@ mod animations;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
+mod attribute_flag_tests;
+#[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
 mod container_query_tests;
@@ -19884,26 +19886,65 @@ impl SelectorMatcher {
         }
     }
 
-    /// Checked in this order; the first one found splits name from value.
+    /// The operators, and the same with the `i` case flag (Selectors 4
+    /// §6.3: `[a="v" i]` compares ASCII case-insensitively).
     const ATTR_OPERATORS: [&'static str; 6] = ["~=", "|=", "^=", "$=", "*=", "="];
+    const ATTR_OPERATORS_I: [&'static str; 6] = ["~=i", "|=i", "^=i", "$=i", "*=i", "=i"];
+    /// The operator of a test with a flag other than `i`. Chromium 143 takes
+    /// no other (not even `s`): the selector is invalid, and this never passes.
+    const ATTR_INVALID_FLAG: &'static str = "!";
+
+    /// Where the operator of an `[...]` selector starts and which it is:
+    /// the first `=` and the one character before it. A name holds no `=`,
+    /// so an operator inside a quoted value (`[a="x~=y"]`) is not taken.
+    fn attr_operator(attr_selector: &str) -> Option<(usize, usize)> {
+        let eq = attr_selector.find('=')?;
+        match attr_selector[..eq].chars().next_back() {
+            Some('~' | '|' | '^' | '$' | '*') => Some((eq - 1, eq + 1)),
+            _ => Some((eq, eq + 1)),
+        }
+    }
 
     /// The operator of an `[...]` selector and the value it compares with
-    /// (trimmed, quotes removed). None for a bare `[name]`.
+    /// (trimmed, quotes removed); with an `i` flag after the value, the
+    /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
     fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
-        Self::ATTR_OPERATORS.iter().find_map(|op| {
-            let pos = attr_selector.find(op)?;
-            let mut attr_value = attr_selector[pos + op.len()..].trim();
-            if (attr_value.starts_with('"') && attr_value.ends_with('"'))
-                || (attr_value.starts_with('\'') && attr_value.ends_with('\''))
-            {
-                attr_value = &attr_value[1..attr_value.len() - 1];
-            }
-            Some((*op, attr_value))
-        })
+        let (start, end) = Self::attr_operator(attr_selector)?;
+        let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
+        let rest = attr_selector[end..].trim();
+        let (attr_value, flag) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
+                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+                // CSS Syntax: EOF closes a string.
+                None => (&rest[1..], ""),
+            },
+            _ => match rest.find(char::is_whitespace) {
+                Some(space) => (&rest[..space], rest[space..].trim()),
+                None => (rest, ""),
+            },
+        };
+        let op = match flag {
+            "" => Self::ATTR_OPERATORS[at],
+            "i" | "I" => Self::ATTR_OPERATORS_I[at],
+            _ => Self::ATTR_INVALID_FLAG,
+        };
+        Some((op, attr_value))
+    }
+
+    /// Whether an `[...]` selector's flag is one the engine takes.
+    fn attr_selector_is_valid(attr_selector: &str) -> bool {
+        Self::attr_selector_test(attr_selector).is_none_or(|(op, _)| op != Self::ATTR_INVALID_FLAG)
     }
 
     /// Whether the element's value `el_attr` passes `op` against `attr_value`.
     fn attr_test_passes(op: &str, attr_value: &str, el_attr: &str) -> bool {
+        if let Some(op) = op.strip_suffix('i') {
+            return Self::attr_test_passes(
+                op,
+                &attr_value.to_ascii_lowercase(),
+                &el_attr.to_ascii_lowercase(),
+            );
+        }
         match op {
             "=" => el_attr == attr_value,
             "~=" => el_attr.split_whitespace().any(|w| w == attr_value),
@@ -19924,10 +19965,8 @@ impl SelectorMatcher {
     /// without an operator, fails on an element that lacks it, which is
     /// what lets the rule index file attribute-first rules under it.
     fn attr_selector_name(attr_selector: &str) -> &str {
-        Self::ATTR_OPERATORS
-            .iter()
-            .find_map(|op| attr_selector.find(op))
-            .map_or(attr_selector, |pos| &attr_selector[..pos])
+        Self::attr_operator(attr_selector)
+            .map_or(attr_selector, |(start, _)| &attr_selector[..start])
             .trim()
     }
 
@@ -20083,6 +20122,7 @@ impl SelectorMatcher {
         let mut paren_depth: Vec<bool> = Vec::new(); // true = this paren is forgiving
         // Parallel to `paren_depth`: true = this paren is a `:has(`.
         let mut has_parens: Vec<bool> = Vec::new();
+        let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
             if let Some(q) = quote {
@@ -20094,8 +20134,22 @@ impl SelectorMatcher {
             }
             match c {
                 '"' | '\'' => quote = Some(c),
-                '[' => in_brackets = true,
-                ']' => in_brackets = false,
+                '[' => {
+                    in_brackets = true;
+                    bracket_start = i + 1;
+                }
+                ']' => {
+                    // `[a="v" s]`: Chromium 143 takes no case flag but `i`.
+                    if in_brackets
+                        && forgiving_depth == 0
+                        && !Self::attr_selector_is_valid(
+                            &chars[bracket_start..i].iter().collect::<String>(),
+                        )
+                    {
+                        return false;
+                    }
+                    in_brackets = false;
+                }
                 '(' => {
                     paren_depth.push(false);
                     has_parens.push(false);
