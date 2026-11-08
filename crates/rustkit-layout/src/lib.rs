@@ -407,9 +407,9 @@ pub(crate) fn form_control_intrinsic_size(
         FormControlType::Select { size, options, .. } => {
             // Chrome sizes a select to its WIDEST option (n53
             // form-controls: listbox 39 = "Item 4" 37 + 2px border;
-            // dropdown 137 = "A longer option text" + 24px of border and
-            // arrow well, 60 = "Select" + 24). The old 10em blob built
-            // 133 for both.
+            // dropdown 137 = ceil("A longer option text") + 20px arrow well
+            // + 2px border, 60 = ceil("Select") + 22). The old 10em blob
+            // built 133 for both.
             let widest = options
                 .iter()
                 .map(|o| {
@@ -430,8 +430,42 @@ pub(crate) fn form_control_intrinsic_size(
                     list_box_row_height(font_size) * *size as f32 + 2.0 * ua_scale,
                 )
             } else {
-                // Dropdown: widest option plus the arrow well.
-                (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
+                // Dropdown (menulist), measured in Chrome for Testing 148:
+                // ceil(widest option) + a 20px arrow well (font-size does not
+                // move it: 66 at 13.6px, 87 at 20px with no padding/border) +
+                // the horizontal padding and border — the UA 1px border each
+                // side when the style carries none. The inner line is
+                // round(ascent) + round(descent) + 2 (13 at 10px, 24 at 20px,
+                // 38 at 32px), plus the vertical padding and border; bare
+                // controls keep the calibrated 19px blob. settings' #theme
+                // ("System", padding .5rem .75rem, 1px border, 13.6px) is
+                // 92 x 35; widest + 24 built 69.8 x 33.
+                let px = |l: &Length| match l {
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
+                };
+                let pb_h = px(&style.padding_left)
+                    + px(&style.padding_right)
+                    + px(&style.border_left_width)
+                    + px(&style.border_right_width);
+                let pb_h = if pb_h > 0.0 { pb_h } else { 2.0 };
+                let height = if author_pb_v > 0.0 {
+                    let m = measure_text_advanced(
+                        "x",
+                        &style.font_family,
+                        font_size,
+                        style.font_weight,
+                        style.font_style,
+                    );
+                    if m.ascent > 0.0 {
+                        m.ascent.round() + m.descent.round() + 2.0 + author_pb_v
+                    } else {
+                        single_line_box(19.0 * ua_scale)
+                    }
+                } else {
+                    single_line_box(19.0 * ua_scale)
+                };
+                (widest.ceil() + 20.0 + pb_h, height)
             }
         }
     }
