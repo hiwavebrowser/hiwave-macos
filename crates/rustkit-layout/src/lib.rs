@@ -442,6 +442,22 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
+/// What closing the open line would advance the cursor by: the line box's
+/// height when a line is open (anything placed on it), else nothing.
+fn open_line_advance(
+    cursor_x: f32,
+    tallest: f32,
+    bottom_edge: f32,
+    extents: (f32, f32),
+    strut: (f32, f32),
+) -> f32 {
+    if cursor_x > 0.0 || tallest > 0.0 {
+        line_advance(tallest, bottom_edge, extents, strut)
+    } else {
+        0.0
+    }
+}
+
 /// Height of a closing line box (CSS2 §10.8.1): the members sit on one
 /// baseline, so the box spans the largest extent above it plus the largest
 /// below it, and the container's strut floors both. `tallest` / `bottom_edge`
@@ -5693,7 +5709,15 @@ impl LayoutBox {
             // by reanchor_absolute_children once this box is final.
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
+                // A block-level box would close the open line: its static
+                // position is below that line box (CH2.B25). One that was
+                // inline-level stays on the line, where it would have gone.
+                cb.content.height = if child.style.abspos_was_inline_level {
+                    cb.content.x += cursor_x;
+                    cursor_y
+                } else {
+                    cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
+                };
                 child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
@@ -6701,8 +6725,28 @@ impl LayoutBox {
                 // carry the margin as well. The live context stays intact for
                 // the next in-flow sibling (an abspos box between two blocks
                 // must not swallow the margin between them).
+                //
+                // An abspos box is blockified, and a block-level box closes
+                // the open line: its static position is below that line box,
+                // not at its top (Chromium 148: after a 20px inline-block
+                // with `margin-bottom:15px`, 39 below the container top, not
+                // 0; CH2.B25). An open line has already taken the pending
+                // margin, so at most one of the two terms is non-zero.
+                //
+                // An abspos box that was inline-level before it was
+                // blockified keeps the place it would have had on the line:
+                // the line's top, after what the line holds so far (Chromium
+                // 148: `ab<span style=position:absolute>` at x 19, y 0, not
+                // below the line). The inline start ignores `text-align`
+                // and floats.
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y + margin_context.resolve();
+                if child.style.abspos_was_inline_level {
+                    cb.content.x += cursor_x;
+                } else {
+                    cb.content.height +=
+                        open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
+                }
                 let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
