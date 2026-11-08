@@ -487,6 +487,19 @@ pub struct DeclarationAst {
 /// - It does not do complex tokenization.
 /// - It attempts to be robust for common author CSS and RustKit test inputs.
 pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
+    // CSS Syntax 3 §3.3 preprocessing: CRLF, CR and FF are each one LF
+    // before anything is scanned. Both scanners here (`take_block` reads
+    // the same iterator) end an unclosed string at LF and take `\` plus
+    // one code point as an escape, so with the raw input `\` CR LF left
+    // the LF to end the string and the real closing quote opened a new
+    // one that swallowed the rest of the sheet (#994 R1 HOLD). Copied
+    // only when there is something to fold.
+    let css: std::borrow::Cow<'_, str> = if css.contains(['\r', '\x0C']) {
+        std::borrow::Cow::Owned(css.replace("\r\n", "\n").replace(['\r', '\x0C'], "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(css)
+    };
+    let css: &str = &css;
     let mut out = StylesheetAst::default();
 
     let mut current_selector = String::new();
