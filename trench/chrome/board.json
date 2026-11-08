@@ -1,11 +1,12 @@
 {
   "run": {
-    "at": "2026-11-05 04:29 UTC",
-    "sha": "55bf3a32",
-    "base": "209f6a64",
+    "at": "2026-11-08 17:42 UTC",
+    "sha": "ad1fd7b6",
+    "base": "27129415",
     "chromium": "143.0.7499.4",
-    "parity_capture": "target/release/parity-capture",
-    "gate_pct": 0.5
+    "parity_capture": "/private/tmp/claude-501/-Users-petecopeland-Repos/0fe3fb84-0626-4cb2-8332-1f8906250f10/scratchpad/batch41/bins/cand41",
+    "gate_pct": 0.5,
+    "gate_geometry_pixel_pct": 1.5
   },
   "sizes": [
     [
@@ -100,272 +101,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 3.185,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 72.3
-        },
-        {
-          "selector": "#tabs",
-          "pct": 1.8
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
-          "pct": 1.6
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 81.92441406249999,
-        "form_control": 1.159375
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "default",
-      "size": "1024x700",
-      "width": 1024,
-      "height": 700,
-      "status": "ok",
-      "pixel_diff_pct": 4.315,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 66.7
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
-          "pct": 1.9
-        },
-        {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2)",
-          "pct": 1.8
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 76.61049107142857,
-        "form_control": 1.9281529017857144
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "default",
-      "size": "1600x1000",
-      "width": 1600,
-      "height": 1000,
-      "status": "ok",
-      "pixel_diff_pct": 2.163,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 77.6
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
-          "pct": 2.3
-        },
-        {
-          "selector": "#tabs",
-          "pct": 1.9
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 87.20787499999999,
-        "form_control": 1.0619999999999998
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "hover_tab2",
-      "size": "1280x800",
-      "width": 1280,
-      "height": 800,
-      "status": "ok",
-      "pixel_diff_pct": 3.085,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 72.3
-        },
-        {
-          "selector": "#tabs",
-          "pct": 1.8
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
-          "pct": 1.6
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 81.92441406249999,
-        "form_control": 1.159375
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "hover_tab2",
-      "size": "1024x700",
-      "width": 1024,
-      "height": 700,
-      "status": "ok",
-      "pixel_diff_pct": 4.172,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 66.7
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
-          "pct": 1.9
-        },
-        {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2)",
-          "pct": 1.8
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 76.61049107142857,
-        "form_control": 1.9281529017857144
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "hover_tab2",
-      "size": "1600x1000",
-      "width": 1600,
-      "height": 1000,
-      "status": "ok",
       "pixel_diff_pct": 2.099,
-      "geometry_diffs": 210,
-      "top": [
-        {
-          "selector": "#chromeMain",
-          "pct": 77.6
-        },
-        {
-          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
-          "pct": 2.3
-        },
-        {
-          "selector": "#tabs",
-          "pct": 1.9
-        }
-      ],
-      "notes": [],
-      "taxonomy": {
-        "unknown": 87.20787499999999,
-        "form_control": 1.0619999999999998
-      },
-      "join_failures": 8,
-      "worst_geometry": [
-        {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
-        },
-        {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
-        }
-      ]
-    },
-    {
-      "page": "chrome",
-      "state": "address_focused",
-      "size": "1280x800",
-      "width": 1280,
-      "height": 800,
-      "status": "ok",
-      "pixel_diff_pct": 3.846,
-      "geometry_diffs": 210,
+      "geometry_diffs": 159,
       "top": [
         {
           "selector": "#chromeMain",
@@ -388,28 +125,28 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
     {
       "page": "chrome",
-      "state": "address_focused",
+      "state": "default",
       "size": "1024x700",
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 4.973,
-      "geometry_diffs": 210,
+      "pixel_diff_pct": 2.711,
+      "geometry_diffs": 157,
       "top": [
         {
           "selector": "#chromeMain",
@@ -420,7 +157,7 @@
           "pct": 1.9
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
           "pct": 1.8
         }
       ],
@@ -432,28 +169,28 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
     {
       "page": "chrome",
-      "state": "address_focused",
+      "state": "default",
       "size": "1600x1000",
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 2.746,
-      "geometry_diffs": 210,
+      "pixel_diff_pct": 1.506,
+      "geometry_diffs": 159,
       "top": [
         {
           "selector": "#chromeMain",
@@ -476,16 +213,280 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.091,
+      "geometry_diffs": 159,
+      "top": [
         {
           "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "pct": 72.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.8
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.6
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 81.92441406249999,
+        "form_control": 1.159375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.698,
+      "geometry_diffs": 157,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+          "pct": 1.8
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 76.61049107142857,
+        "form_control": 1.9281529017857144
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "hover_tab2",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.5,
+      "geometry_diffs": 159,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 87.20787499999999,
+        "form_control": 1.0619999999999998
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1280x800",
+      "width": 1280,
+      "height": 800,
+      "status": "ok",
+      "pixel_diff_pct": 2.322,
+      "geometry_diffs": 159,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 72.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.8
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.6
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 81.92441406249999,
+        "form_control": 1.159375
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1024x700",
+      "width": 1024,
+      "height": 700,
+      "status": "ok",
+      "pixel_diff_pct": 2.886,
+      "geometry_diffs": 157,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 66.7
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3)",
+          "pct": 1.9
+        },
+        {
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2)",
+          "pct": 1.8
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 76.61049107142857,
+        "form_control": 1.9281529017857144
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
+        }
+      ]
+    },
+    {
+      "page": "chrome",
+      "state": "address_focused",
+      "size": "1600x1000",
+      "width": 1600,
+      "height": 1000,
+      "status": "ok",
+      "pixel_diff_pct": 1.729,
+      "geometry_diffs": 159,
+      "top": [
+        {
+          "selector": "#chromeMain",
+          "pct": 77.6
+        },
+        {
+          "selector": "body > aside.sidebar:nth-of-type(1) > section.sidebar-section shelf-section:nth-of-type(4)",
+          "pct": 2.3
+        },
+        {
+          "selector": "#tabs",
+          "pct": 1.9
+        }
+      ],
+      "notes": [],
+      "taxonomy": {
+        "unknown": 87.20787499999999,
+        "form_control": 1.0619999999999998
+      },
+      "join_failures": 8,
+      "worst_geometry": [
+        {
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
+        },
+        {
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
+        },
+        {
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -496,8 +497,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 2.216,
-      "geometry_diffs": 235,
+      "pixel_diff_pct": 0.313,
+      "geometry_diffs": 189,
       "top": [
         {
           "selector": "html > body",
@@ -508,7 +509,7 @@
           "pct": 2.6
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 2.0
         }
       ],
@@ -520,16 +521,16 @@
       "join_failures": 11,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -540,8 +541,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 3.106,
-      "geometry_diffs": 237,
+      "pixel_diff_pct": 0.448,
+      "geometry_diffs": 177,
       "top": [
         {
           "selector": "html > body",
@@ -552,7 +553,7 @@
           "pct": 2.3
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 2.1
         }
       ],
@@ -564,16 +565,16 @@
       "join_failures": 11,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -584,8 +585,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 1.518,
-      "geometry_diffs": 238,
+      "pixel_diff_pct": 0.201,
+      "geometry_diffs": 194,
       "top": [
         {
           "selector": "html > body",
@@ -596,7 +597,7 @@
           "pct": 2.4
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 1.7
         }
       ],
@@ -608,16 +609,16 @@
       "join_failures": 10,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -628,8 +629,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 3.057,
-      "geometry_diffs": 229,
+      "pixel_diff_pct": 1.983,
+      "geometry_diffs": 178,
       "top": [
         {
           "selector": "#chromeMain",
@@ -652,16 +653,16 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -672,8 +673,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 4.149,
-      "geometry_diffs": 229,
+      "pixel_diff_pct": 2.576,
+      "geometry_diffs": 176,
       "top": [
         {
           "selector": "#chromeMain",
@@ -684,7 +685,7 @@
           "pct": 1.9
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 1.4
         }
       ],
@@ -696,16 +697,16 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -716,8 +717,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 2.128,
-      "geometry_diffs": 229,
+      "pixel_diff_pct": 1.43,
+      "geometry_diffs": 178,
       "top": [
         {
           "selector": "#chromeMain",
@@ -740,16 +741,16 @@
       "join_failures": 8,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#sidebarResizeHandle",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -760,8 +761,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 2.561,
-      "geometry_diffs": 222,
+      "pixel_diff_pct": 0.546,
+      "geometry_diffs": 177,
       "top": [
         {
           "selector": "#chromeMain",
@@ -784,16 +785,16 @@
       "join_failures": 11,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#modeSelector",
+          "max_delta_px": 79.26
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 78.81
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#workspaceContent",
+          "max_delta_px": 78.81
         }
       ]
     },
@@ -804,8 +805,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 3.599,
-      "geometry_diffs": 224,
+      "pixel_diff_pct": 0.78,
+      "geometry_diffs": 165,
       "top": [
         {
           "selector": "#chromeMain",
@@ -828,16 +829,16 @@
       "join_failures": 11,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#modeSelector",
+          "max_delta_px": 79.26
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 78.81
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#workspaceContent",
+          "max_delta_px": 78.81
         }
       ]
     },
@@ -848,8 +849,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 1.739,
-      "geometry_diffs": 225,
+      "pixel_diff_pct": 0.35,
+      "geometry_diffs": 182,
       "top": [
         {
           "selector": "#chromeMain",
@@ -872,16 +873,16 @@
       "join_failures": 10,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#modeSelector",
+          "max_delta_px": 79.26
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.sidebar collapsed:nth-of-type(1) > section.sidebar-section workspace-section:nth-of-type(3) > div.section-header:nth-of-type(1)",
+          "max_delta_px": 78.81
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#workspaceContent",
+          "max_delta_px": 78.81
         }
       ]
     },
@@ -892,8 +893,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 0.502,
-      "geometry_diffs": 235,
+      "pixel_diff_pct": 0.202,
+      "geometry_diffs": 189,
       "top": [
         {
           "selector": "html > body.focus-mode",
@@ -904,7 +905,7 @@
           "pct": 2.3
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 2.0
         }
       ],
@@ -916,16 +917,16 @@
       "join_failures": 13,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -936,15 +937,15 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 0.718,
-      "geometry_diffs": 237,
+      "pixel_diff_pct": 0.288,
+      "geometry_diffs": 177,
       "top": [
         {
           "selector": "html > body.focus-mode",
           "pct": 81.1
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 2.1
         },
         {
@@ -960,16 +961,16 @@
       "join_failures": 13,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -980,8 +981,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 0.322,
-      "geometry_diffs": 238,
+      "pixel_diff_pct": 0.129,
+      "geometry_diffs": 194,
       "top": [
         {
           "selector": "html > body.focus-mode",
@@ -992,7 +993,7 @@
           "pct": 2.1
         },
         {
-          "selector": "body > div.chrome-main:nth-of-type(4) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
+          "selector": "body > div.chrome-main:nth-of-type(5) > div.toolbar:nth-of-type(2) > div.address-bar:nth-of-type(3)",
           "pct": 1.7
         }
       ],
@@ -1004,16 +1005,16 @@
       "join_failures": 12,
       "worst_geometry": [
         {
-          "selector": "#sidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsPanel",
+          "max_delta_px": 139.52
         },
         {
-          "selector": "#chromeMain",
-          "max_delta_px": 305.0
+          "selector": "body > aside.right-sidebar collapsed:nth-of-type(2) > div.right-sidebar-content:nth-of-type(4) > div.right-sidebar-panel active:nth-of-type(1) > div.right-panel-header:nth-of-type(1)",
+          "max_delta_px": 115.52
         },
         {
-          "selector": "#rightSidebar",
-          "max_delta_px": 305.0
+          "selector": "#rightDownloadsList",
+          "max_delta_px": 115.52
         }
       ]
     },
@@ -1024,7 +1025,7 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 0.327,
+      "pixel_diff_pct": 0.272,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1055,7 +1056,7 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 0.467,
+      "pixel_diff_pct": 0.39,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1086,7 +1087,7 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 0.211,
+      "pixel_diff_pct": 0.177,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1117,7 +1118,7 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 0.695,
+      "pixel_diff_pct": 0.142,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1148,7 +1149,7 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 0.85,
+      "pixel_diff_pct": 0.207,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1179,7 +1180,7 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 0.526,
+      "pixel_diff_pct": 0.092,
       "geometry_diffs": 0,
       "top": [
         {
@@ -1210,7 +1211,7 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 3.258,
+      "pixel_diff_pct": 3.121,
       "geometry_diffs": 50,
       "top": [
         {
@@ -1253,7 +1254,7 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 3.904,
+      "pixel_diff_pct": 3.708,
       "geometry_diffs": 50,
       "top": [
         {
@@ -1296,7 +1297,7 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 2.505,
+      "pixel_diff_pct": 2.417,
       "geometry_diffs": 50,
       "top": [
         {
@@ -1339,8 +1340,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 0.611,
-      "geometry_diffs": 6,
+      "pixel_diff_pct": 0.346,
+      "geometry_diffs": 0,
       "top": [
         {
           "selector": "#console-output",
@@ -1361,20 +1362,7 @@
         "form_control": 2.92734375
       },
       "join_failures": 1,
-      "worst_geometry": [
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-divider:nth-of-type(1)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2) > button.toolbar-tab:nth-of-type(1)",
-          "max_delta_px": 16.0
-        }
-      ]
+      "worst_geometry": []
     },
     {
       "page": "inspector",
@@ -1383,8 +1371,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 0.873,
-      "geometry_diffs": 6,
+      "pixel_diff_pct": 0.495,
+      "geometry_diffs": 0,
       "top": [
         {
           "selector": "#console-output",
@@ -1405,20 +1393,7 @@
         "form_control": 3.3247767857142856
       },
       "join_failures": 1,
-      "worst_geometry": [
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-divider:nth-of-type(1)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2) > button.toolbar-tab:nth-of-type(1)",
-          "max_delta_px": 16.0
-        }
-      ]
+      "worst_geometry": []
     },
     {
       "page": "inspector",
@@ -1427,8 +1402,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 0.391,
-      "geometry_diffs": 6,
+      "pixel_diff_pct": 0.222,
+      "geometry_diffs": 0,
       "top": [
         {
           "selector": "#console-output",
@@ -1449,20 +1424,7 @@
         "form_control": 2.3535
       },
       "join_failures": 1,
-      "worst_geometry": [
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-divider:nth-of-type(1)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2)",
-          "max_delta_px": 16.0
-        },
-        {
-          "selector": "body > div.inspector-container > div.inspector-toolbar:nth-of-type(1) > div.toolbar-tabs:nth-of-type(2) > button.toolbar-tab:nth-of-type(1)",
-          "max_delta_px": 16.0
-        }
-      ]
+      "worst_geometry": []
     },
     {
       "page": "settings",
@@ -1471,8 +1433,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 1.679,
-      "geometry_diffs": 256,
+      "pixel_diff_pct": 0.864,
+      "geometry_diffs": 168,
       "top": [
         {
           "selector": "html > body",
@@ -1514,8 +1476,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 2.09,
-      "geometry_diffs": 256,
+      "pixel_diff_pct": 1.056,
+      "geometry_diffs": 168,
       "top": [
         {
           "selector": "html > body",
@@ -1557,8 +1519,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 1.451,
-      "geometry_diffs": 256,
+      "pixel_diff_pct": 0.73,
+      "geometry_diffs": 168,
       "top": [
         {
           "selector": "html > body",
@@ -1600,8 +1562,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 2.332,
-      "geometry_diffs": 65,
+      "pixel_diff_pct": 0.517,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
@@ -1620,19 +1582,19 @@
       "taxonomy": {
         "unknown": 82.0966796875
       },
-      "join_failures": 3,
+      "join_failures": 1,
       "worst_geometry": [
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card:nth-of-type(5) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card warning:nth-of-type(6) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card info:nth-of-type(7) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#content",
+          "max_delta_px": 7.0
         }
       ]
     },
@@ -1643,8 +1605,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 3.259,
-      "geometry_diffs": 65,
+      "pixel_diff_pct": 0.731,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
@@ -1663,19 +1625,19 @@
       "taxonomy": {
         "unknown": 74.65094866071428
       },
-      "join_failures": 3,
+      "join_failures": 1,
       "worst_geometry": [
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card:nth-of-type(5) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#activityChart",
+          "max_delta_px": 910.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card warning:nth-of-type(6) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#protectionChart",
+          "max_delta_px": 910.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card info:nth-of-type(7) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#content",
+          "max_delta_px": 7.0
         }
       ]
     },
@@ -1686,8 +1648,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 1.596,
-      "geometry_diffs": 65,
+      "pixel_diff_pct": 0.337,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "html > body",
@@ -1706,19 +1668,19 @@
       "taxonomy": {
         "unknown": 84.823125
       },
-      "join_failures": 3,
+      "join_failures": 1,
       "worst_geometry": [
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card:nth-of-type(5) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card warning:nth-of-type(6) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
         },
         {
-          "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.stats-grid:nth-of-type(1) > div.stat-card info:nth-of-type(7) > div.stat-value:nth-of-type(2) > span.time-format",
-          "max_delta_px": 70.54
+          "selector": "#content",
+          "max_delta_px": 7.0
         }
       ]
     },
@@ -1729,8 +1691,8 @@
       "width": 1280,
       "height": 800,
       "status": "ok",
-      "pixel_diff_pct": 2.488,
-      "geometry_diffs": 69,
+      "pixel_diff_pct": 0.519,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
@@ -1749,19 +1711,19 @@
       "taxonomy": {
         "unknown": 82.0966796875
       },
-      "join_failures": 28,
+      "join_failures": 1,
       "worst_geometry": [
         {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
           "selector": "#content",
-          "max_delta_px": 253.0
-        },
-        {
-          "selector": "html > body",
-          "max_delta_px": 183.39
-        },
-        {
-          "selector": "body > div.container:nth-of-type(1)",
-          "max_delta_px": 183.39
+          "max_delta_px": 7.0
         }
       ]
     },
@@ -1772,8 +1734,8 @@
       "width": 1024,
       "height": 700,
       "status": "ok",
-      "pixel_diff_pct": 3.485,
-      "geometry_diffs": 69,
+      "pixel_diff_pct": 0.744,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "body > div.container:nth-of-type(1) > div:nth-of-type(5) > div.chart-section:nth-of-type(2) > div.chart-container:nth-of-type(2)",
@@ -1792,19 +1754,19 @@
       "taxonomy": {
         "unknown": 74.65094866071428
       },
-      "join_failures": 28,
+      "join_failures": 1,
       "worst_geometry": [
         {
+          "selector": "#activityChart",
+          "max_delta_px": 910.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 910.0
+        },
+        {
           "selector": "#content",
-          "max_delta_px": 253.0
-        },
-        {
-          "selector": "html > body",
-          "max_delta_px": 183.39
-        },
-        {
-          "selector": "body > div.container:nth-of-type(1)",
-          "max_delta_px": 183.39
+          "max_delta_px": 7.0
         }
       ]
     },
@@ -1815,8 +1777,8 @@
       "width": 1600,
       "height": 1000,
       "status": "ok",
-      "pixel_diff_pct": 1.698,
-      "geometry_diffs": 69,
+      "pixel_diff_pct": 0.339,
+      "geometry_diffs": 21,
       "top": [
         {
           "selector": "html > body",
@@ -1835,36 +1797,36 @@
       "taxonomy": {
         "unknown": 84.823125
       },
-      "join_failures": 28,
+      "join_failures": 1,
       "worst_geometry": [
         {
+          "selector": "#activityChart",
+          "max_delta_px": 1150.0
+        },
+        {
+          "selector": "#protectionChart",
+          "max_delta_px": 1150.0
+        },
+        {
           "selector": "#content",
-          "max_delta_px": 253.0
-        },
-        {
-          "selector": "html > body",
-          "max_delta_px": 183.39
-        },
-        {
-          "selector": "body > div.container:nth-of-type(1)",
-          "max_delta_px": 183.39
+          "max_delta_px": 7.0
         }
       ]
     }
   ],
   "census": {
-    "source": "CSS_PROPERTY_CENSUS_2026-11-05.json",
-    "report": "trench/chrome/census/CSS_PROPERTY_CENSUS_2026-11-05.md",
-    "date": "2026-11-05",
+    "source": "CSS_PROPERTY_CENSUS_2026-11-03.json",
+    "report": null,
+    "date": "2026-11-03",
     "oracle": "143.0.7499.4",
-    "red_total": 200,
+    "red_total": 212,
     "pages": {
       "chrome": {
         "declared": 93,
         "red": [
           {
             "property": "-webkit-text-fill-color",
-            "class": "computed",
+            "class": "parse",
             "sites": 30
           },
           {
@@ -1904,32 +1866,32 @@
           },
           {
             "property": "backdrop-filter",
-            "class": "parse",
+            "class": "unsupported",
             "sites": 47
           },
           {
             "property": "background-clip",
-            "class": "computed",
+            "class": "parse",
             "sites": 50
           },
           {
             "property": "background-image",
-            "class": "computed",
+            "class": "parse",
             "sites": 65
           },
           {
             "property": "background-position",
-            "class": "computed",
+            "class": "parse",
             "sites": 64
           },
           {
             "property": "background-repeat",
-            "class": "computed",
+            "class": "parse",
             "sites": 65
           },
           {
             "property": "background-size",
-            "class": "computed",
+            "class": "parse",
             "sites": 63
           },
           {
@@ -1939,7 +1901,7 @@
           },
           {
             "property": "box-shadow",
-            "class": "computed",
+            "class": "parse",
             "sites": 67
           },
           {
@@ -1954,7 +1916,7 @@
           },
           {
             "property": "filter",
-            "class": "computed",
+            "class": "parse",
             "sites": 63
           },
           {
@@ -1971,6 +1933,21 @@
             "property": "letter-spacing",
             "class": "computed",
             "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "outline-color",
+            "class": "unsupported",
+            "sites": 53
+          },
+          {
+            "property": "outline-offset",
+            "class": "unsupported",
+            "sites": 65
           },
           {
             "property": "overscroll-behavior",
@@ -2004,7 +1981,7 @@
           },
           {
             "property": "transform-origin",
-            "class": "computed",
+            "class": "parse",
             "sites": 57
           },
           {
@@ -2039,7 +2016,7 @@
           },
           {
             "property": "box-shadow",
-            "class": "computed",
+            "class": "parse",
             "sites": 67
           },
           {
@@ -2066,6 +2043,11 @@
             "property": "letter-spacing",
             "class": "computed",
             "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
           },
           {
             "property": "text-align",
@@ -2123,6 +2105,16 @@
             "sites": 64
           },
           {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
+          },
+          {
+            "property": "outline-offset",
+            "class": "unsupported",
+            "sites": 65
+          },
+          {
             "property": "text-align",
             "class": "computed",
             "sites": 67
@@ -2159,7 +2151,7 @@
         "red": [
           {
             "property": "-webkit-text-fill-color",
-            "class": "computed",
+            "class": "parse",
             "sites": 30
           },
           {
@@ -2184,12 +2176,12 @@
           },
           {
             "property": "background-clip",
-            "class": "computed",
+            "class": "parse",
             "sites": 50
           },
           {
             "property": "box-shadow",
-            "class": "computed",
+            "class": "parse",
             "sites": 67
           },
           {
@@ -2216,6 +2208,11 @@
             "property": "letter-spacing",
             "class": "computed",
             "sites": 64
+          },
+          {
+            "property": "outline",
+            "class": "unsupported",
+            "sites": 66
           },
           {
             "property": "scrollbar-color",
@@ -2254,17 +2251,17 @@
         "red": [
           {
             "property": "-webkit-text-fill-color",
-            "class": "computed",
+            "class": "parse",
             "sites": 30
           },
           {
             "property": "background-clip",
-            "class": "computed",
+            "class": "parse",
             "sites": 50
           },
           {
             "property": "box-shadow",
-            "class": "computed",
+            "class": "parse",
             "sites": 67
           },
           {
