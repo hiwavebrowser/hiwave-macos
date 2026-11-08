@@ -546,6 +546,8 @@ mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
 #[cfg(all(test, feature = "headless"))]
+mod animation_layer_reset_tests;
+#[cfg(all(test, feature = "headless"))]
 mod pseudo_animation_tests;
 #[cfg(all(test, feature = "headless"))]
 mod chrome_bridge_tests;
@@ -9315,6 +9317,14 @@ impl Engine {
             Some(false) => would.push_str(" restyle_miss=\"not tried\""),
             _ => {}
         }
+        // LAT14: why an animation frame took the full path (the live log
+        // runs at info; the frame's own line is debug).
+        if causes.counts.get("animation") > 0 {
+            let why = LAST_ANIMATION_MISS.with(|why| std::mem::take(&mut *why.borrow_mut()));
+            if !why.is_empty() {
+                would.push_str(&format!(" anim_miss={why:?}"));
+            }
+        }
         let cause = causes
             .first
             .as_ref()
@@ -10448,6 +10458,7 @@ impl Engine {
         }
         let miss = |why: &str| {
             debug!(?id, why, "Animation frame needs a layout");
+            LAST_ANIMATION_MISS.with(|last| *last.borrow_mut() = why.to_string());
             Ok(false)
         };
         let Some(view) = self.views.get(&id) else {
@@ -42630,6 +42641,12 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
+}
+
+thread_local! {
+    /// LAT14: why the last animation frame on this thread needed a layout
+    /// (`Engine::paint_animation_frame`'s miss), for the relayout line.
+    static LAST_ANIMATION_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 thread_local! {
