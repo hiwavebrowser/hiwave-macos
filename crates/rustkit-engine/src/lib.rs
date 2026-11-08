@@ -11796,11 +11796,7 @@ impl layout_ctx::LayoutCtx {
                     // SAME selection rule as discover_images, or the loader
                     // caches under one key and layout looks up another — the
                     // exact cache-miss shape #113 fixed for relative URLs.
-                    let src = attributes
-                        .get("srcset")
-                        .and_then(|ss| Engine::pick_from_srcset(ss))
-                        .or_else(|| attributes.get("src").cloned())
-                        .unwrap_or_default();
+                    let src = Engine::img_source(attributes).unwrap_or_default();
 
                     // Parse explicit dimensions from attributes
                     let explicit_width: Option<f32> =
@@ -17758,6 +17754,23 @@ impl Engine {
         }
     }
 
+    /// The source an `<img>` loads: the `srcset` pick, else `src`. `None`
+    /// when that is empty once HTML whitespace is stripped, as Chromium 148
+    /// has it (CH2.E42): joined onto the base URL, `""` IS the document's
+    /// URL, so the page was fetched again and its HTML decoded as an image.
+    /// A fragment-only `src="#"` is not empty and still requests the
+    /// document, as it does in Chromium.
+    fn img_source(attributes: &HashMap<String, String>) -> Option<String> {
+        // srcset wins when present (that is the point of it); src is the
+        // fallback and is often a placeholder on srcset pages.
+        let chosen = attributes
+            .get("srcset")
+            .and_then(|ss| Self::pick_from_srcset(ss))
+            .or_else(|| attributes.get("src").cloned())?;
+        let trimmed = chosen.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r'));
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
     fn discover_images(&self, document: &Document, base_url: Option<&Url>) -> Vec<(String, Url)> {
         let mut images = Vec::new();
 
@@ -17766,14 +17779,7 @@ impl Engine {
 
         for img_el in img_elements {
             if let NodeType::Element { attributes, .. } = &img_el.node_type {
-                // srcset wins when present (that is the point of it); src is
-                // the fallback and is often a placeholder on srcset pages.
-                let chosen = attributes
-                    .get("srcset")
-                    .and_then(|ss| Self::pick_from_srcset(ss))
-                    .or_else(|| attributes.get("src").cloned());
-
-                if let Some(src) = chosen {
+                if let Some(src) = Self::img_source(attributes) {
                     // Resolve relative URL
                     let resolved = if let Some(base) = base_url {
                         base.join(&src).ok()
