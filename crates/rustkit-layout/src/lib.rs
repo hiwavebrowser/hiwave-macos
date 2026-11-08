@@ -23,6 +23,7 @@ pub mod images;
 pub mod intrinsic_cache;
 pub mod margin_collapse;
 pub mod multicol;
+pub mod path_data;
 pub mod scroll;
 pub mod table;
 pub mod text;
@@ -8137,6 +8138,17 @@ impl LayoutBox {
         let shift = self.sticky_shift.get();
         let (x, y) = (x - shift.0, y - shift.1);
 
+        // A `clip-path` clips hit testing as it clips painting (CSS Masking
+        // 1 §5): outside the shape neither the box nor what it holds is hit,
+        // whatever its bounding box. Rem lengths in it read a 16px root here.
+        if !self.style.clip_path.is_empty() {
+            if let Some(shape) = DisplayList::new().clip_path_clip(self) {
+                if !shape.contains(x, y) {
+                    return None;
+                }
+            }
+        }
+
         // Get the border box for this element
         let border_box = self.dimensions.border_box();
 
@@ -8867,6 +8879,17 @@ pub enum DisplayCommand {
     /// `PushClip` here instead loses the corner notches: a child painting its
     /// own background fills the square corner the parent's radius cut away.
     PushClipRounded { rect: Rect, radius: BorderRadius },
+    /// Push a clip to an outline (`clip-path: polygon()`, `path()`,
+    /// `shape()`; C8b), closed by `PopClip` like every clip. `contours` are
+    /// closed polygons in document space, flattened; a point is inside by
+    /// the nonzero rule, or the even-odd rule when `even_odd`. `rect` is
+    /// their bounding box: a painter that cannot clip to an outline clips
+    /// to it, which never shows more than the outline's own box.
+    PushClipPath {
+        rect: Rect,
+        contours: Vec<Vec<(f32, f32)>>,
+        even_odd: bool,
+    },
     /// Solid borders around a border box with rounded corners. `rect` is
     /// the border box, `widths`/`colors` are `[top, right, bottom, left]`,
     /// and `radius` is the outer (border-edge) radius. The inner (padding)
@@ -9664,6 +9687,279 @@ fn parse_length(value: &str) -> Option<f32> {
     }
 }
 
+/// How far a `clip-path: path()` / `shape()` curve may stray from the true
+/// one when flattened, in CSS px (as `rustkit-svg` flattens `<path>`).
+const CLIP_FLATTEN_TOLERANCE_PX: f32 = 0.1;
+
+/// What a `clip-path` clips a box to, in document space.
+#[derive(Debug, Clone)]
+pub(crate) enum ShapeClip {
+    /// A rectangle, its corners rounded when the radius is not zero.
+    Rounded(Rect, BorderRadius),
+    /// Closed polygons (`polygon()`, flattened `path()` / `shape()`) and
+    /// their fill rule; `bounds` is their bounding box.
+    Path {
+        bounds: Rect,
+        contours: Vec<Vec<(f32, f32)>>,
+        even_odd: bool,
+    },
+}
+
+impl ShapeClip {
+    /// An outline clip; empty contours (a path that did not parse to any
+    /// point) clip everything.
+    fn outline(contours: Vec<Vec<(f32, f32)>>, even_odd: bool) -> ShapeClip {
+        let contours: Vec<Vec<(f32, f32)>> = contours.into_iter().filter(|c| c.len() >= 3).collect();
+        let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+        let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for &(x, y) in contours.iter().flatten() {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        if !(x0 < x1 && y0 < y1) {
+            return ShapeClip::Rounded(Rect::new(0.0, 0.0, 0.0, 0.0), BorderRadius::default());
+        }
+        let bounds = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        // A single axis-aligned rectangle is a plain rect clip.
+        if let [only] = contours.as_slice() {
+            let mut ring: Vec<(f32, f32)> = only.clone();
+            if ring.len() == 5 && ring[0] == ring[4] {
+                ring.pop();
+            }
+            let axis_aligned = ring.len() == 4
+                && (0..4).all(|i| {
+                    let (a, b) = (ring[i], ring[(i + 1) % 4]);
+                    a.0 == b.0 || a.1 == b.1
+                })
+                && ring.iter().all(|&(x, y)| (x == x0 || x == x1) && (y == y0 || y == y1));
+            if axis_aligned {
+                return ShapeClip::Rounded(bounds, BorderRadius::default());
+            }
+        }
+        ShapeClip::Path { bounds, contours, even_odd }
+    }
+
+    /// Whether the clip keeps the point (a hit test inside it).
+    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
+        match self {
+            ShapeClip::Rounded(rect, radius) => rounded_rect_contains(*rect, radius, x, y),
+            ShapeClip::Path { bounds, contours, even_odd } => {
+                bounds.contains(x, y) && path_contains(contours, *even_odd, x, y)
+            }
+        }
+    }
+}
+
+/// Whether `(x, y)` is inside `rect` with its corners rounded by `radius`.
+fn rounded_rect_contains(rect: Rect, radius: &BorderRadius, x: f32, y: f32) -> bool {
+    if !(x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height) {
+        return false;
+    }
+    let (r, b) = (rect.x + rect.width, rect.y + rect.height);
+    let corners = [
+        (radius.top_left, rect.x + radius.top_left.h, rect.y + radius.top_left.v),
+        (radius.top_right, r - radius.top_right.h, rect.y + radius.top_right.v),
+        (radius.bottom_right, r - radius.bottom_right.h, b - radius.bottom_right.v),
+        (radius.bottom_left, rect.x + radius.bottom_left.h, b - radius.bottom_left.v),
+    ];
+    for (i, (c, cx, cy)) in corners.into_iter().enumerate() {
+        if c.h <= 0.0 || c.v <= 0.0 {
+            continue;
+        }
+        let in_corner = match i {
+            0 => x < cx && y < cy,
+            1 => x > cx && y < cy,
+            2 => x > cx && y > cy,
+            _ => x < cx && y > cy,
+        };
+        if in_corner {
+            let (dx, dy) = ((x - cx) / c.h, (y - cy) / c.v);
+            return dx * dx + dy * dy <= 1.0;
+        }
+    }
+    true
+}
+
+/// Whether `(x, y)` is inside the closed `contours` by the nonzero rule, or
+/// the even-odd rule when `even_odd`.
+pub fn path_contains(contours: &[Vec<(f32, f32)>], even_odd: bool, x: f32, y: f32) -> bool {
+    let mut winding = 0i32;
+    let mut crossings = 0u32;
+    for contour in contours {
+        let n = contour.len();
+        for i in 0..n {
+            let (a, b) = (contour[i], contour[(i + 1) % n]);
+            if (a.1 <= y) != (b.1 <= y) {
+                let t = (y - a.1) / (b.1 - a.1);
+                if a.0 + t * (b.0 - a.0) > x {
+                    crossings += 1;
+                    winding += if b.1 > a.1 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    if even_odd {
+        crossings % 2 == 1
+    } else {
+        winding != 0
+    }
+}
+
+/// A basic shape's optional leading `<fill-rule>,`: whether it is
+/// `evenodd`, and the rest.
+fn fill_rule_prefix(args: &str) -> (bool, &str) {
+    for (keyword, even_odd) in [("nonzero", false), ("evenodd", true)] {
+        if args.get(..7).is_some_and(|head| head.eq_ignore_ascii_case(keyword)) {
+            let rest = args[7..].trim_start();
+            return (even_odd, rest.strip_prefix(',').unwrap_or(rest).trim());
+        }
+    }
+    (false, args)
+}
+
+/// `shape()` (css-shapes-1 §3.1.3) commands after the optional fill rule,
+/// lowercased, as SVG path commands in px from the reference box's corner.
+/// `px` resolves a length or percentage against a basis; `w`/`h` are the
+/// reference box's size. `None` when any command does not read.
+fn shape_commands(
+    list: &str,
+    px: &dyn Fn(&str, f32) -> Option<f32>,
+    w: f32,
+    h: f32,
+) -> Option<Vec<path_data::PathCommand>> {
+    use path_data::PathCommand as P;
+    let x_of = |t: &str| match t {
+        "left" => Some(0.0),
+        "center" => Some(w / 2.0),
+        "right" => Some(w),
+        t => px(t, w),
+    };
+    let y_of = |t: &str| match t {
+        "top" => Some(0.0),
+        "center" => Some(h / 2.0),
+        "bottom" => Some(h),
+        t => px(t, h),
+    };
+    let pair = |t: &[&str]| -> Option<(f32, f32)> {
+        match t {
+            [x, y] => Some((x_of(x)?, y_of(y)?)),
+            _ => None,
+        }
+    };
+    let mut items = list.split(',').map(str::trim);
+    let from: Vec<&str> = items.next()?.split_whitespace().collect();
+    let (x, y) = match from.as_slice() {
+        ["from", rest @ ..] => pair(rest)?,
+        _ => return None,
+    };
+    let mut out = vec![P::MoveTo(x, y)];
+    for item in items {
+        let t: Vec<&str> = item.split_whitespace().collect();
+        let by = t.get(1) == Some(&"by");
+        if t.len() > 1 && !by && t[1] != "to" {
+            return None;
+        }
+        let cmd = match t.as_slice() {
+            ["close"] => P::Close,
+            ["move", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::MoveToRel(x, y) } else { P::MoveTo(x, y) }
+            }
+            ["line", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::LineToRel(x, y) } else { P::LineTo(x, y) }
+            }
+            ["hline", _, x] => {
+                let x = x_of(x)?;
+                if by { P::HorizontalToRel(x) } else { P::HorizontalTo(x) }
+            }
+            ["vline", _, y] => {
+                let y = y_of(y)?;
+                if by { P::VerticalToRel(y) } else { P::VerticalTo(y) }
+            }
+            ["curve", _, x, y, "with", c @ ..] => {
+                let (x, y) = pair(&[x, y])?;
+                match c {
+                    [c1x, c1y] => {
+                        let (a, b) = pair(&[c1x, c1y])?;
+                        if by { P::QuadToRel(a, b, x, y) } else { P::QuadTo(a, b, x, y) }
+                    }
+                    [c1x, c1y, "/", c2x, c2y] => {
+                        let (a, b) = pair(&[c1x, c1y])?;
+                        let (c, d) = pair(&[c2x, c2y])?;
+                        if by { P::CubicToRel(a, b, c, d, x, y) } else { P::CubicTo(a, b, c, d, x, y) }
+                    }
+                    _ => return None,
+                }
+            }
+            ["smooth", _, x, y] => {
+                let (x, y) = pair(&[x, y])?;
+                if by { P::SmoothQuadToRel(x, y) } else { P::SmoothQuadTo(x, y) }
+            }
+            ["smooth", _, x, y, "with", c2x, c2y] => {
+                let (x, y) = pair(&[x, y])?;
+                let (c, d) = pair(&[c2x, c2y])?;
+                if by { P::SmoothCubicToRel(c, d, x, y) } else { P::SmoothCubicTo(c, d, x, y) }
+            }
+            ["arc", _, x, y, "of", rest @ ..] => {
+                let (x, y) = pair(&[x, y])?;
+                let mut radii = Vec::new();
+                let mut i = 0;
+                while i < rest.len() && radii.len() < 2 {
+                    if matches!(rest[i], "cw" | "ccw" | "large" | "small" | "rotate") {
+                        break;
+                    }
+                    radii.push(rest[i]);
+                    i += 1;
+                }
+                let (rx, ry) = match radii.as_slice() {
+                    [r] => (px(r, w)?, px(r, h)?),
+                    [a, b] => (px(a, w)?, px(b, h)?),
+                    _ => return None,
+                };
+                let (mut sweep, mut large, mut angle) = (false, false, 0.0);
+                while i < rest.len() {
+                    match rest[i] {
+                        "cw" => sweep = true,
+                        "ccw" => sweep = false,
+                        "large" => large = true,
+                        "small" => large = false,
+                        "rotate" => {
+                            i += 1;
+                            let a = rest.get(i)?;
+                            angle = if let Some(v) = a.strip_suffix("deg") {
+                                v.parse().ok()?
+                            } else if let Some(v) = a.strip_suffix("grad") {
+                                v.parse::<f32>().ok()? * 0.9
+                            } else if let Some(v) = a.strip_suffix("rad") {
+                                v.parse::<f32>().ok()?.to_degrees()
+                            } else if let Some(v) = a.strip_suffix("turn") {
+                                v.parse::<f32>().ok()? * 360.0
+                            } else if *a == "0" {
+                                0.0
+                            } else {
+                                return None;
+                            };
+                        }
+                        _ => return None,
+                    }
+                    i += 1;
+                }
+                if by {
+                    P::ArcToRel(rx, ry, angle, large, sweep, x, y)
+                } else {
+                    P::ArcTo(rx, ry, angle, large, sweep, x, y)
+                }
+            }
+            _ => return None,
+        };
+        out.push(cmd);
+    }
+    Some(out)
+}
+
 /// One box's outline, built and waiting to be painted.
 ///
 /// Chromium paints the outlines of the normal-flow boxes of a paint layer
@@ -10098,13 +10394,21 @@ impl DisplayList {
         if let Some(rect) = rect_clip {
             self.commands.push(DisplayCommand::PushClip(rect));
         }
-        if let Some((rect, radius)) = shape_clip {
-            if radius.is_zero() {
-                self.commands.push(DisplayCommand::PushClip(rect));
-            } else {
-                self.commands
-                    .push(DisplayCommand::PushClipRounded { rect, radius });
+        match &shape_clip {
+            Some(ShapeClip::Rounded(rect, radius)) if radius.is_zero() => {
+                self.commands.push(DisplayCommand::PushClip(*rect));
             }
+            Some(ShapeClip::Rounded(rect, radius)) => {
+                self.commands.push(DisplayCommand::PushClipRounded { rect: *rect, radius: *radius });
+            }
+            Some(ShapeClip::Path { bounds, contours, even_odd }) => {
+                self.commands.push(DisplayCommand::PushClipPath {
+                    rect: *bounds,
+                    contours: contours.clone(),
+                    even_odd: *even_odd,
+                });
+            }
+            None => {}
         }
 
         // Outlines (see `PendingOutline`). Taken here: the clips this box
@@ -10827,7 +11131,7 @@ impl DisplayList {
         ))
     }
 
-    fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<(Rect, BorderRadius)> {
+    pub(crate) fn clip_path_clip(&self, layout_box: &LayoutBox) -> Option<ShapeClip> {
         // A non-replaced inline is one box at its first line fragment here,
         // and Chrome clips a wrapped inline to that first fragment too (WPT
         // clip-path-reference-box-004), so its own boxes are the reference.
@@ -10837,7 +11141,10 @@ impl DisplayList {
         ) {
             return None;
         }
-        let raw = layout_box.style.clip_path.trim().to_ascii_lowercase();
+        // Path data is case-sensitive (`M` and `m` differ); everything else
+        // is read lowercased. Lowercasing ASCII keeps the byte offsets.
+        let original = layout_box.style.clip_path.trim();
+        let raw = original.to_ascii_lowercase();
         if raw.is_empty() || raw == "none" {
             return None;
         }
@@ -10880,10 +11187,10 @@ impl DisplayList {
             let rect = reference_box(&raw)?;
             let radii = self.border_radius_px(layout_box);
             if radii.is_zero() {
-                return Some((rect, BorderRadius::default()));
+                return Some(ShapeClip::Rounded(rect, BorderRadius::default()));
             }
             if matches!(raw.as_str(), "border-box" | "stroke-box" | "view-box") {
-                return Some((rect, radii.fitted(rect.width, rect.height)));
+                return Some(ShapeClip::Rounded(rect, radii.fitted(rect.width, rect.height)));
             }
             return None;
         }
@@ -11101,43 +11408,53 @@ impl DisplayList {
                 // (one point, `0 0,0 0`, or collinear points) clips everything:
                 // eBay hides its header "Expand Cart" buttons and "Skip to
                 // main content" link with `polygon(0 0,0 0)` until `:focus`.
-                // Any other polygon clips to its bounding box: exact for an
-                // axis-aligned rectangle, and never more than Chromium paints
-                // for any other shape (the renderer clips to rects).
-                let list = shape
-                    .strip_prefix("nonzero")
-                    .or_else(|| shape.strip_prefix("evenodd"))
-                    .map_or(shape, |rest| rest.trim_start().trim_start_matches(',').trim());
+                // An axis-aligned rectangle is a plain rect clip; any other
+                // polygon clips to its outline.
+                let (even_odd, list) = fill_rule_prefix(shape);
                 let points = list
                     .split(',')
                     .map(|pair| match pair.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        [x, y] => Some((px(x, w)?, px(y, h)?)),
+                        [x, y] => Some((reference.x + px(x, w)?, reference.y + px(y, h)?)),
                         _ => None,
                     })
                     .collect::<Option<Vec<(f32, f32)>>>()?;
                 let twice_area: f32 = points
                     .iter()
                     .zip(points.iter().cycle().skip(1))
-                    .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
+                    .map(|(a, b)| (a.0 - reference.x) * (b.1 - reference.y) - (b.0 - reference.x) * (a.1 - reference.y))
                     .sum();
-                let rect = if twice_area.abs() < 1e-3 {
-                    Rect::new(reference.x, reference.y, 0.0, 0.0)
-                } else {
-                    let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
-                    let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-                    for &(x, y) in &points {
-                        x0 = x0.min(x);
-                        y0 = y0.min(y);
-                        x1 = x1.max(x);
-                        y1 = y1.max(y);
-                    }
-                    Rect::new(reference.x + x0, reference.y + y0, x1 - x0, y1 - y0)
-                };
-                (rect, BorderRadius::default())
+                if twice_area.abs() < 1e-3 {
+                    return Some(ShapeClip::Rounded(Rect::new(reference.x, reference.y, 0.0, 0.0), BorderRadius::default()));
+                }
+                return Some(ShapeClip::outline(vec![points], even_odd));
+            }
+            "path" => {
+                // `path([<fill-rule>,]? <string>)`: SVG path data in px from
+                // the reference box's top-left corner (css-shapes-1 §3.1).
+                let (even_odd, data) = fill_rule_prefix(original[open + 1..close].trim());
+                let data = data
+                    .strip_prefix('"')
+                    .and_then(|d| d.strip_suffix('"'))
+                    .or_else(|| data.strip_prefix('\'').and_then(|d| d.strip_suffix('\'')))?;
+                let commands = path_data::parse(data);
+                let contours: Vec<Vec<(f32, f32)>> = path_data::flatten(&commands, CLIP_FLATTEN_TOLERANCE_PX)
+                    .into_iter()
+                    .map(|c| c.into_iter().map(|(x, y)| (reference.x + x, reference.y + y)).collect())
+                    .collect();
+                return Some(ShapeClip::outline(contours, even_odd));
+            }
+            "shape" => {
+                let (even_odd, list) = fill_rule_prefix(original[open + 1..close].trim());
+                let commands = shape_commands(&list.to_ascii_lowercase(), &|token, basis| px(token, basis), w, h)?;
+                let contours: Vec<Vec<(f32, f32)>> = path_data::flatten(&commands, CLIP_FLATTEN_TOLERANCE_PX)
+                    .into_iter()
+                    .map(|c| c.into_iter().map(|(x, y)| (reference.x + x, reference.y + y)).collect())
+                    .collect();
+                return Some(ShapeClip::outline(contours, even_odd));
             }
             _ => return None,
         };
-        Some((rect, radii))
+        Some(ShapeClip::Rounded(rect, radii))
     }
 
     /// The rounded clip a box imposes on its descendants, if any.

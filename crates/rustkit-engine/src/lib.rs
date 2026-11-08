@@ -21293,6 +21293,15 @@ impl Engine {
                     "rect": rect(r),
                     "border_radius": radius(rad)
                 }),
+                Cmd::PushClipPath { rect: r, contours, even_odd } => serde_json::json!({
+                    "op": "push_clip_path",
+                    "rect": rect(r),
+                    "contours": contours
+                        .iter()
+                        .map(|c| c.iter().map(|(x, y)| [*x, *y]).collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                    "even_odd": even_odd
+                }),
                 Cmd::PopClip => serde_json::json!({ "op": "pop_clip" }),
                 Cmd::PushStackingContext { z_index, rect: r } => serde_json::json!({
                     "op": "push_stacking_context", "z_index": z_index, "rect": rect(r)
@@ -49415,11 +49424,12 @@ mod clip_path_pins {
             ))
         };
         let cases: [(&str, &str, &str, Option<&str>); 12] = [
-            // polygon(): an axis-aligned rectangle is exact; any other shape clips to
-            // its bounding box (the triangle's is the whole border box); a polygon
-            // with no area (eBay's visually-hidden `polygon(0 0,0 0)`) clips everything.
+            // polygon(): an axis-aligned rectangle is a rect clip; any other shape
+            // clips to its outline (C8b), whose bounding box here is the whole
+            // border box; a polygon with no area (eBay's visually-hidden
+            // `polygon(0 0,0 0)`) clips everything.
             ("clip-path:polygon(20px 20px, 120px 20px, 120px 120px, 20px 120px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
-            ("clip-path:polygon(0 0, 100% 0, 0 100%)", "PushClip(", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
+            ("clip-path:polygon(0 0, 100% 0, 0 100%)", "PushClipPath", "x: 0.0, y: 0.0, width: 140.0, height: 140.0", None),
             ("clip-path:polygon(0 0, 0 0)", "PushClip(", "x: 0.0, y: 0.0, width: 0.0, height: 0.0", None),
             ("clip-path:inset(20px)", "PushClip(", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", None),
             ("clip-path:circle(50px)", "PushClipRounded", "x: 20.0, y: 20.0, width: 100.0, height: 100.0", Some("CornerRadius { h: 50.0, v: 50.0 }")),
@@ -49480,8 +49490,17 @@ mod clip_path_pins {
             .unwrap_or_else(|| panic!("no child paint:\n{all}"));
         assert!(depth_at(&lines, child) >= 1, "the absolute child escaped the clip:\n{all}");
 
-        // `none`, and shapes this does not read (`path()`), paint as before.
-        for style in ["clip-path:none", "clip-path:path('M0 0H10V10Z')", ""] {
+        // `path()` clips to its outline (C8b; `clip_path_shape_tests`).
+        let lines = page("clip-path:path('M0 0H10V10Z')", "");
+        assert!(
+            lines.iter().any(|c| c.starts_with("PushClipPath")
+                && c.contains("x: 0.0, y: 0.0, width: 10.0, height: 10.0")),
+            "{}",
+            lines.join("\n")
+        );
+
+        // `none` paints as before.
+        for style in ["clip-path:none", ""] {
             let lines = page(style, "");
             assert!(
                 !lines.iter().any(|c| c.starts_with("PushClip")),
