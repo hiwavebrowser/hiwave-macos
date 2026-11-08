@@ -1702,6 +1702,9 @@ fn node_info(node: &Rc<Node>, field: &str, templates: &HashMap<usize, Rc<Node>>)
             }
         },
         "parent" => node_id(node.parent()),
+        // web_cssom.js: the lifetime of a <style>'s sheet (new children or
+        // a move make a new one); a sheet's `disabled` belongs to one.
+        "sheetGen" => JsValue::Number(node.sheet_generation() as f64),
         "first" => node_id(node.first_child()),
         "last" => node_id(node.last_child()),
         "next" => node_id(node.next_sibling()),
@@ -5553,11 +5556,19 @@ const WRAPPERS_JS: &str = r#"
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
     };
-    // web_cssom.js: a <style>'s sheet.disabled, for its current text.
+    // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
     g.__rkSetSheetDisabled = function (node, on) {
         var s = node != null ? node[SLOT] : undefined;
         if (!s || s.gen !== gen) return;
         N.setSheetDisabled(s.gen, s.id, !!on);
+    };
+    // web_cssom.js: which sheet a <style> owns now (a number that changes
+    // when its children change or it moves); -1 for a node of another
+    // document.
+    g.__rkSheetGeneration = function (node) {
+        var s = node != null ? node[SLOT] : undefined;
+        if (!s || s.gen !== gen) return -1;
+        return N.info(s.gen, s.id, 'sheetGen');
     };
 
     // For dom/editing.js, which deletes it.

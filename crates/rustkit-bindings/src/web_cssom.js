@@ -281,12 +281,20 @@
     function write(sheet, text) {
         sheet._text = text;
         sheet._owner.textContent = text;
-        // A CSSOM edit keeps the sheet (and its disabled flag); tell the
-        // engine the flag is for the new text.
+        // A CSSOM edit keeps the sheet (and its disabled flag) although the
+        // engine sees new text: rebind the sheet to the element's new
+        // generation and tell the engine the flag is for it.
+        sheet._gen = sheetGeneration(sheet._owner);
         if (sheet._disabled) publishDisabled(sheet);
     }
-    // A <style>'s sheet.disabled goes to the engine, which leaves the sheet
-    // out of the cascade while the element's text is unchanged.
+    // Which sheet a <style> owns now: the engine's number changes whenever
+    // the element's children change or it is inserted or removed (CSSOM
+    // "update a style block" makes a new, enabled sheet each time).
+    function sheetGeneration(el) {
+        return typeof g.__rkSheetGeneration === 'function' ? g.__rkSheetGeneration(el) : 0;
+    }
+    // A <style>'s sheet.disabled goes to the engine, which leaves that sheet
+    // out of the cascade for as long as it is the one the element owns.
     function publishDisabled(sheet) {
         if (isStyle(sheet) && typeof g.__rkSetSheetDisabled === 'function') {
             g.__rkSetSheetDisabled(sheet._owner, !!sheet._disabled);
@@ -376,7 +384,16 @@
             var was = !!this._disabled;
             this._disabled = !!v;
             if (was === this._disabled) return;
-            if (isStyle(this)) { sync(this); publishDisabled(this); }
+            if (isStyle(this)) {
+                // A sheet disabled for one generation of its element whose
+                // element has since moved on is detached (Chromium: the
+                // element owns a new sheet): its flag reaches nothing.
+                var cur = sheetGeneration(this._owner);
+                if (this._detached || (was && this._gen !== cur)) { this._detached = true; return; }
+                sync(this);
+                this._gen = cur;
+                publishDisabled(this);
+            }
             refreshAdopted(this);
         },
         configurable: true
@@ -391,11 +408,14 @@
     function ownSheet(el) {
         if (!el.isConnected || (el.localName === 'link' && !isSheetLink(el))) return null;
         var s = sheets.get(el);
-        // New text in a <style> makes a new sheet (CSSOM "update a style
-        // block"), which is not disabled. Only a disabled sheet is replaced,
-        // so an enabled sheet keeps its identity as before.
-        if (s && s._disabled && el.localName === 'style' && s._text !== null &&
-            (el.textContent || '') !== s._text) s = null;
+        // New children in a <style>, or a move, make a new sheet (CSSOM
+        // "update a style block"), which is not disabled. Only a disabled
+        // sheet is replaced (it is then detached), so an enabled sheet
+        // keeps its identity as before (web_cssom_tests pins that).
+        if (s && s._disabled && el.localName === 'style' && s._gen !== sheetGeneration(el)) {
+            s._detached = true;
+            s = null;
+        }
         if (!s) { s = sheetFor(el); sheets.set(el, s); }
         return s;
     }
