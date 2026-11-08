@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.alephnull.trench-devtools</string>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec /bin/bash /Users/petecopeland/.claude/hooks/trench-devtools.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/petecopeland/.claude/logs/trench-devtools.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/petecopeland/.claude/logs/trench-devtools.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>0</integer>
+			<key>Minute</key>
+			<integer>35</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>6</integer>
+			<key>Minute</key>
+			<integer>35</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>12</integer>
+			<key>Minute</key>
+			<integer>35</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>18</integer>
+			<key>Minute</key>
+			<integer>35</integer>
+		</dict>
+	</array>
+</dict>
+</plist>
