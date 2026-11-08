@@ -26925,63 +26925,240 @@ fn bounds_of_points(points: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
-/// The bbox of a path whose every command is a STRAIGHT line, in user units.
+/// The TIGHT geometry bbox of a path, in user units, as Chrome's
+/// `getBBox()` / `getBoundingClientRect()` report it (stroke excluded).
 ///
-/// `None` for any path carrying a curve or an arc. A Bezier's bbox is NOT the
-/// bbox of its control points — that is a superset, and Chrome reports the
-/// tight bbox — so bounding one from its control points would report a box
-/// larger than the shape and call the difference a geometry defect. Refusing
-/// leaves the element UNMEASURED, which is the honest reading; the tight
-/// extrema of a cubic are a separate unit.
-fn straight_path_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
+/// A Bezier's bbox is NOT the bbox of its control points — that is a
+/// superset — so curves contribute their endpoints plus the interior
+/// extrema where the derivative is zero, and arcs are converted to center
+/// parameterization (SVG 2 Appendix B.2.4, radii scaled up when too small
+/// for the chord) and contribute their endpoints plus every axis extremum
+/// the swept angle crosses. Matches Chrome for Testing 148 on the chrome
+/// board's logo wave and the inspector's arc icons
+/// (`curved_and_arc_paths_report_chromes_tight_bbox`).
+fn path_tight_bbox(commands: &[rustkit_svg::PathCommand]) -> Option<(f32, f32, f32, f32)> {
     use rustkit_svg::PathCommand as C;
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let (mut cx, mut cy) = (0.0f32, 0.0f32);
-    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    // The previous segment's last control point, for S/T reflection: Some
+    // only right after a cubic (for S) or a quad (for T).
+    let mut last_cubic_ctrl: Option<(f64, f64)> = None;
+    let mut last_quad_ctrl: Option<(f64, f64)> = None;
+
+    fn cubic_extrema(p0: f64, p1: f64, p2: f64, p3: f64) -> Vec<f64> {
+        // B'(t)/3 = a t^2 + b t + c
+        let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+        let b = 2.0 * (p0 - 2.0 * p1 + p2);
+        let c = p1 - p0;
+        let mut ts = Vec::new();
+        if a.abs() < 1e-12 {
+            if b.abs() > 1e-12 {
+                ts.push(-c / b);
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let r = disc.sqrt();
+                ts.push((-b + r) / (2.0 * a));
+                ts.push((-b - r) / (2.0 * a));
+            }
+        }
+        ts.into_iter().filter(|t| *t > 0.0 && *t < 1.0).collect()
+    }
+    fn cubic_at(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+        let u = 1.0 - t;
+        u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+    }
+    fn push_cubic(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+    ) {
+        let mut ts = cubic_extrema(p0.0, p1.0, p2.0, p3.0);
+        ts.extend(cubic_extrema(p0.1, p1.1, p2.1, p3.1));
+        for t in ts {
+            points.push((cubic_at(p0.0, p1.0, p2.0, p3.0, t), cubic_at(p0.1, p1.1, p2.1, p3.1, t)));
+        }
+        points.push(p3);
+    }
+    fn push_quad(points: &mut Vec<(f64, f64)>, p0: (f64, f64), p1: (f64, f64), p2: (f64, f64)) {
+        // A quad is the cubic with control points p0 + 2/3 (p1 - p0), p2 + 2/3 (p1 - p2).
+        let c1 = (p0.0 + 2.0 / 3.0 * (p1.0 - p0.0), p0.1 + 2.0 / 3.0 * (p1.1 - p0.1));
+        let c2 = (p2.0 + 2.0 / 3.0 * (p1.0 - p2.0), p2.1 + 2.0 / 3.0 * (p1.1 - p2.1));
+        push_cubic(points, p0, c1, c2, p2);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push_arc(
+        points: &mut Vec<(f64, f64)>,
+        p0: (f64, f64),
+        rx: f64,
+        ry: f64,
+        phi_deg: f64,
+        large: bool,
+        sweep: bool,
+        p1: (f64, f64),
+    ) {
+        points.push(p1);
+        let (mut rx, mut ry) = (rx.abs(), ry.abs());
+        if rx == 0.0 || ry == 0.0 || p0 == p1 {
+            return; // a straight line (or nothing): the endpoints bound it
+        }
+        let phi = phi_deg.to_radians();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let dx = (p0.0 - p1.0) / 2.0;
+        let dy = (p0.1 - p1.1) / 2.0;
+        let x1p = cos_phi * dx + sin_phi * dy;
+        let y1p = -sin_phi * dx + cos_phi * dy;
+        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+        if lambda > 1.0 {
+            let s = lambda.sqrt();
+            rx *= s;
+            ry *= s;
+        }
+        let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+        let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+        let mut coef = if den == 0.0 { 0.0 } else { (num / den).max(0.0).sqrt() };
+        if large == sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1p / ry;
+        let cyp = -coef * ry * x1p / rx;
+        let ccx = cos_phi * cxp - sin_phi * cyp + (p0.0 + p1.0) / 2.0;
+        let ccy = sin_phi * cxp + cos_phi * cyp + (p0.1 + p1.1) / 2.0;
+        let angle = |ux: f64, uy: f64, vx: f64, vy: f64| -> f64 {
+            (ux * vy - uy * vx).atan2(ux * vx + uy * vy)
+        };
+        let ux = (x1p - cxp) / rx;
+        let uy = (y1p - cyp) / ry;
+        let theta1 = angle(1.0, 0.0, ux, uy);
+        let mut dtheta = angle(ux, uy, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+        let tau = std::f64::consts::TAU;
+        if !sweep && dtheta > 0.0 {
+            dtheta -= tau;
+        } else if sweep && dtheta < 0.0 {
+            dtheta += tau;
+        }
+        let at = |t: f64| -> (f64, f64) {
+            let (s, c) = t.sin_cos();
+            (
+                ccx + rx * cos_phi * c - ry * sin_phi * s,
+                ccy + rx * sin_phi * c + ry * cos_phi * s,
+            )
+        };
+        // dx/dθ = 0 and dy/dθ = 0, each with its antipode.
+        let tx = (-ry * sin_phi).atan2(rx * cos_phi);
+        let ty = (ry * cos_phi).atan2(rx * sin_phi);
+        let (lo, hi) = if dtheta >= 0.0 {
+            (theta1, theta1 + dtheta)
+        } else {
+            (theta1 + dtheta, theta1)
+        };
+        for base in [tx, tx + std::f64::consts::PI, ty, ty + std::f64::consts::PI] {
+            // Every representative of `base` inside [lo, hi].
+            let mut t = base + ((lo - base) / tau).ceil() * tau;
+            while t <= hi {
+                points.push(at(t));
+                t += tau;
+            }
+        }
+    }
+
     for cmd in commands {
+        let mut cubic_ctrl = None;
+        let mut quad_ctrl = None;
         match *cmd {
             C::MoveTo(x, y) => {
-                (cx, cy) = (x, y);
-                (sx, sy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
+                (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::MoveToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 (sx, sy) = (cx, cy);
                 points.push((cx, cy));
             }
             C::LineTo(x, y) => {
-                (cx, cy) = (x, y);
+                (cx, cy) = (x as f64, y as f64);
                 points.push((cx, cy));
             }
             C::LineToRel(dx, dy) => {
-                (cx, cy) = (cx + dx, cy + dy);
+                (cx, cy) = (cx + dx as f64, cy + dy as f64);
                 points.push((cx, cy));
             }
             C::HorizontalTo(x) => {
-                cx = x;
+                cx = x as f64;
                 points.push((cx, cy));
             }
             C::HorizontalToRel(dx) => {
-                cx += dx;
+                cx += dx as f64;
                 points.push((cx, cy));
             }
             C::VerticalTo(y) => {
-                cy = y;
+                cy = y as f64;
                 points.push((cx, cy));
             }
             C::VerticalToRel(dy) => {
-                cy += dy;
+                cy += dy as f64;
                 points.push((cx, cy));
+            }
+            C::CubicTo(x1, y1, x2, y2, x, y) | C::CubicToRel(x1, y1, x2, y2, x, y) => {
+                let rel = matches!(cmd, C::CubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = (ox + x1 as f64, oy + y1 as f64);
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::SmoothCubicTo(x2, y2, x, y) | C::SmoothCubicToRel(x2, y2, x, y) => {
+                let rel = matches!(cmd, C::SmoothCubicToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c1 = last_cubic_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let c2 = (ox + x2 as f64, oy + y2 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_cubic(&mut points, (cx, cy), c1, c2, end);
+                cubic_ctrl = Some(c2);
+                (cx, cy) = end;
+            }
+            C::QuadTo(x1, y1, x, y) | C::QuadToRel(x1, y1, x, y) => {
+                let rel = matches!(cmd, C::QuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = (ox + x1 as f64, oy + y1 as f64);
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::SmoothQuadTo(x, y) | C::SmoothQuadToRel(x, y) => {
+                let rel = matches!(cmd, C::SmoothQuadToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let c = last_quad_ctrl.map_or((cx, cy), |(px, py)| (2.0 * cx - px, 2.0 * cy - py));
+                let end = (ox + x as f64, oy + y as f64);
+                push_quad(&mut points, (cx, cy), c, end);
+                quad_ctrl = Some(c);
+                (cx, cy) = end;
+            }
+            C::ArcTo(rx, ry, rot, large, sweep, x, y)
+            | C::ArcToRel(rx, ry, rot, large, sweep, x, y) => {
+                let rel = matches!(cmd, C::ArcToRel(..));
+                let (ox, oy) = if rel { (cx, cy) } else { (0.0, 0.0) };
+                let end = (ox + x as f64, oy + y as f64);
+                push_arc(&mut points, (cx, cy), rx as f64, ry as f64, rot as f64, large, sweep, end);
+                (cx, cy) = end;
             }
             C::Close => {
                 (cx, cy) = (sx, sy);
             }
-            // Any curve or arc: refuse the whole path.
-            _ => return None,
         }
+        last_cubic_ctrl = cubic_ctrl;
+        last_quad_ctrl = quad_ctrl;
     }
-    bounds_of_points(&points)
+    let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    bounds_of_points(&pts)
 }
 
 /// The user-space geometry bbox of one SVG shape element, or `None` where the
@@ -27033,7 +27210,7 @@ fn svg_shape_user_bbox(
         }
         "path" => {
             let commands = rustkit_svg::SvgPath::parse(attributes.get("d")?);
-            straight_path_bbox(&commands)
+            path_tight_bbox(&commands)
         }
         // Everything else is UNMODELLED and stays unmeasured, deliberately:
         // `text`/`tspan` need shaped glyph extents, a `use`'s box is its
