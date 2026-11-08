@@ -494,6 +494,10 @@ mod computed_pseudo_tests;
 #[cfg(test)]
 mod css_display_apply_tests;
 #[cfg(test)]
+mod display_inherit_apply_tests;
+#[cfg(test)]
+mod border_medium_apply_tests;
+#[cfg(test)]
 mod transform_parse_pure_tests;
 #[cfg(test)]
 mod individual_translate_parse_tests;
@@ -681,7 +685,7 @@ mod sticky_scroll_tests;
 mod sticky_flex_grid_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sticky_table_paint_tests;
-#[cfg(all(test, feature = "headless"))]
+#[cfg(test)]
 mod flex_shorthand_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lazy_geometry_tests;
