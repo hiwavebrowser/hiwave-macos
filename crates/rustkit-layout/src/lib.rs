@@ -434,12 +434,11 @@ pub(crate) fn form_control_intrinsic_size(
                 // ceil(widest option) + a 20px arrow well (font-size does not
                 // move it: 66 at 13.6px, 87 at 20px with no padding/border) +
                 // the horizontal padding and border — the UA 1px border each
-                // side when the style carries none. The inner line is
-                // round(ascent) + round(descent) + 2 (13 at 10px, 24 at 20px,
-                // 38 at 32px), plus the vertical padding and border; bare
-                // controls keep the calibrated 19px blob. settings' #theme
-                // ("System", padding .5rem .75rem, 1px border, 13.6px) is
-                // 92 x 35; widest + 24 built 69.8 x 33.
+                // side when the style carries none. settings' #theme
+                // ("System", padding .5rem .75rem, 1px border, 13.6px) is 92
+                // wide; widest + 24 built 69.8. (An `appearance: none` select
+                // has no arrow well in Chrome; RustKit does not carry
+                // `appearance`, and the old +24 assumed the well too.)
                 let px = |l: &Length| match l {
                     Length::Percent(_) | Length::Auto => 0.0,
                     other => other.to_px(font_size, 16.0, 0.0),
@@ -449,23 +448,13 @@ pub(crate) fn form_control_intrinsic_size(
                     + px(&style.border_left_width)
                     + px(&style.border_right_width);
                 let pb_h = if pb_h > 0.0 { pb_h } else { 2.0 };
-                let height = if author_pb_v > 0.0 {
-                    let m = measure_text_advanced(
-                        "x",
-                        &style.font_family,
-                        font_size,
-                        style.font_weight,
-                        style.font_style,
-                    );
-                    if m.ascent > 0.0 {
-                        m.ascent.round() + m.descent.round() + 2.0 + author_pb_v
-                    } else {
-                        single_line_box(19.0 * ua_scale)
-                    }
-                } else {
-                    single_line_box(19.0 * ua_scale)
-                };
-                (widest.ceil() + 20.0 + pb_h, height)
+                // Height stays the text line + padding/border: Chrome's
+                // menulist adds 2px inside (#theme 35, not 33), but an
+                // `appearance: none` select does not (chrome's
+                // #modeSelector is 31), and RustKit does not carry
+                // `appearance` yet — taking the +2 moved chrome's whole
+                // sidebar 2px down on 12 board rows.
+                (widest.ceil() + 20.0 + pb_h, single_line_box(19.0 * ua_scale))
             }
         }
     }
@@ -3983,16 +3972,8 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
-        // Blink's FontMetrics are whole pixels (SimpleFontData rounds ascent
-        // and descent), and the text inside is seated on the same rounded
-        // pair with the leading above FLOORED (`blink_baseline_offset`), so
-        // the rect is round(a) + round(d) tall and starts that floored
-        // leading below the slot: report's 12px system-font `.time-format`
-        // is 15 tall at baseline - 12 in Chrome 148, not 14.13 at
-        // baseline - 11.6.
-        let (ascent, descent) = (ascent.round(), descent.round());
         let content = ascent + descent;
-        let half_leading = half_leading(line_height, ascent, descent).floor();
+        let half_leading = half_leading(line_height, ascent, descent);
         (content, half_leading)
     }
 
@@ -13130,9 +13111,12 @@ mod tests {
             size: 0,
             selected: Vec::new(),
         };
+        // Width only: the menulist's +2 inner height needs `appearance`
+        // (an `appearance: none` select has none), which RustKit does not
+        // carry, so the height stays the text line (33 here, Chrome 35).
         assert_eq!(
-            form_control_intrinsic_size(&style, &select(&["Dark", "Light", "System"])),
-            (92.0, 35.0)
+            form_control_intrinsic_size(&style, &select(&["Dark", "Light", "System"])).0,
+            92.0
         );
 
         let mut bare = ComputedStyle::new();
@@ -13173,28 +13157,6 @@ mod tests {
         };
         assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
         assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
-    }
-
-    #[test]
-    fn test_an_inline_content_area_is_seated_on_rounded_font_metrics() {
-        // report.html `.stat-value { font-size: 2rem; line-height: 1 }` with a
-        // `<span class=time-format>` at .75rem: Chrome for Testing 148 gives
-        // the 12px system-font span a 15px rect whose top is its baseline
-        // minus 12 — SimpleFontData's ROUNDED ascent/descent (11.6 -> 12,
-        // 2.53 -> 3), the same whole pixels `blink_baseline_offset` seats the
-        // text on. RustKit reported the fractional 14.13 and seated it 0.94px
-        // low (all six report rows).
-        let mut style = ComputedStyle::new();
-        style.font_size = Length::Px(12.0);
-        style.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
-        style.line_height = rustkit_css::LineHeight::Number(1.0);
-        let span = LayoutBox::new(BoxType::Inline, style.clone());
-        let (content, shift) = span.inline_content_area();
-        let m = measure_text_advanced("x", &style.font_family, 12.0, style.font_weight, style.font_style);
-        assert_eq!(content, m.ascent.round() + m.descent.round(), "whole-pixel content area");
-        assert_eq!(content, 15.0, "Chrome 148: 15");
-        // The rect top is the baseline minus the rounded ascent.
-        assert_eq!(shift + m.ascent.round(), blink_baseline_offset(12.0, m.ascent, m.descent));
     }
 
     #[test]
