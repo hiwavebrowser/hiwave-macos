@@ -3331,6 +3331,7 @@ impl Renderer {
                 rect,
                 advances,
                 ascent,
+                faces,
             } => {
                 // Glyph quads are alpha-textured and tinted per VERTEX, so
                 // gradient text needs no offscreen mask: each glyph's left
@@ -3354,6 +3355,7 @@ impl Renderer {
                     *font_style,
                     advances.as_deref(),
                     *ascent,
+                    faces.as_deref(),
                 );
             }
         }
@@ -5754,6 +5756,7 @@ impl Renderer {
         font_style: u8,
         layout_advances: Option<&[f32]>,
         layout_ascent: Option<f32>,
+        layout_faces: Option<&[rustkit_text::GlyphFace]>,
     ) {
         let stops = match gradient {
             rustkit_css::Gradient::Linear(g) => &g.stops,
@@ -5832,7 +5835,21 @@ impl Renderer {
         let baseline = y
             + layout_ascent.unwrap_or_else(|| Self::fallback_run_ascent(font_family, font_size));
 
-        for (char_idx, ch) in text.chars().enumerate() {
+        // FACE CONTRACT, as for `Text`: layout's record of the face each
+        // character was measured in when the command carries one, else the
+        // same decision (`select_face`) made in the glyph cache on this
+        // font from the selector after the character. The face's glyph is
+        // taken as a coverage mask (a colour face's artwork by its alpha)
+        // and tinted; nothing here decides a face or keys an entry by the
+        // undecided selector.
+        let chars: Vec<char> = text.chars().collect();
+        let faces = layout_faces.filter(|faces| faces.len() == chars.len());
+        for (char_idx, &ch) in chars.iter().enumerate() {
+            let next = chars.get(char_idx + 1).copied();
+            let face = match faces {
+                Some(faces) => FaceKey::Recorded(faces[char_idx]),
+                None => FaceKey::Auto(rustkit_text::Variation::after(next)),
+            };
             let key = GlyphKey {
                 // FROZEN AT 0 until the rasterizer can draw at a phase --
                 // see GlyphKey::subpixel_phase. Pixels are bit-identical to
@@ -5844,10 +5861,30 @@ impl Renderer {
                 font_weight,
                 font_style,
                 web_face,
-                face: FaceKey::default(),
+                face,
             };
+            let layout_advance = layout_advances.and_then(|a| a.get(char_idx).copied());
 
-            if let Some(entry) = self.glyph_cache.get_or_rasterize(&self.device, &self.queue, &key) {
+            #[cfg(target_os = "macos")]
+            let drawn = self
+                .glyph_cache
+                .get_or_rasterize_faced_mask(&self.queue, &key);
+            #[cfg(not(target_os = "macos"))]
+            let drawn = self
+                .glyph_cache
+                .get_or_rasterize(&self.device, &self.queue, &key);
+
+            let Some(entry) = drawn else {
+                // Nothing to draw (a selector, or a character no face has):
+                // the advance is still owed, as on the `Text` path.
+                cursor_x += layout_advance.unwrap_or(if rustkit_text::is_default_ignorable(ch) {
+                    0.0
+                } else {
+                    font_size * 0.6
+                });
+                continue;
+            };
+            {
                 let glyph_x = cursor_x + entry.offset[0];
                 let glyph_y = baseline + entry.offset[1];
                 let glyph_w = (entry.tex_coords[2] - entry.tex_coords[0]) * atlas_size;
@@ -5893,9 +5930,7 @@ impl Renderer {
                     base + 3,
                 ]);
 
-                cursor_x += layout_advances
-                    .and_then(|a| a.get(char_idx).copied())
-                    .unwrap_or(entry.advance);
+                cursor_x += layout_advance.unwrap_or(entry.advance);
             }
         }
     }

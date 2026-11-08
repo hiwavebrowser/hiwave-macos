@@ -83,9 +83,15 @@ fn text(s: &str, x: f32) -> DisplayCommand {
 }
 
 /// A gradient text command of the same font, as the emitter builds it for
-/// `background-clip: text` (no face record in the legacy shape).
+/// `background-clip: text`, in the legacy shape (no face record).
 fn gradient(s: &str, x: f32) -> DisplayCommand {
+    gradient_with(s, x, None)
+}
+
+/// The same with layout's face record, parallel to `advances`.
+fn gradient_with(s: &str, x: f32, faces: Option<Vec<rustkit_text::GlyphFace>>) -> DisplayCommand {
     use rustkit_css::{ColorStop, GradientDirection, LinearGradient};
+    let advances = faces.as_ref().map(|faces| vec![30.0; faces.len()]);
     DisplayCommand::GradientText {
         text: s.to_string(),
         x,
@@ -102,8 +108,9 @@ fn gradient(s: &str, x: f32) -> DisplayCommand {
             ],
         )),
         rect: Rect::new(x, TOP, 60.0, 32.0),
-        advances: None,
+        advances,
         ascent: None,
+        faces,
     }
 }
 
@@ -122,7 +129,11 @@ fn draw(gpu: &Gpu, r: &mut Renderer, list: &[DisplayCommand]) -> Vec<u8> {
 fn columns(frame: &[u8], x0: u32, x1: u32) -> Vec<u8> {
     let row = (VIEW_W * 4) as usize;
     (0..VIEW_H as usize)
-        .flat_map(|y| frame[y * row + x0 as usize * 4..y * row + x1 as usize * 4].iter().copied())
+        .flat_map(|y| {
+            frame[y * row + x0 as usize * 4..y * row + x1 as usize * 4]
+                .iter()
+                .copied()
+        })
         .collect()
 }
 
@@ -186,7 +197,11 @@ fn plain_text_keeps_its_colour_artwork_whatever_gradient_text_drew_before() {
 
     // Gradient first, cold cache.
     let mut r = renderer(&gpu);
-    let frame = draw(&gpu, &mut r, &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)]);
+    let frame = draw(
+        &gpu,
+        &mut r,
+        &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)],
+    );
     assert!(
         columns(&frame, tx0, tx1) == expected_text,
         "gradient text drawn first changed the plain text's pixels (colour artwork lost)"
@@ -200,7 +215,11 @@ fn plain_text_keeps_its_colour_artwork_whatever_gradient_text_drew_before() {
     // next frame: the gradient's mask must not shadow the colour entry.
     let mut r = renderer(&gpu);
     let _ = draw(&gpu, &mut r, &[text(emoji, TEXT_X)]);
-    let frame = draw(&gpu, &mut r, &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)]);
+    let frame = draw(
+        &gpu,
+        &mut r,
+        &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)],
+    );
     assert!(
         columns(&frame, tx0, tx1) == expected_text,
         "with the plain text's entry warm, a later gradient glyph took its place"
@@ -212,7 +231,11 @@ fn plain_text_keeps_its_colour_artwork_whatever_gradient_text_drew_before() {
 
     // Reset caches (the atlas starting over) and the same frame again.
     r.glyph_cache().clear();
-    let frame = draw(&gpu, &mut r, &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)]);
+    let frame = draw(
+        &gpu,
+        &mut r,
+        &[gradient(emoji, GRADIENT_X), text(emoji, TEXT_X)],
+    );
     assert!(
         columns(&frame, tx0, tx1) == expected_text,
         "after a cache reset, gradient text drawn first changed the plain text's pixels"
@@ -234,7 +257,10 @@ fn every_atlas_entry_is_keyed_by_a_decided_face() {
     let _ = draw(
         &gpu,
         &mut r,
-        &[gradient("\u{A9}\u{FE0F}a", GRADIENT_X), text("\u{A9}\u{FE0F}a", TEXT_X)],
+        &[
+            gradient("\u{A9}\u{FE0F}a", GRADIENT_X),
+            text("\u{A9}\u{FE0F}a", TEXT_X),
+        ],
     );
     let keys: Vec<_> = r.glyph_cache().keys().cloned().collect();
     assert!(!keys.is_empty(), "the frame cached nothing");
@@ -261,13 +287,21 @@ fn gradient_text_draws_the_face_the_selector_chooses() {
     // decision (Chrome for Testing 148, the #997 matrix), whether the
     // command is plain text or gradient text. Helvetica's `©` is narrower.
     let emoji_gradient = ink_width(
-        &draw(&gpu, &mut renderer(&gpu), &[gradient("\u{A9}\u{FE0F}", GRADIENT_X)]),
+        &draw(
+            &gpu,
+            &mut renderer(&gpu),
+            &[gradient("\u{A9}\u{FE0F}", GRADIENT_X)],
+        ),
         gx0,
         gx1,
     )
     .expect("gradient © + VS16 paints ink");
     let emoji_text = ink_width(
-        &draw(&gpu, &mut renderer(&gpu), &[text("\u{A9}\u{FE0F}", GRADIENT_X)]),
+        &draw(
+            &gpu,
+            &mut renderer(&gpu),
+            &[text("\u{A9}\u{FE0F}", GRADIENT_X)],
+        ),
         gx0,
         gx1,
     )
@@ -286,5 +320,49 @@ fn gradient_text_draws_the_face_the_selector_chooses() {
         (emoji_gradient as i64 - emoji_text as i64).abs() <= 2,
         "gradient © + VS16 is {emoji_gradient}px of ink, the plain text's emoji face {emoji_text}px: \
          gradient text drew another face than the selector chooses (Helvetica's © is {primary_gradient}px)"
+    );
+
+    // With layout's record on the command, paint draws the recorded face
+    // and decides nothing: the emoji face where layout measured it, the
+    // primary where layout kept it, whatever the selector would say.
+    use rustkit_text::GlyphFace;
+    let recorded_emoji = ink_width(
+        &draw(
+            &gpu,
+            &mut renderer(&gpu),
+            &[gradient_with(
+                "\u{A9}\u{FE0F}",
+                GRADIENT_X,
+                Some(vec![
+                    GlyphFace::Fallback { emoji: true },
+                    GlyphFace::Ignorable,
+                ]),
+            )],
+        ),
+        gx0,
+        gx1,
+    )
+    .expect("recorded emoji face paints ink");
+    assert!(
+        (recorded_emoji as i64 - emoji_text as i64).abs() <= 2,
+        "recorded emoji face: {recorded_emoji}px of ink against the emoji face's {emoji_text}px"
+    );
+    let recorded_primary = ink_width(
+        &draw(
+            &gpu,
+            &mut renderer(&gpu),
+            &[gradient_with(
+                "\u{A9}\u{FE0F}",
+                GRADIENT_X,
+                Some(vec![GlyphFace::Primary, GlyphFace::Ignorable]),
+            )],
+        ),
+        gx0,
+        gx1,
+    )
+    .expect("recorded primary face paints ink");
+    assert_eq!(
+        recorded_primary, primary_gradient,
+        "recorded primary face: paint re-decided the face instead of drawing the record"
     );
 }

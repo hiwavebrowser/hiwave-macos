@@ -9050,6 +9050,12 @@ pub enum DisplayCommand {
         /// advances and ascent; paint places, never re-measures.
         advances: Option<Vec<f32>>,
         ascent: Option<f32>,
+        /// FACE CONTRACT — same record as `Text::faces`: the face each
+        /// character was measured in, parallel to `advances`. Paint takes
+        /// that face's glyph as a coverage mask and tints it with the
+        /// gradient (a colour face's artwork by its alpha); it decides no
+        /// face itself. `None` wherever `advances` is `None`.
+        faces: Option<Vec<rustkit_text::GlyphFace>>,
     },
 
     // SVG-specific commands
@@ -12210,6 +12216,7 @@ impl DisplayList {
                             rect: Rect::new(x, y, text_width, line_height),
                             advances,
                             ascent: Some(seat_ascent),
+                            faces,
                         });
                         continue; // Skip regular text rendering for this line
                     }

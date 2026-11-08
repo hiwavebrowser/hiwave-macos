@@ -193,6 +193,24 @@ pub struct GlyphCache {
     /// `GlyphKey::face`); `None` remembers a character no face draws, so the
     /// caller owes its advance without re-asking.
     color_entries: HashMap<GlyphKey, Option<GlyphEntry>>,
+    /// `select_face`'s decision for a key without a record from layout
+    /// (`FaceKey::Auto`), so a legacy command's glyph costs one lookup here
+    /// and one in the atlas maps, not a rasterizer per character. NO ATLAS
+    /// ENTRY IS EVER FILED UNDER AN `Auto` KEY: `resolve_face` turns the
+    /// selector into the face that draws the glyph before any map is read,
+    /// so a plain command and a recorded one of the same face share one
+    /// entry, and nothing keyed by the selector can answer for a face.
+    #[cfg(target_os = "macos")]
+    decisions: HashMap<GlyphKey, rustkit_text::GlyphFace>,
+    /// Coverage masks of COLOUR faces' glyphs (gradient text tints the
+    /// alpha of the emoji's artwork), in the grayscale atlas, keyed by the
+    /// resolved face like the other maps but kept apart from `entries`: a
+    /// mask made for tinting must never answer a plain text command's
+    /// lookup, which wants the face's colour artwork (Prometheus's third
+    /// R1 on #997, a gradient `😀` turning a later plain `😀` into a tinted
+    /// silhouette). `None` remembers a character the face does not draw.
+    #[cfg(target_os = "macos")]
+    tint_entries: HashMap<GlyphKey, Option<GlyphEntry>>,
     color_next_x: u32,
     color_next_y: u32,
     color_row_height: u32,
@@ -345,6 +363,10 @@ impl GlyphCache {
             _color_atlas_view: color_atlas_view,
             color_bind_group,
             color_entries: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            decisions: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            tint_entries: HashMap::new(),
             color_next_x: 1,
             color_next_y: 1,
             color_row_height: 0,
@@ -404,44 +426,123 @@ impl GlyphCache {
         queue: &wgpu::Queue,
         key: &GlyphKey,
     ) -> Option<(GlyphEntry, bool)> {
-        if let Some(entry) = self.entries.get(key) {
+        // The face first, then the maps: an entry is filed under the face
+        // that drew it, so a hit here is that face's glyph on its path.
+        let (key, face) = self.resolve_face(key);
+        if let Some(entry) = self.entries.get(&key) {
             return Some((entry.clone(), false));
         }
-        if let Some(entry) = self.color_entries.get(key) {
+        if let Some(entry) = self.color_entries.get(&key) {
             return entry.clone().map(|entry| (entry, true));
         }
 
-        let raster = {
-            let italic = key.font_style == 1;
-            let family = if key.font_family.is_empty() {
-                "Helvetica"
-            } else {
-                key.font_family.as_str()
-            };
-            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
-                family,
-                key.font_size as f32 / 10.0,
-                key.font_weight,
-                italic,
-            );
-            let face = match key.face {
-                FaceKey::Recorded(face) => face,
-                FaceKey::Auto(variation) => rasterizer.select_face(key.codepoint, variation),
-            };
-            rasterizer.rasterize_with_face(key.codepoint, face)
-        };
-        match raster {
-            Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => {
-                self.insert_mask(queue, key, raster).map(|entry| (entry, false))
-            }
-            Some(rustkit_text::macos::GlyphRaster::Color(raster)) => {
-                self.insert_color(queue, key, raster).map(|entry| (entry, true))
-            }
+        match Self::rasterizer_for(&key).rasterize_with_face(key.codepoint, face) {
+            Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => self
+                .insert_mask(queue, &key, raster)
+                .map(|entry| (entry, false)),
+            Some(rustkit_text::macos::GlyphRaster::Color(raster)) => self
+                .insert_color(queue, &key, raster)
+                .map(|entry| (entry, true)),
             None => {
-                self.color_entries.insert(key.clone(), None);
+                self.color_entries.insert(key, None);
                 None
             }
         }
+    }
+
+    /// The glyph of the face `key` names as a COVERAGE MASK whatever path
+    /// the face takes (GRADIENT TEXT: the text pipeline tints it per
+    /// vertex). A mask face's glyph is the entry plain text shares
+    /// (`entries`); a colour face's artwork is reduced to its alpha and
+    /// filed in `tint_entries`, apart from the colour artwork plain text
+    /// draws, so neither purpose answers the other's lookup. The face is
+    /// resolved first, as in `get_or_rasterize_faced`. `None` for a
+    /// character the face does not draw (an `Ignorable` selector, or no
+    /// face has it); the caller still owes its advance.
+    #[cfg(target_os = "macos")]
+    pub fn get_or_rasterize_faced_mask(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+    ) -> Option<GlyphEntry> {
+        let (key, face) = self.resolve_face(key);
+        if let Some(entry) = self.entries.get(&key) {
+            return Some(entry.clone());
+        }
+        if let Some(entry) = self.tint_entries.get(&key) {
+            return entry.clone();
+        }
+
+        match Self::rasterizer_for(&key).rasterize_with_face(key.codepoint, face) {
+            Some(rustkit_text::macos::GlyphRaster::Mask(raster)) => {
+                self.insert_mask(queue, &key, raster)
+            }
+            Some(rustkit_text::macos::GlyphRaster::Color((
+                rgba,
+                width,
+                height,
+                advance,
+                bearing_x,
+                bearing_y,
+            ))) => {
+                // Premultiplied RGBA: the alpha channel is the coverage.
+                let alpha: Vec<u8> = rgba.chunks_exact(4).map(|px| px[3]).collect();
+                let entry = self.upload_mask(
+                    queue,
+                    &key,
+                    (alpha, width, height, advance, bearing_x, bearing_y),
+                );
+                self.tint_entries.insert(key, entry.clone());
+                entry
+            }
+            None => {
+                self.tint_entries.insert(key, None);
+                None
+            }
+        }
+    }
+
+    /// The key an atlas entry is filed under, and its face: `Recorded` as
+    /// given, or the `Auto` selector replaced by `select_face`'s decision
+    /// on the key's own font (memoised in `decisions`). ONE decision rule
+    /// in the tree: the same function layout records.
+    #[cfg(target_os = "macos")]
+    fn resolve_face(&mut self, key: &GlyphKey) -> (GlyphKey, rustkit_text::GlyphFace) {
+        let variation = match key.face {
+            FaceKey::Recorded(face) => return (key.clone(), face),
+            FaceKey::Auto(variation) => variation,
+        };
+        let face = match self.decisions.get(key) {
+            Some(face) => *face,
+            None => {
+                let face = Self::rasterizer_for(key).select_face(key.codepoint, variation);
+                self.decisions.insert(key.clone(), face);
+                face
+            }
+        };
+        (
+            GlyphKey {
+                face: FaceKey::Recorded(face),
+                ..key.clone()
+            },
+            face,
+        )
+    }
+
+    /// The rasterizer for the key's own font (the primary face).
+    #[cfg(target_os = "macos")]
+    fn rasterizer_for(key: &GlyphKey) -> rustkit_text::macos::GlyphRasterizer {
+        let family = if key.font_family.is_empty() {
+            "Helvetica"
+        } else {
+            key.font_family.as_str()
+        };
+        rustkit_text::macos::GlyphRasterizer::with_style(
+            family,
+            key.font_size as f32 / 10.0,
+            key.font_weight,
+            key.font_style == 1,
+        )
     }
 
     /// Get or rasterize a COLOR glyph (emoji) into the RGBA atlas. Returns the
@@ -547,7 +648,21 @@ impl GlyphCache {
         Some((x, y))
     }
 
+    /// Get or rasterize a glyph as a coverage mask. On macOS this is the
+    /// faced path (`get_or_rasterize_faced_mask`): the key's face is decided
+    /// first and the entry filed under it, never under an `Auto` selector.
+    #[cfg(target_os = "macos")]
+    pub fn get_or_rasterize(
+        &mut self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+    ) -> Option<GlyphEntry> {
+        self.get_or_rasterize_faced_mask(queue, key)
+    }
+
     /// Get or rasterize a glyph.
+    #[cfg(not(target_os = "macos"))]
     pub fn get_or_rasterize(
         &mut self,
         _device: &wgpu::Device,
@@ -563,36 +678,13 @@ impl GlyphCache {
     }
 
     /// Rasterize a glyph using platform-specific text rendering.
+    #[cfg(not(target_os = "macos"))]
     fn rasterize_glyph_fallback(
         &mut self,
         queue: &wgpu::Queue,
         key: &GlyphKey,
     ) -> Option<GlyphEntry> {
         let font_size = key.font_size as f32 / 10.0;
-
-        // Use platform-specific glyph rasterization
-        #[cfg(target_os = "macos")]
-        let raster_result = {
-            let italic = key.font_style == 1;
-            // Map font families for parity testing
-            let family = if key.font_family.is_empty() {
-                "Helvetica"
-            } else {
-                // Map ParityTest to Noto Sans for consistent cross-platform rendering
-                match key.font_family.as_str() {
-                    "ParityTest" | "'ParityTest'" => "Noto Sans",
-                    "Noto Sans" | "'Noto Sans'" => "Noto Sans",
-                    other => other,
-                }
-            };
-            let rasterizer = rustkit_text::macos::GlyphRasterizer::with_style(
-                family,
-                font_size,
-                key.font_weight,
-                italic,
-            );
-            rasterizer.rasterize_char(key.codepoint, 0.0)
-        };
 
         #[cfg(windows)]
         let raster_result = {
@@ -661,8 +753,24 @@ impl GlyphCache {
     }
 
     /// Upload a coverage-mask raster for `key` into the grayscale atlas and
-    /// remember its entry.
+    /// remember its entry in `entries` (the face's own mask, shared by
+    /// every command that draws the face).
     fn insert_mask(
+        &mut self,
+        queue: &wgpu::Queue,
+        key: &GlyphKey,
+        raster: (Vec<u8>, u32, u32, f32, f32, f32),
+    ) -> Option<GlyphEntry> {
+        let entry = self.upload_mask(queue, key, raster)?;
+        self.entries.insert(key.clone(), entry.clone());
+        Some(entry)
+    }
+
+    /// Upload a coverage-mask raster into the grayscale atlas and build its
+    /// entry; the caller files it (`entries`, or `tint_entries` for a
+    /// colour face's alpha). `key` is read for the PAINT-0 probe only.
+    #[allow(unused_variables)]
+    fn upload_mask(
         &mut self,
         queue: &wgpu::Queue,
         key: &GlyphKey,
@@ -733,14 +841,11 @@ impl GlyphCache {
         // x_offset: horizontal bearing adjustment
         let x_offset = bearing_x;
 
-        let entry = GlyphEntry {
+        Some(GlyphEntry {
             tex_coords: [u0, v0, u1, v1],
             offset: [x_offset, y_offset],
             advance,
-        };
-
-        self.entries.insert(key.clone(), entry.clone());
-        Some(entry)
+        })
     }
 
     /// Get or rasterize a glyph of a shaped run (see [`RunGlyphKey`]).
@@ -845,6 +950,9 @@ impl GlyphCache {
             Self::zero_texture(queue, &self.atlas, self.atlas_size, 1);
             self.entries.clear();
             self.run_entries.clear();
+            // The tint masks live in this atlas too.
+            #[cfg(target_os = "macos")]
+            self.tint_entries.clear();
             self.next_x = 1;
             self.next_y = 1;
             self.row_height = 0;
@@ -861,15 +969,23 @@ impl GlyphCache {
 
     /// Every key an atlas entry is filed under (the FACE CONTRACT pins
     /// read them: no entry may be keyed by an undecided face).
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn keys(&self) -> impl Iterator<Item = &GlyphKey> {
-        self.entries.keys().chain(self.color_entries.keys())
+        self.entries
+            .keys()
+            .chain(self.color_entries.keys())
+            .chain(self.tint_entries.keys())
     }
 
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.run_entries.clear();
+        #[cfg(target_os = "macos")]
+        {
+            self.tint_entries.clear();
+            self.decisions.clear();
+        }
         self.next_x = 1;
         self.next_y = 1;
         self.row_height = 0;
