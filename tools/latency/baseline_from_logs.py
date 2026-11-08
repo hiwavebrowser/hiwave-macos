@@ -22,11 +22,16 @@ the latency-relevant counts the engine already logs:
   ``Page lifecycle step done source="timers"`` callbacks;
 * ``Page scripts ran`` and ``Navigation finished`` elapsed_ms;
 * ``Input to present`` summary lines;
-* (LAT1) the ``Content thread holds n=... by_entry=...`` summary lines, one
-  per 100 entries and one per visit, over **every** entry whatever its
-  length; merged with the hold lines (each entry of 50 ms or more) they
-  give the exact hold p95 over all entries when it is 50 ms or more, and
-  "under 50" when it is not;
+* (LAT1) the ``Content thread holds view=N host=H n=... by_entry=...``
+  summary lines, one per 100 entries and one per content visit, over
+  **every** content-thread entry whatever its length; merged with the hold
+  lines (each entry of 50 ms or more) they give the exact hold p95 over all
+  entries when it is 50 ms or more, and "under 50" when it is not. Since
+  LAT1b a line names its view and host, and it is grouped by those, not by
+  where it falls in the log. ``Window thread holds`` lines (written before
+  LAT1b by the window thread: a headless capture's load and render, or the
+  flag-off page) are no content visit and are ignored; a site with no
+  content-thread summary gets n/a, never a verdict;
 * the exit metric of ``trench/latency/BASELINE.md`` per site: live
   script-budget stops per minute <= 1, content-thread hold p95 over all
   entries <= 50 ms, and input-to-present p95 <= 100 ms (the worst
@@ -82,7 +87,7 @@ HOLD_THRESHOLD_MS = 50.0  # wgate::HOLD_THRESHOLD_MS: shorter holds get no line 
 EXIT_STOPS_PER_MIN = 1.0
 EXIT_HOLD_P95_MS = 50.0
 EXIT_INPUT_P95_MS = 100.0
-HOLD_SUMMARY = re.compile(r"\b(Content|Window) thread holds n=")
+HOLD_SUMMARY = re.compile(r"\b(Content|Window) thread holds (?:view=(\S+) host=(\S+) )?n=")
 
 
 def pct(values, p):
@@ -145,6 +150,10 @@ class Site:
         # LAT1: per thread label, entries counted by the summary lines, and
         # the logged holds (>= 50 ms) as (entry, ms).
         self.hold_summary_n = defaultdict(lambda: defaultdict(int))
+        # LAT1b: the entries of 50 ms or more the tagged summary lines list
+        # themselves, and how many entries those lines covered.
+        self.hold_summary_over = []
+        self.hold_summary_tagged_n = 0
         self.hold_logged = defaultdict(list)
         self.holds = defaultdict(lambda: {
             "ms": [], **{s: [] for s in STAGES}, "script_ms": [], "other_ms": [], "leaving_ms": []})
@@ -263,11 +272,23 @@ def parse_one(path, sites, by_view):
                 site.forced_ms += num(d, "ms")
                 site.forced_tasks += 1
             elif HOLD_SUMMARY.search(msg):
-                thread = HOLD_SUMMARY.search(msg).group(1)
-                for item in kv(msg).get("by_entry", "").split(","):
+                hm = HOLD_SUMMARY.search(msg)
+                thread, tag_view, tag_host = hm.group(1), hm.group(2), hm.group(3)
+                # LAT1b: the window thread's entries are no content visit.
+                target = site if thread == "Content" else None
+                if target is not None and tag_host is not None:
+                    # LAT1b: the line names its visit; the log position may be another's.
+                    target = sites[key_for(int(tag_view) if tag_view.isdigit() else None,
+                                           "(html)" if tag_host == "-" else tag_host)]
+                fields = kv(msg) if target is not None else {}
+                if "over_50_ms" in fields:
+                    over = fields["over_50_ms"]
+                    target.hold_summary_over.extend(float(x) for x in over.split(",") if over != "-")
+                    target.hold_summary_tagged_n += int(num(fields, "n"))
+                for item in fields.get("by_entry", "").split(","):
                     parts = item.split(":")
                     if len(parts) >= 2 and parts[1].isdigit():
-                        site.hold_summary_n[thread][parts[0]] += int(parts[1])
+                        target.hold_summary_n[thread][parts[0]] += int(parts[1])
             elif "thread hold entry=" in msg:
                 d = kv(msg.split("hold ", 1)[1])
                 entry = d.get("entry", "?")
@@ -367,12 +388,11 @@ def summarize(sites):
 
 
 def hold_thread(s):
-    """The thread whose summary lines the metric reads: the content thread
-    when it logged any, else the window thread (flag off)."""
+    """The thread whose summary lines the metric reads: the content thread,
+    when it logged any for the site (LAT1b: never the window thread, whose
+    only summary was a headless load and render at the drop)."""
     if s.hold_summary_n.get("Content"):
         return "Content"
-    if s.hold_summary_n.get("Window"):
-        return "Window"
     return None
 
 
@@ -398,7 +418,11 @@ def merged_p95(n, logged):
 def exit_metric(s, row):
     thread = hold_thread(s)
     entries = row["hold_entries"]["n"]
-    logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
+    if thread and s.hold_summary_tagged_n == entries:
+        # LAT1b: every line listed its own long entries; no hold line is needed.
+        logged = list(s.hold_summary_over)
+    else:
+        logged = [ms for _, ms in s.hold_logged.get(thread, [])] if thread else []
     p95, under = merged_p95(entries, logged) if thread else (None, None)
     itp = max((w[1] for w in s.input_to_present), default=None)
     stops = row["stops_live_per_min"]
@@ -497,7 +521,7 @@ def print_exit_metric(summary, out=sys.stdout):
         elif m["hold_p95_under_threshold"]:
             p95 = f"< {HOLD_THRESHOLD_MS:g}"
         else:
-            p95 = "n/a (no summary line)"
+            p95 = "n/a (no content-thread entries)"
         verdict = {True: "yes", False: "NO", None: "n/a"}[m["pass"]]
         w(" | ".join(str(x) for x in [
             name, "-" if m["stops_live_per_min"] is None else m["stops_live_per_min"],
