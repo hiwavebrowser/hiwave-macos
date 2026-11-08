@@ -59,6 +59,66 @@
    "name": "an-input-max-width-in-a-flex-row",
    "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start\"><input id=a style=\"width:100px;max-width:40px;height:20px\"></div>",
    "chrome_boxes": "a:0:0:48:26"
+  },
+  {
+   "name": "a-border-box-input-max-width-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:0 20px;border:3px solid;max-width:10px;height:20px\">",
+   "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-border-box-input-max-width-2px-with-8px-padding",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:8px;max-width:2px;height:30px\">",
+   "chrome_boxes": "a:0:0:20:30"
+  },
+  {
+   "name": "a-border-box-input-zero-max-width-and-max-height",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:4px 6px;border:2px solid;max-width:0;max-height:0\">",
+   "chrome_boxes": "a:0:0:16:12"
+  },
+  {
+   "name": "a-border-box-textarea-max-width-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><textarea id=a style=\"display:block;box-sizing:border-box;padding:5px;border:3px solid;max-width:4px;height:30px\"></textarea>",
+   "chrome_boxes": "a:0:0:16:30"
+  },
+  {
+   "name": "a-border-box-textarea-max-height-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><textarea id=a style=\"display:block;box-sizing:border-box;padding:5px;border:3px solid;width:60px;max-height:4px\"></textarea>",
+   "chrome_boxes": "a:0:0:60:16"
+  },
+  {
+   "name": "a-border-box-input-min-over-max-both-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:0 10px;border:1px solid;min-width:30px;max-width:5px;height:20px\">",
+   "chrome_boxes": "a:0:0:30:20"
+  },
+  {
+   "name": "a-border-box-input-min-and-max-both-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:0 10px;border:1px solid;min-width:4px;max-width:5px;height:20px\">",
+   "chrome_boxes": "a:0:0:22:20"
+  },
+  {
+   "name": "a-border-box-input-explicit-width-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:0 20px;border:3px solid;width:10px;height:20px\">",
+   "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-border-box-input-max-height-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:10px 2px;border:2px solid;width:60px;max-height:5px\">",
+   "chrome_boxes": "a:0:0:60:24"
+  },
+  {
+   "name": "a-border-box-input-max-width-equal-to-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;box-sizing:border-box;padding:0 20px;border:3px solid;max-width:46px;height:20px\">",
+   "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-content-box-input-zero-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><input id=a style=\"display:block;padding:0 20px;border:3px solid;max-width:0;height:20px\">",
+   "chrome_boxes": "a:0:0:46:26"
+  },
+  {
+   "name": "a-border-box-flex-input-max-width-under-its-edges",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start;width:300px\"><input id=a style=\"box-sizing:border-box;padding:0 20px;border:3px solid;max-width:10px;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:46:20"
   }
  ],
  "chrome": "143.0.7499.4"
