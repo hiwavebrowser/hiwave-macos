@@ -432,7 +432,9 @@ fn take_block(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
             continue;
         }
         if let Some(q) = quote {
-            if c == q {
+            // A newline ends an unclosed string (the tokenizer's bad-string),
+            // as `parse_stylesheet` does.
+            if c == q || c == '\n' {
                 quote = None;
             }
             body.push(c);
@@ -540,6 +542,22 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
         }
 
         if !in_block {
+            // A string in a prelude is text: `a[title="{"]` does not open
+            // the block at its `{`, nor `@import "a;b";` end at its `;`
+            // (CH2.E31). A newline ends an unclosed string, as the
+            // tokenizer's bad-string does.
+            if let Some(q) = quote {
+                if c == q || c == '\n' {
+                    quote = None;
+                }
+                current_selector.push(c);
+                continue;
+            }
+            if c == '"' || c == '\'' {
+                quote = Some(c);
+                current_selector.push(c);
+                continue;
+            }
             let at_rule = current_selector.trim_start().starts_with('@');
             if c == ';' && at_rule {
                 // A statement at-rule (`@charset "UTF-8";`, `@import ...;`)
@@ -605,7 +623,21 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
             continue;
         }
 
-        // In block
+        // In block. A string is text up to its closing quote (or a newline,
+        // the tokenizer's bad-string), so a `}` inside it does not end the
+        // rule (`a{content:"}"}`, `url("x}.png")`; CH2.E31). Escapes were
+        // taken above.
+        if let Some(q) = quote {
+            if c == q || c == '\n' {
+                quote = None;
+            }
+            if in_value {
+                current_value.push(c);
+            } else {
+                current_property.push(c);
+            }
+            continue;
+        }
         if c == '}' {
             flush_decl(
                 &mut current_property,
@@ -641,10 +673,9 @@ pub fn parse_stylesheet(css: &str) -> Result<StylesheetAst, ParseError> {
         // once a value begins would miss `url(` opened on the property side by
         // malformed input and leave depth wrong for the rest of the block.
         match c {
-            '"' | '\'' if quote == Some(c) => quote = None,
-            '"' | '\'' if quote.is_none() => quote = Some(c),
-            '(' if quote.is_none() => depth += 1,
-            ')' if quote.is_none() => depth = depth.saturating_sub(1),
+            '"' | '\'' => quote = Some(c),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
             _ => {}
         }
 
@@ -1624,8 +1655,8 @@ mod tests {
 
     #[test]
     fn braces_in_strings_and_comments_do_not_end_a_media_block() {
-        // (A `}` inside a declaration's string is a separate, older limit of
-        // the rule parser; `{` exercises the block scanner's string state.)
+        // (`{` exercises the block scanner's string state; a `}` in a
+        // declaration's string is pinned by the CH2.E31 test below.)
         let css = "@media print { .a::after { content: \"{\" } /* } */ .b { color: red } } .c { color: blue }";
         assert_eq!(
             summary(css),
@@ -1665,6 +1696,12 @@ mod tests {
             selectors_and_decls(r#"@media all{a{content:"}";color:red} b{color:blue}}"#),
             vec![sd("a", &[r#"content:"}""#, "color:red"]), sd("b", &["color:blue"])]
         );
+        // A newline ends an unclosed string (bad-string), so it cannot
+        // swallow the sheet: CfT 148 keeps `a`'s colour and styles `b`.
+        let parsed = selectors_and_decls("a{color:red;content:\"oops\n} b{color:blue}");
+        assert_eq!(parsed.first().map(|r| r.0.as_str()), Some("a"));
+        assert!(parsed[0].1.contains(&"color:red".to_string()), "{parsed:?}");
+        assert_eq!(parsed.last(), Some(&sd("b", &["color:blue"])), "{parsed:?}");
     }
 
     #[test]
