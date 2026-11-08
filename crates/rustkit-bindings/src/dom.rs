@@ -468,10 +468,14 @@ impl DomHost {
     /// need the layout current but not the geometry maps (the scroll
     /// maximum).
     pub(crate) fn force_layout_if_written(host: &SharedDomHost, dirty: &crate::DirtyMark, read: &'static str) {
-        if !dirty.written_since_layout() {
+        if !dirty.needs_layout_for(read) {
             return;
         }
-        let cause = dirty.cause().unwrap_or("other");
+        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        let cause = match dirty.written_since_layout() {
+            true => dirty.cause().unwrap_or("other"),
+            false => "animation",
+        };
         let forced = {
             let mut h = host.borrow_mut();
             let spent = h.forced_in_task >= FORCED_LAYOUTS_PER_TASK;
@@ -2060,13 +2064,27 @@ pub(crate) fn install(
                 _ => None,
             };
             let mut layer = host.animated.borrow_mut();
-            let changed = match entries {
-                Some(entries) => layer.script.insert(node.id.raw(), entries.clone()) != Some(entries),
-                None => layer.script.remove(&node.id.raw()).is_some(),
+            // What the layer held and holds for the element: the reads a
+            // change can reach are those of both (LAT7c).
+            let (changed, reads) = match entries {
+                Some(entries) => {
+                    let reads = layer_reads(entries.iter().map(|e| e.0.as_str()));
+                    let old = layer.script.insert(node.id.raw(), entries.clone());
+                    let old_reads = old.as_ref().map_or(Some(0), |o| layer_reads(o.iter().map(|e| e.0.as_str())));
+                    (old.as_ref() != Some(&entries), reads.zip(old_reads).map(|(a, b)| a | b))
+                }
+                None => match layer.script.remove(&node.id.raw()) {
+                    Some(old) => (true, layer_reads(old.iter().map(|e| e.0.as_str()))),
+                    None => (false, None),
+                },
             };
             if changed {
                 layer.generation += 1;
-                d.mark_animation_layer(crate::DomDirty::Layout, "animation");
+                match reads {
+                    // Paint properties only: the boxes did not move.
+                    Some(reads) => d.mark_animation_paint(crate::DomDirty::Layout, reads),
+                    None => d.mark_animation_layer(crate::DomDirty::Layout, "animation"),
+                }
                 // The element restyles as if its inline style changed, so
                 // the next build walks it rather than keep its box.
                 l.borrow_mut().push(MutationRecord {
@@ -3708,6 +3726,11 @@ const WRAPPERS_JS: &str = r#"
         // row is empty, where the engine is known to drop part of the value,
         // where layout does not apply, and when the write has not been laid
         // out (the forced-layout budget). `display: none` has no transform.
+        // A declaration `el.style` leaves out (a bad url, CH2.E29) is not
+        // here at all, so the cascaded value shows. No row cannot be read as
+        // "initial" in general: the engine stores `justify-content:
+        // flex-start` and `align-items: stretch` as its defaults
+        // and publishes no row for them, where Chromium reads the value.
         var inline = el.style;
         if (inline) {
             var stale = !!info(el, 'stale');
@@ -3885,18 +3908,100 @@ const WRAPPERS_JS: &str = r#"
     // style: a CSSStyleDeclaration over the style attribute, one per
     // element. Reads parse the attribute; writes reserialize it, so the
     // cascade sees them through the attribute (and the write marks Style).
-    // A `;` inside a string or url() is not yet split correctly.
     var CSSStyleDeclaration = iface('CSSStyleDeclaration');
     var OWNER = Symbol('rustkit.styleOwner');
+    // The attribute is a declaration list (CH2.E27): only a top-level `;`
+    // ends a declaration, not one inside a string, a ()/[]/{} block, an
+    // unquoted url( token (one token to its first unescaped `)`, with no
+    // string, comment or block inside: `url(a/*b)`, `url(it's)`) or a
+    // comment; `\;` is text. Comments drop out. At the end a custom property
+    // keeps its text as written; any other declaration gets its open url,
+    // string and blocks closed. rustkit_cssparser::split_declaration_list is
+    // the Rust copy of this rule; both run declaration_list_cases.json.
+    function splitDecls(text) {
+        var out = [], cur = '', closers = [], quote = null, openUrl = false, i = 0, c, j;
+        var pairs = { '(': ')', '[': ']', '{': '}' };
+        while (i < text.length) {
+            c = text.charAt(i++);
+            if (c === '\\') { cur += c + text.charAt(i++); continue; }
+            if (quote) { if (c === quote) quote = null; cur += c; continue; }
+            if (c === '/' && text.charAt(i) === '*') {
+                var end = text.indexOf('*/', i + 1);
+                i = end < 0 ? text.length : end + 2;
+                cur += ' ';
+                continue;
+            }
+            if (c === '(' && /(^|[^\w\-\\\u0080-￿])url$/i.test(cur)) {
+                cur += c;
+                for (j = i; j < text.length && /\s/.test(text.charAt(j)); j++) {}
+                if (text.charAt(j) === '"' || text.charAt(j) === "'") { closers.push(')'); continue; }
+                openUrl = true;
+                while (i < text.length) {
+                    c = text.charAt(i++);
+                    cur += c;
+                    if (c === '\\') cur += text.charAt(i++);
+                    else if (c === ')') { openUrl = false; break; }
+                }
+                continue;
+            }
+            if (c === '"' || c === "'") quote = c;
+            else if (pairs[c]) closers.push(pairs[c]);
+            else if (closers.length && c === closers[closers.length - 1]) closers.pop();
+            else if (c === ';' && !closers.length) { out.push(cur); cur = ''; continue; }
+            cur += c;
+        }
+        if (!/^\s*--/.test(cur)) {
+            if (openUrl) cur += ')';
+            if (quote) cur += quote;
+            while (closers.length) cur += closers.pop();
+        }
+        out.push(cur);
+        return out;
+    }
+    // A value holding a bad url (CSS Syntax 3 §4.3.6: an unquoted url with a
+    // quote, `(`, inner whitespace or a control character in it) is invalid
+    // for every property, so the declaration is not in the block (CH2.E29:
+    // Chromium's `el.style.length` leaves it out and the earlier value
+    // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    function hasBadUrl(value) {
+        var quote = null, i, j, k, c;
+        for (i = 0; i < value.length; i++) {
+            c = value.charAt(i);
+            if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+            if (c === '"' || c === "'") { quote = c; continue; }
+            if (c === '\\') { i++; continue; }
+            // `url(` as its own function name, not the tail of `foourl(`.
+            if (value.substr(i, 4).toLowerCase() !== 'url(' ||
+                (i > 0 && /[\w\-\\\u0080-￿]/.test(value.charAt(i - 1)))) continue;
+            for (j = i + 4; j < value.length && /\s/.test(value.charAt(j)); j++) {}
+            // A quoted url is a function with a string: the strings rule above reads it.
+            if (value.charAt(j) === '"' || value.charAt(j) === "'") { i = j - 1; continue; }
+            for (; j < value.length; j++) {
+                c = value.charAt(j);
+                if (c === '\\') { j++; continue; }
+                if (c === ')') break;
+                if (c === '"' || c === "'" || c === '(' || /[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(c)) return true;
+                if (/\s/.test(c)) {
+                    for (k = j; k < value.length && /\s/.test(value.charAt(k)); k++) {}
+                    // Whitespace is allowed only before the closing `)`.
+                    if (k < value.length && value.charAt(k) !== ')') return true;
+                    j = k - 1;
+                }
+            }
+            i = j;
+        }
+        return false;
+    }
     function decls(st) {
         var out = [];
-        (st[OWNER].getAttribute('style') || '').split(';').forEach(function (d) {
+        splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
             var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
+            if (hasBadUrl(value)) return;
             out = out.filter(function (x) { return x.name !== name; });
             out.push({ name: name, value: value, important: important });
         });
@@ -3928,6 +4033,8 @@ const WRAPPERS_JS: &str = r#"
             name = String(name).trim().toLowerCase();
             value = value == null ? '' : String(value).trim();
             if (value === '') { this.removeProperty(name); return; }
+            // An invalid value changes nothing (the attribute is not rewritten).
+            if (hasBadUrl(value)) return;
             var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
             var important = String(priority || '').toLowerCase() === 'important';
             // The same declaration again changes nothing: the attribute is
@@ -5979,4 +6086,21 @@ mod tests {
         let (_, label) = b.take_script_mutations().first.expect("a write");
         assert_eq!(label, format!("div#{}…", "b".repeat(48)));
     }
+}
+
+/// LAT7c: the reads a Web Animations layer write of `props` reaches, or
+/// `None` when one of them is one layout reads (the boxes may move). The
+/// paint properties are the engine's paint-only animation frame's
+/// (`animations::is_paint_prop`).
+fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
+    let mut reads = 0;
+    for prop in props {
+        reads |= match prop {
+            "opacity" | "color" | "background-color" | "border-top-color" | "border-right-color"
+            | "border-bottom-color" | "border-left-color" => crate::LAYER_PAINT,
+            "transform" | "translate" | "rotate" | "scale" => crate::LAYER_PAINT | crate::LAYER_TRANSFORM,
+            _ => return None,
+        };
+    }
+    Some(reads)
 }

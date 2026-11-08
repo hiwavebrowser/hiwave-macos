@@ -770,7 +770,20 @@ pub(crate) struct DirtyMark {
     /// the embedder's `mark_dirty`), so the engine's paint-only animation
     /// frame is taken only when the layer write is all that changed.
     beyond_animation_layer: Cell<bool>,
+    /// LAT7c: Web Animations wrote paint properties of the animated-style
+    /// layer since the last published layout ([`LAYER_PAINT`],
+    /// [`LAYER_TRANSFORM`]). The boxes did not move, so only the reads that
+    /// see those values lay out first (`needs_layout_for`).
+    layer_since_layout: Cell<u8>,
 }
+
+/// A layer write of paint properties (`opacity`, `color`,
+/// `background-color`, the border colours): the computed style sees it.
+pub(crate) const LAYER_PAINT: u8 = 1;
+/// A layer write of `transform` (and `translate`/`rotate`/`scale`): the
+/// computed style, the transformed rects, hit testing and the scroll
+/// extents see it; offset and client boxes do not.
+pub(crate) const LAYER_TRANSFORM: u8 = 2;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
@@ -791,6 +804,35 @@ impl DirtyMark {
             if !self.since_layout.replace(true) {
                 self.cause.set(Some(kind));
             }
+        }
+    }
+
+    /// LAT7c: Web Animations wrote only paint properties of an element's
+    /// animated-style layer (`reads`: [`LAYER_PAINT`] and/or
+    /// [`LAYER_TRANSFORM`]). The engine paints it when script settles (the
+    /// bucket, and the paint-only frame: `beyond_animation_layer` is left
+    /// alone), but no box moved: an offset or client read stays clean, and
+    /// only the reads that see the values lay out (`needs_layout_for`).
+    pub(crate) fn mark_animation_paint(&self, bucket: DomDirty, reads: u8) {
+        if bucket != DomDirty::Clean {
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+        }
+    }
+
+    /// Whether the read `read` (the forced-layout log's read kinds) must
+    /// lay the page out first: after any write a layout can see, or after a
+    /// paint-layer write whose values it reads.
+    pub(crate) fn needs_layout_for(&self, read: &str) -> bool {
+        if self.since_layout.get() {
+            return true;
+        }
+        let layer = self.layer_since_layout.get();
+        match read {
+            "computed_style" => layer != 0,
+            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
+            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            _ => false,
         }
     }
 
@@ -836,6 +878,7 @@ impl DirtyMark {
     /// A layout of the DOM as it is now was published.
     pub(crate) fn laid_out(&self) {
         self.since_layout.set(false);
+        self.layer_since_layout.set(0);
         self.cause.set(None);
     }
 }
@@ -3756,6 +3799,30 @@ mod tests {
         assert_eq!(bindings.take_dirty(), DomDirty::Clean);
     }
 
+    // LAT7c: a Web Animations write of paint properties only marks the
+    // layer for the reads that see it, not the published layout.
+    #[test]
+    fn lat7c_a_paint_layer_write_leaves_offset_reads_clean() {
+        let d = DirtyMark::default();
+        d.mark_animation_paint(DomDirty::Layout, LAYER_PAINT);
+        assert!(!d.written_since_layout(), "the boxes did not move");
+        assert!(!d.needs_layout_for("offset"));
+        assert!(!d.needs_layout_for("client"));
+        assert!(!d.needs_layout_for("rect"), "opacity moves no rect");
+        assert!(d.needs_layout_for("computed_style"), "the computed value is the animated one");
+        assert_eq!(d.get(), DomDirty::Layout, "the engine still paints the frame");
+        assert!(!d.beyond_animation_layer());
+        d.mark_animation_paint(DomDirty::Layout, LAYER_TRANSFORM);
+        assert!(d.needs_layout_for("rect") && d.needs_layout_for("hit_test") && d.needs_layout_for("scroll_size"));
+        assert!(!d.needs_layout_for("offset"), "a transform moves no offset box");
+        d.laid_out();
+        assert!(!d.needs_layout_for("computed_style"), "a layout publishes the layer");
+        // A seen write afterwards forces every read again.
+        d.mark(DomDirty::Layout, "text");
+        assert!(d.needs_layout_for("offset"));
+        assert_eq!(d.cause(), Some("text"));
+    }
+
     // #947 x #941: the LAT7 marks (write cause, unseen writes, no-op writes)
     // against LAT2's paint-only marker (`beyond_animation_layer`).
     #[test]
@@ -4585,6 +4652,73 @@ mod tests {
         assert_eq!(b.take_dirty(), DomDirty::Style);
         let doc = b.window.borrow().document.clone().unwrap();
         assert_eq!(doc.get_element_by_id("d").unwrap().get_attribute("style"), Some(""));
+    }
+
+    /// CH2.E27: the attribute is a declaration list, so the `;` in a data
+    /// URL's `;base64,` does not end the declaration, and a write elsewhere
+    /// keeps the URL whole. Chromium 148.0.7778.216 on the same page:
+    /// `2|background-image|red|url("data:image/svg+xml;base64,AA==")|3|
+    /// background-image: url("data:image/svg+xml;base64,AA=="); color: red; width: 1px;`
+    /// -- the same declarations; it re-serializes the URL quoted, this
+    /// keeps the author's text.
+    #[test]
+    fn style_keeps_a_semicolon_inside_a_data_url() {
+        let b = bound(
+            "<html><body><div id='d' style='background-image:url(data:image/svg+xml;base64,AA==);color:red'>x</div></body></html>",
+        );
+        assert_eq!(
+            eval_string(
+                &b,
+                "var d = document.getElementById('d'), s = d.style, r = [s.length, s[0], s.color, s.backgroundImage]; \
+                 s.width = '1px'; r.push(s.length, d.getAttribute('style')); r.join('|')"
+            ),
+            "2|background-image|red|url(data:image/svg+xml;base64,AA==)|3|\
+             background-image: url(data:image/svg+xml;base64,AA==); color: red; width: 1px;"
+        );
+    }
+
+    /// The JS copy of the declaration-list rule (`splitDecls`) on the case
+    /// list `rustkit_cssparser`'s own copy runs, read back through
+    /// `CSSStyleDeclaration` (#972 R1 nit 3: the two copies must not drift).
+    /// A declaration whose value is a bad url is split the same way but is
+    /// not in the block (CH2.E29: Chromium's `el.style` leaves it out), so
+    /// the read-back leaves those out of the split.
+    #[test]
+    fn style_splits_the_shared_declaration_list_cases() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../rustkit-cssparser/src/declaration_list_cases.json"
+        ))
+        .expect("cases");
+        let b = bound("<html><body><div id='d'>x</div></body></html>");
+        let mut wrong = Vec::new();
+        for case in doc["cases"].as_array().expect("cases") {
+            let input = case["input"].as_str().unwrap();
+            let want: Vec<String> = case["decls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| {
+                    let v = d[1].as_str().unwrap();
+                    let is_url = v.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("url("));
+                    // A url left open at the end of the text is still a url
+                    // token (CSS Syntax 3 §4.3.6, EOF): close it to ask.
+                    let closed = if v.ends_with(')') { v.to_string() } else { format!("{v})") };
+                    !is_url || rustkit_css::mask::parse_css_url(&closed).is_some()
+                })
+                .map(|d| format!("{}={}", d[0].as_str().unwrap(), d[1].as_str().unwrap()))
+                .collect();
+            let script = format!(
+                "var d = document.getElementById('d'); d.setAttribute('style', {}); \
+                 var s = d.style, r = []; for (var i = 0; i < s.length; i++) r.push(s[i] + '=' + s.getPropertyValue(s[i])); \
+                 JSON.stringify(r)",
+                serde_json::to_string(input).unwrap()
+            );
+            let got: Vec<String> = serde_json::from_str(&eval_string(&b, &script)).expect("json");
+            if got != want {
+                wrong.push(format!("{input:?}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong\n{}", wrong.len(), wrong.join("\n"));
     }
 
     const TREE: &str = "<html><body><div id='o'><p id='i'>x</p></div></body></html>";
