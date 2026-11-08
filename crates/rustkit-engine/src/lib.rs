@@ -688,6 +688,8 @@ mod scroll_into_view_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_link_tests;
 #[cfg(all(test, feature = "headless"))]
+mod link_sheet_order_tests;
+#[cfg(all(test, feature = "headless"))]
 mod sticky_scroll_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sticky_flex_grid_tests;
