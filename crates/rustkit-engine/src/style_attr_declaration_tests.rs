@@ -88,14 +88,45 @@ fn a_rejected_background_image_keeps_the_earlier_image() {
     }
 }
 
+/// The cases are checked in four tests, every fourth case each. As one test
+/// the 41 pages held the GPU for about 130 s on a loaded machine, past the
+/// 120 s GPU test guard, and the tests queued behind it failed there.
+#[cfg(all(target_os = "macos", feature = "headless"))]
+const PARTS: usize = 4;
+
 #[cfg(all(target_os = "macos", feature = "headless"))]
 #[test]
-fn style_attribute_declarations_read_as_chromium() {
+fn style_attribute_declarations_read_as_chromium_1_of_4() {
+    declarations_read_as_chromium(0);
+}
+
+#[cfg(all(target_os = "macos", feature = "headless"))]
+#[test]
+fn style_attribute_declarations_read_as_chromium_2_of_4() {
+    declarations_read_as_chromium(1);
+}
+
+#[cfg(all(target_os = "macos", feature = "headless"))]
+#[test]
+fn style_attribute_declarations_read_as_chromium_3_of_4() {
+    declarations_read_as_chromium(2);
+}
+
+#[cfg(all(target_os = "macos", feature = "headless"))]
+#[test]
+fn style_attribute_declarations_read_as_chromium_4_of_4() {
+    declarations_read_as_chromium(3);
+}
+
+#[cfg(all(target_os = "macos", feature = "headless"))]
+fn declarations_read_as_chromium(part: usize) {
     let doc: serde_json::Value = serde_json::from_str(CASES).expect("cases");
     assert_eq!(doc["oracle"], "148.0.7778.216");
+    let cases = doc["cases"].as_array().expect("cases");
+    assert!(cases.len() >= PARTS, "every part has a case");
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let mut wrong = Vec::new();
-    for c in doc["cases"].as_array().expect("cases") {
+    for c in cases.iter().skip(part).step_by(PARTS) {
         let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
         let id = engine.create_headless_view(Bounds::new(0, 0, 400, 300)).expect("view");
         engine.load_html(id, &s("html")).expect("load");
