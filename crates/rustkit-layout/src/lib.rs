@@ -65,6 +65,8 @@ mod abspos_image_reanchor_tests;
 
 #[cfg(test)]
 mod percent_height_definite_tests;
+#[cfg(test)]
+mod form_control_content_box_tests;
 
 #[cfg(test)]
 mod replaced_size_unit_tests;
@@ -437,6 +439,22 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
         // Only `normal` needs the font; skip shaping entirely otherwise.
         rustkit_css::LineHeight::Normal => normal_line_height(style, font_size),
         other => other.to_px(font_size),
+    }
+}
+
+/// What closing the open line would advance the cursor by: the line box's
+/// height when a line is open (anything placed on it), else nothing.
+fn open_line_advance(
+    cursor_x: f32,
+    tallest: f32,
+    bottom_edge: f32,
+    extents: (f32, f32),
+    strut: (f32, f32),
+) -> f32 {
+    if cursor_x > 0.0 || tallest > 0.0 {
+        line_advance(tallest, bottom_edge, extents, strut)
+    } else {
+        0.0
     }
 }
 
@@ -5691,7 +5709,15 @@ impl LayoutBox {
             // by reanchor_absolute_children once this box is final.
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 let mut cb = self.dimensions.clone();
-                cb.content.height = cursor_y;
+                // A block-level box would close the open line: its static
+                // position is below that line box (CH2.B25). One that was
+                // inline-level stays on the line, where it would have gone.
+                cb.content.height = if child.style.abspos_was_inline_level {
+                    cb.content.x += cursor_x;
+                    cursor_y
+                } else {
+                    cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
+                };
                 child.layout_with_definite_height(&cb, cb.content.height);
                 continue;
             }
@@ -6699,8 +6725,28 @@ impl LayoutBox {
                 // carry the margin as well. The live context stays intact for
                 // the next in-flow sibling (an abspos box between two blocks
                 // must not swallow the margin between them).
+                //
+                // An abspos box is blockified, and a block-level box closes
+                // the open line: its static position is below that line box,
+                // not at its top (Chromium 148: after a 20px inline-block
+                // with `margin-bottom:15px`, 39 below the container top, not
+                // 0; CH2.B25). An open line has already taken the pending
+                // margin, so at most one of the two terms is non-zero.
+                //
+                // An abspos box that was inline-level before it was
+                // blockified keeps the place it would have had on the line:
+                // the line's top, after what the line holds so far (Chromium
+                // 148: `ab<span style=position:absolute>` at x 19, y 0, not
+                // below the line). The inline start ignores `text-align`
+                // and floats.
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y + margin_context.resolve();
+                if child.style.abspos_was_inline_level {
+                    cb.content.x += cursor_x;
+                } else {
+                    cb.content.height +=
+                        open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
+                }
                 let mut oof_margin_context = MarginCollapseContext::new();
                 child.layout_with_collapse_in(&cb, &mut oof_margin_context, float_context, None);
                 continue;
@@ -12324,8 +12370,38 @@ impl DisplayList {
         // The control's painted frame: 1px (the UA border stand-in) unless
         // the author removed it. `border: none` on a styled search box drew
         // a 1px frame anyway and seated the text 1px right of Chrome's
-        // (shelf's command input).
-        let border_width = if layout_box.style.border_top_style == rustkit_css::BorderStyle::None {
+        // (shelf's command input). An author width is the frame (CH2.B18c:
+        // `border: 40px solid` painted a 1px hairline; Chromium 143 paints
+        // 40). `Length::Zero` is the unset UA default, as in
+        // `content_box_control_extra`; an author `0px` paints none. Widths
+        // snap as Chromium's do (0 < w < 1 paints 1, else floor). The frame
+        // is one width for all four sides, so it follows the author only
+        // when the four sides agree; otherwise (e.g. `border-top: 0` on a
+        // bordered input) it keeps the old frame rather than painting the
+        // top side's width everywhere.
+        let style = &layout_box.style;
+        let side = |s: rustkit_css::BorderStyle, w: &Length| -> Option<f32> {
+            if s == rustkit_css::BorderStyle::None {
+                return Some(0.0);
+            }
+            match w {
+                Length::Zero => None,
+                Length::Percent(_) | Length::Auto => Some(1.0),
+                w => {
+                    let px = w.to_px(font_size, self.root_font_size, 0.0).max(0.0);
+                    Some(if px > 0.0 && px < 1.0 { 1.0 } else { px.floor() })
+                }
+            }
+        };
+        let sides = [
+            side(style.border_top_style, &style.border_top_width),
+            side(style.border_right_style, &style.border_right_width),
+            side(style.border_bottom_style, &style.border_bottom_width),
+            side(style.border_left_style, &style.border_left_width),
+        ];
+        let border_width = if sides.iter().all(|s| *s == sides[0]) {
+            sides[0].unwrap_or(1.0)
+        } else if style.border_top_style == rustkit_css::BorderStyle::None {
             0.0
         } else {
             1.0
@@ -16016,6 +16092,55 @@ mod tests {
         none.style.border_top_style = rustkit_css::BorderStyle::None;
         none.dimensions.content = Rect::new(0.0, 0.0, 149.0, 19.0);
         assert_eq!(frame(none), 0.0);
+    }
+
+    /// CH2.B18c: an author border width is the painted frame. Chromium 143
+    /// paints `<input style="border:40px solid red">` with a 40px ring; the
+    /// painter drew the 1px UA stand-in for any style but `none`, so the
+    /// real-window `e22_focus_ring` check counted a hairline.
+    #[test]
+    fn an_author_border_width_is_the_painted_control_frame() {
+        let solid = rustkit_css::BorderStyle::Solid;
+        // `border: <w> solid` sets all four sides; `top` then overrides the
+        // top side (`border-top: 0` after it) when given.
+        let sides = |w: Length, top: Option<Length>| {
+            let mut control = n53_text_input();
+            let s = &mut control.style;
+            s.border_top_width = top.unwrap_or_else(|| w.clone());
+            s.border_right_width = w.clone();
+            s.border_bottom_width = w.clone();
+            s.border_left_width = w;
+            s.border_top_style = solid;
+            s.border_right_style = solid;
+            s.border_bottom_style = solid;
+            s.border_left_style = solid;
+            control.dimensions.content = Rect::new(0.0, 0.0, 229.0, 99.0);
+            let list = DisplayList::build(&control);
+            list.commands
+                .iter()
+                .find_map(|c| match c {
+                    DisplayCommand::TextInput { border_width, .. } => Some(*border_width),
+                    _ => None,
+                })
+                .expect("a TextInput command")
+        };
+        let frame = |w: Length| sides(w, None);
+        // Chromium snaps a border width: 0 < w < 1 paints 1, else floor.
+        assert_eq!(frame(Length::Px(0.65)), 1.0, "border: 0.05em solid at 13px");
+        assert_eq!(frame(Length::Px(2.5)), 2.0, "border: 2.5px solid");
+        // Sides that disagree keep the old 1px frame (one width paints all
+        // four; the top side's 0 must not erase the other three).
+        assert_eq!(
+            sides(Length::Px(1.0), Some(Length::Px(0.0))),
+            1.0,
+            "border: 1px solid; border-top: 0"
+        );
+        assert_eq!(frame(Length::Px(40.0)), 40.0, "border: 40px solid");
+        assert_eq!(frame(Length::Px(3.0)), 3.0, "border: 3px solid");
+        // `border: 0` / `border-width: 0px`: no frame (unitless 0 parses to Px(0)).
+        assert_eq!(frame(Length::Px(0.0)), 0.0, "border-width: 0px");
+        // Unset (Length::Zero) keeps the 1px UA stand-in.
+        assert_eq!(frame(Length::Zero), 1.0, "UA default");
     }
 
     #[test]
