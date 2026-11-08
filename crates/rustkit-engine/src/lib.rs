@@ -28000,6 +28000,43 @@ mod tests {
         }
     }
 
+    /// Curved and arc paths get their TIGHT geometry bbox, as Chrome reports
+    /// it. Expected values are Chrome for Testing 148 `getBBox()` on the same
+    /// `d` strings (impl-board2 probe, 2026-11-08); they include the chrome
+    /// board's logo wave and the inspector's refresh and warning icons, which
+    /// were `missing_box` join failures on every chrome and inspector row.
+    #[test]
+    fn curved_and_arc_paths_report_chromes_tight_bbox() {
+        let cases: [(&str, [f32; 4]); 9] = [
+            ("M10 10 C 20 20, 40 20, 50 10", [10.0, 10.0, 40.0, 7.5]),
+            ("M2 13C4 13 6 9 9 9C12 9 14 13 17 13C20 13 22 9 22 9", [2.0, 9.0, 20.0, 4.0]),
+            ("M10 50 C 10 70 30 70 30 50 S 50 30 50 50", [10.0, 35.0, 40.0, 30.0]),
+            ("M10 80 Q 30 100 50 80 T 90 80", [10.0, 70.0, 80.0, 20.0]),
+            ("m10 30 q 20 -20 40 0 t 40 0", [10.0, 20.0, 80.0, 20.0]),
+            (
+                "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+                [1.0, 3.002364, 22.0, 17.995272],
+            ),
+            (
+                "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+                [1.551981, 2.897256, 20.896038, 18.102745],
+            ),
+            ("M60 60 A 20 10 30 1 1 90 70", [55.914055, 45.310505, 36.05552, 24.689495]),
+            // Radii too small for the chord are scaled up (SVG 2 §9.5.1 step 3).
+            ("M60 20 A 5 5 0 0 1 80 20", [60.0, 10.0, 20.0, 10.0]),
+        ];
+        for (d, want) in cases {
+            let attrs: HashMap<String, String> =
+                [("d".to_string(), d.to_string())].into_iter().collect();
+            let got = svg_shape_user_bbox("path", &attrs)
+                .unwrap_or_else(|| panic!("{d}: refused, Chrome reports {want:?}"));
+            let got = [got.0, got.1, got.2, got.3];
+            for (axis, (g, w)) in ["x", "y", "width", "height"].iter().zip(got.iter().zip(want)) {
+                assert!((g - w).abs() < 1e-3, "{d} {axis}: {g} vs Chrome {w}");
+            }
+        }
+    }
+
     /// The refusals, which are the load-bearing half: a shape this exporter
     /// does not model EXACTLY must produce NO box, leaving Gate A to file it
     /// as `missing_box` and score it UNMEASURED. "Unmeasured is never green"
@@ -28021,12 +28058,12 @@ mod tests {
             }
         };
 
-        // A cubic Bezier (bbox of control points is a SUPERSET of the tight
-        // bbox Chrome reports), an element carrying a transform this walk does
-        // not compose, a <text> needing shaped glyph extents, and a <use>
-        // rustkit-svg's renderer does not resolve. Plus one straight-line
-        // path and one rect, which MUST still come through — a refusal that
-        // refuses everything would pass this test vacuously.
+        // An element carrying a transform this walk does not compose, a
+        // <text> needing shaped glyph extents, and a <use> rustkit-svg's
+        // renderer does not resolve. Plus one cubic Bezier (exported with its
+        // TIGHT bbox, which is not its control points' bbox), one
+        // straight-line path and one rect, which MUST come through — a
+        // refusal that refuses everything would pass this test vacuously.
         let html = r##"<!DOCTYPE html><html><body>
             <svg width="100" height="100" viewBox="0 0 100 100">
               <path class="curve" d="M10 10 C 20 20, 40 20, 50 10"/>
@@ -28054,10 +28091,15 @@ mod tests {
             selectors.contains(&"rect:nth-of-type(2)"),
             "the untransformed rect must be exported; got {selectors:?}"
         );
-        assert!(
-            !selectors.contains(&"path:nth-of-type(1)"),
-            "a path with a cubic Bezier must be REFUSED, not bounded by its \
-             control points; got {selectors:?}"
+        let curve = entry
+            .shapes
+            .iter()
+            .find(|s| s.selector == "path:nth-of-type(1)")
+            .unwrap_or_else(|| panic!("the cubic path must be exported; got {selectors:?}"));
+        // Chrome 148 getBBox(): 10,10 40x7.5 (control points would say 40x10).
+        assert_eq!(
+            (curve.x, curve.y, curve.width, curve.height),
+            (10.0, 10.0, 40.0, 7.5)
         );
         assert!(
             !selectors.contains(&"rect:nth-of-type(1)"),
@@ -28074,8 +28116,8 @@ mod tests {
         );
         assert_eq!(
             entry.shapes.len(),
-            2,
-            "exactly the two modelled shapes; got {selectors:?}"
+            3,
+            "exactly the three modelled shapes; got {selectors:?}"
         );
 
         // The straight path's bbox is the tight one: M10 10 L30 40 spans
