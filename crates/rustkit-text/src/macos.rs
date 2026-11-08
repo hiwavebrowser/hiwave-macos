@@ -2014,9 +2014,10 @@ mod tests {
     #[test]
     fn fallback_keeps_emoji_faces_and_refuses_the_last_resort_face() {
         let helvetica = named_font("Helvetica", 16.0).expect("Helvetica is installed");
-        // U+23F0 and U+2328 are outside `is_emoji`'s ranges; Apple Color
-        // Emoji has them, and Chrome's line for them is that face's height.
-        for ch in ['\u{2615}', '\u{1F3AF}', '\u{23F0}', '\u{2328}'] {
+        // Emoji_Presentation characters (U+23F0 is outside `is_emoji`'s
+        // ranges) take Apple Color Emoji, and Chrome's line for them is that
+        // face's height.
+        for ch in ['\u{2615}', '\u{1F3AF}', '\u{23F0}'] {
             let (face, glyph) = fallback_face_for(&helvetica, ch).expect("an emoji face");
             assert_eq!(family_name_or_empty(&face), "Apple Color Emoji", "{ch:?}");
             assert_ne!(glyph, 0);
@@ -2034,6 +2035,32 @@ mod tests {
         let again = fallback_face_for(&helvetica, '\u{6F22}').map(|(f, g)| (f.postscript_name(), g));
         assert!(first.is_some(), "a CJK face");
         assert_eq!(first, again);
+    }
+
+    /// Chrome for Testing 148 (CSS.getPlatformFontsForNode, impl-board3
+    /// probe 2026-11-08): a character WITHOUT Emoji_Presentation (an emoji
+    /// that is text by default) takes the system's cascade face for the
+    /// primary face, like any other missing glyph. Only Emoji_Presentation
+    /// characters (or a following U+FE0F) take Apple Color Emoji first. The
+    /// chrome sidebar's `🛡` (U+1F6E1) under the system font is
+    /// `.AppleColorEmojiUI`, whose extents are the system font's (its line is
+    /// 17px at 14px, not the emoji face's 23), and `⚙` (U+2699) is Menlo
+    /// (8.44px wide, not 18).
+    #[test]
+    fn a_text_default_emoji_takes_the_cascade_face_like_chrome() {
+        let system = create_font("-apple-system", 14.0).expect("system font");
+        let helvetica = named_font("Helvetica", 14.0).expect("Helvetica is installed");
+        let ps = |primary: &CTFont, ch: char| {
+            fallback_face_for(primary, ch).map(|(f, _)| f.postscript_name()).unwrap_or_default()
+        };
+        assert_eq!(ps(&system, '\u{1F6E1}'), ".AppleColorEmojiUI", "shield under system-ui");
+        assert_eq!(ps(&system, '\u{2699}'), "Menlo-Regular", "gear under system-ui");
+        assert_eq!(ps(&system, '\u{2328}'), "Menlo-Regular", "keyboard under system-ui");
+        assert_eq!(ps(&system, '\u{1F6AB}'), "AppleColorEmoji", "no-entry is Emoji_Presentation");
+        assert_eq!(ps(&system, '\u{1F4C8}'), "AppleColorEmoji", "chart is Emoji_Presentation");
+        assert_eq!(ps(&helvetica, '\u{1F6E1}'), "AppleColorEmoji", "shield under Helvetica");
+        assert_eq!(ps(&helvetica, '\u{2764}'), "ZapfDingbatsITC", "heart under Helvetica");
+        assert_eq!(ps(&helvetica, '\u{2328}'), "Menlo-Regular", "keyboard under Helvetica");
     }
 
     #[test]

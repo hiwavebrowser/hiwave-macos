@@ -109,6 +109,22 @@ fn normal_line_height_unites_the_used_faces_like_chrome() {
         26.0
     );
 
+    // Chrome for Testing 148 (the chrome sidebar's action icons, flex items
+    // at 14px system-ui): an emoji WITHOUT Emoji_Presentation takes the
+    // system's cascade face. `🛡` is `.AppleColorEmojiUI` (the system font's
+    // extents: 17, not 23) and `⚙` is Menlo (17, 8.44px wide). `🚫` has
+    // Emoji_Presentation (Apple Color Emoji: 23), and so does `🛡` with
+    // U+FE0F after it.
+    let s14 = style(14.0, LineHeight::Normal);
+    let line14 = |t: &str| run_line_height(&s14, 14.0, &measure(t, 14.0));
+    assert_eq!(line14("plain"), 17.0);
+    assert_eq!(line14("\u{1F6E1}"), 17.0, "shield");
+    assert_eq!(line14("\u{2699}"), 17.0, "gear");
+    assert_eq!(line14("\u{1F6AB}"), 23.0, "no-entry");
+    assert_eq!(line14("\u{1F6E1}\u{FE0F}"), 23.0, "shield + VS16");
+    let gear = measure("\u{2699}", 14.0).width;
+    assert!((gear - 8.4375).abs() < 0.05, "gear is Menlo's advance (Chrome 8.4375), got {gear}");
+
     // An explicit line-height ignores the used faces (Chrome: 24 stays 24).
     let fixed = style(16.0, LineHeight::Px(24.0));
     assert_eq!(
