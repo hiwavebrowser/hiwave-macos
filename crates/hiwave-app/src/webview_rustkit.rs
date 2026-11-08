@@ -1707,6 +1707,65 @@ impl IWebContent for RustKitView {
 mod tests {
     use super::*;
 
+    fn u(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn a_cancelled_navigation_leaves_no_history_entry() {
+        // CH2.E38 (hiwave-macos#991, Pollux on hiwave-windows #122): the
+        // window recorded a navigation when it was asked for, so one
+        // superseded or stopped before it committed stayed in Back.
+        let mut history = NavHistory::default();
+        history.request(1, u("http://a.test/"), false);
+        history.committed(1);
+        // Superseded by a newer navigation before it committed.
+        history.request(2, u("http://b.test/"), false);
+        history.request(3, u("http://c.test/"), false);
+        history.committed(3);
+        assert_eq!(history.urls(), ["http://a.test/", "http://c.test/"]);
+        // Stopped before it committed.
+        history.request(4, u("http://d.test/"), false);
+        history.abandon_pending();
+        history.committed(4);
+        assert_eq!(history.urls(), ["http://a.test/", "http://c.test/"]);
+        assert_eq!(history.back().map(String::from), Some("http://a.test/".to_string()));
+        assert!(!history.can_go_back());
+    }
+
+    #[test]
+    fn a_failed_navigation_leaves_no_history_entry() {
+        let mut history = NavHistory::default();
+        history.request(1, u("http://a.test/"), false);
+        history.committed(1);
+        history.request(2, u("http://refused.test/"), false);
+        history.abandoned(2);
+        assert_eq!(history.urls(), ["http://a.test/"]);
+        assert!(!history.can_go_back(), "Back is enabled after a navigation that never committed");
+        // A failure does not drop the forward list it never replaced.
+        history.request(3, u("http://b.test/"), false);
+        history.committed(3);
+        assert_eq!(history.back().map(String::from), Some("http://a.test/".to_string()));
+        history.request(4, u("http://refused.test/"), false);
+        history.abandoned(4);
+        assert!(history.can_go_forward(), "a failed navigation truncated the forward list");
+        assert_eq!(history.urls(), ["http://a.test/", "http://b.test/"]);
+    }
+
+    #[test]
+    fn a_committed_navigation_is_recorded_once_and_a_replace_keeps_its_entry() {
+        let mut history = NavHistory::default();
+        history.request(1, u("http://a.test/"), false);
+        history.committed(1);
+        history.committed(1);
+        history.request(2, u("http://a.test/next"), true);
+        history.committed(2);
+        assert_eq!(history.urls(), ["http://a.test/next"]);
+        // The same-thread page has no commit event: 0 is recorded at once.
+        history.request(0, u("http://b.test/"), false);
+        assert_eq!(history.urls(), ["http://a.test/next", "http://b.test/"]);
+    }
+
     #[test]
     fn content_views_get_the_live_script_budget() {
         let builder = content_engine_builder();
