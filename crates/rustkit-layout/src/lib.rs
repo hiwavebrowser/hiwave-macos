@@ -13053,6 +13053,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_an_emoji_label_lifts_a_styled_buttons_line() {
+        // report.html `.export-btn { padding: .5rem 1rem; font-size: .875rem }`:
+        // Chrome for Testing 148 builds "Export as JSON" 32 tall and
+        // "📱 Share to Social" 39 — Blink unites the emoji's fallback face into
+        // the label's `normal` line (Arial 14px 16 -> 23), as it does for any
+        // text line. RustKit composed every button from the primary face's
+        // line alone (32), and the flex row stretched none of them to 39.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(14.0);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(16.0);
+        style.padding_right = Length::Px(16.0);
+        let plain = FormControlType::Button {
+            label: "Export as JSON".to_string(),
+            button_type: "button".to_string(),
+        };
+        let emoji = FormControlType::Button {
+            label: "\u{1F4F1} Share to Social".to_string(),
+            button_type: "button".to_string(),
+        };
+        assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
+        assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
+    }
+
+    #[test]
+    fn test_an_inline_content_area_is_seated_on_rounded_font_metrics() {
+        // report.html `.stat-value { font-size: 2rem; line-height: 1 }` with a
+        // `<span class=time-format>` at .75rem: Chrome for Testing 148 gives
+        // the 12px system-font span a 15px rect whose top is its baseline
+        // minus 12 — SimpleFontData's ROUNDED ascent/descent (11.6 -> 12,
+        // 2.53 -> 3), the same whole pixels `blink_baseline_offset` seats the
+        // text on. RustKit reported the fractional 14.13 and seated it 0.94px
+        // low (all six report rows).
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(12.0);
+        style.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
+        style.line_height = rustkit_css::LineHeight::Number(1.0);
+        let span = LayoutBox::new(BoxType::Inline, style.clone());
+        let (content, shift) = span.inline_content_area();
+        let m = measure_text_advanced("x", &style.font_family, 12.0, style.font_weight, style.font_style);
+        assert_eq!(content, m.ascent.round() + m.descent.round(), "whole-pixel content area");
+        assert_eq!(content, 15.0, "Chrome 148: 15");
+        // The rect top is the baseline minus the rounded ascent.
+        assert_eq!(shift + m.ascent.round(), blink_baseline_offset(12.0, m.ascent, m.descent));
+    }
+
+    #[test]
     fn test_styled_button_composes_its_font_line_with_author_padding() {
         // flex-positioning `.btn { padding: 8px 16px; border: none; font-size:
         // 14px }`: Chrome builds label + 32 wide and 16 + 16 = 32 tall (the
