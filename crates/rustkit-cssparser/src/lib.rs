@@ -1704,6 +1704,57 @@ mod tests {
         assert_eq!(parsed.last(), Some(&sd("b", &["color:blue"])), "{parsed:?}");
     }
 
+    /// #994 R1 HOLD: a backslash before a newline continues a string (CSS
+    /// Syntax 3 §4.3.5 consumes the escaped newline), and the input's
+    /// CRLF, CR and FF are each one newline (§3.3 preprocessing). The escape
+    /// branches took `\` plus one code point, so `\` CR LF left the LF to end
+    /// the string as a bad-string and the real closing quote opened a new
+    /// one that swallowed the rest of the sheet. CfT 148 on each sheet: two
+    /// rules, `a` red with `content: "xy"`, `b` blue (`e31_crlf_probe`).
+    #[test]
+    fn an_escaped_newline_of_any_kind_continues_a_string() {
+        let b = sd("b", &["color:blue"]);
+        let bs = char::from(92);
+        let lf_decl = format!("a{{content:\"x{bs}\ny\";color:red}} b{{color:blue}}");
+        for nl in [
+            String::from_iter([char::from(13), char::from(10)]),
+            String::from(char::from(13)),
+            String::from(char::from(10)),
+            String::from(char::from(12)),
+        ] {
+            let esc = format!("{bs}{nl}");
+            let decl = format!("a{{content:\"x{esc}y\";color:red}} b{{color:blue}}");
+            let got = selectors_and_decls(&decl);
+            assert_eq!(got.len(), 2, "{decl:?}: {got:?}");
+            assert_eq!(got[0].0, "a", "{decl:?}");
+            assert!(got[0].1.contains(&"color:red".to_string()), "{decl:?}: {got:?}");
+            assert_eq!(got[1], b, "{decl:?}: {got:?}");
+            assert_eq!(got, selectors_and_decls(&lf_decl), "{decl:?}: the same AST as backslash LF");
+
+            let sel = format!("a[title=\"x{esc}y\"]{{color:red}} b{{color:blue}}");
+            let got = selectors_and_decls(&sel);
+            assert_eq!(got.len(), 2, "{sel:?}: {got:?}");
+            assert_eq!(got[0].1, vec!["color:red".to_string()], "{sel:?}: {got:?}");
+            assert_eq!(got[1], b, "{sel:?}: {got:?}");
+
+            let media = format!("@media all{{a{{content:\"x{esc}y\";color:red}} b{{color:blue}}}} i{{color:green}}");
+            assert_eq!(
+                summary(&media),
+                vec![rule("a", &["all"]), rule("b", &["all"]), rule("i", &[])],
+                "{media:?}"
+            );
+        }
+        // An unescaped CR, FF or CRLF ends an unclosed string as LF does
+        // (bad-string): CfT 148 keeps `a`'s colour and styles `b`.
+        for nl in ["\r", "\x0C", "\r\n"] {
+            let css = format!("a{{color:red;content:\"oops{nl}}} b{{color:blue}}");
+            let parsed = selectors_and_decls(&css);
+            assert_eq!(parsed.first().map(|r| r.0.as_str()), Some("a"), "{css:?}: {parsed:?}");
+            assert!(parsed[0].1.contains(&"color:red".to_string()), "{css:?}: {parsed:?}");
+            assert_eq!(parsed.last(), Some(&b), "{css:?}: {parsed:?}");
+        }
+    }
+
     #[test]
     fn eof_closes_an_unclosed_media_block_like_an_unclosed_rule() {
         assert_eq!(
