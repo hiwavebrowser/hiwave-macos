@@ -183,3 +183,132 @@ fn sheet_text_cannot_close_the_media_attributes_condition_early() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// `#t`'s size and `#s.sheet.disabled` after `script`.
+fn size_and_flag(body: &str, script: &str) -> String {
+    let (mut engine, view) = page(body);
+    engine.execute_script(view, script).expect("script");
+    let w = read(&mut engine, view, "document.getElementById('t').offsetWidth");
+    let h = read(&mut engine, view, "document.getElementById('t').offsetHeight");
+    let flag = read(&mut engine, view, "document.getElementById('s').sheet.disabled");
+    format!("{w}x{h} disabled={flag}")
+}
+
+#[test]
+fn a_disabled_flag_dies_with_the_sheet_not_with_its_text() {
+    // Chromium makes a new, enabled CSSStyleSheet whenever a <style>'s
+    // children change or the element is inserted or removed (CSSOM "update
+    // a style block"); the flag belongs to that sheet, not to its text.
+    // Keying the record by text resurrected a disabled sheet when its text
+    // came back (A -> B -> A) and left two same-text sheets entangled.
+    // Chromium 148.0.7778.216 headless, 800x600 (#964 R1 HOLD).
+    let s = "<style id=s>#t{width:20px}</style>";
+    let two = "<style id=s>#t{width:20px}</style><style id=s2>#t{width:20px}</style>";
+    let cases = [
+        (
+            "A -> B -> A by textContent",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.textContent='#t{width:30px}'; e.textContent='#t{width:20px}'",
+            "20x0 disabled=false",
+        ),
+        (
+            "A -> B -> A with a layout read between",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.textContent='#t{width:30px}'; document.body.offsetWidth; e.textContent='#t{width:20px}'",
+            "20x0 disabled=false",
+        ),
+        (
+            "A -> A: the same text set again",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.textContent=e.textContent",
+            "20x0 disabled=false",
+        ),
+        (
+            "A -> B -> A by firstChild.data",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.firstChild.data='#t{width:30px}'; e.firstChild.data='#t{width:20px}'",
+            "20x0 disabled=false",
+        ),
+        (
+            "A -> B -> A by appendChild then removeChild",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; var n=document.createTextNode(' #t{height:5px}'); e.appendChild(n); e.removeChild(n)",
+            "20x0 disabled=false",
+        ),
+        (
+            "A -> B -> A by innerHTML",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.innerHTML='#t{width:30px}'; e.innerHTML='#t{width:20px}'",
+            "20x0 disabled=false",
+        ),
+        (
+            "removed and reinserted",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.remove(); document.head.appendChild(e)",
+            "20x0 disabled=false",
+        ),
+        (
+            "removed, reinserted, the new sheet disabled",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.remove(); document.head.appendChild(e); e.sheet.disabled=true",
+            "10x0 disabled=true",
+        ),
+        (
+            "disabled, new text, the new sheet disabled",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.textContent='#t{width:30px}'; e.sheet.disabled=true",
+            "10x0 disabled=true",
+        ),
+        (
+            "an old reference cannot enable the new sheet",
+            s,
+            "var e=document.getElementById('s'); var o=e.sheet; o.disabled=true; e.textContent='#t{width:30px}'; o.disabled=false",
+            "30x0 disabled=false",
+        ),
+        (
+            "an old disabled reference cannot disable the new sheet",
+            s,
+            "var e=document.getElementById('s'); var o=e.sheet; o.disabled=true; e.textContent='#t{width:30px}'; o.disabled=false; o.disabled=true",
+            "30x0 disabled=false",
+        ),
+        ("two nodes, same text: the first disabled", two, "document.getElementById('s').sheet.disabled=true", "20x0 disabled=true"),
+        (
+            "two nodes, same text: both disabled",
+            two,
+            "document.getElementById('s').sheet.disabled=true; document.getElementById('s2').sheet.disabled=true",
+            "10x0 disabled=true",
+        ),
+        (
+            "a second node with the disabled sheet's text applies",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; var n=document.createElement('style'); n.textContent=e.textContent; document.head.appendChild(n)",
+            "20x0 disabled=true",
+        ),
+        (
+            "a media attribute keeps the sheet",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.setAttribute('media','screen')",
+            "10x0 disabled=true",
+        ),
+        (
+            "a media attribute keeps the sheet, then enabled",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.setAttribute('media','screen'); e.sheet.disabled=false",
+            "20x0 disabled=false",
+        ),
+        (
+            "insertRule keeps the sheet, then enabled",
+            s,
+            "var e=document.getElementById('s'); e.sheet.disabled=true; e.sheet.insertRule('#t{height:5px}',1); e.sheet.disabled=false",
+            "20x5 disabled=false",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, body, script, want) in cases {
+        let got = size_and_flag(body, script);
+        if got != want {
+            wrong.push(format!("{name}: got {got}, Chromium {want}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
