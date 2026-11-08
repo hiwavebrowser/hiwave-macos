@@ -17303,8 +17303,9 @@ impl Engine {
         let view = self.views.get(&view);
         let lay = view.map(|v| &*v.lay);
         let external: Rc<Vec<Stylesheet>> = view.map(|v| v.external_stylesheets.clone()).unwrap_or_default();
+        let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
-            .cache_svg_paint_styles(document, lay, &external, self.config.javascript_enabled, viewport);
+            .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
     }
 }
 
@@ -17366,6 +17367,7 @@ impl layout_ctx::LayoutCtx {
         document: &Document,
         lay: Option<&layout_ctx::ViewLayout>,
         external: &Rc<Vec<Stylesheet>>,
+        owners: &[NodeId],
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
     ) {
@@ -17395,7 +17397,7 @@ impl layout_ctx::LayoutCtx {
             *self.svg_paint_styles.borrow_mut() = map;
             return;
         }
-        let map = self.svg_paint_styles_of(document, lay, external, javascript_enabled, viewport, &state);
+        let map = self.svg_paint_styles_of(document, lay, external, owners, javascript_enabled, viewport, &state);
         // The rules read now decide whether the state is in the key.
         let key = svg_prepass::PaintKey {
             state: self
@@ -17442,13 +17444,17 @@ impl layout_ctx::LayoutCtx {
         document: &Document,
         lay: Option<&layout_ctx::ViewLayout>,
         external: &Rc<Vec<Stylesheet>>,
+        owners: &[NodeId],
         javascript_enabled: bool,
         viewport: Option<(f32, f32)>,
         state: &SvgElementState,
     ) -> HashMap<usize, SvgPaintStyle> {
-        let inline: Vec<Rc<Stylesheet>> =
-            self.inline_sheets(document, lay, javascript_enabled).into_iter().map(|(_, sheet)| sheet).collect();
-        let rules = self.svg_paint_rules(inline, external, viewport);
+        // The same sheet list the cascade builds (#984 third HOLD): `<style>`
+        // and `<link>` sheets in document order, each link under its media.
+        let inline_owned = self.inline_sheets(document, lay, javascript_enabled);
+        let order = sheet_document_order(document, &inline_owned, external.len(), owners);
+        let inline: Vec<Rc<Stylesheet>> = inline_owned.into_iter().map(|(_, sheet)| sheet).collect();
+        let rules = self.svg_paint_rules(inline, external, &order, viewport);
         let sheet_rule = |source: SheetRef, rule: usize| -> &rustkit_css::Rule {
             match source {
                 SheetRef::Inline(i) => &rules.inline[i].rules[rule],
@@ -17561,13 +17567,17 @@ impl layout_ctx::LayoutCtx {
 
 impl layout_ctx::LayoutCtx {
     /// The author rules that set an svg paint property, of `inline` and
-    /// `external` at `viewport`, with the root's custom properties: kept
-    /// while the sheets are the same ones (LAT4b), since reading them
-    /// means visiting every rule of every sheet.
+    /// `external` in the cascade's `order` (`sheet_document_order`: document
+    /// position across both kinds, each `<link>` sheet with its media list,
+    /// which must match `viewport` for the sheet to count) at `viewport`,
+    /// with the root's custom properties: kept while the sheets, their
+    /// order and media are the same (LAT4b), since reading them means
+    /// visiting every rule of every sheet.
     fn svg_paint_rules(
         &self,
         inline: Vec<Rc<Stylesheet>>,
         external: &Rc<Vec<Stylesheet>>,
+        sheet_order: &[(SheetRef, String)],
         viewport: Option<(f32, f32)>,
     ) -> Rc<SvgPaintRules> {
         let viewport_bits = viewport.map(|(w, h)| (w.to_bits(), h.to_bits()));
@@ -17575,18 +17585,26 @@ impl layout_ctx::LayoutCtx {
             let same = kept.inline.len() == inline.len()
                 && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
                 && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
-                && kept.viewport == viewport_bits;
+                && kept.viewport == viewport_bits
+                && kept.order == sheet_order;
             if same {
                 return kept;
             }
         }
         let mut root_vars: HashMap<String, String> = HashMap::new();
         let mut paint = Vec::new();
-        let sources = inline
-            .iter()
-            .enumerate()
-            .map(|(i, sheet)| (SheetRef::Inline(i), &**sheet))
-            .chain(external.iter().enumerate().map(|(i, sheet)| (SheetRef::External(i), sheet)));
+        // A `<link>` sheet whose media does not match this viewport (or
+        // any, without one: conditional rules stay out, as in the cascade)
+        // contributes nothing.
+        let sources = sheet_order.iter().filter_map(|(slot, media)| {
+            if !media.is_empty() && !viewport.is_some_and(|(w, h)| rustkit_css::media_query_list_matches(media, w, h)) {
+                return None;
+            }
+            Some(match *slot {
+                SheetRef::Inline(i) => (SheetRef::Inline(i), &*inline[i]),
+                SheetRef::External(i) => (SheetRef::External(i), &external[i]),
+            })
+        });
         let mut order = 0;
         for (source, sheet) in sources {
             for (index, rule) in sheet.rules.iter().enumerate() {
@@ -17636,6 +17654,7 @@ impl layout_ctx::LayoutCtx {
             inline,
             external: Rc::downgrade(external),
             viewport: viewport_bits,
+            order: sheet_order.to_vec(),
             paint,
             root_vars,
             local,
@@ -17659,6 +17678,8 @@ pub(crate) struct SvgPaintRules {
     inline: Vec<Rc<Stylesheet>>,
     external: std::rc::Weak<Vec<Stylesheet>>,
     viewport: Option<(u32, u32)>,
+    /// The sheets' cascade order and link media (`sheet_document_order`).
+    order: Vec<(SheetRef, String)>,
     /// (cascade order, sheet, rule index, subject keys)
     paint: Vec<(usize, SheetRef, usize, Rc<Vec<SubjectKey>>)>,
     root_vars: HashMap<String, String>,
@@ -22268,7 +22289,7 @@ impl Engine {
                 writes,
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
-            lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, javascript_enabled, building.viewport);
+            lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
             lctx.cache_inline_svgs(&document);
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
