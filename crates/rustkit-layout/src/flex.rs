@@ -2055,9 +2055,21 @@ fn create_flex_item<'a>(
     };
     let has_explicit_cross_size = !matches!(explicit_cross_length, rustkit_css::Length::Auto);
 
+    // An author's `min-height: 0` (or `min-width: 0` in a column) is a
+    // minimum too, not the absence of one: the intrinsic floor below is
+    // for items that said nothing. A 5px row stretching an input with
+    // `min-height: 0` reaches the input's padding and border, not its
+    // intrinsic height (Chromium 148: 24, not 39; #985 second HOLD).
+    let specified_min_cross_is_auto = matches!(
+        match main_axis {
+            Axis::Horizontal => &layout_box.style.min_height,
+            Axis::Vertical => &layout_box.style.min_width,
+        },
+        rustkit_css::Length::Auto
+    );
     let min_cross = if css_min_cross > 0.0 {
         spec_cross_to_border_box(css_min_cross)
-    } else if explicit_cross_size.is_some() {
+    } else if explicit_cross_size.is_some() || !specified_min_cross_is_auto {
         // An author-specified cross size is used as specified. The intrinsic
         // floor below is for CONTENT-sized items; applying it to an explicit
         // size makes any control smaller than its intrinsic box impossible to
@@ -2099,9 +2111,15 @@ fn create_flex_item<'a>(
         cross_size: 0.0,
         main_position: 0.0,
         cross_position: 0.0,
-        min_main_size: min_main,
+        // CSS Sizing 3: the content box floors at zero, so no size an item
+        // takes, however it is clamped (the final shrink, a frozen
+        // hypothetical, the cross size), goes below its padding and border;
+        // for a text control that includes the frame it folds into its box
+        // (#985 second HOLD: a 10px row shrank a border-box input with 20px
+        // padding and 3px borders to 10, Chromium keeps 46).
+        min_main_size: min_main.max(main_pb + control_main_edges),
         max_main_size: max_main,
-        min_cross_size: min_cross,
+        min_cross_size: min_cross.max(cross_pb + control_cross_edges),
         max_cross_size: max_cross,
         align_self,
         main_margin_start,
