@@ -495,21 +495,25 @@ mod tests {
                 Some(Computed {
                     display: "none".into(),
                     visible: true,
+                    white_space: None,
                 })
             } else if id == ids["i"] {
                 Some(Computed {
                     display: "inline".into(),
                     visible: false,
+                    white_space: None,
                 })
             } else if id == ids["r"] || id == ids["v"] {
                 Some(Computed {
                     display: "inline".into(),
                     visible: true,
+                    white_space: None,
                 })
             } else if id == ids["t"] {
                 Some(Computed {
                     display: "block".into(),
                     visible: true,
+                    white_space: None,
                 })
             } else {
                 None
