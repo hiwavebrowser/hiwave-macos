@@ -54,6 +54,8 @@ mod frame_stats;
 mod glyph_grid;
 #[cfg(test)]
 mod scroll_cost_tests;
+#[cfg(test)]
+mod layer_cost_tests;
 pub use frame_stats::FrameStats;
 mod glyph;
 mod pipeline;
