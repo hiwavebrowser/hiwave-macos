@@ -119,6 +119,46 @@
    "name": "a-border-box-flex-input-max-width-under-its-edges",
    "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;align-items:flex-start;width:300px\"><input id=a style=\"box-sizing:border-box;padding:0 20px;border:3px solid;max-width:10px;height:20px\"></div>",
    "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-border-box-input-shrunk-in-a-10px-flex-row-with-max-width",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:10px\"><input id=a style=\"box-sizing:border-box;width:100px;min-width:0;max-width:10px;padding:0 20px;border:3px solid;height:20px;flex:0 1 auto\"></div>",
+   "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-border-box-input-shrunk-in-a-10px-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:10px\"><input id=a style=\"box-sizing:border-box;width:100px;min-width:0;padding:0 20px;border:3px solid;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:46:20"
+  },
+  {
+   "name": "a-content-box-input-shrunk-in-a-10px-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:10px\"><input id=a style=\"width:100px;min-width:0;padding:0 20px;border:3px solid;height:20px\"></div>",
+   "chrome_boxes": "a:0:0:46:26"
+  },
+  {
+   "name": "a-border-box-textarea-shrunk-in-a-10px-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;width:10px\"><textarea id=a style=\"box-sizing:border-box;width:100px;min-width:0;padding:5px;border:3px solid;height:30px\"></textarea></div>",
+   "chrome_boxes": "a:0:0:16:30"
+  },
+  {
+   "name": "a-border-box-input-shrunk-in-a-10px-flex-column",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;height:10px;width:200px\"><input id=a style=\"box-sizing:border-box;height:100px;min-height:0;padding:10px 2px;border:2px solid;width:60px;flex:0 1 auto\"></div>",
+   "chrome_boxes": "a:0:0:60:24"
+  },
+  {
+   "name": "a-border-box-input-stretched-to-a-5px-flex-row-cross-size",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;height:5px;width:200px\"><input id=a style=\"box-sizing:border-box;padding:10px 2px;border:2px solid;width:60px;min-height:0\"></div>",
+   "chrome_boxes": "a:0:0:60:24"
+  },
+  {
+   "name": "a-border-box-input-with-max-height-in-a-5px-flex-row",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;height:5px;width:200px;align-items:stretch\"><input id=a style=\"box-sizing:border-box;padding:10px 2px;border:2px solid;width:60px;min-height:0;max-height:4px\"></div>",
+   "chrome_boxes": "a:0:0:60:24"
+  },
+  {
+   "name": "a-border-box-input-stretched-in-a-10px-flex-column-cross-size",
+   "html": "<!doctype html><body style=\"margin:0\"><div style=\"display:flex;flex-direction:column;width:10px;height:100px\"><input id=a style=\"box-sizing:border-box;padding:0 20px;border:3px solid;height:20px;min-width:0\"></div>",
+   "chrome_boxes": "a:0:0:46:20"
   }
  ],
  "chrome": "143.0.7499.4"
