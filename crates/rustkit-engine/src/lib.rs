@@ -49576,6 +49576,116 @@ mod clip_path_pins {
         }
     }
 
+    /// `clip-path` on a non-replaced inline (WPT clip-path-reference-box-004,
+    /// clip-path-inline-006). Only block, image and form-control boxes read
+    /// it, so an inline painted unclipped. RustKit's inline is one box at its
+    /// first line fragment; Chrome for Testing 148 clips a wrapped inline to
+    /// that first fragment too: `<span style="clip-path:inset(0)">XXX XXX</span>`
+    /// in a 50px `font:20px/40px monospace` block paints 36x23 at (0,8), the
+    /// first line only (1656 px green without the clip, 828 with it), and
+    /// `inset(0 10px)` on a one-line inline with 10px side padding paints the
+    /// 36px text and none of the padding.
+    #[test]
+    fn clip_path_clips_an_inline_box_and_its_text() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="width:50px;font:20px/40px monospace"><span style="background:green;color:green;clip-path:inset(0)">XXX XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        // Font-independent: the clip is read against the inline's own
+        // background rect, not against one platform's monospace metrics.
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        let clip = &lines[push];
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        // `inset(0)` is the inline's border box at its first fragment: one
+        // line tall, so the second line's text is outside it.
+        for key in ["x", "y", "width", "height"] {
+            assert!(near(num(clip, key), num(bg, key)), "{key}: {clip}\n{bg}");
+        }
+        let height = num(clip, "height");
+        assert!(height > 0.0 && height <= 40.0, "first fragment only: {clip}");
+        let texts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("Text"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!texts.is_empty(), "no text:\n{all}");
+        for i in texts {
+            assert!(depth_at(&lines, i) >= 1, "text paints unclipped:\n{all}");
+        }
+
+        // A one-line inline: `inset(0 10px)` takes the side padding away.
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace">ab <span style="background:green;padding:0 10px;clip-path:inset(0 10px)">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let push = lines
+            .iter()
+            .position(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("the inline opened no clip:\n{all}"));
+        let bg = lines
+            .iter()
+            .position(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let (clip, bg_line) = (&lines[push], &lines[bg]);
+        assert!(near(num(clip, "x"), num(bg_line, "x") + 10.0), "{clip}\n{bg_line}");
+        assert!(near(num(clip, "width"), num(bg_line, "width") - 20.0), "{clip}\n{bg_line}");
+        assert!(bg > push && depth_at(&lines, bg) >= 1, "background unclipped:\n{all}");
+    }
+
+    /// `margin-box` on an inline includes its vertical margins, which take
+    /// no space in the line (WPT clip-path-inline-004: `circle(25%)
+    /// margin-box` on a 100px Ahem `X` with `margin: 50px` is the 50px
+    /// circle `circle(50%)` cuts from the border box; Chrome for Testing
+    /// 148 paints the two pages the same, 7716 green px each). RustKit
+    /// lays an inline out with its vertical margins at zero, so its margin
+    /// box was only the horizontal margins wider than the border box.
+    #[test]
+    fn clip_path_margin_box_on_an_inline_includes_its_vertical_margins() {
+        let e = engine();
+        let lines = dl(
+            &e,
+            r#"<!DOCTYPE html><html><body style="margin:0"><div style="font:20px/40px monospace;padding:50px">ab <span style="background:green;margin:20px 10px;clip-path:inset(0) margin-box">XXX</span></div></body></html>"#,
+        );
+        let all = lines.join("\n");
+        let num = |line: &str, key: &str| -> f32 {
+            line.split(&format!("{key}: "))
+                .nth(1)
+                .and_then(|s| s.split(|c: char| c != '.' && c != '-' && !c.is_ascii_digit()).next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("no {key} in {line}"))
+        };
+        let bg = lines
+            .iter()
+            .find(|c| c.starts_with("SolidColor(Color { r: 0, g: 128"))
+            .unwrap_or_else(|| panic!("no background:\n{all}"));
+        let clip = lines
+            .iter()
+            .find(|c| c.starts_with("PushClip"))
+            .unwrap_or_else(|| panic!("no clip:\n{all}"));
+        assert!((num(clip, "x") - (num(bg, "x") - 10.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "width") - (num(bg, "width") + 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "y") - (num(bg, "y") - 20.0)).abs() < 0.01, "{clip}\n{bg}");
+        assert!((num(clip, "height") - (num(bg, "height") + 40.0)).abs() < 0.01, "{clip}\n{bg}");
+    }
+
     /// `fill-box`, `stroke-box` and `view-box` on an HTML box (css-masking-1
     /// §8.1, WPT clip-path-polygon-010/012): the content box and the border
     /// box. A `<geometry-box>` alone clips to that box. All of them were
