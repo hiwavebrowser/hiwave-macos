@@ -19200,7 +19200,7 @@ impl layout_ctx::LayoutCtx {
             if let Some(r) = rest.strip_prefix('[') {
                 // The matcher's first check after the tag: the element must
                 // carry the attribute match_attribute_selector looks up.
-                let end = r.find(']').unwrap_or(r.len());
+                let end = SelectorMatcher::attr_bracket_end(r);
                 key.attr = Some(SelectorMatcher::attr_selector_name(&r[..end]).to_string());
             } else if key.tag.is_none() {
                 if let Some(r) = rest.strip_prefix(':') {
@@ -19926,7 +19926,7 @@ impl SelectorMatcher {
                 }
             } else if let Some(rest) = remaining.strip_prefix('[') {
                 // Attribute selector with operators
-                let bracket_end = rest.find(']').unwrap_or(rest.len());
+                let bracket_end = SelectorMatcher::attr_bracket_end(rest);
                 let attr_selector = &rest[..bracket_end];
                 remaining = if bracket_end < rest.len() {
                     &rest[bracket_end + 1..]
@@ -19970,7 +19970,7 @@ impl SelectorMatcher {
         match Self::attr_selector_test(attr_selector) {
             Some((op, attr_value)) => attributes
                 .get(attr_name)
-                .is_some_and(|el_attr| Self::attr_test_passes(op, attr_value, el_attr)),
+                .is_some_and(|el_attr| Self::attr_test_passes(op, &attr_value, el_attr)),
             // Just [attr] - check presence
             None => attributes.contains_key(attr_name),
         }
@@ -19998,20 +19998,33 @@ impl SelectorMatcher {
     /// The operator of an `[...]` selector and the value it compares with
     /// (trimmed, quotes removed); with an `i` flag after the value, the
     /// operator is its `ATTR_OPERATORS_I` form. None for a bare `[name]`.
-    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, &str)> {
+    fn attr_selector_test(attr_selector: &str) -> Option<(&'static str, Cow<'_, str>)> {
         let (start, end) = Self::attr_operator(attr_selector)?;
         let at = Self::ATTR_OPERATORS.iter().position(|op| *op == &attr_selector[start..end])?;
         let rest = attr_selector[end..].trim();
-        let (attr_value, flag) = match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => match rest[1..].find(q) {
-                Some(close) => (&rest[1..1 + close], rest[2 + close..].trim()),
+        // The value's escapes resolve as a string token's or an ident's
+        // (CSS Syntax §4.3.7): `CSS.escape("0.1.1")` is `\30 \.1\.1`, and
+        // the Inspector's `[data-path="…"]` query matched nothing while
+        // the raw text was compared. An escaped quote does not close the
+        // string; an escape's trailing space does not end an ident.
+        let (attr_value, flag): (Cow<'_, str>, &str) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => match Self::string_close(&rest[1..], q) {
+                Some(close) => (
+                    rustkit_css::css_string_value(&rest[1..1 + close]),
+                    rest[2 + close..].trim(),
+                ),
                 // CSS Syntax: EOF closes a string.
-                None => (&rest[1..], ""),
+                None => (rustkit_css::css_string_value(&rest[1..]), ""),
             },
-            _ => match rest.find(char::is_whitespace) {
-                Some(space) => (&rest[..space], rest[space..].trim()),
-                None => (rest, ""),
-            },
+            _ => {
+                let token_end = Self::ident_end(rest);
+                let token = rustkit_css::css_ident(&rest[..token_end]);
+                let value = match token {
+                    Cow::Borrowed(t) => rustkit_css::css_string_value(t),
+                    Cow::Owned(t) => Cow::Owned(rustkit_css::css_string_value(&t).into_owned()),
+                };
+                (value, rest[token_end..].trim())
+            }
         };
         let op = match flag {
             "" => Self::ATTR_OPERATORS[at],
@@ -20019,6 +20032,75 @@ impl SelectorMatcher {
             _ => Self::ATTR_INVALID_FLAG,
         };
         Some((op, attr_value))
+    }
+
+    /// Byte offset of the quote that closes a string whose contents start
+    /// `s` (the opening quote already consumed); an escaped quote is part
+    /// of the string. None when EOF closes it.
+    fn string_close(s: &str, quote: char) -> Option<usize> {
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == quote {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Byte length of the ident token at the start of `s`: up to the first
+    /// unescaped whitespace, where a hex escape owns one whitespace after
+    /// its digits (`\30 \.1` is one ident).
+    fn ident_end(s: &str) -> usize {
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c.is_whitespace() {
+                return i;
+            }
+            if c != '\\' {
+                continue;
+            }
+            let mut digits = 0;
+            while digits < 6 && chars.peek().is_some_and(|(_, d)| d.is_ascii_hexdigit()) {
+                chars.next();
+                digits += 1;
+            }
+            if digits > 0 {
+                if chars.peek().is_some_and(|(_, d)| d.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                chars.next();
+            }
+        }
+        s.len()
+    }
+
+    /// Byte offset of the `]` that ends an attribute selector whose
+    /// contents start `s` (the `[` already consumed), skipping quoted
+    /// strings and escaped characters; `s.len()` when EOF closes it.
+    fn attr_bracket_end(s: &str) -> usize {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+            } else if c == ']' {
+                return i;
+            }
+        }
+        s.len()
     }
 
     /// Whether an `[...]` selector's flag is one the engine takes.
@@ -20215,6 +20297,12 @@ impl SelectorMatcher {
         let mut bracket_start = 0;
         while i < chars.len() {
             let c = chars[i];
+            // An escaped character (`\"` in a string, `\]` in a value) has
+            // no syntax of its own here.
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -20322,7 +20410,16 @@ impl SelectorMatcher {
         let mut in_brackets = false;
         let mut quote: Option<char> = None;
         let mut start = 0;
+        let mut escaped = false;
         for (i, c) in selector.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
@@ -39769,7 +39866,7 @@ impl SubjectCompound {
                 parts.push(SubjectPart::Id(css_ident(&rest[..end]).into_owned()));
                 remaining = &rest[end..];
             } else if let Some(rest) = remaining.strip_prefix('[') {
-                let end = rest.find(']').unwrap_or(rest.len());
+                let end = SelectorMatcher::attr_bracket_end(rest);
                 parts.push(SubjectPart::Attr(rest[..end].to_string()));
                 remaining = if end < rest.len() { &rest[end + 1..] } else { "" };
             } else if let Some(rest) = remaining.strip_prefix(':') {
@@ -42205,8 +42302,8 @@ impl SelectorReads {
             let name = SelectorMatcher::attr_selector_name(attr).to_string();
             if let Some((op, value)) = SelectorMatcher::attr_selector_test(attr) {
                 let tests = self.attribute_tests.entry(name.clone()).or_default();
-                if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                    tests.push((op, value.to_string()));
+                if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                    tests.push((op, value.into_owned()));
                 }
             }
             self.ancestor_attributes.insert(name);
@@ -42275,8 +42372,8 @@ impl SelectorReads {
                             .attribute_tests
                             .entry(SelectorMatcher::attr_selector_name(attr).to_string())
                             .or_default();
-                        if !tests.iter().any(|(o, v)| *o == op && v == value) {
-                            tests.push((op, value.to_string()));
+                        if !tests.iter().any(|(o, v)| *o == op && *v == *value) {
+                            tests.push((op, value.into_owned()));
                         }
                     }
                 }
@@ -43912,7 +44009,7 @@ mod style_share_tests {
             assert_eq!(keyed.len(), kept.len());
             for test in tests {
                 let (op, operand) = SelectorMatcher::attr_selector_test(test).expect("operator");
-                let at = kept.iter().position(|(o, v)| *o == op && v == operand).expect("kept");
+                let at = kept.iter().position(|(o, v)| *o == op && *v == *operand).expect("kept");
                 assert_eq!(
                     keyed[at],
                     SelectorMatcher.match_attribute_selector(test, &attributes),
