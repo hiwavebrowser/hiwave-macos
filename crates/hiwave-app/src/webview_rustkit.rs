@@ -124,10 +124,8 @@ pub struct RustKitView {
     /// Counter for blocked requests (shared with shield).
     #[allow(dead_code)]
     blocked_counter: Option<Arc<AtomicU64>>,
-    /// Navigation history stack.
-    history: RefCell<Vec<Url>>,
-    /// Current position in navigation history.
-    history_index: RefCell<usize>,
+    /// The back/forward list.
+    history: RefCell<NavHistory>,
     /// The next `wry_load_url` replaces the current history entry instead
     /// of adding one: the page's script asked for a replace navigation
     /// (`take_script_navigation`).
@@ -399,8 +397,7 @@ impl RustKitView {
             page_focused: std::cell::Cell::new(false),
             page_text_focused: std::cell::Cell::new(false),
             blocked_counter: counter_clone,
-            history: RefCell::new(Vec::new()),
-            history_index: RefCell::new(0),
+            history: RefCell::new(NavHistory::default()),
             replace_next: Cell::new(false),
             live_clock: Cell::new(Instant::now()),
             next_turn_at: Cell::new(None),
@@ -562,13 +559,8 @@ impl RustKitView {
     /// the fleet pin — the full #81-style port is the named follow-up; this
     /// makes the button work tonight without inventing a third stack.
     pub fn nav_back(&self) -> bool {
-        let target = {
-            let mut index = self.history_index.borrow_mut();
-            if *index == 0 {
-                return false;
-            }
-            *index -= 1;
-            self.history.borrow()[*index].clone()
+        let Some(target) = self.history.borrow_mut().back() else {
+            return false;
         };
         *self.current_url.borrow_mut() = Some(target.to_string());
         self.load_url_blocking(target.as_str());
@@ -577,14 +569,8 @@ impl RustKitView {
 
     /// Go forward in this view's navigation history.
     pub fn nav_forward(&self) -> bool {
-        let target = {
-            let mut index = self.history_index.borrow_mut();
-            let len = self.history.borrow().len();
-            if *index + 1 >= len {
-                return false;
-            }
-            *index += 1;
-            self.history.borrow()[*index].clone()
+        let Some(target) = self.history.borrow_mut().forward() else {
+            return false;
         };
         *self.current_url.borrow_mut() = Some(target.to_string());
         self.load_url_blocking(target.as_str());
@@ -922,6 +908,7 @@ impl RustKitView {
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
         self.cancel_load();
         if let Some(thread) = &self.content {
+            self.history.borrow_mut().abandon_pending();
             let _rx = thread.load_html(html);
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
@@ -1012,28 +999,10 @@ impl RustKitView {
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
 
-        // Update navigation history
-        let mut history = self.history.borrow_mut();
-        let mut index = self.history_index.borrow_mut();
-
-        if self.replace_next.take() && *index < history.len() {
-            // A replace navigation from the page's script: same entry.
-            history[*index] = parsed;
-        } else {
-            // If we're in the middle of history (user went back), truncate forward history
-            if *index < history.len() {
-                history.truncate(*index + 1);
-            }
-
-            // Add new URL to history
-            history.push(parsed);
-            *index = history.len() - 1;
-        }
-
-        drop(history);
-        drop(index);
-
+        // A replace navigation from the page's script keeps its entry.
+        let replace = self.replace_next.take();
         self.load_url_blocking(url);
+        self.note_navigation(parsed, replace);
         Ok(())
     }
 
@@ -1174,6 +1143,7 @@ impl RustKitView {
     pub fn stop_load(&self) -> bool {
         if let Some(thread) = &self.content {
             thread.stop();
+            self.history.borrow_mut().abandon_pending();
             return self.loading.replace(false);
         }
         if self.is_loading() {
@@ -1365,7 +1335,7 @@ impl RustKitView {
                     }
                     *self.current_url.borrow_mut() = Some(url.to_string());
                 }
-                PageEvent::LoadState { state, .. } => {
+                PageEvent::LoadState { state, nav_id } => {
                     let mut updates = self.chrome_updates.borrow_mut();
                     match &state {
                         LoadState::Started => {
@@ -1379,7 +1349,10 @@ impl RustKitView {
                                 updates.finished = Some(url);
                             }
                         }
-                        LoadState::Failed { .. } => updates.loading = Some(false),
+                        LoadState::Failed { .. } => {
+                            updates.loading = Some(false);
+                            self.history.borrow_mut().abandoned(nav_id);
+                        }
                     }
                     *self.loading.borrow_mut() = matches!(state, LoadState::Started);
                 }
@@ -1583,6 +1556,88 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
     nav_id != 0 && nav_id < accepted
 }
 
+impl RustKitView {
+    /// A navigation to `url` was just sent to the page. On the content
+    /// thread its number is the one `load_url_blocking` accepted.
+    fn note_navigation(&self, url: Url, replace: bool) {
+        let nav_id = if self.content.is_some() { self.accepted_nav.get() } else { 0 };
+        self.history.borrow_mut().request(nav_id, url, replace);
+    }
+}
+
+/// A view's back/forward list (CH2.E38).
+#[derive(Debug, Default)]
+pub(crate) struct NavHistory {
+    entries: Vec<Url>,
+    /// The entry on screen. Meaningless while `entries` is empty.
+    index: usize,
+}
+
+impl NavHistory {
+    /// A navigation to `url` (window number `nav_id`, 0 on the same-thread
+    /// page) was asked for. `replace` keeps the current entry.
+    pub(crate) fn request(&mut self, _nav_id: u64, url: Url, replace: bool) {
+        self.record(url, replace);
+    }
+
+    /// The page committed navigation `nav_id`: its first frame was
+    /// published, or its load completed.
+    #[allow(dead_code)]
+    pub(crate) fn committed(&mut self, _nav_id: u64) {}
+
+    /// Navigation `nav_id` failed or was stopped before it committed.
+    pub(crate) fn abandoned(&mut self, _nav_id: u64) {}
+
+    /// Every navigation asked for and not yet committed is cancelled (a
+    /// newer document, such as New Tab, replaced it).
+    pub(crate) fn abandon_pending(&mut self) {}
+
+    fn record(&mut self, url: Url, replace: bool) {
+        if replace && self.index < self.entries.len() {
+            self.entries[self.index] = url;
+            return;
+        }
+        // Going somewhere new from the middle of the list drops what was
+        // forward of it.
+        if self.index < self.entries.len() {
+            self.entries.truncate(self.index + 1);
+        }
+        self.entries.push(url);
+        self.index = self.entries.len() - 1;
+    }
+
+    pub(crate) fn can_go_back(&self) -> bool {
+        self.index > 0
+    }
+
+    pub(crate) fn can_go_forward(&self) -> bool {
+        self.index < self.entries.len().saturating_sub(1)
+    }
+
+    /// Step back: the entry to load, or `None` at the start.
+    pub(crate) fn back(&mut self) -> Option<Url> {
+        if !self.can_go_back() {
+            return None;
+        }
+        self.index -= 1;
+        self.entries.get(self.index).cloned()
+    }
+
+    /// Step forward: the entry to load, or `None` at the end.
+    pub(crate) fn forward(&mut self) -> Option<Url> {
+        if !self.can_go_forward() {
+            return None;
+        }
+        self.index += 1;
+        self.entries.get(self.index).cloned()
+    }
+
+    #[cfg(test)]
+    fn urls(&self) -> Vec<String> {
+        self.entries.iter().map(|u| u.to_string()).collect()
+    }
+}
+
 // ============================================================================
 // IWebContent Implementation
 // ============================================================================
@@ -1592,23 +1647,8 @@ impl IWebContent for RustKitView {
         // Update cached URL
         *self.current_url.borrow_mut() = Some(url.to_string());
 
-        // Update navigation history
-        let mut history = self.history.borrow_mut();
-        let mut index = self.history_index.borrow_mut();
-
-        // If we're in the middle of history (user went back), truncate forward history
-        if *index < history.len() {
-            history.truncate(*index + 1);
-        }
-
-        // Add new URL to history
-        history.push(url.clone());
-        *index = history.len() - 1;
-
-        drop(history);
-        drop(index);
-
         self.load_url_blocking(url.as_str());
+        self.note_navigation(url.clone(), false);
         Ok(())
     }
 
@@ -1626,24 +1666,17 @@ impl IWebContent for RustKitView {
     }
 
     fn can_go_back(&self) -> bool {
-        *self.history_index.borrow() > 0
+        self.history.borrow().can_go_back()
     }
 
     fn can_go_forward(&self) -> bool {
-        let index = *self.history_index.borrow();
-        let history_len = self.history.borrow().len();
-        index < history_len.saturating_sub(1)
+        self.history.borrow().can_go_forward()
     }
 
     fn go_back(&mut self) -> HiWaveResult<()> {
-        if !self.can_go_back() {
+        let Some(url) = self.history.borrow_mut().back() else {
             return Err(hiwave_core::HiWaveError::WebView("Cannot go back".to_string()));
-        }
-
-        let mut index = self.history_index.borrow_mut();
-        *index -= 1;
-        let url = self.history.borrow()[*index].clone();
-        drop(index);
+        };
 
         self.load_url_blocking(url.as_str());
         *self.current_url.borrow_mut() = Some(url.to_string());
@@ -1651,14 +1684,9 @@ impl IWebContent for RustKitView {
     }
 
     fn go_forward(&mut self) -> HiWaveResult<()> {
-        if !self.can_go_forward() {
+        let Some(url) = self.history.borrow_mut().forward() else {
             return Err(hiwave_core::HiWaveError::WebView("Cannot go forward".to_string()));
-        }
-
-        let mut index = self.history_index.borrow_mut();
-        *index += 1;
-        let url = self.history.borrow()[*index].clone();
-        drop(index);
+        };
 
         self.load_url_blocking(url.as_str());
         *self.current_url.borrow_mut() = Some(url.to_string());
