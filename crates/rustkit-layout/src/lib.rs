@@ -442,6 +442,13 @@ pub fn resolve_line_height(style: &ComputedStyle, font_size: f32) -> f32 {
     }
 }
 
+/// An absolutely positioned box that was inline-level before it was
+/// blockified: its static position is on the line, so the line's alignment
+/// and float shifts move it (CH2.B25b).
+fn is_inline_level_oof(b: &LayoutBox) -> bool {
+    b.style.abspos_was_inline_level && matches!(b.position, Position::Absolute | Position::Fixed)
+}
+
 /// What closing the open line would advance the cursor by: the line box's
 /// height when a line is open (anything placed on it), else nothing.
 fn open_line_advance(
@@ -2639,6 +2646,13 @@ impl LayoutBox {
 
             child.layout_with_definite_height(&cb, cb.content.height);
 
+            // An out-of-flow child takes no room on the line: the inline
+            // stays as wide as its in-flow content and what follows starts
+            // where it would have (Chromium 148: `<a><ib 40px><abspos>`
+            // gives the link width 40; CH2.B25b).
+            if matches!(child.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
             cursor_x += child.dimensions.margin_box().width;
             max_height = max_height.max(child.dimensions.margin_box().height);
         }
@@ -3983,6 +3997,13 @@ impl LayoutBox {
     fn shift_inline_content_area(&mut self, half_leading: f32) {
         self.dimensions.content.y += half_leading;
         for sub in &mut self.children {
+            // An abspos box that was inline-level is placed at the top of
+            // the line slot, not of the content area (Chromium 148: inside
+            // an `<a>` whose rect starts 6px down, it stays at the line's
+            // top; CH2.B25b).
+            if is_inline_level_oof(sub) {
+                continue;
+            }
             match sub.box_type {
                 BoxType::Text(_) => {}
                 BoxType::Inline => sub.shift_inline_content_area(half_leading),
@@ -5591,13 +5612,39 @@ impl LayoutBox {
         band
     }
 
+    /// See `is_inline_level_oof`: the boxes of `inline_oof` that no recorded
+    /// line holds are aligned as an empty line of the band they were placed
+    /// in.
+    fn align_lone_inline_oof(
+        children: &mut [LayoutBox],
+        inline_oof: &[(usize, f32)],
+        line_ranges: &[(usize, usize)],
+        text_align: TextAlign,
+    ) {
+        for &(i, band_width) in inline_oof {
+            if line_ranges.iter().any(|&(start, end)| start <= i && i < end) {
+                continue;
+            }
+            let dx = match text_align {
+                TextAlign::Right => band_width.max(0.0),
+                TextAlign::Center => (band_width / 2.0).max(0.0),
+                TextAlign::Left | TextAlign::Justify => 0.0,
+            };
+            if dx > 0.0 {
+                crate::flex::translate_subtree(&mut children[i], dx, 0.0);
+            }
+        }
+    }
+
     /// Move the content already on a line right by `dx` (a left float was
     /// placed on it). A run split over several lines moves only its last
-    /// line, the one on this line box; floats and positioned boxes stay.
+    /// line, the one on this line box; floats and positioned boxes stay,
+    /// except an abspos box that was inline-level (`is_inline_level_oof`).
     fn shift_line_content(children: &mut [LayoutBox], dx: f32) {
         for sib in children {
             if sib.float != Float::None
-                || matches!(sib.position, Position::Absolute | Position::Fixed)
+                || (matches!(sib.position, Position::Absolute | Position::Fixed)
+                    && !is_inline_level_oof(sib))
             {
                 continue;
             }
@@ -5701,6 +5748,13 @@ impl LayoutBox {
             && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
+        // Abspos boxes that were inline-level, placed on a line: (index, the
+        // width of that line's band beside the floats). `text-align` moves
+        // them with their line (CH2.B25b).
+        let mut inline_oof: Vec<(usize, f32)> = Vec::new();
+        // The first of them placed while no line was open: the next line
+        // that opens starts at it, so it is aligned with that line.
+        let mut pending_oof: Option<usize> = None;
 
         for (i, child) in self.children.iter_mut().enumerate() {
             // Skip absolutely/fixed positioned children for flow layout.
@@ -5713,7 +5767,13 @@ impl LayoutBox {
                 // position is below that line box (CH2.B25). One that was
                 // inline-level stays on the line, where it would have gone.
                 cb.content.height = if child.style.abspos_was_inline_level {
-                    cb.content.x += cursor_x;
+                    let (line_left, band_width) =
+                        floats.line_band(cursor_y, empty_line_height, container_width);
+                    cb.content.x += line_left + cursor_x;
+                    inline_oof.push((i, band_width));
+                    if line_start_index.is_none() && pending_oof.is_none() {
+                        pending_oof = Some(i);
+                    }
                     cursor_y
                 } else {
                     cursor_y + open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut)
@@ -5799,6 +5859,7 @@ impl LayoutBox {
                 line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
+                pending_oof = None;
                 continue;
             }
 
@@ -5933,7 +5994,7 @@ impl LayoutBox {
 
                 // Track line start
                 if line_start_index.is_none() {
-                    line_start_index = Some(i);
+                    line_start_index = Some(pending_oof.take().unwrap_or(i));
                 }
 
                 // Position the child. The cursor addresses the MARGIN box;
@@ -6089,6 +6150,7 @@ impl LayoutBox {
             } else {
                 seam = None;
                 // Regular block layout
+                pending_oof = None;
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
@@ -6215,6 +6277,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
         for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
@@ -6226,6 +6289,10 @@ impl LayoutBox {
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
+        // An inline-level abspos box on no recorded line (alone, or before a
+        // block or a break) sits on an empty line and is aligned as one
+        // (Chromium 148: alone in a 400px `text-align:center` block, x 200).
+        Self::align_lone_inline_oof(&mut self.children, &inline_oof, &line_ranges, text_align);
 
         // CSS 2.1 §10.6.7: a box that establishes a formatting context
         // grows to contain its floats (the auto height of a floated card
@@ -6413,9 +6480,27 @@ impl LayoutBox {
             // line leaves the run where it is. Ledgered, not chased.
             if dy.abs() > 0.01 && !is_multi_line_split {
                 crate::flex::translate_subtree(c, 0.0, dy);
+                if matches!(c.box_type, BoxType::Inline) {
+                    Self::keep_inline_oof_at_line_top(c, dy);
+                }
             }
             if seats_as_text(c) {
                 c.seat_atomics_in_inline(baseline_y, line_top);
+            }
+        }
+    }
+
+    /// Undo a baseline shift of `dy` for the inline-level abspos boxes inside
+    /// the non-atomic inline `b` (through nested inlines): their static
+    /// position is the line's top, which the baseline does not move
+    /// (Chromium 148: `<a><ib 40px><abspos>` keeps the abspos at y 0 while
+    /// the link's rect is 6px down; CH2.B25b).
+    fn keep_inline_oof_at_line_top(b: &mut LayoutBox, dy: f32) {
+        for sub in &mut b.children {
+            if is_inline_level_oof(sub) {
+                crate::flex::translate_subtree(sub, 0.0, -dy);
+            } else if matches!(sub.box_type, BoxType::Inline) {
+                Self::keep_inline_oof_at_line_top(sub, dy);
             }
         }
     }
@@ -6522,6 +6607,7 @@ impl LayoutBox {
             if offset > 0.0
                 && child.float == Float::None
                 && (child.style.display.is_atomic_inline()
+                    || is_inline_level_oof(child)
                     || matches!(
                         child.box_type,
                         BoxType::Inline
@@ -6702,6 +6788,13 @@ impl LayoutBox {
             && multicol::column_geometry(&self.style, container_width).is_none();
         // Content a left float placed mid-line pushed right: (start, end, dx).
         let mut line_shifts: Vec<(usize, usize, f32)> = Vec::new();
+        // Abspos boxes that were inline-level, placed on a line: (index, the
+        // width of that line's band beside the floats). `text-align` moves
+        // them with their line (CH2.B25b).
+        let mut inline_oof: Vec<(usize, f32)> = Vec::new();
+        // The first of them placed while no line was open: the next line
+        // that opens starts at it, so it is aligned with that line.
+        let mut pending_oof: Option<usize> = None;
 
         // `cb.content.height = cursor_y` below is the STATIC POSITION trick
         // (calculate_block_position stacks a box at cb.y + cb.height), not
@@ -6737,12 +6830,18 @@ impl LayoutBox {
                 // blockified keeps the place it would have had on the line:
                 // the line's top, after what the line holds so far (Chromium
                 // 148: `ab<span style=position:absolute>` at x 19, y 0, not
-                // below the line). The inline start ignores `text-align`
-                // and floats.
+                // below the line), past the floats that narrow the line. The
+                // line's `text-align` moves it with the line (CH2.B25b).
                 let mut cb = self.dimensions.clone();
                 cb.content.height = cursor_y + margin_context.resolve();
                 if child.style.abspos_was_inline_level {
-                    cb.content.x += cursor_x;
+                    let (line_left, band_width) =
+                        floats.line_band(cursor_y, empty_line_height, container_width);
+                    cb.content.x += line_left + cursor_x;
+                    inline_oof.push((i, band_width));
+                    if line_start_index.is_none() && pending_oof.is_none() {
+                        pending_oof = Some(i);
+                    }
                 } else {
                     cb.content.height +=
                         open_line_advance(cursor_x, line_height, line_below_baseline, line_extents, strut);
@@ -6854,6 +6953,7 @@ impl LayoutBox {
                 line_extents = (0.0, 0.0);
                 line_start_index = None;
                 line_width = 0.0;
+                pending_oof = None;
                 continue;
             }
 
@@ -6988,7 +7088,7 @@ impl LayoutBox {
 
                 // Track line start
                 if line_start_index.is_none() {
-                    line_start_index = Some(i);
+                    line_start_index = Some(pending_oof.take().unwrap_or(i));
                 }
 
                 // Position the child. The cursor addresses the MARGIN box;
@@ -7136,6 +7236,7 @@ impl LayoutBox {
             } else {
                 seam = None;
                 // Regular block layout with margin collapse
+                pending_oof = None;
                 // First, finish any inline-block line
                 if cursor_x > 0.0 {
                     if let Some(start) = line_start_index {
@@ -7281,6 +7382,7 @@ impl LayoutBox {
         }
 
         // Apply text-align to all recorded lines
+        let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
         for (start, end, width, (_, band_width)) in lines {
             Self::apply_text_align_offset(
@@ -7292,6 +7394,10 @@ impl LayoutBox {
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
+        // An inline-level abspos box on no recorded line (alone, or before a
+        // block or a break) sits on an empty line and is aligned as one
+        // (Chromium 148: alone in a 400px `text-align:center` block, x 200).
+        Self::align_lone_inline_oof(&mut self.children, &inline_oof, &line_ranges, text_align);
 
         // CSS 2.1 §8.3.1: the last in-flow block child's bottom margin is
         // still pending in the context. When this box's own padding-bottom /
