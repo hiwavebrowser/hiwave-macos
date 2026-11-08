@@ -564,6 +564,8 @@ mod animations;
 mod ancestor_attribute_tests;
 #[cfg(test)]
 mod attribute_flag_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_value_escape_tests;
 #[cfg(test)]
 mod css_has_tests;
 #[cfg(test)]
