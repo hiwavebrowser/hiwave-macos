@@ -94,6 +94,9 @@ pub(crate) struct BuildView {
     /// The view's `<link>` sheets: the rule-index fingerprint vouches for
     /// them only when the build was handed this very list.
     pub(crate) external_sheets: Rc<Vec<rustkit_css::Stylesheet>>,
+    /// The `<link>` that owns each of `external_sheets`, for its place
+    /// among the `<style>` sheets (`sheet_document_order`).
+    pub(crate) external_sheet_owners: Rc<Vec<rustkit_dom::NodeId>>,
 }
 
 impl LayoutCtx {
@@ -439,6 +442,12 @@ impl LayoutCtx {
         self.building.borrow().as_ref().and_then(|b| b.viewport)
     }
 
+    /// The owners of the building view's external sheets; empty outside
+    /// a view build.
+    pub(crate) fn building_external_sheet_owners(&self) -> Rc<Vec<rustkit_dom::NodeId>> {
+        self.building.borrow().as_ref().map(|b| b.external_sheet_owners.clone()).unwrap_or_default()
+    }
+
     pub(crate) fn building_url(&self) -> Option<Url> {
         self.building.borrow().as_ref().and_then(|b| b.url.clone())
     }
@@ -581,6 +590,7 @@ mod tests {
             viewport: None,
             focus: None,
             external_sheets: Rc::default(),
+            external_sheet_owners: Rc::default(),
         }
     }
 
