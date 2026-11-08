@@ -13341,6 +13341,52 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_half_leading_inline_keeps_the_line_baseline() {
+        // report.html `.stat-value { font-size: 2rem; line-height: 1 }` with
+        // a 12px `<span class=time-format>`: Chrome for Testing 148 (probe
+        // tf.html, line at 100) gives the span a 15px rect at 116, the
+        // baseline minus SimpleFontData's rounded ascent (11.6 -> 12), on
+        // the same baseline (128 = 100 + 28) as the 32px "0". The 12px line
+        // is 3px shorter than its content area, so the half-leading is
+        // negative (floor(-1.5) = -2) and the rect sits ABOVE its text slot
+        // (118 = 128 - 10). RustKit reported 14.13 at a fractional offset
+        // and, skipping the negative shift while the line read the slot as
+        // rect - half-leading, seated the whole line a pixel high (the six
+        // report rows' only in-viewport geometry diff).
+        let mut big = ComputedStyle::new();
+        big.font_size = Length::Px(32.0);
+        big.font_weight = rustkit_css::FontWeight::BOLD;
+        big.font_family = "-apple-system, BlinkMacSystemFont, sans-serif".to_string();
+        big.line_height = rustkit_css::LineHeight::Number(1.0);
+        let mut small = big.clone();
+        small.font_size = Length::Px(12.0);
+        small.font_weight = rustkit_css::FontWeight::NORMAL;
+
+        assert_eq!(LayoutBox::text_line_box_extents(&big).0, 28.0, "32px bold strut seat");
+        assert_eq!(LayoutBox::text_line_box_extents(&small).0, 10.0, "12px seat in a 12px line");
+
+        let mut text = LayoutBox::new(BoxType::Text("0".to_string()), big.clone());
+        text.dimensions.content.y = 100.0;
+        text.dimensions.content.height = 32.0;
+        let mut inner = LayoutBox::new(BoxType::Text("m".to_string()), small.clone());
+        inner.dimensions.content.y = 100.0;
+        inner.dimensions.content.height = 12.0;
+        let mut span = LayoutBox::new(BoxType::Inline, small.clone());
+        span.dimensions.content.y = 100.0;
+        span.children.push(inner);
+        let (content, half_leading) = span.inline_content_area();
+        assert_eq!((content, half_leading), (15.0, -2.0), "Chrome 148: 15 tall, floor(-1.5)");
+        span.shift_inline_content_area(half_leading);
+
+        let mut line = vec![text, span];
+        LayoutBox::apply_vertical_align(&mut line, &big);
+
+        assert_eq!(line[0].dimensions.content.y, 100.0, "the strut-font text stays");
+        assert_eq!(line[1].children[0].dimensions.content.y, 118.0, "span text slot: baseline 128 - 10");
+        assert_eq!(line[1].dimensions.content.y, 116.0, "span rect: baseline 128 - 12");
+    }
+
+    #[test]
     fn test_line_of_only_small_inlines_keeps_its_line_top() {
         // A line whose only member is an inline: its rect sits a half-leading
         // below the slot, and reading the rect as the line top would push the
