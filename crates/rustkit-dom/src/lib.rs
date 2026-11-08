@@ -180,14 +180,18 @@ pub struct Node {
     /// and are not applied. The cascade reads this; it is not a `<style>`
     /// element, so it does not change the child count.
     adopted_styles: RefCell<Vec<String>>,
-    /// The lifetime of the sheet a `<style>` element owns, as a count of
-    /// the events that end it: its children changing, and the element
-    /// being inserted or removed (CSSOM "update a style block": Chromium
-    /// makes a new, enabled `CSSStyleSheet` each time). Kept on every
-    /// node, since a child list does not know its parent is a `<style>`.
-    /// A `<style>`'s `sheet.disabled` is recorded against this number
-    /// ([`Document::set_style_sheet_disabled`]) and dies with the sheet.
+    /// How many times this node's child list changed: one of the events
+    /// that end the sheet a `<style>` element owns (CSSOM "update a style
+    /// block": Chromium makes a new, enabled `CSSStyleSheet` each time).
+    /// Kept on every node, since a child list does not know its parent is
+    /// a `<style>`. See [`Node::sheet_generation`].
     sheet_generation: Cell<u64>,
+    /// How many times this node was inserted or removed. A connection
+    /// change anywhere above a `<style>` ends its sheet too (a container
+    /// detached and reinserted, or moved), so [`Node::sheet_generation`]
+    /// sums this count over the element and every ancestor instead of
+    /// walking the subtree at every mutation.
+    connection_generation: Cell<u64>,
 }
 
 impl Node {
@@ -204,18 +208,34 @@ impl Node {
             shadow: RefCell::new(None),
             adopted_styles: RefCell::new(Vec::new()),
             sheet_generation: Cell::new(0),
+            connection_generation: Cell::new(0),
         })
     }
 
     /// The current lifetime of this element's sheet: changes whenever the
-    /// element's children change or it is inserted or removed. Two reads
-    /// are the same sheet iff they are equal.
+    /// element's children change or it, or any ancestor, is inserted or
+    /// removed. Two reads of one element are the same sheet iff they are
+    /// equal: every event adds one to a count on the chain, so the sum
+    /// only grows (a `wrapping_add` that never wraps in practice; script
+    /// reads it as a JS number, exact below 2^53, which no page reaches).
+    /// A `<style>`'s `sheet.disabled` is recorded against this number
+    /// ([`Document::set_style_sheet_disabled`]) and dies with the sheet.
     pub fn sheet_generation(&self) -> u64 {
-        self.sheet_generation.get()
+        let mut generation = self.sheet_generation.get().wrapping_add(self.connection_generation.get());
+        let mut node = self.parent();
+        while let Some(ancestor) = node {
+            generation = generation.wrapping_add(ancestor.connection_generation.get());
+            node = ancestor.parent();
+        }
+        generation
     }
 
     fn end_sheet(&self) {
         self.sheet_generation.set(self.sheet_generation.get().wrapping_add(1));
+    }
+
+    fn moved(&self) {
+        self.connection_generation.set(self.connection_generation.get().wrapping_add(1));
     }
 
     /// Replace the CSS text adopted by this document or shadow root.
@@ -323,7 +343,7 @@ impl Node {
     pub fn append_child(self: &Rc<Self>, child: Rc<Node>) {
         note_mutation();
         self.end_sheet();
-        child.end_sheet();
+        child.moved();
         // Update child's parent
         *child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -362,7 +382,7 @@ impl Node {
         if let Some(parent) = self.parent() {
             note_mutation();
             parent.end_sheet();
-            self.end_sheet();
+            self.moved();
             // Update sibling links
             if let Some(prev) = self.previous_sibling() {
                 *prev.next_sibling.borrow_mut() = self.next_sibling.borrow().clone();
@@ -390,7 +410,7 @@ impl Node {
 
         if let Some(idx) = ref_idx {
             self.end_sheet();
-            new_child.end_sheet();
+            new_child.moved();
             // Update new_child's parent
             *new_child.parent.borrow_mut() = Some(Rc::downgrade(self));
 
@@ -892,6 +912,7 @@ impl Document {
         // An attribute change keeps a <style>'s sheet; new data in a Text
         // child ends its parent's.
         new.sheet_generation.set(old.sheet_generation.get());
+        new.connection_generation.set(old.connection_generation.get());
         if let Some(p) = old.parent() {
             p.end_sheet();
         }

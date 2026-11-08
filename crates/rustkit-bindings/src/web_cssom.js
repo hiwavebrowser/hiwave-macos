@@ -262,19 +262,32 @@
         return s;
     }
     function isStyle(o) { return o && o._owner && o._owner.localName === 'style'; }
+    // A <style>'s wrapper the element no longer owns (its children changed,
+    // or it or an ancestor was inserted or removed since: a new generation).
+    // Chromium makes a new CSSStyleSheet then; the old object keeps its
+    // rules, owns no node, and its disabled flag and rule edits reach
+    // nothing. Marked the first time anyone asks, so a wrapper held across
+    // the change is inert even before `.sheet` is read again.
+    function stale(sheet) {
+        if (!isStyle(sheet)) return false;
+        if (!sheet._detached && sheet._gen !== sheetGeneration(sheet._owner)) sheet._detached = true;
+        return !!sheet._detached;
+    }
     // A <style>'s rules follow its text: reparse when script changed it.
+    // A stale wrapper keeps the rules it had.
     function sync(sheet) {
-        if (isStyle(sheet)) {
+        if (isStyle(sheet) && !sheet._detached) {
             var text = sheet._owner.textContent || '';
             if (text !== sheet._text) { sheet._text = text; sheet._rules = parseSheet(text, sheet, false); }
         }
         fill(sheet._list, sheet._rules);
         return sheet;
     }
-    // After a rule edit: write the rules back into the <style>'s text.
+    // After a rule edit: write the rules back into the <style>'s text. A
+    // stale wrapper's edit stays in the wrapper.
     function changed(sheet) {
         if (!sheet) return;
-        if (isStyle(sheet)) write(sheet, sheet._rules.map(sourceOf).join('\n'));
+        if (isStyle(sheet) && !stale(sheet)) write(sheet, sheet._rules.map(sourceOf).join('\n'));
         fill(sheet._list, sheet._rules);
         refreshAdopted(sheet);
     }
@@ -314,7 +327,7 @@
             if (r._type === 3 && this._constructed) throw domError("Can't insert @import rules into a constructed stylesheet.", 'SyntaxError');
             var atEnd = index === this._rules.length;
             this._rules.splice(index, 0, r);
-            if (isStyle(this) && atEnd) {
+            if (isStyle(this) && atEnd && !stale(this)) {
                 // The CSS-in-JS path: append the rule to the element's text.
                 write(this, this._text + (this._text ? '\n' : '') + r._src);
                 fill(this._list, this._rules);
@@ -346,7 +359,7 @@
     getter(CSSStyleSheet.prototype, 'rules', function () { return sync(this)._list; });
     getter(CSSStyleSheet.prototype, 'ownerRule', function () { return null; });
     getter(StyleSheet.prototype, 'type', function () { return 'text/css'; });
-    getter(StyleSheet.prototype, 'ownerNode', function () { return this._owner || null; });
+    getter(StyleSheet.prototype, 'ownerNode', function () { return this._detached ? null : (this._owner || null); });
     getter(StyleSheet.prototype, 'parentStyleSheet', function () { return null; });
     getter(StyleSheet.prototype, 'href', function () {
         var o = this._owner;
@@ -385,13 +398,10 @@
             this._disabled = !!v;
             if (was === this._disabled) return;
             if (isStyle(this)) {
-                // A sheet disabled for one generation of its element whose
-                // element has since moved on is detached (Chromium: the
-                // element owns a new sheet): its flag reaches nothing.
-                var cur = sheetGeneration(this._owner);
-                if (this._detached || (was && this._gen !== cur)) { this._detached = true; return; }
+                // A wrapper the element no longer owns keeps its own flag;
+                // the element's current sheet is untouched (Chromium).
+                if (stale(this)) return;
                 sync(this);
-                this._gen = cur;
                 publishDisabled(this);
             }
             refreshAdopted(this);
@@ -408,15 +418,16 @@
     function ownSheet(el) {
         if (!el.isConnected || (el.localName === 'link' && !isSheetLink(el))) return null;
         var s = sheets.get(el);
-        // New children in a <style>, or a move, make a new sheet (CSSOM
-        // "update a style block"), which is not disabled. Only a disabled
-        // sheet is replaced (it is then detached), so an enabled sheet
-        // keeps its identity as before (web_cssom_tests pins that).
-        if (s && s._disabled && el.localName === 'style' && s._gen !== sheetGeneration(el)) {
-            s._detached = true;
-            s = null;
+        // New children in a <style>, or a move of it or an ancestor, make a
+        // new sheet (CSSOM "update a style block"), enabled, a new object;
+        // the old wrapper is detached with the rules it had (Chromium; the
+        // identity pin in web_cssom_tests follows this).
+        if (s && el.localName === 'style' && stale(s)) s = null;
+        if (!s) {
+            s = sheetFor(el);
+            if (el.localName === 'style') { s._gen = sheetGeneration(el); sync(s); }
+            sheets.set(el, s);
         }
-        if (!s) { s = sheetFor(el); sheets.set(el, s); }
         return s;
     }
     getter(g.HTMLStyleElement.prototype, 'sheet', function () { return ownSheet(this); });
