@@ -542,10 +542,55 @@ const EMOJI_FAMILY: &str = "Apple Color Emoji";
 /// (`GlyphRasterizer::resolve_color_font`).
 const COLOR_GLYPH_FAMILIES: &[&str] = &[EMOJI_FAMILY, "Apple Symbols"];
 
+/// Whether `ch` asks for emoji presentation: it has the Unicode
+/// Emoji_Presentation property (ICU, as Chrome reads it) or `next` is
+/// U+FE0F. U+FE0E after it asks for text. This is what puts a character on
+/// Blink's emoji fallback priority (`FontFallbackPriority::kEmojiEmoji`,
+/// which goes to Apple Color Emoji); every other character, text-default
+/// emoji included, takes the system's cascade face for the primary face.
+pub fn emoji_presented(ch: char, next: Option<char>) -> bool {
+    match next {
+        Some('\u{FE0F}') => true,
+        Some('\u{FE0E}') => false,
+        _ => has_emoji_presentation(ch),
+    }
+}
+
+/// ICU's Emoji_Presentation property (`UCHAR_EMOJI_PRESENTATION`, 58), from
+/// the system's libicucore: the same table Chrome's `SymbolsIterator` reads.
+fn has_emoji_presentation(ch: char) -> bool {
+    #[link(name = "icucore")]
+    extern "C" {
+        fn u_hasBinaryProperty(c: i32, which: i32) -> i8;
+    }
+    const UCHAR_EMOJI_PRESENTATION: i32 = 58;
+    if (ch as u32) < 0x80 {
+        return false;
+    }
+    // SAFETY: a pure lookup on a code point; ICU accepts any i32.
+    unsafe { u_hasBinaryProperty(ch as i32, UCHAR_EMOJI_PRESENTATION) != 0 }
+}
+
+/// Whether `font` draws colour glyphs (Apple Color Emoji and its
+/// `.AppleColorEmojiUI` variant): such a face is painted on the colour-glyph
+/// path, any other on the coverage-mask path.
+pub fn is_color_face(font: &CTFont) -> bool {
+    const K_CT_FONT_COLOR_GLYPHS_TRAIT: u32 = 1 << 13;
+    font.symbolic_traits() & K_CT_FONT_COLOR_GLYPHS_TRAIT != 0
+}
+
 /// The face a character is drawn from when `primary` has no glyph for it,
 /// and its glyph id there. ONE function for layout (which takes the advance
 /// and the face's extents) and paint (which draws the glyph), so both use
-/// the same face.
+/// the same face. The presentation is the character's own
+/// (`emoji_presented(ch, None)`); a caller that sees the next character
+/// uses `fallback_face_for_presentation`.
+pub fn fallback_face_for(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
+    fallback_face_for_presentation(primary, ch, emoji_presented(ch, None))
+}
+
+/// `fallback_face_for` with the presentation decided by the caller
+/// (`emoji_presented(ch, next)`).
 ///
 /// Chrome asks the system for the fallback of the font in use, and so does
 /// this: `CTFontCreateForString` walks Core Text's cascade list for
@@ -553,33 +598,38 @@ const COLOR_GLYPH_FAMILIES: &[&str] = &[EMOJI_FAMILY, "Apple Symbols"];
 /// Apple Symbols' advance (22.3 to 22.6px in a 16px `<kbd>`), where the
 /// cascade, and Chrome, give Menlo's (21.23px).
 ///
-/// Two things come before the cascade. A character above Latin-1 that
-/// Apple Color Emoji has is taken from it, as it was when that face led the
-/// fixed list: `⏰` and `⌨` alone get a text face from the cascade, and
-/// Chrome's line for them is the emoji face's height (an `about` heading is
-/// 29px, and was 24 with the cascade first). ASCII and Latin-1 are left
-/// out because that face also has the digits, `#`, `*`, `©` and `®`, which
-/// are text unless a variation selector or keycap follows: a web font
-/// without digits drew x.com's year as wide emoji-face digits. And a
-/// character on the colour-glyph path (`is_emoji`) keeps that path's own
-/// faces, because that is where paint draws it from. The fixed list is the
-/// last resort. `None` means no face has the character (Core Text answers
-/// with its LastResort face, which is not a glyph anyone meant).
-pub fn fallback_face_for(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
+/// An emoji-presented character (Emoji_Presentation, or U+FE0F after it)
+/// takes Apple Color Emoji first, as Blink's emoji fallback priority does:
+/// `⏰` and `⌨️` lines are the emoji face's height (an `about` heading is
+/// 29px). Every other character takes the cascade first, text-default emoji
+/// included, which is what Chrome for Testing 148 does: under the system
+/// font `🛡` is `.AppleColorEmojiUI` (the system font's extents, so a 17px
+/// line at 14px, not 23) and `⚙` and `⌨` are Menlo; under Helvetica `❤` is
+/// Zapf Dingbats. Taking Apple Color Emoji for every character above
+/// Latin-1 it has made the chrome sidebar's shield and settings rows 6px
+/// taller than Chrome's. ASCII and Latin-1 never go to the emoji face
+/// unasked (it has the digits, `#`, `*`, `©` and `®`). The fixed list is
+/// the last resort. `None` means no face has the character (Core Text
+/// answers with its LastResort face, which is not a glyph anyone meant).
+pub fn fallback_face_for_presentation(
+    primary: &CTFont,
+    ch: char,
+    emoji: bool,
+) -> Option<(CTFont, u16)> {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    type Key = (String, u32, char);
+    type Key = (String, u32, char, bool);
     thread_local! {
         static FOUND: RefCell<HashMap<Key, Option<(CTFont, u16)>>> = RefCell::new(HashMap::new());
     }
     const MAX_ENTRIES: usize = 4096;
 
-    let key = (postscript_name_or_empty(primary), (primary.pt_size() as f32).to_bits(), ch);
+    let key = (postscript_name_or_empty(primary), (primary.pt_size() as f32).to_bits(), ch, emoji);
     if let Some(hit) = FOUND.with(|m| m.borrow().get(&key).cloned()) {
         return hit;
     }
-    let found = fallback_face_uncached(primary, ch);
+    let found = fallback_face_uncached(primary, ch, emoji);
     FOUND.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() >= MAX_ENTRIES {
@@ -590,7 +640,7 @@ pub fn fallback_face_for(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
     found
 }
 
-fn fallback_face_uncached(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
+fn fallback_face_uncached(primary: &CTFont, ch: char, emoji: bool) -> Option<(CTFont, u16)> {
     let size = primary.pt_size();
     let named = |families: &[&str]| -> Option<(CTFont, u16)> {
         families.iter().find_map(|name| {
@@ -600,12 +650,7 @@ fn fallback_face_uncached(primary: &CTFont, ch: char) -> Option<(CTFont, u16)> {
         })
     };
 
-    if ch as u32 > 0xFF {
-        if let Some(hit) = named(&[EMOJI_FAMILY]) {
-            return Some(hit);
-        }
-    }
-    if is_emoji(ch) {
+    if emoji {
         if let Some(hit) = named(COLOR_GLYPH_FAMILIES) {
             return Some(hit);
         }
@@ -1329,9 +1374,34 @@ impl GlyphRasterizer {
     /// `rgba` is `width*height*4` premultiplied bytes, or `None` if the char
     /// has no glyph in any color-capable fallback font.
     pub fn rasterize_char_color(&self, ch: char) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-        // Resolve a font that actually has a glyph for `ch`. Prefer the
-        // instance font, then the color-emoji fallback chain.
-        let font = self.resolve_color_font(ch)?;
+        self.rasterize_char_color_presented(ch, emoji_presented(ch, None))
+    }
+
+    /// `rasterize_char_color` with the presentation decided by the caller
+    /// (`emoji_presented(ch, next)`). The face is the one layout measured:
+    /// an emoji-presented character keeps the colour faces first; any other
+    /// character the instance font lacks is drawn from
+    /// `fallback_face_for_presentation`, and only when that face is a colour
+    /// face (`🛡` under the system font: `.AppleColorEmojiUI`). `None` for a
+    /// character whose face is a text face (`⚙`: Menlo), or one the
+    /// instance font has and that is not emoji-presented: the caller paints
+    /// it on the coverage-mask path, from the same face layout measured.
+    pub fn rasterize_char_color_presented(
+        &self,
+        ch: char,
+        emoji: bool,
+    ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
+        let font = if emoji {
+            self.resolve_color_font(ch)?
+        } else if color_glyph_id(&self.font, ch).is_some() {
+            return None;
+        } else {
+            let (face, _) = fallback_face_for_presentation(&self.font, ch, false)?;
+            if !is_color_face(&face) {
+                return None;
+            }
+            face
+        };
         self.rasterize_char_color_with_font(&font, ch)
     }
 

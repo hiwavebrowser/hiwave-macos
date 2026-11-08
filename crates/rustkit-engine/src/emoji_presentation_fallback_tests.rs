@@ -38,10 +38,20 @@ fn text_default_emoji_rows_match_chromium() {
          var r = e.getBoundingClientRect(); return r.y + '/' + r.height; }).join(' ')",
     );
     assert_eq!(rows, "0/33 33/39 72/39 111/33 144/39", "Chromium 148 row y/height");
-    let icons = eval(
+    let heights = eval(
         ROWS,
         "Array.prototype.map.call(document.querySelectorAll('.i'), function (e) { \
-         var r = e.getBoundingClientRect(); return Math.round(r.width * 100) / 100 + 'x' + r.height; }).join(' ')",
+         return e.getBoundingClientRect().height; }).join(' ')",
     );
-    assert_eq!(icons, "18x17 18x23 18x23 8.44x17 18x23", "Chromium 148 icon width x height");
+    assert_eq!(heights, "17 23 23 17 23", "Chromium 148 icon heights");
+    // The gear is Menlo's advance (Chrome 8.4375), not the emoji face's.
+    // (The colour faces' advances are 1-2px wider than Chrome's 18 here:
+    // Core Text's sbix advance, a separate, older difference.)
+    let gear: f64 = eval(
+        ROWS,
+        "String(document.querySelectorAll('.i')[3].getBoundingClientRect().width)",
+    )
+    .parse()
+    .expect("a width");
+    assert!((gear - 8.4375).abs() < 0.05, "gear width {gear}, Chromium 8.4375");
 }

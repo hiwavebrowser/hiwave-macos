@@ -5747,7 +5747,9 @@ impl Renderer {
         let atlas_size = self.glyph_cache.atlas_size() as f32;
         let web_face = GlyphKey::web_face_for(font_family, font_weight, font_style);
 
-        for (char_idx, ch) in text.chars().enumerate() {
+        let chars: Vec<char> = text.chars().collect();
+        for (char_idx, &ch) in chars.iter().enumerate() {
+            let next = chars.get(char_idx + 1).copied();
             let key = GlyphKey {
                 // FROZEN AT 0 until the rasterizer can draw at a phase --
                 // see GlyphKey::subpixel_phase. Pixels are bit-identical to
@@ -5766,13 +5768,27 @@ impl Renderer {
             // the normal path would tint into a flat blob. Falls through to the
             // grayscale path if the char isn't a color glyph or has no color
             // artwork (e.g. non-macOS).
-            #[cfg(any(target_os = "macos", windows))]
+            // On macOS the face decides (`rasterize_char_color_presented`):
+            // an emoji-presented character (Emoji_Presentation, or U+FE0F
+            // next) is colour; a text-default one is colour only when its
+            // fallback face is (`🛡` under the system font), and `⚙`'s
+            // Menlo comes back as None and takes the mask path below.
+            #[cfg(target_os = "macos")]
+            let emoji = rustkit_text::macos::emoji_presented(ch, next);
+            #[cfg(not(target_os = "macos"))]
+            let emoji = {
+                let _ = next;
+                true
+            };
+            #[cfg(target_os = "macos")]
+            let is_color = emoji || rustkit_text::is_emoji(ch);
+            #[cfg(windows)]
             let is_color = rustkit_text::is_emoji(ch);
             #[cfg(not(any(target_os = "macos", windows)))]
             let is_color = false;
             if is_color {
                 if let Some(entry) =
-                    self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key)
+                    self.glyph_cache.get_or_rasterize_color(&self.device, &self.queue, &key, emoji)
                 {
                     let glyph_x = cursor_x + entry.offset[0];
                     let glyph_y = baseline + entry.offset[1];

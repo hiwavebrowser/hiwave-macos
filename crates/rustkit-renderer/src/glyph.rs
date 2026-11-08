@@ -164,7 +164,10 @@ pub struct GlyphCache {
     color_atlas: wgpu::Texture,
     _color_atlas_view: wgpu::TextureView,
     color_bind_group: wgpu::BindGroup,
-    color_entries: HashMap<GlyphKey, GlyphEntry>,
+    /// Colour-path entries by key and presentation (`emoji_presented`);
+    /// `None` remembers a character whose face is a text face, so the
+    /// caller paints it on the coverage-mask path without re-asking.
+    color_entries: HashMap<(GlyphKey, bool), Option<GlyphEntry>>,
     color_next_x: u32,
     color_next_y: u32,
     color_row_height: u32,
@@ -355,9 +358,11 @@ impl GlyphCache {
         _device: &wgpu::Device,
         queue: &wgpu::Queue,
         key: &GlyphKey,
+        emoji: bool,
     ) -> Option<GlyphEntry> {
-        if let Some(entry) = self.color_entries.get(key) {
-            return Some(entry.clone());
+        let cache_key = (key.clone(), emoji);
+        if let Some(entry) = self.color_entries.get(&cache_key) {
+            return entry.clone();
         }
 
         #[cfg(target_os = "macos")]
@@ -374,14 +379,19 @@ impl GlyphCache {
                 key.font_weight,
                 italic,
             );
-            rasterizer.rasterize_char_color(key.codepoint)
+            rasterizer.rasterize_char_color_presented(key.codepoint, emoji)
         };
         #[cfg(windows)]
         let raster = rasterize_glyph_directwrite_color(key, key.font_size as f32 / 10.0);
         #[cfg(not(any(target_os = "macos", windows)))]
         let raster: Option<(Vec<u8>, u32, u32, f32, f32, f32)> = None;
 
-        let (rgba, gw, gh, advance, bearing_x, bearing_y) = raster?;
+        #[cfg(not(target_os = "macos"))]
+        let _ = emoji;
+        let Some((rgba, gw, gh, advance, bearing_x, bearing_y)) = raster else {
+            self.color_entries.insert(cache_key, None);
+            return None;
+        };
         let gw = gw.max(1).min(256);
         let gh = gh.max(1).min(256);
 
@@ -421,7 +431,7 @@ impl GlyphCache {
             offset: [bearing_x, -bearing_y],
             advance,
         };
-        self.color_entries.insert(key.clone(), entry.clone());
+        self.color_entries.insert(cache_key, Some(entry.clone()));
         Some(entry)
     }
 

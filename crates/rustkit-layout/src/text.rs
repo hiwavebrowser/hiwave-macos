@@ -1650,7 +1650,10 @@ impl TextShaper {
                     if c.is_whitespace() || c.is_control() {
                         notdef_advance
                     } else {
-                        match Self::fallback_glyph_advance(c, &ct_font) {
+                        // The next character decides the presentation
+                        // too: U+FE0F asks for the emoji face.
+                        let next = text_chars.get(char_idx + 1).copied();
+                        match Self::fallback_glyph_advance(c, next, &ct_font) {
                             Some((adv, asc, desc, lead)) => {
                                 used_fallback_extents = Some(match used_fallback_extents {
                                     Some((a, d, l)) => (a.max(asc), d.max(desc), l.max(lead)),
@@ -1820,11 +1823,14 @@ impl TextShaper {
     }
 
     /// Advance and face extents for a character `primary` lacks, from the
-    /// face rustkit-text's `fallback_face_for` gives: the one paint draws
-    /// the character from. Returns `(advance, ascent, descent, leading)`.
+    /// face rustkit-text's `fallback_face_for_presentation` gives: the one
+    /// paint draws the character from. `next` is the character after it
+    /// (U+FE0F / U+FE0E choose the presentation). Returns `(advance, ascent,
+    /// descent, leading)`.
     #[cfg(target_os = "macos")]
     fn fallback_glyph_advance(
         c: char,
+        next: Option<char>,
         primary: &core_text::font::CTFont,
     ) -> Option<(f32, f32, f32, f32)> {
         extern "C" {
@@ -1837,7 +1843,8 @@ impl TextShaper {
             ) -> f64;
         }
 
-        let (font, glyph) = rustkit_text::macos::fallback_face_for(primary, c)?;
+        let emoji = rustkit_text::macos::emoji_presented(c, next);
+        let (font, glyph) = rustkit_text::macos::fallback_face_for_presentation(primary, c, emoji)?;
         let mut advance = CGSize::new(0.0, 0.0);
         // SAFETY: `font` is a live CTFont; one glyph id is read and one
         // advance written.
