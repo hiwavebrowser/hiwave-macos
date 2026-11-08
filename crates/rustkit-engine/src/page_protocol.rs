@@ -694,6 +694,11 @@ impl PageEndpoint {
                 | PageInput::Scroll { .. }
                 | PageInput::ScrollAt { .. }
         );
+        // CH2.E34: an input that edited a field (its value or caret lives
+        // in engine-side edit state, which nothing else lays out) is laid
+        // out here and published below, so no window has to follow it with
+        // PageCmd::Relayout.
+        let mut edited = false;
         match input {
             PageInput::TextKey {
                 key_code,
@@ -722,6 +727,7 @@ impl PageEndpoint {
                     let consumed = self
                         .engine
                         .handle_text_key(view, key_code, &key, ctrl, shift, alt);
+                    edited = consumed;
                     if self.settle_keys && !consumed && focused_before.is_none() {
                         if let Some(dy) = scroll_dy_for_unhandled_key(key_code, &key) {
                             let _ = self.engine.scroll_view(view, 0.0, dy);
@@ -732,24 +738,25 @@ impl PageEndpoint {
             }
             PageInput::CommandKey { key_code, key, shift, alt, token } => {
                 let claimed = self.engine.handle_command_key(view, key_code, &key, shift, alt);
+                edited = claimed;
                 self.emit(PageEvent::KeyEquivalentDone { token, claimed });
             }
             PageInput::Ime(input) => {
                 use rustkit_viewhost::ImeInput;
                 match input {
                     ImeInput::SetMarked(text) => {
-                        self.engine.set_marked_text(view, &text);
+                        edited = self.engine.set_marked_text(view, &text);
                     }
                     ImeInput::Insert { text, replace } => {
-                        self.engine.insert_text_replacing(view, &text, replace);
+                        edited = self.engine.insert_text_replacing(view, &text, replace);
                     }
                     ImeInput::Unmark => {
-                        self.engine.unmark_text(view);
+                        edited = self.engine.unmark_text(view);
                     }
                 }
             }
             PageInput::Edit(command) => {
-                self.engine.run_edit_command(view, &command);
+                edited = self.engine.run_edit_command(view, &command);
             }
             PageInput::KeyUp { key_code, key, ctrl, shift, alt } => {
                 self.engine.handle_key_up(view, key_code, &key, ctrl, shift, alt);
@@ -837,6 +844,11 @@ impl PageEndpoint {
             PageInput::HasTextFocus { reply } => {
                 let (_, text) = self.emit_focus();
                 let _ = reply.send(text);
+            }
+        }
+        if edited {
+            if let Err(e) = self.engine.relayout_for(view, crate::RelayoutCause::Input) {
+                tracing::debug!(error = %e, "relayout after an edit failed");
             }
         }
         self.publish_commit();

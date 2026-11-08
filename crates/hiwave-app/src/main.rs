@@ -2148,8 +2148,9 @@ fn dispatch_view_input(
         // IME, the accent popover, the emoji picker (CH2.E3).
         rustkit_viewhost::InputKind::Ime(input) => {
             tracing::debug!(input = %ime_input_log_line(&input), "input method text");
+            // The page lays out and publishes what the edit changed
+            // (CH2.E34); no Relayout follows.
             view.ime_input(input);
-            view.relayout();
         }
         // An Edit menu item (CH2.E3): the command in the focused text field.
         rustkit_viewhost::InputKind::Edit(action) => {
@@ -2164,7 +2165,6 @@ fn dispatch_view_input(
             };
             info!(?action, "Edit menu action");
             view.edit_command(command);
-            view.relayout();
         }
         rustkit_viewhost::InputKind::Key(key) => {
             // Cmd chords are menu shortcuts, except the editing
@@ -2205,9 +2205,10 @@ fn dispatch_view_input(
                 }
             }
             let focused = view.has_focused_element();
-            if view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt) {
-                view.relayout();
-            } else if !focused && target == InputTarget::Page {
+            // A key that edited the field is laid out and published by the
+            // page itself (CH2.E34).
+            let taken = view.handle_text_key(vk, text, key.ctrl || key.cmd, key.shift, key.alt);
+            if !taken && !focused && target == InputTarget::Page {
                 // Nothing focused and the page did not take
                 // the key: the keys that scroll, as in the
                 // window-level arm (wheel sign convention).
@@ -3886,9 +3887,8 @@ fn main() {
                                     mods.shift_key(),
                                     mods.alt_key(),
                                 ) {
-                                    // The edit lives in engine state, so
-                                    // nothing else would repaint it.
-                                    view.relayout();
+                                    // The page lays out and publishes the
+                                    // edit itself (CH2.E34).
                                     return;
                                 }
                             }
@@ -3925,7 +3925,6 @@ fn main() {
                                     mods.alt_key(),
                                 )
                             {
-                                view.relayout();
                                 return;
                             }
                         }
