@@ -383,18 +383,24 @@ pub(crate) fn form_control_intrinsic_size(
             // (DIG-2): the css-selectors buttons (padding 8px 16px) build
             // (fs+1)+16 = 31 in Chrome; the blob said 33. Width also
             // composes when the author sets horizontal padding.
-            let label_width = measure_text_advanced(
+            let label_metrics = measure_text_advanced(
                 label,
                 &style.font_family,
                 font_size,
                 style.font_weight,
                 style.font_style,
-            )
-            .width;
-            (
-                button_border_box_width(style, font_size, label_width),
-                single_line_box(19.0 * ua_scale),
-            )
+            );
+            // The label's line is `normal` united with every fallback face
+            // its text used (an emoji lifts Arial 14px from 16 to 23 in
+            // Chrome 148: report's "📱 Share to Social" is 39 tall where
+            // "Export as JSON" is 32). ASCII never reaches a fallback face.
+            let height = if author_pb_v > 0.0 && !label.is_ascii() && label_metrics.ascent > 0.0 {
+                normal_line_height(style, font_size).max(used_font_line_height(&label_metrics))
+                    + author_pb_v
+            } else {
+                single_line_box(19.0 * ua_scale)
+            };
+            (button_border_box_width(style, font_size, label_metrics.width), height)
         }
         FormControlType::Checkbox { .. } | FormControlType::Radio { .. } => {
             // Fixed size for checkboxes and radios
@@ -403,9 +409,9 @@ pub(crate) fn form_control_intrinsic_size(
         FormControlType::Select { size, options, .. } => {
             // Chrome sizes a select to its WIDEST option (n53
             // form-controls: listbox 39 = "Item 4" 37 + 2px border;
-            // dropdown 137 = "A longer option text" + 24px of border and
-            // arrow well, 60 = "Select" + 24). The old 10em blob built
-            // 133 for both.
+            // dropdown 137 = ceil("A longer option text") + 20px arrow well
+            // + 2px border, 60 = ceil("Select") + 22). The old 10em blob
+            // built 133 for both.
             let widest = options
                 .iter()
                 .map(|o| {
@@ -426,8 +432,31 @@ pub(crate) fn form_control_intrinsic_size(
                     list_box_row_height(font_size) * *size as f32 + 2.0 * ua_scale,
                 )
             } else {
-                // Dropdown: widest option plus the arrow well.
-                (widest + 24.0 * ua_scale, single_line_box(19.0 * ua_scale))
+                // Dropdown (menulist), measured in Chrome for Testing 148:
+                // ceil(widest option) + a 20px arrow well (font-size does not
+                // move it: 66 at 13.6px, 87 at 20px with no padding/border) +
+                // the horizontal padding and border — the UA 1px border each
+                // side when the style carries none. settings' #theme
+                // ("System", padding .5rem .75rem, 1px border, 13.6px) is 92
+                // wide; widest + 24 built 69.8. (An `appearance: none` select
+                // has no arrow well in Chrome; RustKit does not carry
+                // `appearance`, and the old +24 assumed the well too.)
+                let px = |l: &Length| match l {
+                    Length::Percent(_) | Length::Auto => 0.0,
+                    other => other.to_px(font_size, 16.0, 0.0),
+                };
+                let pb_h = px(&style.padding_left)
+                    + px(&style.padding_right)
+                    + px(&style.border_left_width)
+                    + px(&style.border_right_width);
+                let pb_h = if pb_h > 0.0 { pb_h } else { 2.0 };
+                // Height stays the text line + padding/border: Chrome's
+                // menulist adds 2px inside (#theme 35, not 33), but an
+                // `appearance: none` select does not (chrome's
+                // #modeSelector is 31), and RustKit does not carry
+                // `appearance` yet — taking the +2 moved chrome's whole
+                // sidebar 2px down on 12 board rows.
+                (widest.ceil() + 20.0 + pb_h, single_line_box(19.0 * ua_scale))
             }
         }
     }
@@ -13127,6 +13156,84 @@ fn border_dash_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_a_styled_drop_down_composes_its_arrow_well_with_author_padding() {
+        // settings.html `select { padding: .5rem .75rem; border: 1px solid;
+        // font-size: .85rem }`: Chrome for Testing 148 builds #theme
+        // ("System") 92 x 35 — ceil(widest option) + a 20px arrow well +
+        // the author's horizontal padding and border, and an inner line of
+        // round(ascent) + round(descent) + 2 plus the vertical padding and
+        // border. RustKit built widest + 24 (69.8) and the text line (33).
+        // Bare at the UA font the same rule gives Chrome's 60 / 137 / 67.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(13.6);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(12.0);
+        style.padding_right = Length::Px(12.0);
+        for side in [
+            &mut style.border_top_width,
+            &mut style.border_right_width,
+            &mut style.border_bottom_width,
+            &mut style.border_left_width,
+        ] {
+            *side = Length::Px(1.0);
+        }
+        let select = |options: &[&str]| FormControlType::Select {
+            options: options.iter().map(|o| o.to_string()).collect(),
+            selected_index: None,
+            size: 0,
+            selected: Vec::new(),
+        };
+        // Width only: the menulist's +2 inner height needs `appearance`
+        // (an `appearance: none` select has none), which RustKit does not
+        // carry, so the height stays the text line (33 here, Chrome 35).
+        assert_eq!(
+            form_control_intrinsic_size(&style, &select(&["Dark", "Light", "System"])).0,
+            92.0
+        );
+
+        let mut bare = ComputedStyle::new();
+        bare.font_size = Length::Px(40.0 / 3.0);
+        bare.font_family = "Arial".to_string();
+        for (options, want) in [
+            (&["Select"][..], 60.0),
+            (&["A longer option text"][..], 137.0),
+            (&["Dark", "Light", "System"][..], 67.0),
+        ] {
+            let (w, h) = form_control_intrinsic_size(&bare, &select(options));
+            assert_eq!((w, h), (want, 19.0), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn test_an_emoji_label_lifts_a_styled_buttons_line() {
+        // report.html `.export-btn { padding: .5rem 1rem; font-size: .875rem }`:
+        // Chrome for Testing 148 builds "Export as JSON" 32 tall and
+        // "📱 Share to Social" 39 — Blink unites the emoji's fallback face into
+        // the label's `normal` line (Arial 14px 16 -> 23), as it does for any
+        // text line. RustKit composed every button from the primary face's
+        // line alone (32), and the flex row stretched none of them to 39.
+        let mut style = ComputedStyle::new();
+        style.font_size = Length::Px(14.0);
+        style.font_family = "Arial".to_string();
+        style.padding_top = Length::Px(8.0);
+        style.padding_bottom = Length::Px(8.0);
+        style.padding_left = Length::Px(16.0);
+        style.padding_right = Length::Px(16.0);
+        let plain = FormControlType::Button {
+            label: "Export as JSON".to_string(),
+            button_type: "button".to_string(),
+        };
+        let emoji = FormControlType::Button {
+            label: "\u{1F4F1} Share to Social".to_string(),
+            button_type: "button".to_string(),
+        };
+        assert_eq!(form_control_intrinsic_size(&style, &plain).1, 32.0);
+        assert_eq!(form_control_intrinsic_size(&style, &emoji).1, 39.0);
+    }
 
     #[test]
     fn test_styled_button_composes_its_font_line_with_author_padding() {
