@@ -1820,19 +1820,24 @@ fn create_flex_item<'a>(
     // A text input / textarea keeps its UA padding and border folded into
     // its border box (`dimensions` has none), so a content-box author size
     // gains them here as in block flow (CH2.B17).
-    let (control_main_pb, control_cross_pb) = match &layout_box.box_type {
+    // `control_*_edges` is the same extent whatever the box-sizing: the
+    // least the control's border box can be (CSS Sizing 3 floors the
+    // content box at zero), so a border-box `max-width: 10px` on 20px
+    // padding and 3px borders is 46 here as in block flow (CH2.B17b).
+    let (control_main_pb, control_cross_pb, control_main_edges, control_cross_edges) = match &layout_box.box_type {
         crate::BoxType::FormControl(control) => {
             let cb_width = match main_axis {
                 Axis::Horizontal => container_main,
                 Axis::Vertical => container_cross,
             };
             let (w, h) = layout_box.content_box_control_extra(control, cb_width);
+            let (ew, eh) = layout_box.control_edge_extent(control, cb_width);
             match main_axis {
-                Axis::Horizontal => (w, h),
-                Axis::Vertical => (h, w),
+                Axis::Horizontal => (w, h, ew, eh),
+                Axis::Vertical => (h, w, eh, ew),
             }
         }
-        _ => (0.0, 0.0),
+        _ => (0.0, 0.0, 0.0, 0.0),
     };
     let spec_main_to_border_box =
         |v: f32| if is_border_box { v } else { v + main_pb + control_main_pb };
@@ -2015,7 +2020,7 @@ fn create_flex_item<'a>(
             crate::BoxType::Block | crate::BoxType::Inline | crate::BoxType::AnonymousBlock
         );
     let max_main = if max_main.is_finite() {
-        spec_main_to_border_box(max_main)
+        spec_main_to_border_box(max_main).max(main_pb + control_main_edges)
     } else {
         max_main
     };
@@ -2066,7 +2071,7 @@ fn create_flex_item<'a>(
         intrinsic_cross + cross_pb
     };
     let max_cross = if max_cross.is_finite() {
-        spec_cross_to_border_box(max_cross)
+        spec_cross_to_border_box(max_cross).max(cross_pb + control_cross_edges)
     } else {
         max_cross
     };
@@ -2080,7 +2085,7 @@ fn create_flex_item<'a>(
     // same way: the base was then "past the hypothetical size", the item
     // froze before it could grow, and its siblings were placed as if it
     // were 0 wide.
-    let hypothetical_main_size = flex_basis.max(min_main).min(max_main).max(main_pb);
+    let hypothetical_main_size = flex_basis.max(min_main).min(max_main).max(main_pb + control_main_edges);
 
     FlexItem {
         layout_box,
